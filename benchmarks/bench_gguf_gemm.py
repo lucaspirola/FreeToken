@@ -72,7 +72,7 @@ def parse_args(argv=None):
         "--moe-projections",
         nargs="+",
         default=["gate_up", "down"],
-        choices=["gate_up", "down"],
+        choices=["gate_up", "gate_up_q6", "down"],
     )
     p.add_argument("--experts", type=int, default=256)
     p.add_argument("--top-k", type=int, default=8)
@@ -207,6 +207,8 @@ def main(argv=None) -> int:
             projection = case["projection"]
             if projection == "gate_up":
                 qtype, in_f, out_f, broadcast = GGML_Q4_K, hidden, 2 * inter, True
+            elif projection == "gate_up_q6":
+                qtype, in_f, out_f, broadcast = GGML_Q6_K, hidden, 2 * inter, True
             else:
                 qtype, in_f, out_f, broadcast = GGML_Q6_K, inter, hidden, False
             block, _ = BLOCK_SHAPE[qtype]

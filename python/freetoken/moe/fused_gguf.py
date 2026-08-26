@@ -88,9 +88,11 @@ _MMA_MAX_TOKENS = 16384
 # 1.76; 8192 tokens 9.1 vs 38.5 -- the full-prefill-chunk regime is the win).
 _MMA_MOE_MIN_TOKENS = 320
 
-# On the 70 W RTX 2000 Ada, both Ornith projections cross reliably at 272
-# tokens: Q4_K gate/up 3.55 vs 4.28 ms and Q6_K down 2.41 vs 2.93 ms. At 256
-# they are tied or DP4A is faster, so do not copy Blackwell's threshold.
+# On the 70 W RTX 2000 Ada, the Ornith projections cross reliably at 272
+# tokens: Q4_K gate/up 3.55 vs 4.28 ms, Q6_K gate/up 4.24 vs 5.82 ms, and
+# Q6_K down 2.41 vs 2.93 ms. The all-Q6 gate/up advantage grows to 19.0 vs
+# 135.2 ms at 8192 tokens. Small tails can still favor DP4A, so do not copy
+# Blackwell's threshold.
 _MMA_MOE_MIN_TOKENS_SM89 = 272
 
 
@@ -121,8 +123,12 @@ def _use_mma_moe(
         return False
     if (8, 9) <= capability < (9, 0):
         # Only the exact Ornith routed projections were measured on this Ada:
-        # fused Q4_K gate/up [1024, 2048] and Q6_K down [2048, 512], top-8.
-        ornith_gate_up = int(quant_type) == GGML_Q4_K and broadcast and rows == 1024
+        # fused Q4_K/Q6_K gate/up [1024, 2048] and Q6_K down [2048, 512], top-8.
+        ornith_gate_up = (
+            int(quant_type) in (GGML_Q4_K, GGML_Q6_K)
+            and broadcast
+            and rows == 1024
+        )
         ornith_down = int(quant_type) == GGML_Q6_K and not broadcast and rows == 2048
         if top_k != 8 or not (ornith_gate_up or ornith_down):
             return False

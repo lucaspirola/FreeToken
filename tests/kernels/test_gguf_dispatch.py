@@ -211,6 +211,9 @@ def test_moe_use_mma_gate(monkeypatch):
     assert moe_gguf._use_mma_moe(GGML_Q4_K, 4 * type_size, (12, 0), 320, 4, True, 2)
     assert moe_gguf._use_mma_moe(GGML_Q4_K, 4 * type_size, (8, 9), 272, 1024, True, 8)
     assert moe_gguf._use_mma_moe(
+        GGML_Q6_K, 4 * BLOCK_SHAPE[GGML_Q6_K][1], (8, 9), 272, 1024, True, 8
+    )
+    assert moe_gguf._use_mma_moe(
         GGML_Q6_K, 4 * BLOCK_SHAPE[GGML_Q6_K][1], (8, 9), 272, 2048, False, 8
     )
     assert not moe_gguf._use_mma_moe(

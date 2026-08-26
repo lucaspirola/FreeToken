@@ -42,5 +42,15 @@ def test_projection_filter_and_dense_cross_product():
     assert moe[0]["projection"] == "down"
 
 
+def test_q6_gate_up_projection_is_selectable():
+    args = bench.parse_args(
+        ["--dense-rows", "8", "--moe-tokens", "272", "--moe-projections", "gate_up_q6"]
+    )
+    moe = [case for case in bench.build_cases(args) if case["op"] == "moe"]
+
+    assert len(moe) == 1
+    assert moe[0]["projection"] == "gate_up_q6"
+
+
 def test_default_activation_scale_is_overflow_safe():
     assert bench.parse_args([]).activation_scale == 1e-3
