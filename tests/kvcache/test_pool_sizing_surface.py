@@ -263,6 +263,19 @@ def test_linear_state_pool_prices_itself():
     assert state_pool_bytes(config) == 0
 
 
+def test_linear_state_slot_override_accepts_dual_request_floor_and_rejects_less():
+    from freetoken.kvcache.linear_state_pool import _linear_pool_num_slots
+
+    config = _generic_config()
+    config.cache_type = "hybrid_radix"
+    config.max_running_req = 2
+    config.linear_state_slots_override = 9
+    assert _linear_pool_num_slots(config) == 9
+    config.linear_state_slots_override = 8
+    with pytest.raises(ValueError, match="9-slot working-set floor"):
+        _linear_pool_num_slots(config)
+
+
 def test_validate_rebuild_targets_flow_by_kv_cost_signature():
     """The base template hands each family's kv_cost exactly the non-None target keys its
     signature declares: hybrid's pinned window flows through and changes the verdict;

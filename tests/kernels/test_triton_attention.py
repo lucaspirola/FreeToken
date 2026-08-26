@@ -339,6 +339,27 @@ def test_decode_launch_config_selects_ornith_quantized_tuning_only():
     ) == (8, 32, 4)
 
 
+def test_decode_runtime_splits_uses_measured_ada_batch_two_policy():
+    from freetoken.kernel.triton.attention import decode_runtime_splits
+
+    common = dict(
+        preferred_splits=32,
+        scratch_splits=32,
+        quant_name="int4",
+        head_dim=256,
+        num_q_heads=16,
+        num_kv_heads=2,
+        compute_capability=(8, 9),
+    )
+    assert decode_runtime_splits(batch=1, **common) == 32
+    assert decode_runtime_splits(batch=2, **common) == 16
+    assert decode_runtime_splits(batch=4, **common) == 32
+    assert decode_runtime_splits(batch=2, **(common | {"scratch_splits": 8})) == 8
+    assert decode_runtime_splits(
+        batch=2, **(common | {"compute_capability": (12, 0)})
+    ) == 32
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton attention needs CUDA")
 @pytest.mark.parametrize(("num_q_heads", "num_kv_heads"), [(24, 4), (20, 4), (28, 4)])
 def test_decode_triton_attention_non_pow2_group(num_q_heads: int, num_kv_heads: int):

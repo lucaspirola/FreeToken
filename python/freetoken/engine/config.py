@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
 from typing import TYPE_CHECKING, List
 
@@ -81,6 +81,17 @@ class EngineConfig:
     use_dummy_weight: bool = False
     use_pynccl: bool = True
     max_seq_len_override: int | None = None
+    # Optional runtime YaRN extension for checkpoints whose native metadata does
+    # not encode the longer deployment context (notably Ornith GGUF).  The
+    # original length defaults to the checkpoint rotary maximum.  This changes
+    # the actual frequency table as well as its size; max_seq_len_override alone
+    # must never be used to extend RoPE out of bounds.
+    rope_yarn_factor: float | None = None
+    rope_yarn_original_context: int | None = None
+    # Physical GDN state slots, including the padding sink. None uses the normal
+    # cache-ratio policy. A constrained dual-request deployment can request the
+    # proven 4*max_running_req+1 minimum without paying for unused snapshots.
+    linear_state_slots_override: int | None = None
     num_page_override: int | None = None  # if not None, will override the number of pages
     # KV capacity in tokens; resolved into num_page_override by _adjust_config once page_size
     # is final. Mutually exclusive with num_page_override.
@@ -104,7 +115,39 @@ class EngineConfig:
     def model_config(self) -> ModelConfig:
         spec = get_model_spec(self.hf_config.architectures[0])
         parse_config = _load_attr(spec.module, spec.parse_config)
-        return parse_config(self.hf_config)
+        config = parse_config(self.hf_config)
+        factor = self.rope_yarn_factor
+        if factor is None:
+            if self.rope_yarn_original_context is not None:
+                raise ValueError(
+                    "--rope-yarn-original-context requires --rope-yarn-factor"
+                )
+            return config
+        if factor < 1.0:
+            raise ValueError("--rope-yarn-factor must be >= 1")
+
+        from freetoken.models.config import FullAttentionGroupConfig
+
+        original = self.rope_yarn_original_context or config.rotary_config.max_position
+        if original < 1:
+            raise ValueError("--rope-yarn-original-context must be >= 1")
+        scaled = int(round(original * factor))
+        rotary = replace(
+            config.rotary_config,
+            max_position=scaled,
+            scaling={
+                "rope_type": "yarn",
+                "factor": float(factor),
+                "original_max_position_embeddings": int(original),
+            },
+        )
+        groups = tuple(
+            replace(group, rotary_config=rotary)
+            if isinstance(group, FullAttentionGroupConfig)
+            else group
+            for group in config.attention_groups
+        )
+        return replace(config, rotary_config=rotary, attention_groups=groups)
 
     @property
     def max_seq_len(self) -> int:

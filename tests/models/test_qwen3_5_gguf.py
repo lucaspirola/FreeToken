@@ -65,6 +65,34 @@ def test_qwen35moe_gguf_config_excludes_mtp_and_builds_hybrid_groups(monkeypatch
     assert tuple(full.layer_ids) == tuple(range(3, 40, 4))
 
 
+def test_engine_yarn_override_extends_ornith_rope_and_full_group(monkeypatch):
+    from freetoken.distributed import DistributedInfo
+    from freetoken.engine.config import EngineConfig
+    from freetoken.models.gguf import reader
+    from freetoken.models.qwen3_5_moe import gguf
+
+    monkeypatch.setattr("freetoken.engine.config.cached_load_hf_config", lambda path: _shim())
+    monkeypatch.setattr(reader, "gguf_tensor_type", lambda path, name: 12)
+    monkeypatch.setattr(gguf, "_expert_types", lambda shim: ((12, 14),) * 40)
+    engine = EngineConfig(
+        model_path="ornith.gguf",
+        tp_info=DistributedInfo(0, 1),
+        dtype=torch.bfloat16,
+        rope_yarn_factor=2.0,
+        max_seq_len_override=524288,
+    )
+    config = engine.model_config
+    assert config.rotary_config.max_position == 524288
+    assert config.rotary_config.scaling == {
+        "rope_type": "yarn",
+        "factor": 2.0,
+        "original_max_position_embeddings": 262144,
+    }
+    full = next(group for group in config.attention_groups if group.name == "full")
+    assert full.rotary_config is config.rotary_config
+    assert engine.max_seq_len == 524288
+
+
 def test_qwen35moe_gguf_registry_mapping():
     from freetoken.models import register
     from freetoken.models.gguf.config import GGUF_ARCH_TO_REGISTRY
@@ -89,3 +117,44 @@ def test_inverse_v_permutation_restores_grouped_head_order(monkeypatch):
     # llama.cpp stores [G0v0, G1v0, ..., G0v1, G1v1, ...].
     tiled = grouped.reshape(16, 2, 3).permute(1, 0, 2).reshape(32 * 3, 1)
     assert torch.equal(gguf._undo_v_rows(tiled, config, 3), grouped)
+
+
+def test_split_linear_packs_adjacent_equal_quant_types(monkeypatch):
+    from freetoken.models.gguf.dequant import GGML_Q4_K, GGML_Q6_K, row_bytes
+    from freetoken.models.qwen3_5_moe.gguf import GGUFSplitLinear
+
+    linear = GGUFSplitLinear(256, (("qkv", 2), ("z", 3), ("a", 1)))
+    linear.qkv.materialize(GGML_Q4_K)
+    linear.z.materialize(GGML_Q4_K)
+    linear.a.materialize(GGML_Q6_K)
+    q4_row = row_bytes(256, GGML_Q4_K)
+    q6_row = row_bytes(256, GGML_Q6_K)
+    state = {
+        "qkv.qweight": torch.full((2, q4_row), 11, dtype=torch.uint8),
+        "z.qweight": torch.full((3, q4_row), 22, dtype=torch.uint8),
+        "a.qweight": torch.full((1, q6_row), 33, dtype=torch.uint8),
+    }
+    linear.load_state_dict(state)
+
+    assert state == {}
+    assert linear._fused_groups is not None
+    assert [(qt, tuple(w.shape)) for qt, w in linear._fused_groups] == [
+        (GGML_Q4_K, (5, q4_row)),
+        (GGML_Q6_K, (1, q6_row)),
+    ]
+    q4_packed = linear._fused_groups[0][1]
+    assert q4_packed.untyped_storage().data_ptr() == linear.qkv.qweight.untyped_storage().data_ptr()
+    assert q4_packed.untyped_storage().data_ptr() == linear.z.qweight.untyped_storage().data_ptr()
+    assert torch.all(linear.qkv.qweight == 11)
+    assert torch.all(linear.z.qweight == 22)
+
+    calls = []
+
+    def fake_mul(x, weight, quant_type):
+        calls.append((quant_type, weight.shape[0]))
+        return torch.full((x.shape[0], weight.shape[0]), quant_type, dtype=x.dtype)
+
+    monkeypatch.setattr("freetoken.layers.gguf.fused_mul_mat_gguf", fake_mul)
+    out = linear.forward(torch.zeros((2, 256), dtype=torch.float32))
+    assert calls == [(GGML_Q4_K, 5), (GGML_Q6_K, 1)]
+    assert out.shape == (2, 6)

@@ -217,6 +217,16 @@ def _linear_pool_num_slots(config) -> int:
     (1 live + 2 ping-pong + 1 committed snapshot locked through decode), plus a cross-request
     snapshot cache and a padding sink; naive GDN keeps the old (max_running_req + 1)."""
     mr = config.max_running_req
+    override = getattr(config, "linear_state_slots_override", None)
+    if override is not None:
+        minimum = mr + 1 if config.cache_type != "hybrid_radix" else 4 * mr + 1
+        if override < minimum:
+            raise ValueError(
+                f"--linear-state-slots {override} is below the {minimum}-slot "
+                f"working-set floor for max_running_requests={mr} and "
+                f"cache_type={config.cache_type!r}"
+            )
+        return int(override)
     if config.cache_type != "hybrid_radix":
         return mr + 1  # live + dummy/padding
     ratio = config.linear_state_cache_ratio

@@ -254,6 +254,27 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--rope-yarn-factor",
+        type=float,
+        default=ServerArgs.rope_yarn_factor,
+        help=(
+            "Apply static YaRN RoPE scaling by this factor. Use 2 for about 524k "
+            "from Ornith's native 262144 context, or 4 for about 1M. Also set "
+            "--max-seq-len-override to the intended serving ceiling."
+        ),
+    )
+
+    parser.add_argument(
+        "--rope-yarn-original-context",
+        type=_positive_int,
+        default=ServerArgs.rope_yarn_original_context,
+        help=(
+            "Native pre-YaRN context length. Defaults to the checkpoint RoPE maximum; "
+            "Ornith GGUF therefore defaults to 262144."
+        ),
+    )
+
+    parser.add_argument(
         "--max-output-tokens",
         type=_positive_int,
         default=ServerArgs.max_output_tokens,
@@ -401,6 +422,18 @@ def parse_args(
         choices=SUPPORTED_CACHE_MANAGER.supported_names(),
         help="KV cache strategy (naive | radix). For hybrid GDN models 'radix' is materialized "
         "as a GDN-aware radix (cross-request GDN-state prefix reuse); pass 'naive' to opt out.",
+    )
+
+    parser.add_argument(
+        "--linear-state-slots",
+        type=_positive_int,
+        dest="linear_state_slots_override",
+        default=ServerArgs.linear_state_slots_override,
+        help=(
+            "Physical GDN recurrent-state slots including the padding slot. Defaults "
+            "to the snapshot-cache policy; the minimum for hybrid radix is "
+            "4*max-running-requests+1 (9 for two requests)."
+        ),
     )
 
     parser.add_argument(
@@ -556,6 +589,16 @@ def parse_args(
         default=ServerArgs.moe_cache_policy,
         choices=["lru"],
         help="The unified MoE cache eviction policy.",
+    )
+
+    parser.add_argument(
+        "--moe-collect-stats",
+        action="store_true",
+        default=ServerArgs.moe_collect_stats,
+        help=(
+            "Collect CUDA-graph-safe per-layer decode expert-cache hit/miss counters "
+            "for cache tuning and hybrid CPU/GPU decisions."
+        ),
     )
 
     parser.add_argument(

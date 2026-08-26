@@ -327,10 +327,76 @@ class GGUFSplitLinear(BaseOP):
 
     def __init__(self, in_features: int, parts: tuple[tuple[str, int], ...]):
         self._part_names = tuple(name for name, _ in parts)
+        self._in_features = in_features
+        self._fused_groups: tuple[tuple[int, torch.Tensor], ...] | None = None
         for name, out_features in parts:
             setattr(self, name, DeferredGGUFLinear(in_features, out_features))
 
+    def _pack_equal_type_runs(self) -> None:
+        """Pack adjacent equal-type parts into one matrix after weight loading.
+
+        Qwen3.5 GGUF stores GDN qkv/z/b/a as separate tensors even when their
+        quant type is identical.  Four MMVQ launches plus ``torch.cat`` are
+        disproportionately expensive during decode.  K-quant rows are
+        independently packed, so concatenating output rows is lossless and lets
+        one kernel produce the same concatenated projection.  Mixed Q6/Q4
+        layers naturally become two runs instead of four.
+        """
+        groups: list[tuple[int, torch.Tensor]] = []
+        run_type: int | None = None
+        run_parts: list[DeferredGGUFLinear] = []
+
+        def flush() -> None:
+            nonlocal run_parts, run_type
+            if not run_parts:
+                return
+            assert run_type is not None
+            packed = torch.cat([part.qweight for part in run_parts], dim=0)
+            offset = 0
+            for part in run_parts:
+                assert part.qweight is not None
+                rows = part.qweight.shape[0]
+                part.qweight = packed[offset : offset + rows]
+                offset += rows
+            groups.append((run_type, packed))
+            run_parts = []
+
+        for name in self._part_names:
+            part = getattr(self, name)
+            assert part.qweight is not None and part._quant_type is not None
+            if run_type is not None and part._quant_type != run_type:
+                flush()
+            if not run_parts:
+                run_type = part._quant_type
+            run_parts.append(part)
+        flush()
+        self._fused_groups = tuple(groups)
+
+    def load_state_dict(
+        self,
+        state_dict,
+        *,
+        prefix: str = "",
+        _internal: bool = False,
+    ) -> None:
+        # Let the ordinary recursive loader attach every checkpoint tensor first,
+        # then replace each equal-type run with views into one packed allocation.
+        super().load_state_dict(
+            state_dict, prefix=prefix, _internal=True
+        )
+        self._pack_equal_type_runs()
+        if not _internal and state_dict:
+            raise RuntimeError(f"Unexpected keys in state_dict: {list(state_dict.keys())}")
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self._fused_groups is not None:
+            from freetoken.layers.gguf import fused_mul_mat_gguf
+
+            outputs = [
+                fused_mul_mat_gguf(x, qweight, quant_type)
+                for quant_type, qweight in self._fused_groups
+            ]
+            return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
         return torch.cat([getattr(self, name).forward(x) for name in self._part_names], dim=-1)
 
 
@@ -412,14 +478,25 @@ def convert_qwen3_5_to_gguf(model, config: ModelConfig) -> None:
 
 
 def _expert_bank_geometry(config: ModelConfig) -> tuple[int, int]:
+    """Largest per-expert rows (legacy/cache-budget geometry)."""
+    per_layer = _expert_layer_geometry(config)
+    return max(g for g, _ in per_layer), max(d for _, d in per_layer)
+
+
+def _expert_layer_geometry(config: ModelConfig) -> tuple[tuple[int, int], ...]:
+    """Exact aligned per-expert row bytes for every GGUF layer."""
     from freetoken.models.gguf.dequant import row_bytes
 
     assert config.gguf_expert_types
     h, inter = config.hidden_size, config.moe_intermediate_size
-    gu = max(2 * inter * row_bytes(h, t) for t, _ in config.gguf_expert_types)
-    down = max(h * row_bytes(inter, t) for _, t in config.gguf_expert_types)
     align = lambda n: (n + 63) // 64 * 64
-    return align(gu), align(down)
+    return tuple(
+        (
+            align(2 * inter * row_bytes(h, gate_type)),
+            align(h * row_bytes(inter, down_type)),
+        )
+        for gate_type, down_type in config.gguf_expert_types
+    )
 
 
 def load_gguf_expert_sources(
@@ -428,21 +505,21 @@ def load_gguf_expert_sources(
     from freetoken.distributed import get_tp_info
     from freetoken.models.gguf.dequant import row_bytes
     from freetoken.models.gguf.reader import iter_gguf_tensors
-    from freetoken.moe.host_banks import LayerCompletionTracker, PinPipeline, alloc_layer_banks
+    from freetoken.moe.host_banks import HostBank, LayerCompletionTracker, PinPipeline
 
     if get_tp_info().size > 1:
         raise NotImplementedError("qwen35moe GGUF expert banks currently support TP=1 only")
     types = config.gguf_expert_types
     assert types and len(types) == config.num_layers
     experts, hidden, inter = config.num_experts, config.hidden_size, config.moe_intermediate_size
-    gu_stride, down_stride = _expert_bank_geometry(config)
-    host = alloc_layer_banks(
-        {
-            "gate_up": ((experts, gu_stride), torch.uint8),
-            "down": ((experts, down_stride), torch.uint8),
-        },
-        config.num_layers,
-    )
+    geometry = _expert_layer_geometry(config)
+    # Keep each host layer compact. OffloadMoeCache groups equal row signatures
+    # into GPU size classes; padding every Q4 down layer to Q6 here would hide the
+    # distinction and waste both host RAM and VRAM.
+    host = {
+        "gate_up": [HostBank((experts, gu), torch.uint8) for gu, _ in geometry],
+        "down": [HostBank((experts, down), torch.uint8) for _, down in geometry],
+    }
     banks = {name: [b.tensor for b in per_layer] for name, per_layer in host.items()}
     seen_gu, seen_down = set(), set()
 
@@ -492,16 +569,18 @@ def load_gguf_expert_sources(
 
 
 def dummy_gguf_expert_sources(config: ModelConfig) -> dict[str, list[torch.Tensor]]:
-    from freetoken.moe.host_banks import alloc_layer_banks, pin_banks
+    from freetoken.moe.host_banks import HostBank, pin_banks
 
-    gu_stride, down_stride = _expert_bank_geometry(config)
-    host = alloc_layer_banks(
-        {
-            "gate_up": ((config.num_experts, gu_stride), torch.uint8),
-            "down": ((config.num_experts, down_stride), torch.uint8),
-        },
-        config.num_layers,
-    )
+    host = {
+        "gate_up": [
+            HostBank((config.num_experts, gu), torch.uint8)
+            for gu, _ in _expert_layer_geometry(config)
+        ],
+        "down": [
+            HostBank((config.num_experts, down), torch.uint8)
+            for _, down in _expert_layer_geometry(config)
+        ],
+    }
     banks = {name: [b.tensor for b in per_layer] for name, per_layer in host.items()}
     for tensor in banks["gate_up"] + banks["down"]:
         tensor.random_(0, 256)

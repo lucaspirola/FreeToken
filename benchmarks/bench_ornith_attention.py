@@ -218,7 +218,11 @@ def _time_ms(fn, warmup: int, iters: int) -> float:
 def run_decode(case: DecodeCase, quant_specs, device, args) -> dict:
     import torch
 
-    from freetoken.kernel.triton.attention import decode_launch_config, decode_paged_attention
+    from freetoken.kernel.triton.attention import (
+        decode_launch_config,
+        decode_paged_attention,
+        decode_runtime_splits,
+    )
 
     spec = quant_specs[_QUANT_ALIAS[case.quant]]
     slots = case.ctx_len * case.batch
@@ -233,8 +237,10 @@ def run_decode(case: DecodeCase, quant_specs, device, args) -> dict:
     sm_scale = HEAD_DIM**-0.5
 
     quant_name = "int4" if spec.enabled and spec.elements_per_byte == 2 else ("quant8" if spec.enabled else None)
+    capability = torch.cuda.get_device_capability(device)
     preferred, block_n, num_warps = decode_launch_config(
-        quant_name=quant_name, head_dim=HEAD_DIM, num_q_heads=Q_HEADS, num_kv_heads=KV_HEADS
+        quant_name=quant_name, head_dim=HEAD_DIM, num_q_heads=Q_HEADS,
+        num_kv_heads=KV_HEADS, compute_capability=capability,
     )
     ceiling = case.max_kv_splits if case.max_kv_splits is not None else preferred
 
@@ -247,9 +253,15 @@ def run_decode(case: DecodeCase, quant_specs, device, args) -> dict:
         # stage1 never wrote, reading uninitialized scratch.
         qname = quant_name if k_s is not None else None
         call_preferred, _, _ = decode_launch_config(
-            quant_name=qname, head_dim=HEAD_DIM, num_q_heads=Q_HEADS, num_kv_heads=KV_HEADS
+            quant_name=qname, head_dim=HEAD_DIM, num_q_heads=Q_HEADS,
+            num_kv_heads=KV_HEADS, compute_capability=capability,
         )
-        splits = max(min(call_preferred, ceiling), 1)
+        splits = decode_runtime_splits(
+            preferred_splits=call_preferred, scratch_splits=ceiling,
+            batch=case.batch, quant_name=qname, head_dim=HEAD_DIM,
+            num_q_heads=Q_HEADS, num_kv_heads=KV_HEADS,
+            compute_capability=capability,
+        )
         logits = torch.empty(case.batch, Q_HEADS, splits, HEAD_DIM, device=device, dtype=torch.float32)
         lse = torch.empty(case.batch, Q_HEADS, splits, device=device, dtype=torch.float32)
         nsplits = torch.full((case.batch,), splits, device=device, dtype=torch.int32)
@@ -258,7 +270,11 @@ def run_decode(case: DecodeCase, quant_specs, device, args) -> dict:
             k_scale=k_s, v_scale=v_s,
         )
 
-    scratch_splits = max(min(preferred, ceiling), 1)  # the quantized (production) path's actual launch
+    scratch_splits = decode_runtime_splits(
+        preferred_splits=preferred, scratch_splits=ceiling, batch=case.batch,
+        quant_name=quant_name, head_dim=HEAD_DIM, num_q_heads=Q_HEADS,
+        num_kv_heads=KV_HEADS, compute_capability=capability,
+    )
     max_abs_err = None
     if spec.enabled and not args.skip_verify:
         got = call(k_cache, v_cache, k_scale, v_scale)

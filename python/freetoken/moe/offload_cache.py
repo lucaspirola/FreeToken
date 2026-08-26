@@ -205,6 +205,16 @@ class OffloadMoeCache:
         self.bank_schema = _BANK_SCHEMAS[self.quant_format]
         self.bank_sources: dict[str, list[torch.Tensor]] = {}
         self.bank_caches: dict[str, torch.Tensor] = {}
+        # Mixed-GGUF size classes. A class owns a contiguous range in the
+        # logical LRU map and compact per-bank tensors matching that class's row
+        # signature. Decode kernels receive class-local slot ids. The two
+        # full-layer prefill buffers remain explicit max-row allocations, so
+        # overlap never forces every decode slot up to the largest stride.
+        self._size_class_enabled = False
+        self._layer_cache_class: list[int] = [0] * self.num_layers
+        self._class_ranges: list[tuple[int, int]] = [(0, self.cache_size)]
+        self._class_bank_caches: list[dict[str, torch.Tensor]] = []
+        self._lru_size = self.cache_size
         # per-layer host residency: the GPU movement paths require "pinned"; LOCKED/PAGEABLE layers decode on the CPU executor and prefill via copy_missing's pageable branch
         # _unpinned_layers is the derived id set the hot paths test against
         self.layer_residency: list[str] = []
@@ -259,6 +269,7 @@ class OffloadMoeCache:
         self._copy_feat_bytes_by_layer: list[torch.Tensor] | None = None
         self._copy_dst_strides: torch.Tensor | None = None
         self._copy_src_strides: list[torch.Tensor] | None = None
+        self._copy_dst_ptrs_by_layer: list[torch.Tensor] | None = None
         self._variable_bank_rows: set[str] = set()
         self._bank_cache_shapes: dict[str, tuple[int, ...]] = {}
         # The layer whose misses ensure_experts/materialize_layer staged last; consumed
@@ -348,6 +359,21 @@ class OffloadMoeCache:
                 )
         self._unpinned_layers = unpinned
         self.layer_residency = list(residency)
+        signatures = [
+            tuple(math.prod(sources[name][layer].shape[1:]) for name in self.bank_schema)
+            for layer in range(self.num_layers)
+        ]
+        if self.quant_format == "gguf" and len(set(signatures)) > 1:
+            if unpinned:
+                raise NotImplementedError(
+                    "mixed-GGUF GPU size classes currently require pinned host banks"
+                )
+            self._set_gguf_size_class_sources(sources, signatures)
+            return
+        self._size_class_enabled = False
+        self._lru_size = self.cache_size
+        self._class_ranges = [(0, self.cache_size)]
+        self._class_bank_caches = []
         self._variable_bank_rows.clear()
         self._bank_cache_shapes.clear()
         self.bank_sources.clear()
@@ -384,6 +410,84 @@ class OffloadMoeCache:
         if self.prefill_overlap:
             self._init_prefill_overlap_buffers()
 
+    def _set_gguf_size_class_sources(
+        self,
+        sources: dict[str, list[torch.Tensor]],
+        signatures: list[tuple[int, ...]],
+    ) -> None:
+        """Allocate compact per-signature GGUF decode pools.
+
+        ``cache_size`` retains its public meaning: with prefill overlap, two
+        expert layers' worth of rows are reserved for the explicit double
+        buffer and the remainder is split across decode classes. This is the
+        same 2E region the legacy cache temporarily borrowed, but it no longer
+        dictates the Q6 stride of every Q4 slot.
+        """
+        self._size_class_enabled = True
+        self._variable_bank_rows = set(self.bank_schema)
+        self.bank_sources = {name: list(per_layer) for name, per_layer in sources.items()}
+        unique: list[tuple[int, ...]] = []
+        for signature in signatures:
+            if signature not in unique:
+                unique.append(signature)
+        self._layer_cache_class = [unique.index(signature) for signature in signatures]
+
+        reserve = 2 * self.num_experts if self.prefill_overlap else 0
+        usable = self.cache_size - reserve
+        minimum = len(unique) * self.num_experts
+        if usable < minimum:
+            raise ValueError(
+                f"mixed-GGUF size classes need {minimum + reserve} requested slots "
+                f"({minimum} decode + {reserve} prefill), got {self.cache_size}"
+            )
+        counts = [self._layer_cache_class.count(i) for i in range(len(unique))]
+        remaining = usable - minimum
+        capacities = [self.num_experts + remaining * count // self.num_layers for count in counts]
+        for i in range(usable - sum(capacities)):
+            capacities[i % len(capacities)] += 1
+        self._class_ranges = []
+        begin = 0
+        for capacity in capacities:
+            self._class_ranges.append((begin, begin + capacity))
+            begin += capacity
+        self._lru_size = begin
+
+        self.bank_caches.clear()
+        self._class_bank_caches = []
+        for class_id, signature in enumerate(unique):
+            layer = self._layer_cache_class.index(class_id)
+            capacity = capacities[class_id]
+            caches: dict[str, torch.Tensor] = {}
+            for name in self.bank_schema:
+                source = sources[name][layer]
+                cache = torch.empty(
+                    (capacity, *source.shape[1:]), dtype=source.dtype, device=self.device
+                )
+                caches[name] = cache
+                self.bank_caches[f"{name}.class{class_id}"] = cache
+            self._class_bank_caches.append(caches)
+        self.banks = []
+        self._build_copy_plan()
+        if self.prefill_overlap:
+            self._init_prefill_overlap_buffers()
+
+        legacy = self.cache_size * sum(max(sig[i] for sig in unique) for i in range(len(self.bank_schema)))
+        compact = sum(
+            capacities[c] * sum(unique[c]) for c in range(len(unique))
+        )
+        if self.prefill_overlap:
+            compact += 2 * self.num_experts * sum(
+                max(sig[i] for sig in unique) for i in range(len(self.bank_schema))
+            )
+        logger.info(
+            "mixed-GGUF size-class cache ACTIVE: classes=%s, decode_slots=%d, "
+            "prefill_slots=%d, saved=%.1f MiB",
+            [(unique[i], capacities[i]) for i in range(len(unique))],
+            self._lru_size,
+            reserve,
+            (legacy - compact) / 2**20,
+        )
+
     def _build_copy_plan(self) -> None:
         """Precompute the fused multi-bank copy descriptor (base addrs + per-row bytes).
 
@@ -399,6 +503,7 @@ class OffloadMoeCache:
         self._copy_feat_bytes_by_layer = None
         self._copy_dst_strides = None
         self._copy_src_strides = None
+        self._copy_dst_ptrs_by_layer = None
         self._copy_dst_ptrs_host: list[int] = []
         self._copy_src_ptrs_host: list[list[int]] = []
         self._copy_feat_bytes_host: list[int] = []
@@ -408,6 +513,9 @@ class OffloadMoeCache:
         self._gather_bank_ids: list[int] = []
         self._gather_dst_ptrs: torch.Tensor | None = None
         self._gather_feat_bytes: torch.Tensor | None = None
+        if getattr(self, "_size_class_enabled", False):
+            self._build_size_class_copy_plan()
+            return
         if (not _FUSED_COPY and not self._variable_bank_rows) or self.device.type != "cuda" or not self.banks:
             return
         from freetoken.kernel.pinned import device_ptr
@@ -470,6 +578,51 @@ class OffloadMoeCache:
             self._gather_feat_bytes = self._copy_feat_bytes[self._gather_bank_ids].contiguous()
         self._copy_fused_ok = True
 
+    def _build_size_class_copy_plan(self) -> None:
+        """Build per-layer fused H2D descriptors for compact class tensors."""
+        if not _FUSED_COPY or self.device.type != "cuda":
+            return
+        from freetoken.kernel.pinned import device_ptr
+
+        dst_by_layer: list[torch.Tensor] = []
+        src_by_layer: list[torch.Tensor] = []
+        feat_by_layer: list[torch.Tensor] = []
+        for layer_id in range(self.num_layers):
+            caches = self._class_bank_caches[self._layer_cache_class[layer_id]]
+            dst_ptrs, src_ptrs, feats = [], [], []
+            for name in self.bank_schema:
+                source = self.bank_sources[name][layer_id]
+                cache = caches[name]
+                feat = math.prod(source.shape[1:]) * source.element_size()
+                dst_stride = math.prod(cache.shape[1:]) * cache.element_size()
+                src_ptr = device_ptr(source)
+                if (
+                    feat != dst_stride
+                    or feat % 16 != 0
+                    or cache.data_ptr() % 16 != 0
+                    or src_ptr % 16 != 0
+                ):
+                    return
+                dst_ptrs.append(cache.data_ptr())
+                src_ptrs.append(src_ptr)
+                feats.append(feat)
+            dst_by_layer.append(
+                torch.tensor(dst_ptrs, dtype=torch.int64, device=self.device)
+            )
+            src_by_layer.append(
+                torch.tensor(src_ptrs, dtype=torch.int64, device=self.device)
+            )
+            feat_by_layer.append(
+                torch.tensor(feats, dtype=torch.int64, device=self.device)
+            )
+            self._copy_src_ptrs_host.append(src_ptrs)
+            self._copy_feat_bytes_by_layer_host.append(feats)
+            self._copy_src_strides_host.append(feats)
+        self._copy_dst_ptrs_by_layer = dst_by_layer
+        self._copy_src_ptrs = src_by_layer
+        self._copy_feat_bytes_by_layer = feat_by_layer
+        self._copy_fused_ok = True
+
     def validate_rebuild(self, cache_size: int) -> None:
         """Pure geometry validation of a rebuild target (no GPU side effects).
 
@@ -480,6 +633,14 @@ class OffloadMoeCache:
         """
         if cache_size < self.num_experts:
             raise ValueError(f"cache_size {cache_size} < num_experts {self.num_experts}")
+        if getattr(self, "_size_class_enabled", False):
+            reserve = 2 * self.num_experts if self.prefill_overlap else 0
+            minimum = len(self._class_ranges) * self.num_experts + reserve
+            if cache_size < minimum:
+                raise ValueError(
+                    f"mixed-GGUF size classes require at least {minimum} slots, "
+                    f"got {cache_size}"
+                )
         if self.quant_format == "nvfp4_marlin" and cache_size > MARLIN_MAX_CACHE_SIZE:
             raise ValueError(
                 f"moe_cache_size={cache_size} exceeds the marlin backend's slot limit of "
@@ -498,6 +659,12 @@ class OffloadMoeCache:
         """
         assert self.bank_sources, "set_bank_sources must run before rebuild"
         self.validate_rebuild(cache_size)
+        size_class_sources = (
+            {name: list(per_layer) for name, per_layer in self.bank_sources.items()}
+            if self._size_class_enabled
+            else None
+        )
+        size_class_residency = list(self.layer_residency)
         # 1. Tear down prefill-overlap (its buffer views alias the old bank_caches).
         self.prefill_bank_buffers = []
         self.prefill_copy_stream = None
@@ -515,13 +682,16 @@ class OffloadMoeCache:
             torch.cuda.synchronize(self.device)
             torch.cuda.empty_cache()
         # 3. Reallocate the slot cache from the retained host sources.
-        for name in self.bank_schema:
-            head = self.bank_sources[name][0]
-            self.bank_caches[name] = torch.empty(
-                (cache_size, *self._bank_cache_shapes[name]), dtype=head.dtype, device=self.device
-            )
-        self.banks = [(self.bank_sources[n], self.bank_caches[n]) for n in self.bank_schema]
-        self._build_copy_plan()  # slot caches were reallocated -> refresh fused-copy addrs
+        if size_class_sources is not None:
+            self.set_bank_sources(size_class_sources, size_class_residency)
+        else:
+            for name in self.bank_schema:
+                head = self.bank_sources[name][0]
+                self.bank_caches[name] = torch.empty(
+                    (cache_size, *self._bank_cache_shapes[name]), dtype=head.dtype, device=self.device
+                )
+            self.banks = [(self.bank_sources[n], self.bank_caches[n]) for n in self.bank_schema]
+            self._build_copy_plan()  # slot caches were reallocated -> refresh fused-copy addrs
         # 4. Reallocate cache_size-shaped bookkeeping; reset the slot map (cold start).
         self.slot_for_id.fill_(-1)
         self.id_of_slot = torch.full((cache_size,), -1, dtype=torch.int32, device=self.device)
@@ -555,7 +725,7 @@ class OffloadMoeCache:
                 f"< 2*num_experts {2 * self.num_experts}."
             )
             self.prefill_overlap = False
-        if self.prefill_overlap:
+        if self.prefill_overlap and not self._size_class_enabled:
             self._init_prefill_overlap_buffers()
 
     def set_alphas(
@@ -598,6 +768,12 @@ class OffloadMoeCache:
         ``copy_missing`` takes the whole-layer pageable branch, which presumes materialize's position == expert id (never ``ensure_experts``'s LRU slot remap)."""
         return layer_id in self._unpinned_layers
 
+    def lru_slot_range(self, layer_id: int) -> tuple[int, int]:
+        """Allowed global LRU slot range; kernels emit class-local row ids."""
+        if self._size_class_enabled:
+            return self._class_ranges[self._layer_cache_class[layer_id]]
+        return 0, self.cache_size
+
     def alphas_for_slots(self, layer_id: int) -> tuple[torch.Tensor, torch.Tensor] | None:
         """Per-slot global scales for a decode call, or ``None`` when the format
         keeps no GPU-resident alphas (bf16 / triton-nvfp4). Slots of other layers
@@ -620,25 +796,51 @@ class OffloadMoeCache:
         hi = lo + self.num_experts
         return self.gate_up_alpha[lo:hi], self.down_alpha[lo:hi]
 
-    def bank_views(self, n: int | None = None) -> tuple[torch.Tensor, ...]:
+    def bank_views(
+        self, n: int | None = None, *, layer_id: int | None = None
+    ) -> tuple[torch.Tensor, ...]:
         """Per-bank cache views in registration order: the full ``[S]`` slot cache
         (decode), or its first ``n`` slots (materialized layer)."""
+        if self._size_class_enabled:
+            if layer_id is None:
+                raise ValueError("mixed-GGUF size-class views require layer_id")
+            caches = self._class_bank_caches[self._layer_cache_class[layer_id]]
+            views = tuple(caches[name] for name in self.bank_schema)
+            return views if n is None else tuple(cache[:n] for cache in views)
         assert self.banks, "set_bank_sources must register the banks first"
         if n is None:
             return tuple(cache for _, cache in self.banks)
         return tuple(cache[:n] for _, cache in self.banks)
 
     def _init_prefill_overlap_buffers(self) -> None:
-        assert self.banks, "set_bank_sources must register the banks first"
+        assert self.banks or self._size_class_enabled, (
+            "set_bank_sources must register the banks first"
+        )
         self._prefill_buffer_layer = [None, None]
         self._prefill_buffer_released = [True, True]
         self._prefill_buffer_has_release_event = [False, False]
-        # The double buffers borrow the slot cache's first 2 * num_experts slots
-        # (one full expert layer per buffer), one view per registered bank.
-        self.prefill_bank_buffers = [
-            cache[: 2 * self.num_experts].view(2, self.num_experts, *cache.shape[1:])
-            for _, cache in self.banks
-        ]
+        if self._size_class_enabled:
+            # Explicit max-row buffers: compact decode classes cannot expose one
+            # uniform first-2E slab. Their memory is charged by reserving 2E from
+            # the requested logical cache size in _set_gguf_size_class_sources.
+            self.prefill_bank_buffers = []
+            for name in self.bank_schema:
+                per_layer = self.bank_sources[name]
+                max_layer = max(per_layer, key=lambda source: math.prod(source.shape[1:]))
+                buffer = torch.empty(
+                    (2, self.num_experts, *max_layer.shape[1:]),
+                    dtype=max_layer.dtype,
+                    device=self.device,
+                )
+                self.prefill_bank_buffers.append(buffer)
+                self.bank_caches[f"{name}.prefill"] = buffer
+        else:
+            # The double buffers borrow the slot cache's first 2 * num_experts slots
+            # (one full expert layer per buffer), one view per registered bank.
+            self.prefill_bank_buffers = [
+                cache[: 2 * self.num_experts].view(2, self.num_experts, *cache.shape[1:])
+                for _, cache in self.banks
+            ]
         if self.device.type == "cuda":
             self.prefill_copy_stream = torch.cuda.Stream(device=self.device)
             self.prefill_ready_events = [torch.cuda.Event() for _ in range(2)]
@@ -658,6 +860,8 @@ class OffloadMoeCache:
             self._prefill_hit_num = torch.zeros((1,), dtype=torch.int64, device=self.device)
 
     def _invalidate_prefill_buffer(self, buffer_id: int) -> None:
+        if self._size_class_enabled:
+            return  # explicit buffers do not alias the decode LRU
         slot_start = buffer_id * self.num_experts
         slot_end = slot_start + self.num_experts
         old_ids = self.id_of_slot[slot_start:slot_end]
@@ -696,7 +900,7 @@ class OffloadMoeCache:
         if layer_id < 0:
             raise ValueError(f"Invalid prefill layer id: {layer_id}")
 
-        assert self.banks and self.prefill_bank_buffers
+        assert (self.banks or self._size_class_enabled) and self.prefill_bank_buffers
 
         buffer_id = layer_id % 2
         if self._prefill_buffer_layer[buffer_id] == layer_id:
@@ -708,12 +912,10 @@ class OffloadMoeCache:
 
         def copy() -> None:
             self._invalidate_prefill_buffer(buffer_id)
-            for name, (per_layer, _), buffer in zip(
-                self.bank_schema, self.banks, self.prefill_bank_buffers
-            ):
-                src = per_layer[layer_id]
+            for name, buffer in zip(self.bank_schema, self.prefill_bank_buffers):
+                src = self.bank_sources[name][layer_id]
                 dst = buffer[buffer_id]
-                if name in self._variable_bank_rows:
+                if src.shape[1:] != dst.shape[1:]:
                     dst[:, : src.shape[1]].copy_(src, non_blocking=True)
                 else:
                     dst.copy_(src, non_blocking=True)
@@ -741,7 +943,9 @@ class OffloadMoeCache:
         """
         from freetoken.kernel.fast_index_copy import _skip_fast_index_copy_enabled
 
-        if self._prefill_slot_snapshot is None or self.prefill_copy_stream is None:
+        if self._size_class_enabled:
+            reason = "mixed-GGUF prefill buffers are separate from the decode LRU"
+        elif self._prefill_slot_snapshot is None or self.prefill_copy_stream is None:
             reason = "prefill overlap buffers are not initialized for this device"
         elif _skip_fast_index_copy_enabled():
             reason = "FREETOKEN_SKIP_FAST_INDEX_COPY is set (the hit gather would be a no-op)"
@@ -1175,7 +1379,9 @@ class OffloadMoeCache:
         )
 
     def copy_missing(self) -> None:
-        assert self.banks, "set_bank_sources must register the banks first"
+        assert self.banks or self._size_class_enabled, (
+            "set_bank_sources must register the banks first"
+        )
         layer_id = self._pending_src_layer
         assert layer_id is not None, "no staged misses (ensure_experts/materialize_layer first)"
         if layer_id in self._unpinned_layers:
@@ -1203,6 +1409,18 @@ class OffloadMoeCache:
                 fast_index_copy_multi_strided_jit,
             )
 
+            if self._size_class_enabled:
+                assert self._copy_dst_ptrs_by_layer is not None
+                fast_index_copy_multi_jit(
+                    self._copy_dst_ptrs_by_layer[layer_id],
+                    self._copy_src_ptrs[layer_id],
+                    self._copy_feat_bytes_by_layer[layer_id],
+                    self.evict_slots,
+                    self.src_indices,
+                    self.num_indices,
+                )
+                return
+
             # One launch copies the missing rows for every bank (instead of one launch per
             # bank). evict_slots/src_indices/num_indices are shared across banks;
             # src_indices holds layer-local expert rows, resolved against this layer's
@@ -1228,6 +1446,11 @@ class OffloadMoeCache:
                     self.num_indices,
                 )
             return
+
+        if self._size_class_enabled:
+            raise RuntimeError(
+                "mixed-GGUF size-class cache requires the fused aligned copy plan"
+            )
 
         from freetoken.kernel import fast_index_copy_jit
 

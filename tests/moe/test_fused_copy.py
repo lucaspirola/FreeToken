@@ -106,18 +106,16 @@ def test_fused_copy_variable_source_rows_fill_cache_prefix(layer_id):
 
     cache._pending_src_layer = layer_id
     cache.num_indices.fill_(2)
-    cache.evict_slots[:2] = torch.tensor([1, 5], dtype=torch.int32, device=dev)
+    cache.evict_slots[:2] = torch.tensor([1, 2], dtype=torch.int32, device=dev)
     cache.src_indices[:2] = torch.tensor([3, 0], dtype=torch.int32, device=dev)
-    for _, bank in cache.banks:
+    views = cache.bank_views(layer_id=layer_id)
+    for bank in views:
         bank.fill_(0xA5)
     cache.copy_missing()
     torch.cuda.synchronize()
 
-    for name, (_, bank) in zip(cache.bank_schema, cache.banks):
+    for name, bank in zip(cache.bank_schema, views):
         source = sources[name][layer_id]
         feat = source.shape[1]
-        torch.testing.assert_close(bank[1, :feat], source[3])
-        torch.testing.assert_close(bank[5, :feat], source[0])
-        if feat < bank.shape[1]:
-            assert torch.all(bank[1, feat:] == 0xA5)
-            assert torch.all(bank[5, feat:] == 0xA5)
+        torch.testing.assert_close(bank[1], source[3])
+        torch.testing.assert_close(bank[2], source[0])

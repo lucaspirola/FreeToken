@@ -134,12 +134,20 @@ class Scheduler(SchedulerIOMixin):
             log=logger.info_rank0,
             decode_log_interval=config.decode_log_interval,
         )
+        self._last_moe_stats_calls = 0
 
         # Initialize the I/O mixin
         super().__init__(config, self.engine.tp_cpu_group)
 
     def run_when_idle(self) -> None:
         """Called when the scheduler is idle to perform background tasks."""
+        moe = self.engine.moe_offload_cache
+        if self.config.moe_collect_stats and moe is not None:
+            stats = moe.decode_miss_stats()
+            calls = int(stats["layer_calls"])
+            if calls > self._last_moe_stats_calls:
+                logger.info_rank0("MoE decode miss stats: %s", stats)
+                self._last_moe_stats_calls = calls
         logger.info_rank0("Scheduler is idle, waiting for new reqs...")
         self.cache_manager.check_integrity()
 

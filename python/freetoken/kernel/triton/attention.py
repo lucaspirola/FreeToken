@@ -53,6 +53,38 @@ def decode_launch_config(
     return _MAX_KV_SPLITS, 32, 4
 
 
+def decode_runtime_splits(
+    *,
+    preferred_splits: int,
+    scratch_splits: int,
+    batch: int,
+    quant_name: str | None,
+    head_dim: int,
+    num_q_heads: int,
+    num_kv_heads: int,
+    compute_capability: tuple[int, int] | None,
+) -> int:
+    """Select the realized split count once decode batch size is known.
+
+    The RTX 2000 Ada Ornith sweep shows that batch two already supplies enough
+    independent stage-1 blocks at 16 splits; keeping 32 adds reduction work and
+    is about 9% slower at 262K. Batch one and batch four both remain fastest at
+    32. Keep this deliberately narrow so unrelated GQA shapes and Blackwell's
+    separately tuned launch are unaffected.
+    """
+    splits = min(preferred_splits, scratch_splits)
+    if (
+        compute_capability == (8, 9)
+        and batch == 2
+        and quant_name == "int4"
+        and head_dim == 256
+        and num_q_heads == 16
+        and num_kv_heads == 2
+    ):
+        splits = min(splits, 16)
+    return max(splits, 1)
+
+
 @triton.jit
 def _load_kv(
     ptr,
@@ -360,6 +392,7 @@ def _decode_grouped_stage1_kernel(
     QUANT: tl.constexpr,
     QBLOCK: tl.constexpr,
     EPB: tl.constexpr,
+    KV_SPLITS: tl.constexpr,
 ):
     batch_id = tl.program_id(0)
     head_block_id = tl.program_id(1)
@@ -392,9 +425,8 @@ def _decode_grouped_stage1_kernel(
         effective_start = tl.maximum(0, q_pos - SLIDING_WINDOW + 1)
     effective_len = tl.maximum(0, effective_end - effective_start)
 
-    kv_splits = tl.load(num_kv_splits_ptr + batch_id)
     kv_len_per_split = (
-        tl.cdiv(tl.cdiv(effective_len, kv_splits), MIN_BLOCK_KV) * MIN_BLOCK_KV
+        tl.cdiv(tl.cdiv(effective_len, KV_SPLITS), MIN_BLOCK_KV) * MIN_BLOCK_KV
     )
     split_start = kv_len_per_split * split_id
     split_end = tl.minimum(split_start + kv_len_per_split, effective_len)
@@ -502,6 +534,7 @@ def _decode_stage2_kernel(
     DV: tl.constexpr,
     SLIDING_WINDOW: tl.constexpr,
     HAS_SINKS: tl.constexpr,
+    KV_SPLITS: tl.constexpr,
 ):
     batch_id = tl.program_id(0)
     q_head = tl.program_id(1)
@@ -514,9 +547,8 @@ def _decode_stage2_kernel(
         effective_start = tl.maximum(0, q_pos - SLIDING_WINDOW + 1)
     effective_len = tl.maximum(0, effective_end - effective_start)
 
-    kv_splits = tl.load(num_kv_splits_ptr + batch_id)
     kv_len_per_split = (
-        tl.cdiv(tl.cdiv(effective_len, kv_splits), MIN_BLOCK_KV) * MIN_BLOCK_KV
+        tl.cdiv(tl.cdiv(effective_len, KV_SPLITS), MIN_BLOCK_KV) * MIN_BLOCK_KV
     )
 
     offs_d = tl.arange(0, BLOCK_DV)
@@ -643,17 +675,27 @@ def decode_paged_attention(
     sinks_arg = sinks if sinks is not None else q
     group = num_q_heads // num_kv_heads
     quant_name = "int4" if quant and epb == 2 else ("quant8" if quant else None)
+    capability = torch.cuda.get_device_capability(q.device)
     preferred_splits, block_n, num_warps = decode_launch_config(
         quant_name=quant_name,
         head_dim=head_dim,
         num_q_heads=num_q_heads,
         num_kv_heads=num_kv_heads,
-        compute_capability=torch.cuda.get_device_capability(q.device),
+        compute_capability=capability,
     )
     # Direct kernel callers and older capture buffers may provide less scratch;
     # retain correctness and use every split they made available. The backend
     # allocates the preferred capacity for new captures.
-    launch_splits = min(preferred_splits, max_kv_splits)
+    launch_splits = decode_runtime_splits(
+        preferred_splits=preferred_splits,
+        scratch_splits=max_kv_splits,
+        batch=batch,
+        quant_name=quant_name,
+        head_dim=head_dim,
+        num_q_heads=num_q_heads,
+        num_kv_heads=num_kv_heads,
+        compute_capability=capability,
+    )
     # valid_block_h = heads computed per program (drives the grid + head indexing); block_h =
     # power-of-two tile size for tl.arange. They differ only for non-power-of-two GQA groups
     # (e.g. 6), where block_h rounds up and the kernel masks the extra lanes.
@@ -707,6 +749,7 @@ def decode_paged_attention(
         QUANT=quant,
         QBLOCK=qblock,
         EPB=epb,
+        KV_SPLITS=launch_splits,
         num_warps=num_warps,
         num_stages=2,
     )
@@ -732,6 +775,7 @@ def decode_paged_attention(
         DV=head_dim,
         SLIDING_WINDOW=sliding_window or 0,
         HAS_SINKS=sinks is not None,
+        KV_SPLITS=launch_splits,
         num_warps=4,
         num_stages=2,
     )

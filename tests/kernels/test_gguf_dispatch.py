@@ -35,9 +35,10 @@ def test_mmq_min_tokens(capability, expected):
 @pytest.mark.parametrize(
     "qtype,capability,out_features,expected",
     [
-        (GGML_Q4_K, (8, 9), 8192, (8, 512)),
+        (GGML_Q4_K, (8, 9), 8192, (2, 512)),
+        (GGML_Q4_K, (8, 9), 12352, (4, 512)),
         (GGML_Q4_K, (8, 9), 4096, None),
-        (GGML_Q6_K, (8, 9), 8192, (8, 448)),
+        (GGML_Q6_K, (8, 9), 8192, (2, 448)),
         (GGML_Q6_K, (8, 9), 2048, (8, 64)),
         (GGML_Q6_K, (8, 9), 152064, None),
         (GGML_Q4_K, (12, 0), 8, (7, None)),
@@ -119,7 +120,8 @@ def test_dense_dispatch_branch(cuda, monkeypatch, capability, rows, expected_bra
     [
         ((12, 0), GGML_Q4_K, 64, 8, True),
         ((12, 1), GGML_Q6_K, 2048, 8, True),
-        ((8, 9), GGML_Q4_K, 8, 8192, True),
+        ((8, 9), GGML_Q4_K, 2, 8192, True),
+        ((8, 9), GGML_Q4_K, 4, 12352, True),
         ((8, 9), GGML_Q4_K, 512, 8192, True),
         ((8, 9), GGML_Q4_K, 513, 8192, False),
         ((8, 9), GGML_Q4_K, 32, 4096, False),
