@@ -6,6 +6,7 @@ packed bytes. So every test builds a weight from random-but-safe packed bytes
 overflow -- real weights are O(1), random fp16 scales are not) and compares the
 CUDA kernels against gguf-py's decode of the SAME bytes.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -17,7 +18,6 @@ if not torch.cuda.is_available():
     pytest.skip("CUDA required", allow_module_level=True)
 
 import gguf
-
 from freetoken.models.gguf.dequant import (
     BLOCK_SHAPE,
     GGML_IQ1_S,
@@ -32,8 +32,14 @@ from freetoken.models.gguf.dequant import (
 )
 
 TYPES = [
-    GGML_Q3_K, GGML_Q4_K, GGML_Q5_K,
-    GGML_IQ1_S, GGML_IQ2_S, GGML_IQ2_XXS, GGML_IQ3_XXS, GGML_IQ4_XS,
+    GGML_Q3_K,
+    GGML_Q4_K,
+    GGML_Q5_K,
+    GGML_IQ1_S,
+    GGML_IQ2_S,
+    GGML_IQ2_XXS,
+    GGML_IQ3_XXS,
+    GGML_IQ4_XS,
 ]
 
 
@@ -135,7 +141,9 @@ def test_dense_gguf_prefill_uses_dequantized_cublas_result(qtype, monkeypatch):
 
     # On sm_120 Q4_K/Q6_K prefill dispatches to int8-MMA MMQ instead (different
     # rounding; covered by test_gguf_mma). This test validates the dequant path.
-    monkeypatch.setattr(layers_gguf, "_use_mma_mmq", lambda qt, cc: False)
+    monkeypatch.setattr(
+        layers_gguf, "_use_mma_mmq", lambda qt, cc, rows, out_features: False
+    )
 
     block = BLOCK_SHAPE[qtype][0]
     rows, cols, batch = 32, 2 * block, 32
@@ -151,7 +159,16 @@ def test_dense_gguf_prefill_uses_dequantized_cublas_result(qtype, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "qtype", [GGML_Q3_K, GGML_Q4_K, GGML_IQ2_S, GGML_IQ2_XXS, GGML_IQ3_XXS, GGML_IQ1_S, GGML_IQ4_XS]
+    "qtype",
+    [
+        GGML_Q3_K,
+        GGML_Q4_K,
+        GGML_IQ2_S,
+        GGML_IQ2_XXS,
+        GGML_IQ3_XXS,
+        GGML_IQ1_S,
+        GGML_IQ4_XS,
+    ],
 )
 def test_moe_vec_matches_mmvq(qtype):
     """moe_vec shares mmvq's vec_dot; per selected expert it must reproduce the
@@ -182,7 +199,9 @@ def test_moe_vec_expert_stride_padded_bank(qtype):
     block = BLOCK_SHAPE[qtype][0]
     experts, rows, cols, top_k = 4, 4, block, 2
     raw = _packed_rows(qtype, rows=experts * rows, seed=qtype + 40)
-    dense = torch.from_numpy(np.ascontiguousarray(raw.reshape(experts, rows, -1))).cuda()
+    dense = torch.from_numpy(
+        np.ascontiguousarray(raw.reshape(experts, rows, -1))
+    ).cuda()
     payload = rows * raw.shape[1] // 1  # bytes per expert (row_bytes * rows)
     payload = rows * dense.shape[2]
     stride = payload + 64  # pad each expert slot

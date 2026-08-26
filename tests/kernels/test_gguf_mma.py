@@ -2,8 +2,9 @@
 
 Same strategy as test_gguf_quant_types: random-but-safe packed bytes (fp16
 scale fields masked small), gguf-py's decode of the same bytes as reference.
-Runs only where the dispatch would actually select the MMA path (sm_120+).
+Runs only where the dispatch selects the MMA path (measured sm_89 or sm_120+).
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -12,11 +13,13 @@ import torch
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA required", allow_module_level=True)
-if torch.cuda.get_device_capability() < (12, 0):
-    pytest.skip("int8-MMA MMQ path is sm_120-gated", allow_module_level=True)
+_CAPABILITY = torch.cuda.get_device_capability()
+if not ((8, 9) <= _CAPABILITY < (9, 0) or _CAPABILITY >= (12, 0)):
+    pytest.skip(
+        "int8-MMA MMQ path is not enabled on this architecture", allow_module_level=True
+    )
 
 import gguf
-
 from freetoken.models.gguf.dequant import BLOCK_SHAPE, GGML_Q4_K, GGML_Q6_K
 
 
@@ -34,13 +37,18 @@ def test_mma_matches_reference(qtype, tokens):
     from freetoken.kernel.gguf import ggml_mul_mat_a8_mma
 
     out_features = 320  # not a multiple of 128 -> exercises the fallback kernel
-    block, type_size = BLOCK_SHAPE[qtype]
+    block, _ = BLOCK_SHAPE[qtype]
     in_features = 2 * block
-    raw = _packed_rows(qtype, out_features * in_features // block, seed=qtype * 100 + tokens)
+    raw = _packed_rows(
+        qtype, out_features * in_features // block, seed=qtype * 100 + tokens
+    )
     weight = torch.from_numpy(raw.reshape(out_features, -1).copy()).cuda()
-    ref_w = torch.from_numpy(
-        gguf.quants.dequantize(raw, gguf.GGMLQuantizationType(qtype))
-    ).float().reshape(out_features, in_features).cuda()
+    ref_w = (
+        torch.from_numpy(gguf.quants.dequantize(raw, gguf.GGMLQuantizationType(qtype)))
+        .float()
+        .reshape(out_features, in_features)
+        .cuda()
+    )
 
     torch.manual_seed(0)
     x = torch.randn(tokens, in_features, dtype=torch.float32, device="cuda")
@@ -70,14 +78,21 @@ def test_moe_mma_matches_reference(qtype, broadcast):
         raw = _packed_rows(qtype, out_f * in_f // block, seed=e)
         bank[e, :payload] = torch.from_numpy(raw.reshape(-1))
         ws.append(
-            torch.from_numpy(gguf.quants.dequantize(raw, gguf.GGMLQuantizationType(qtype)))
-            .float().reshape(out_f, in_f)
+            torch.from_numpy(
+                gguf.quants.dequantize(raw, gguf.GGMLQuantizationType(qtype))
+            )
+            .float()
+            .reshape(out_f, in_f)
         )
     bank = bank.cuda()
     w = torch.stack(ws).cuda()
-    topk_ids = torch.from_numpy(
-        np.stack([rng.permutation(experts)[:top_k] for _ in range(tokens)])
-    ).int().cuda()
+    topk_ids = (
+        torch.from_numpy(
+            np.stack([rng.permutation(experts)[:top_k] for _ in range(tokens)])
+        )
+        .int()
+        .cuda()
+    )
 
     torch.manual_seed(2)
     rows_x = tokens if broadcast else tokens * top_k
@@ -88,9 +103,15 @@ def test_moe_mma_matches_reference(qtype, broadcast):
         )
     else:
         ref = torch.stack(
-            [x[t * top_k + k] @ w[topk_ids[t, k]].T for t in range(tokens) for k in range(top_k)]
+            [
+                x[t * top_k + k] @ w[topk_ids[t, k]].T
+                for t in range(tokens)
+                for k in range(top_k)
+            ]
         )
-    got = ggml_moe_a8_mma(x, bank, topk_ids, top_k, qtype, out_f, tokens, stride, broadcast)
+    got = ggml_moe_a8_mma(
+        x, bank, topk_ids, top_k, qtype, out_f, tokens, stride, broadcast
+    )
     rel = ((got - ref).norm() / (ref.norm() + 1e-12)).item()
     assert got.shape == (tokens * top_k, out_f)
     assert rel < 0.02, rel
@@ -101,13 +122,16 @@ def test_mma_multiple_of_128_rows():
 
     qtype = GGML_Q4_K
     out_features = 256  # multiple of 128 -> non-fallback kernel
-    block, type_size = BLOCK_SHAPE[qtype]
+    block, _ = BLOCK_SHAPE[qtype]
     in_features = 2 * block
     raw = _packed_rows(qtype, out_features * in_features // block, seed=7)
     weight = torch.from_numpy(raw.reshape(out_features, -1).copy()).cuda()
-    ref_w = torch.from_numpy(
-        gguf.quants.dequantize(raw, gguf.GGMLQuantizationType(qtype))
-    ).float().reshape(out_features, in_features).cuda()
+    ref_w = (
+        torch.from_numpy(gguf.quants.dequantize(raw, gguf.GGMLQuantizationType(qtype)))
+        .float()
+        .reshape(out_features, in_features)
+        .cuda()
+    )
 
     torch.manual_seed(1)
     x = torch.randn(33, in_features, dtype=torch.float32, device="cuda")

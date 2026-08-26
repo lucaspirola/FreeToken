@@ -119,3 +119,30 @@ Command: `ft serve --model ~/ai/models/Ornith-1.5-35B-Q4_K_M.gguf
 - `tests/benchmarks`: 8 passed; ruff clean on all changed files.
 - Full non-slow suite: 9 failures + 6 errors pre-exist on clean main
   (`moe_pageable_gpu` config-test drift), byte-identical A/B vs baseline.
+
+## RTX 2000 Ada port (2026-08-26, sm_89, 16 GB, 70 W, Torch 2.11/CUDA 13)
+
+- [x] Confirm the sm_120 int8-MMA extension compiles and passes numeric tests on
+  sm_89; keep the Blackwell dispatch unchanged.
+- [x] Sweep dense Q4_K/Q6_K rows and output geometries. Ada uses exact measured
+  shapes, not the sm_120 all-row rule: Q4_K out=8192 rows 8--512; Q6_K out=8192
+  rows 8--448 and out=2048 rows 8--64. Larger dense batches return to
+  dequant+cuBLAS; unmeasured output sizes (including the large lm_head) retain
+  their prior path.
+- [x] Sweep both exact Ornith routed projections. The MMA crossover is 272 tokens
+  for Q4_K gate/up and Q6_K down; DP4A remains selected through 256. At 8192
+  tokens, gate/up improved 103.78 -> 16.52 ms (6.28x) and down improved
+  70.17 -> 17.80 ms (3.94x).
+- [x] Keep the existing Ada Q4_0 attention launch (32 splits, BLOCK_N=32,
+  4 warps). The sm_120 64/64/8 tuple was slower at full 262K context.
+- [x] Extend `bench_gguf_gemm.py` with exact gate/up and down projections,
+  activation scaling, and GPU-free case-construction tests.
+- [x] Focused dispatch/MMA/benchmark tests: 61 passed. Kernels+benchmarks after
+  updating the dispatcher test double: 356 passed, 1 skipped; two unrelated,
+  reproducible FP8 failures remain on this Ada/Torch build (`blk_aq_y` strict
+  native/emu equality and 0.01090 error against a 0.01000 W8A8 tolerance).
+- [x] Cold live server A/B at the production 262K/Q4_0 configuration, identical
+  96,026-token prompt, fresh process per leg: fallback TTFT 176.912 s, Ada MMA
+  TTFT 125.265 s (29.2% lower / 1.41x faster). Both completed 15-token coherent
+  responses without a crash. Worker environments proved the fallback leg had
+  `FREETOKEN_GGUF_DISABLE_MMA=1` and the optimized leg did not.

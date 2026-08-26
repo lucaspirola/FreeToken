@@ -27,6 +27,17 @@ batch size x miss rate.
 python benchmarks/bench_offload_cache_copy.py
 ```
 
+**`bench_gguf_gemm.py`** — synthetic GGUF Q4_K/Q6_K dense and grouped-MoE
+kernel sweep. It compares the upstream int8-MMA path with DP4A, transient
+dequant+cuBLAS, and MMVQ, with an oracle check before every timed shape. Defaults
+match Ornith's Q4_K gate/up and Q6_K down projections; use `--dense-out` and the
+row/token lists to map safe architecture-specific crossover bands.
+
+```bash
+python benchmarks/bench_gguf_gemm.py --dense-rows 8 64 256 512 8192 \
+    --moe-tokens 256 272 320 8192 --moe-projections gate_up down
+```
+
 **`bench_ornith_attention.py`** — synthetic (no checkpoint): Ornith's exact attention
 geometry (16 query heads, 2 KV heads, head_dim 256 — the GQA shape `decode_launch_config`
 tunes packed-int4/Q4_0 decode for) through the production Triton kernels directly

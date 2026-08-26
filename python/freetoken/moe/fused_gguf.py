@@ -15,7 +15,7 @@ from __future__ import annotations
 import torch
 
 from freetoken.layers.activation import gelu_and_mul, gelu_tanh_and_mul, silu_and_mul
-from freetoken.models.gguf.dequant import GGML_BF16
+from freetoken.models.gguf.dequant import GGML_BF16, GGML_Q4_K, GGML_Q6_K
 
 _ACT = {"silu": silu_and_mul, "gelu": gelu_and_mul, "gelu_tanh": gelu_tanh_and_mul}
 
@@ -55,7 +55,9 @@ def _moe_vec_chunked(x, weight, topk_ids, top_k, quant_type, rows, tokens, strid
 
     limit = min(_MAX_GRID_Z, _MAX_ROWS_IN_FLIGHT)
     if tokens * top_k <= limit:
-        return ggml_moe_a8_vec(x, weight, topk_ids, top_k, quant_type, rows, tokens, stride)
+        return ggml_moe_a8_vec(
+            x, weight, topk_ids, top_k, quant_type, rows, tokens, stride
+        )
 
     chunk = max(1, limit // top_k)
     outs = []
@@ -63,7 +65,14 @@ def _moe_vec_chunked(x, weight, topk_ids, top_k, quant_type, rows, tokens, strid
         end = min(start + chunk, tokens)
         outs.append(
             ggml_moe_a8_vec(
-                x[start:end], weight, topk_ids[start:end], top_k, quant_type, rows, end - start, stride
+                x[start:end],
+                weight,
+                topk_ids[start:end],
+                top_k,
+                quant_type,
+                rows,
+                end - start,
+                stride,
             )
         )
     return torch.cat(outs, dim=0)
@@ -79,16 +88,44 @@ _MMA_MAX_TOKENS = 16384
 # 1.76; 8192 tokens 9.1 vs 38.5 -- the full-prefill-chunk regime is the win).
 _MMA_MOE_MIN_TOKENS = 320
 
+# On the 70 W RTX 2000 Ada, both Ornith projections cross reliably at 272
+# tokens: Q4_K gate/up 3.55 vs 4.28 ms and Q6_K down 2.41 vs 2.93 ms. At 256
+# they are tied or DP4A is faster, so do not copy Blackwell's threshold.
+_MMA_MOE_MIN_TOKENS_SM89 = 272
 
-def _use_mma_moe(quant_type, stride, x, capability) -> bool:
-    """Upstream int8-MMA grouped MMQ: sm_120-gated, Q4_K/Q6_K slots only.
+
+def mma_moe_token_range(
+    quant_type: int, capability: tuple[int, int] | None
+) -> tuple[int, int] | None:
+    """Measured token range where grouped int8-MMA wins."""
+    if quant_type not in (GGML_Q4_K, GGML_Q6_K) or capability is None:
+        return None
+    if capability >= (12, 0):
+        return _MMA_MOE_MIN_TOKENS, _MMA_MAX_TOKENS
+    if (8, 9) <= capability < (9, 0):
+        return _MMA_MOE_MIN_TOKENS_SM89, _MMA_MAX_TOKENS
+    return None
+
+
+def _use_mma_moe(
+    quant_type, stride, capability, tokens, rows, broadcast, top_k
+) -> bool:
+    """Upstream int8-MMA grouped MMQ for measured Q4_K/Q6_K ranges.
 
     The slot byte stride must be a multiple of the quant block size so the
     kernel can address experts in whole blocks (true for Ornith's banks, where
     payloads are already 64-byte aligned).
     """
-    if capability is None or capability < (12, 0):
+    token_range = mma_moe_token_range(int(quant_type), capability)
+    if token_range is None or not token_range[0] <= tokens <= token_range[1]:
         return False
+    if (8, 9) <= capability < (9, 0):
+        # Only the exact Ornith routed projections were measured on this Ada:
+        # fused Q4_K gate/up [1024, 2048] and Q6_K down [2048, 512], top-8.
+        ornith_gate_up = int(quant_type) == GGML_Q4_K and broadcast and rows == 1024
+        ornith_down = int(quant_type) == GGML_Q6_K and not broadcast and rows == 2048
+        if top_k != 8 or not (ornith_gate_up or ornith_down):
+            return False
     from freetoken.kernel.gguf import mma_mmq_supported
     from freetoken.models.gguf.dequant import BLOCK_SHAPE
 
@@ -101,7 +138,9 @@ def _use_mma_moe(quant_type, stride, x, capability) -> bool:
     return _mma_mmq_ok()
 
 
-def _moe_matmul(x, weight, topk_ids, top_k, quant_type, rows, tokens, stride, *, broadcast=True):
+def _moe_matmul(
+    x, weight, topk_ids, top_k, quant_type, rows, tokens, stride, *, broadcast=True
+):
     """Choose grouped MMQ for prefill and MMVQ for decode/small tails.
 
     ``broadcast=True``: ``x[tokens, in]`` shared by each token's top_k experts
@@ -116,15 +155,19 @@ def _moe_matmul(x, weight, topk_ids, top_k, quant_type, rows, tokens, stride, *,
     from freetoken.layers.gguf import _device_capability
 
     capability = _device_capability(x.device.index) if x.is_cuda else None
-    if (
-        _MMA_MOE_MIN_TOKENS <= tokens <= _MMA_MAX_TOKENS
-        and _use_mma_moe(quant_type, stride, x, capability)
-    ):
+    if _use_mma_moe(quant_type, stride, capability, tokens, rows, broadcast, top_k):
         from freetoken.kernel.gguf import ggml_moe_a8_mma
 
         out = ggml_moe_a8_mma(
-            x, weight, topk_ids.contiguous(), top_k, int(quant_type),
-            rows, tokens, stride, broadcast,
+            x,
+            weight,
+            topk_ids.contiguous(),
+            top_k,
+            int(quant_type),
+            rows,
+            tokens,
+            stride,
+            broadcast,
         )
         return out.to(x.dtype)
     if not broadcast:
@@ -176,7 +219,9 @@ def fused_experts_gguf(
 
     num_tokens = hidden_states.shape[0]
     top_k = topk_ids.shape[1]
-    assert gate_up_q.dim() == 2 and down_q.dim() == 2, "gguf banks are flat padded slots"
+    assert gate_up_q.dim() == 2 and down_q.dim() == 2, (
+        "gguf banks are flat padded slots"
+    )
 
     # Safetensors Laguna-S keeps its last expert layers in BF16.  Variable-size
     # cache rows place the real payload at the start of each padded slot, so expose
@@ -191,11 +236,15 @@ def fused_experts_gguf(
         # The leading payload is contiguous within each slot, while the slot-to-slot
         # stride includes padding for the largest layer. ``view`` preserves that outer
         # stride, giving the dense kernel an exact zero-copy 3-D view.
-        gate_up = gate_up_q[:, : gu_elems * 2].view(torch.bfloat16).view(
-            gate_up_q.shape[0], gate_up_rows, hidden
+        gate_up = (
+            gate_up_q[:, : gu_elems * 2]
+            .view(torch.bfloat16)
+            .view(gate_up_q.shape[0], gate_up_rows, hidden)
         )
-        down = down_q[:, : dn_elems * 2].view(torch.bfloat16).view(
-            down_q.shape[0], down_rows, intermediate
+        down = (
+            down_q[:, : dn_elems * 2]
+            .view(torch.bfloat16)
+            .view(down_q.shape[0], down_rows, intermediate)
         )
         return fused_experts_impl(
             # fused_experts_impl writes its input in place. Laguna evaluates the
@@ -210,19 +259,34 @@ def fused_experts_gguf(
             False,
         )
     if gate_up_type == GGML_BF16 or down_type == GGML_BF16:
-        raise ValueError("mixed BF16/quantized projections within one expert layer are unsupported")
+        raise ValueError(
+            "mixed BF16/quantized projections within one expert layer are unsupported"
+        )
 
     gate_up = _moe_matmul(
-        hidden_states, gate_up_q, topk_ids, top_k, int(gate_up_type),
-        gate_up_rows, num_tokens, gate_up_q.shape[1],
+        hidden_states,
+        gate_up_q,
+        topk_ids,
+        top_k,
+        int(gate_up_type),
+        gate_up_rows,
+        num_tokens,
+        gate_up_q.shape[1],
     )
     inter = act_fn(gate_up)
     # Down pass: one selected-expert row per (token, k). _moe_matmul flattens to
     # a top_k=1 call for the DP4A/vec kernels (row-major [num_tokens, top_k] ->
     # contiguous [num_tokens*top_k, 1]); the MMA path keeps the 2-D ids.
     out = _moe_matmul(
-        inter, down_q, topk_ids, top_k, int(down_type),
-        down_rows, num_tokens, down_q.shape[1], broadcast=False,
+        inter,
+        down_q,
+        topk_ids,
+        top_k,
+        int(down_type),
+        down_rows,
+        num_tokens,
+        down_q.shape[1],
+        broadcast=False,
     )
     out = out.reshape(num_tokens, top_k, down_rows) * topk_weights.reshape(
         num_tokens, top_k, 1

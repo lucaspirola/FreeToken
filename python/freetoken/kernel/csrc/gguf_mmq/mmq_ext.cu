@@ -2,15 +2,16 @@
 //
 // The sibling csrc/gguf tree carries llama.cpp b2899 DP4A kernels (via
 // vLLM/sgl-kernel); upstream has since rewritten MMQ around int8 MMA tiles
-// (turing_mma, sm_75+), which is ~13x faster at prefill row counts on sm_120
-// and also beats transient dequant+cuBLAS at every batch size. Files in this
+// (turing_mma, sm_75+), which is ~13x faster at prefill row counts on sm_120.
+// It also wins selected dense and grouped-MoE bands on sm_89; Python dispatch
+// keeps larger Ada dense batches on transient dequant+cuBLAS. Files in this
 // directory other than this one are vendored VERBATIM from llama.cpp master
 // eab8ee41f889ef7823af517e8098fb8a9b3cf601 (ggml/src/ggml-cuda + the ggml
 // headers they include); this file supplies the small backend shims that
 // ggml-cuda.cu would normally provide (device info, pool, error/abort) plus
 // the torch bindings. Only Q4_K/Q6_K mul_mat_q cases are instantiated to keep
-// JIT compile time down; the GEMV (batch<=6) and MoE paths stay on the
-// existing csrc/gguf kernels.
+// JIT compile time down; GEMV (batch<=6) stays on the existing csrc/gguf
+// kernels while measured large routed batches use the grouped MMA binding.
 
 #include "common.cuh"
 #include "mmq.cuh"

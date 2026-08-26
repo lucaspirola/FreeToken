@@ -23,12 +23,12 @@ from freetoken.models.gguf.dequant import (
     GGML_BF16,
     GGML_F16,
     GGML_F32,
-    GGML_NAME,
     GGML_IQ1_S,
     GGML_IQ2_S,
     GGML_IQ2_XXS,
     GGML_IQ3_XXS,
     GGML_IQ4_XS,
+    GGML_NAME,
     GGML_Q3_K,
     GGML_Q4_0,
     GGML_Q4_K,
@@ -44,15 +44,33 @@ from .base import BaseOP
 _UNQUANTIZED = {GGML_F32, GGML_F16, GGML_BF16}
 # standard + k-quants: both an MMVQ (small-batch GEMV) and MMQ (large-batch) kernel exist.
 _MMVQ = {
-    GGML_Q4_0, GGML_Q8_0, GGML_Q3_K, GGML_Q4_K, GGML_Q5_K, GGML_Q6_K,
-    GGML_IQ1_S, GGML_IQ2_S, GGML_IQ2_XXS, GGML_IQ3_XXS, GGML_IQ4_XS,
+    GGML_Q4_0,
+    GGML_Q8_0,
+    GGML_Q3_K,
+    GGML_Q4_K,
+    GGML_Q5_K,
+    GGML_Q6_K,
+    GGML_IQ1_S,
+    GGML_IQ2_S,
+    GGML_IQ2_XXS,
+    GGML_IQ3_XXS,
+    GGML_IQ4_XS,
 }
 # The vendored CUDA MMQ switch covers the standard + K-quants only (no IQ cases);
 # IQ types take the dequant fallback for large batches.
 _MMQ = {GGML_Q4_0, GGML_Q8_0, GGML_Q3_K, GGML_Q4_K, GGML_Q5_K, GGML_Q6_K}
 _DEQUANT = {
-    GGML_Q4_0, GGML_Q8_0, GGML_Q3_K, GGML_Q4_K, GGML_Q5_K, GGML_Q6_K,
-    GGML_IQ1_S, GGML_IQ2_S, GGML_IQ2_XXS, GGML_IQ3_XXS, GGML_IQ4_XS,
+    GGML_Q4_0,
+    GGML_Q8_0,
+    GGML_Q3_K,
+    GGML_Q4_K,
+    GGML_Q5_K,
+    GGML_Q6_K,
+    GGML_IQ1_S,
+    GGML_IQ2_S,
+    GGML_IQ2_XXS,
+    GGML_IQ3_XXS,
+    GGML_IQ4_XS,
 }
 
 # Below this token count, the MMVQ GEMV kernel wins (matches vLLM's heuristic).
@@ -70,6 +88,17 @@ _DEQUANT_GEMM_MIN_ROWS = 32
 # Q6_K lm_head at 16 (2.08 vs 2.93 ms), so 24 is the safe arch-wide value.
 _DEQUANT_GEMM_MIN_ROWS_SM120 = 24
 
+# The upstream int8-MMA kernel also compiles and runs on Ada (sm_89), but this
+# 70 W RTX 2000 Ada crosses back to transient dequant+cuBLAS at larger batches.
+# These conservative geometry bands are the repeatable wins at Ornith's
+# 2048-wide dense projections. Small-output Q4_K matrices do not amortize the
+# MMA setup and stay on the old path. Q6_K's 2048-output shared/down projection
+# has a shorter win band than the fused 8192-output attention projection.
+_MMA_DENSE_GEOMETRY_SM89 = {
+    GGML_Q4_K: ((8192, (8, 512)),),
+    GGML_Q6_K: ((8192, (8, 448)), (2048, (8, 64))),
+}
+
 
 def dequant_gemm_min_rows(compute_capability: tuple[int, int] | None) -> int:
     """Row count from which transient dequant+cuBLAS beats the DP4A MMQ kernel."""
@@ -83,7 +112,7 @@ def _device_capability(device_index: int) -> tuple[int, int]:
     return torch.cuda.get_device_capability(device_index)
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _mma_mmq_ok() -> bool:
     """JIT-build the upstream int8-MMA MMQ extension once; fall back on failure.
 
@@ -102,7 +131,7 @@ def _mma_mmq_ok() -> bool:
 
     try:
         _mma_module()
-    except Exception as exc:  # build/toolchain failure -> DP4A/dequant path
+    except Exception as exc:  # noqa: BLE001 - toolchain failures need a safe fallback
         log.warning(
             "int8-MMA MMQ extension unavailable, using DP4A/dequant fallback: %s", exc
         )
@@ -112,23 +141,52 @@ def _mma_mmq_ok() -> bool:
     return True
 
 
-def _use_mma_mmq(quant_type: int, capability: tuple[int, int] | None) -> bool:
+def mma_mmq_row_band(
+    quant_type: int, capability: tuple[int, int] | None, out_features: int
+) -> tuple[int, int | None] | None:
+    """Measured row band where int8-MMA wins for this architecture/type.
+
+    Blackwell keeps the uncapped path validated on the RTX 5080. Ada uses an
+    upper bound because cuBLAS dequant GEMM retakes the lead on large chunks.
+    Other architectures remain on their previously validated dispatch.
+    """
+    if capability is None:
+        return None
+    if capability >= (12, 0):
+        return _MMVQ_SAFE + 1, None
+    if (8, 9) <= capability < (9, 0):
+        for measured_out_features, band in _MMA_DENSE_GEOMETRY_SM89.get(quant_type, ()):
+            if out_features == measured_out_features:
+                return band
+    return None
+
+
+def _use_mma_mmq(
+    quant_type: int,
+    capability: tuple[int, int] | None,
+    rows: int,
+    out_features: int,
+) -> bool:
     """int8-MMA MMQ replaces both the DP4A MMQ band and the dequant+cuBLAS band.
 
-    Measured on sm_120 (RTX 5080, real Ornith tensors): faster than BOTH at
-    every batch size >= 4 -- 8192-row Q4_K attn_q 1.79 ms vs dequant 2.40 vs
-    DP4A 22.9; Q6_K lm_head @2048 tokens 17.5 vs 19.2 vs 262. Gated to sm_120
-    for now (upstream supports sm_75+, but only Blackwell is measured here);
-    MMVQ keeps the <= _MMVQ_SAFE decode band.
+    Blackwell uses MMA for every non-MMVQ batch. Ada uses measured finite bands:
+    at larger rows its lower-power cuBLAS path overtakes MMA again. MMVQ keeps
+    the <= _MMVQ_SAFE decode band on both architectures.
     """
-    if capability is None or capability < (12, 0):
+    band = mma_mmq_row_band(quant_type, capability, out_features)
+    if band is None:
+        return False
+    lower, upper = band
+    if rows < lower or (upper is not None and rows > upper):
         return False
     from freetoken.kernel.gguf import mma_mmq_supported
 
     return mma_mmq_supported(quant_type) and _mma_mmq_ok()
 
 
-def fused_mul_mat_gguf(x: torch.Tensor, qweight: torch.Tensor, qweight_type: int) -> torch.Tensor:
+def fused_mul_mat_gguf(
+    x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
+) -> torch.Tensor:
     """y = x @ dequant(qweight).T, dispatched by batch size and quant type."""
     from freetoken.kernel.gguf import (
         ggml_dequantize,
@@ -145,10 +203,12 @@ def fused_mul_mat_gguf(x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
         return ggml_mul_mat_vec_a8(qweight, x, qweight_type, out_features)
     if qweight_type in _MMQ:
         capability = _device_capability(x.device.index) if x.is_cuda else None
-        if _use_mma_mmq(qweight_type, capability):
+        if _use_mma_mmq(qweight_type, capability, x.shape[0], out_features):
             from freetoken.kernel.gguf import ggml_mul_mat_a8_mma
 
-            return ggml_mul_mat_a8_mma(qweight, x, qweight_type, out_features).to(x.dtype)
+            return ggml_mul_mat_a8_mma(qweight, x, qweight_type, out_features).to(
+                x.dtype
+            )
         if x.shape[0] >= dequant_gemm_min_rows(capability):
             block, type_size = BLOCK_SHAPE[qweight_type]
             in_features = qweight.shape[1] // type_size * block
@@ -160,9 +220,13 @@ def fused_mul_mat_gguf(x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
     if qweight_type in _DEQUANT:
         block, type_size = BLOCK_SHAPE[qweight_type]
         in_features = qweight.shape[1] // type_size * block
-        weight = ggml_dequantize(qweight, qweight_type, out_features, in_features, x.dtype)
+        weight = ggml_dequantize(
+            qweight, qweight_type, out_features, in_features, x.dtype
+        )
         return x @ weight.T
-    raise NotImplementedError(f"unsupported GGUF type {GGML_NAME.get(qweight_type, qweight_type)}")
+    raise NotImplementedError(
+        f"unsupported GGUF type {GGML_NAME.get(qweight_type, qweight_type)}"
+    )
 
 
 class GGUFLinear(BaseOP):
@@ -178,7 +242,9 @@ class GGUFLinear(BaseOP):
         self.in_features = in_features
         self.out_features = out_features
         self._quant_type = quant_type
-        self.qweight = torch.empty(out_features, row_bytes(in_features, quant_type), dtype=torch.uint8)
+        self.qweight = torch.empty(
+            out_features, row_bytes(in_features, quant_type), dtype=torch.uint8
+        )
         self.bias = torch.empty(out_features) if has_bias else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -216,13 +282,17 @@ class GGUFEmbedding(BaseOP):
 
         flat = x.flatten()
         rows = self.qweight.index_select(0, flat)  # [n, row_bytes] packed
-        y = ggml_dequantize(rows, self._quant_type, flat.shape[0], self.embedding_dim, torch.bfloat16)
+        y = ggml_dequantize(
+            rows, self._quant_type, flat.shape[0], self.embedding_dim, torch.bfloat16
+        )
         y = y.view(*x.shape, self.embedding_dim)
         if self._embed_scale is not None:
             if self._embed_scale_t is None:
-                self._embed_scale_t = torch.tensor(self._embed_scale, dtype=y.dtype, device=y.device)
+                self._embed_scale_t = torch.tensor(
+                    self._embed_scale, dtype=y.dtype, device=y.device
+                )
             y = y * self._embed_scale_t
         return y
 
 
-__all__ = ["GGUFLinear", "GGUFEmbedding", "fused_mul_mat_gguf"]
+__all__ = ["GGUFEmbedding", "GGUFLinear", "fused_mul_mat_gguf"]

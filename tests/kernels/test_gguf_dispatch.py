@@ -4,16 +4,16 @@ The threshold *functions* are pure and tested on both archs without a GPU; the
 dispatch-site tests stub the CUDA kernels and fake the device capability, so
 they only need any CUDA device (branch selection, not numerics).
 """
-from __future__ import annotations
 
-import pytest
-import torch
+from __future__ import annotations
 
 import freetoken.layers.gguf as layers_gguf
 import freetoken.moe.fused_gguf as moe_gguf
-from freetoken.layers.gguf import dequant_gemm_min_rows
-from freetoken.models.gguf.dequant import BLOCK_SHAPE, GGML_Q4_K
-from freetoken.moe.fused_gguf import mmq_min_tokens
+import pytest
+import torch
+from freetoken.layers.gguf import dequant_gemm_min_rows, mma_mmq_row_band
+from freetoken.models.gguf.dequant import BLOCK_SHAPE, GGML_Q4_K, GGML_Q6_K
+from freetoken.moe.fused_gguf import mma_moe_token_range, mmq_min_tokens
 
 
 @pytest.mark.parametrize(
@@ -30,6 +30,37 @@ def test_dequant_gemm_min_rows(capability, expected):
 )
 def test_mmq_min_tokens(capability, expected):
     assert mmq_min_tokens(capability) == expected
+
+
+@pytest.mark.parametrize(
+    "qtype,capability,out_features,expected",
+    [
+        (GGML_Q4_K, (8, 9), 8192, (8, 512)),
+        (GGML_Q4_K, (8, 9), 4096, None),
+        (GGML_Q6_K, (8, 9), 8192, (8, 448)),
+        (GGML_Q6_K, (8, 9), 2048, (8, 64)),
+        (GGML_Q6_K, (8, 9), 152064, None),
+        (GGML_Q4_K, (12, 0), 8, (7, None)),
+        (GGML_Q4_K, (9, 0), 8192, None),
+        (2, (8, 9), 8192, None),
+    ],
+)
+def test_mma_mmq_row_band(qtype, capability, out_features, expected):
+    assert mma_mmq_row_band(qtype, capability, out_features) == expected
+
+
+@pytest.mark.parametrize(
+    "qtype,capability,expected",
+    [
+        (GGML_Q4_K, (8, 9), (272, 16384)),
+        (GGML_Q6_K, (8, 9), (272, 16384)),
+        (GGML_Q4_K, (12, 0), (320, 16384)),
+        (GGML_Q4_K, (9, 0), None),
+        (2, (8, 9), None),
+    ],
+)
+def test_mma_moe_token_range(qtype, capability, expected):
+    assert mma_moe_token_range(qtype, capability) == expected
 
 
 @pytest.fixture
@@ -52,25 +83,31 @@ def test_dense_dispatch_branch(cuda, monkeypatch, capability, rows, expected_bra
 
     monkeypatch.setattr(layers_gguf, "_device_capability", lambda i: capability)
     # The MMA path (tested separately) sits above the dequant/DP4A crossover.
-    monkeypatch.setattr(layers_gguf, "_use_mma_mmq", lambda qt, cc: False)
+    monkeypatch.setattr(layers_gguf, "_use_mma_mmq", lambda qt, cc, rows, out: False)
     block, type_size = BLOCK_SHAPE[GGML_Q4_K]
     in_features, out_features = 256, 8
     qweight = torch.zeros(
-        (out_features, in_features // block * type_size), dtype=torch.uint8, device="cuda"
+        (out_features, in_features // block * type_size),
+        dtype=torch.uint8,
+        device="cuda",
     )
     x = torch.zeros((rows, in_features), dtype=torch.float16, device="cuda")
     called = []
     monkeypatch.setattr(
         kernel_gguf,
         "ggml_dequantize",
-        lambda *a, **k: called.append("dequant")
-        or torch.zeros((out_features, in_features), dtype=x.dtype, device="cuda"),
+        lambda *a, **k: (
+            called.append("dequant")
+            or torch.zeros((out_features, in_features), dtype=x.dtype, device="cuda")
+        ),
     )
     monkeypatch.setattr(
         kernel_gguf,
         "ggml_mul_mat_a8",
-        lambda *a, **k: called.append("mmq")
-        or torch.zeros((rows, out_features), dtype=x.dtype, device="cuda"),
+        lambda *a, **k: (
+            called.append("mmq")
+            or torch.zeros((rows, out_features), dtype=x.dtype, device="cuda")
+        ),
     )
     out = layers_gguf.fused_mul_mat_gguf(x, qweight, GGML_Q4_K)
     assert called == [expected_branch]
@@ -78,35 +115,55 @@ def test_dense_dispatch_branch(cuda, monkeypatch, capability, rows, expected_bra
 
 
 @pytest.mark.parametrize(
-    "capability,expect_mma",
-    [((12, 0), True), ((12, 1), True), ((8, 9), False), ((9, 0), False)],
+    "capability,qtype,rows,out_features,expect_mma",
+    [
+        ((12, 0), GGML_Q4_K, 64, 8, True),
+        ((12, 1), GGML_Q6_K, 2048, 8, True),
+        ((8, 9), GGML_Q4_K, 8, 8192, True),
+        ((8, 9), GGML_Q4_K, 512, 8192, True),
+        ((8, 9), GGML_Q4_K, 513, 8192, False),
+        ((8, 9), GGML_Q4_K, 32, 4096, False),
+        ((8, 9), GGML_Q6_K, 448, 8192, True),
+        ((8, 9), GGML_Q6_K, 449, 8192, False),
+        ((8, 9), GGML_Q6_K, 64, 2048, True),
+        ((8, 9), GGML_Q6_K, 65, 2048, False),
+        ((9, 0), GGML_Q4_K, 64, 8192, False),
+    ],
 )
-def test_dense_dispatch_mma_branch(cuda, monkeypatch, capability, expect_mma):
-    """On sm_120, Q4_K rows above the MMVQ band route to int8-MMA MMQ."""
+def test_dense_dispatch_mma_branch(
+    cuda, monkeypatch, capability, qtype, rows, out_features, expect_mma
+):
+    """Blackwell is uncapped; Ada MMA is bounded before cuBLAS retakes the lead."""
     import freetoken.kernel.gguf as kernel_gguf
 
     monkeypatch.setattr(layers_gguf, "_device_capability", lambda i: capability)
     monkeypatch.setattr(layers_gguf, "_mma_mmq_ok", lambda: True)
-    block, type_size = BLOCK_SHAPE[GGML_Q4_K]
-    in_features, out_features, rows = 256, 8, 64
+    block, type_size = BLOCK_SHAPE[qtype]
+    in_features = 256
     qweight = torch.zeros(
-        (out_features, in_features // block * type_size), dtype=torch.uint8, device="cuda"
+        (out_features, in_features // block * type_size),
+        dtype=torch.uint8,
+        device="cuda",
     )
     x = torch.zeros((rows, in_features), dtype=torch.float16, device="cuda")
     called = []
     monkeypatch.setattr(
         kernel_gguf,
         "ggml_mul_mat_a8_mma",
-        lambda *a, **k: called.append("mma")
-        or torch.zeros((rows, out_features), dtype=torch.float32, device="cuda"),
+        lambda *a, **k: (
+            called.append("mma")
+            or torch.zeros((rows, out_features), dtype=torch.float32, device="cuda")
+        ),
     )
     monkeypatch.setattr(
         kernel_gguf,
         "ggml_dequantize",
-        lambda *a, **k: called.append("dequant")
-        or torch.zeros((out_features, in_features), dtype=x.dtype, device="cuda"),
+        lambda *a, **k: (
+            called.append("dequant")
+            or torch.zeros((out_features, in_features), dtype=x.dtype, device="cuda")
+        ),
     )
-    out = layers_gguf.fused_mul_mat_gguf(x, qweight, GGML_Q4_K)
+    out = layers_gguf.fused_mul_mat_gguf(x, qweight, qtype)
     assert called == (["mma"] if expect_mma else ["dequant"])
     assert out.dtype == x.dtype
 
@@ -146,14 +203,26 @@ def test_moe_dispatch_branch(cuda, monkeypatch, capability, tokens, expect_mmq):
 
 
 def test_moe_use_mma_gate(monkeypatch):
-    """_use_mma_moe: sm_120 + supported type + block-aligned stride only."""
+    """_use_mma_moe: measured arch/range + supported type + aligned stride."""
     monkeypatch.setattr(layers_gguf, "_mma_mmq_ok", lambda: True)
-    block, type_size = BLOCK_SHAPE[GGML_Q4_K]
-    x = torch.zeros(4, 8)
-    assert moe_gguf._use_mma_moe(GGML_Q4_K, 4 * type_size, x, (12, 0))
-    assert not moe_gguf._use_mma_moe(GGML_Q4_K, 4 * type_size, x, (8, 9))
-    assert not moe_gguf._use_mma_moe(GGML_Q4_K, 4 * type_size + 1, x, (12, 0))
-    assert not moe_gguf._use_mma_moe(2, 64, x, (12, 0))  # Q4_0: not instantiated
+    type_size = BLOCK_SHAPE[GGML_Q4_K][1]
+    assert moe_gguf._use_mma_moe(GGML_Q4_K, 4 * type_size, (12, 0), 320, 4, True, 2)
+    assert moe_gguf._use_mma_moe(GGML_Q4_K, 4 * type_size, (8, 9), 272, 1024, True, 8)
+    assert moe_gguf._use_mma_moe(
+        GGML_Q6_K, 4 * BLOCK_SHAPE[GGML_Q6_K][1], (8, 9), 272, 2048, False, 8
+    )
+    assert not moe_gguf._use_mma_moe(
+        GGML_Q4_K, 4 * type_size, (8, 9), 256, 1024, True, 8
+    )
+    assert not moe_gguf._use_mma_moe(
+        GGML_Q4_K, 4 * type_size, (8, 9), 272, 512, True, 8
+    )
+    assert not moe_gguf._use_mma_moe(
+        GGML_Q4_K, 4 * type_size + 1, (12, 0), 320, 4, True, 2
+    )
+    assert not moe_gguf._use_mma_moe(
+        2, 64, (12, 0), 320, 4, True, 2
+    )  # Q4_0: not instantiated
 
 
 @pytest.mark.parametrize(
@@ -164,7 +233,7 @@ def test_moe_dispatch_mma_branch(cuda, monkeypatch, tokens, broadcast, expect_mm
     import freetoken.kernel.gguf as kernel_gguf
 
     monkeypatch.setattr(layers_gguf, "_device_capability", lambda i: (12, 0))
-    monkeypatch.setattr(moe_gguf, "_use_mma_moe", lambda *a: True)
+    monkeypatch.setattr(moe_gguf, "_use_mma_moe", lambda *a: expect_mma)
     top_k = 2
     called = []
     mma_out = torch.zeros(tokens * top_k, 4)
@@ -181,7 +250,14 @@ def test_moe_dispatch_mma_branch(cuda, monkeypatch, tokens, broadcast, expect_mm
     topk_ids = torch.zeros((tokens, top_k), dtype=torch.int32, device="cuda")
     weight = torch.zeros((4, 16), dtype=torch.uint8, device="cuda")
     out = moe_gguf._moe_matmul(
-        x, weight, topk_ids, top_k, GGML_Q4_K, rows=4, tokens=tokens, stride=16,
+        x,
+        weight,
+        topk_ids,
+        top_k,
+        GGML_Q4_K,
+        rows=4,
+        tokens=tokens,
+        stride=16,
         broadcast=broadcast,
     )
     assert (called == ["mma"]) is expect_mma

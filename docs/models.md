@@ -62,7 +62,15 @@ work too.
   and a 55.6K-token Claude Code Bash-tool round trip. The sm_89 attention tuning reduces
   a synthetic 200K full-attention layer from 2.42 ms to 0.92 ms; the live 55.9K decode
   ran at 36--48 tok/s after warmup. A coherent 169.9K-token live generation completed
-  in 425.8 s of prefill and decoded at 27--35 tok/s. `int4` remains an alias for `q4_0`.
+  in 425.8 s of prefill and decoded at 27--35 tok/s. The full 262,144-token pool also
+  fits this 16 GB host with the command above after replacing both 200000 values with
+  262144. Ada now uses llama.cpp's int8-MMA Q4_K/Q6_K kernels only for measured Ornith
+  shapes and batch bands: dense 8192-output projections at 8--448/512 rows, the
+  Q6_K 2048-output projection at 8--64 rows, and both top-8 routed projections at
+  272--16384 tokens. Larger dense chunks return to transient dequant+cuBLAS, which is
+  faster on this 70 W GPU. In a cold, identical 96,026-token server A/B, TTFT fell from
+  176.91 s (`FREETOKEN_GGUF_DISABLE_MMA=1`) to 125.26 s (29.2% lower, 1.41x faster).
+  `int4` remains an alias for `q4_0`.
 - On Blackwell (sm_120, e.g. RTX 5080 16 GB) the same command serves the **full
   262,144-token window**: `--attention-backend triton --max-seq-len-override 262144
   --num-tokens 262144 --kv-cache-dtype q4_0 --max-running-requests 1
