@@ -159,6 +159,30 @@ def test_split_linear_packs_adjacent_equal_quant_types(monkeypatch):
     out = linear.forward(torch.zeros((2, 256), dtype=torch.float32))
     assert calls == [(GGML_Q4_K, 5), (GGML_Q6_K, 1)]
     assert out.shape == (2, 6)
+
+
+def test_permuted_input_gguf_linear_uses_tiled_v_layout(monkeypatch):
+    from freetoken.models.gguf.dequant import GGML_Q6_K
+    from freetoken.models.qwen3_5_moe.gguf import PermutedInputGGUFLinear
+
+    linear = PermutedInputGGUFLinear(
+        256, 2, num_key_heads=2, num_value_heads=4, head_dim=64
+    )
+    linear.materialize(GGML_Q6_K)
+    captured = []
+
+    def fake_mul(x, weight, quant_type):
+        captured.append(x.clone())
+        return torch.zeros((x.shape[0], weight.shape[0]), dtype=x.dtype)
+
+    monkeypatch.setattr("freetoken.layers.gguf.fused_mul_mat_gguf", fake_mul)
+    x = torch.arange(512, dtype=torch.float32).reshape(2, 256)
+    linear.forward(x)
+
+    expected = x.reshape(2, 2, 2, 64).permute(0, 2, 1, 3).reshape(2, 256)
+    assert torch.equal(captured[0], expected)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton shared-expert epilogue needs CUDA")
 def test_fused_shared_expert_epilogue_matches_torch():
     from freetoken.kernel.triton.shared_expert import fused_shared_expert_add_

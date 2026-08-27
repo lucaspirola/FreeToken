@@ -276,14 +276,20 @@ def iter_gguf_weights(
             yield f"{base}.linear_attn.A_log", torch.log(-a)
         elif suffix == "ssm_out.weight":
             # llama.cpp permutes this matrix's input columns before quantizing.
-            # K-quants group adjacent input columns, so a lossless packed-byte
-            # permutation is impossible after quantization; dequantize this one
-            # projection and restore the original columns in bf16.
-            out = _dense(t)
-            group = config.linear_attention_group()
-            assert group is not None
-            inv = _inverse_v_permutation(config, head_dim=group.value_head_dim)
-            yield f"{base}.linear_attn.out_proj.weight", out.index_select(1, inv)
+            # Q6_K is faster on Ada when it remains packed and the equivalent
+            # layout change is applied to the activation at runtime. Q4_K's
+            # MMVQ only ties the restored BF16 cuBLAS projection, so preserve
+            # the existing exact path for it.
+            from freetoken.models.gguf.dequant import GGML_Q6_K
+
+            if t.ggml_type == GGML_Q6_K:
+                yield f"{base}.linear_attn.out_proj.qweight", t.packed()
+            else:
+                out = _dense(t)
+                group = config.linear_attention_group()
+                assert group is not None
+                inv = _inverse_v_permutation(config, head_dim=group.value_head_dim)
+                yield f"{base}.linear_attn.out_proj.weight", out.index_select(1, inv)
         elif suffix in ("ffn_gate_shexp.weight", "ffn_up_shexp.weight"):
             slot = "gate" if "gate" in suffix else "up"
             shared_buf.setdefault(layer, {})[slot] = (t.packed(), t.ggml_type)
@@ -320,6 +326,49 @@ class DeferredGGUFLinear(BaseOP):
 
         assert self.qweight is not None and self._quant_type is not None
         return fused_mul_mat_gguf(x, self.qweight, self._quant_type)
+
+
+class PermutedInputGGUFLinear(DeferredGGUFLinear):
+    """Native GGUF GDN output projection with llama.cpp's V layout.
+
+    llama.cpp transposes the grouped/tiled V-head axes before quantizing
+    ``ssm_out``. Reordering packed K-quant columns is not possible without
+    changing their quantization blocks, but the equivalent activation
+    permutation is cheap and lets Q6_K stay compressed during decode.
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        *,
+        num_key_heads: int,
+        num_value_heads: int,
+        head_dim: int,
+    ):
+        super().__init__(in_features, out_features)
+        if num_value_heads % num_key_heads:
+            raise ValueError(
+                f"num_value_heads={num_value_heads} is not divisible by "
+                f"num_key_heads={num_key_heads}"
+            )
+        if num_value_heads * head_dim != in_features:
+            raise ValueError(
+                f"V geometry {num_value_heads}x{head_dim} != in_features={in_features}"
+            )
+        self._num_key_heads = num_key_heads
+        self._values_per_key = num_value_heads // num_key_heads
+        self._head_dim = head_dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        leading = x.shape[:-1]
+        x = (
+            x.reshape(-1, self._num_key_heads, self._values_per_key, self._head_dim)
+            .permute(0, 2, 1, 3)
+            .reshape(*leading, self.in_features)
+            .contiguous()
+        )
+        return super().forward(x)
 
 
 class GGUFSplitLinear(BaseOP):
@@ -444,8 +493,22 @@ def convert_qwen3_5_to_gguf(model, config: ModelConfig) -> None:
                 ("a", "ssm_alpha.weight"),
             ):
                 materialize(getattr(layer.linear_attn.in_proj, part), f"blk.{i}.{suffix}")
-            # ssm_out was column-permuted before GGUF quantization. The loader
-            # dequantizes and restores it to the ordinary bf16 module.
+            # Q6_K ssm_out is faster kept packed on Ada. Apply the equivalent
+            # V-head permutation to its activation because GGUF's packed
+            # K-quant columns cannot be reordered losslessly. Q4_K remains
+            # dequantized BF16: its MMVQ path only ties cuBLAS for this geometry.
+            from freetoken.models.gguf.dequant import GGML_Q6_K
+
+            ssm_out_name = f"blk.{i}.ssm_out.weight"
+            if types[ssm_out_name] == GGML_Q6_K:
+                layer.linear_attn.out_proj = PermutedInputGGUFLinear(
+                    g.num_value_heads * g.value_head_dim,
+                    config.hidden_size,
+                    num_key_heads=g.num_key_heads,
+                    num_value_heads=g.num_value_heads,
+                    head_dim=g.value_head_dim,
+                )
+                materialize(layer.linear_attn.out_proj, ssm_out_name)
         else:
             q_out = 2 * config.num_qo_heads * config.head_dim
             kv_out = config.num_kv_heads * config.head_dim
