@@ -71,6 +71,57 @@ static void quantize_row_q8_1_cuda(const scalar_t* x, void* vy, const int kx, co
   }
 }
 
+template <typename scalar_t>
+static __global__ void quantize_silu_row_q8_1(
+    const scalar_t* __restrict__ gate_up,
+    void* __restrict__ vy,
+    const int kx,
+    const int kx_padded) {
+  const auto ix = blockDim.x * blockIdx.x + threadIdx.x;
+  if (ix >= kx_padded) return;
+  const auto iy = blockDim.y * blockIdx.y + threadIdx.y;
+  const int i_padded = iy * kx_padded + ix;
+  block_q8_1* y = (block_q8_1*)vy;
+  const int ib = i_padded / QK8_1;
+  const int iqs = i_padded % QK8_1;
+
+  float value = 0.0f;
+  if (ix < kx) {
+    const int64_t row = (int64_t)iy * 2 * kx;
+    const float gate = static_cast<float>(gate_up[row + ix]);
+    const float up = static_cast<float>(gate_up[row + kx + ix]);
+    // Match the existing Triton SiLU epilogue (ex2.approx), then round the
+    // materialized activation to the model dtype before Q8_1 quantization.
+    // The fused path must not accidentally gain an extra FP32 activation stage.
+    const float activated = (gate / (1.0f + exp2f(-gate * 1.4426950408889634f))) * up;
+    value = static_cast<float>(static_cast<scalar_t>(activated));
+  }
+  float amax = fabsf(value);
+  float sum = value;
+#pragma unroll
+  for (int mask = 16; mask > 0; mask >>= 1) {
+    amax = fmaxf(amax, SGLANG_SHFL_XOR_SYNC_WIDTH(uint32_t(-1), amax, mask, 32));
+    sum += SGLANG_SHFL_XOR_SYNC_WIDTH(uint32_t(-1), sum, mask, 32);
+  }
+  const float d = amax / 127;
+  y[ib].qs[iqs] = amax == 0.0f ? 0 : roundf(value / d);
+  if (iqs == 0) {
+    y[ib].ds.x = __float2half(d);
+    y[ib].ds.y = __float2half(sum);
+  }
+}
+
+template <typename scalar_t>
+static void quantize_silu_row_q8_1_cuda(
+    const scalar_t* gate_up, void* vy, const int kx, const int rows,
+    cudaStream_t stream) {
+  const int64_t padded = (kx + 512 - 1) / 512 * 512;
+  const int blocks_x = (padded + CUDA_QUANTIZE_BLOCK_SIZE - 1) / CUDA_QUANTIZE_BLOCK_SIZE;
+  const dim3 blocks(blocks_x, rows, 1);
+  const dim3 threads(CUDA_DEQUANTIZE_BLOCK_SIZE, 1, 1);
+  quantize_silu_row_q8_1<<<blocks, threads, 0, stream>>>(gate_up, vy, kx, padded);
+}
+
 torch::Tensor ggml_dequantize(
     torch::Tensor W,  // quant weight
     int64_t type,
@@ -879,6 +930,56 @@ torch::Tensor ggml_moe_shared_a8_vec(
   return Y;
 }
 
+torch::Tensor ggml_moe_shared_silu_down_a8_vec(
+    torch::Tensor GateUp,
+    torch::Tensor W,
+    torch::Tensor W_shared,
+    torch::Tensor routed_ids,
+    int64_t routed_top_k,
+    int64_t type,
+    int64_t row,
+    int64_t tokens,
+    int64_t expert_stride_bytes) {
+  TORCH_CHECK(type == 12 || type == 14, "shared GGUF fusion supports Q4_K/Q6_K");
+  TORCH_CHECK(GateUp.is_cuda() && W.is_cuda() && W_shared.is_cuda() && routed_ids.is_cuda());
+  TORCH_CHECK(GateUp.dim() == 2 && GateUp.is_contiguous() && GateUp.size(1) % 2 == 0);
+  TORCH_CHECK(W.dtype() == torch::kUInt8 && W_shared.dtype() == torch::kUInt8);
+  TORCH_CHECK(W.dim() == 2 && W_shared.dim() == 2 && W.is_contiguous() && W_shared.is_contiguous());
+  TORCH_CHECK(routed_ids.dtype() == torch::kInt32 && routed_ids.is_contiguous());
+  TORCH_CHECK(routed_ids.size(0) == tokens && routed_ids.size(1) == routed_top_k);
+  TORCH_CHECK(W_shared.size(0) == row, "shared weight row count mismatch");
+  const int64_t total_top_k = routed_top_k + 1;
+  TORCH_CHECK(GateUp.size(0) == tokens * total_top_k, "gate/up route count mismatch");
+
+  const int col = GateUp.size(1) / 2;
+  const int padded = (col + 512 - 1) / 512 * 512;
+  const int activation_rows = GateUp.size(0);
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(GateUp));
+  auto options = torch::TensorOptions().dtype(GateUp.dtype()).device(W.device());
+  at::Tensor Y = torch::empty({activation_rows, row}, options);
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+  options = torch::TensorOptions().dtype(torch::kInt32).device(W.device());
+  at::Tensor quant_X = torch::empty({activation_rows, padded / 32 * 9}, options);
+  DISPATCH_FLOAT_TYPES(GateUp.scalar_type(), "ggml_moe_shared_silu_down_a8_vec", [&] {
+    quantize_silu_row_q8_1_cuda<scalar_t>(
+        (scalar_t*)GateUp.data_ptr(), quant_X.data_ptr(), col, activation_rows, stream);
+    if (type == 12) {
+      moe_vec_with_shared_cuda<scalar_t, QK_K, QI4_K, block_q4_K,
+          VDR_Q4_K_Q8_1_MMVQ, vec_dot_q4_K_q8_1>(
+          W.data_ptr(), W_shared.data_ptr(), quant_X.data_ptr(),
+          (scalar_t*)Y.data_ptr(), (int*)routed_ids.data_ptr(), routed_top_k,
+          tokens, col, row, quant_X.stride(0), expert_stride_bytes, false, stream);
+    } else {
+      moe_vec_with_shared_cuda<scalar_t, QK_K, QI6_K, block_q6_K,
+          VDR_Q6_K_Q8_1_MMVQ, vec_dot_q6_K_q8_1>(
+          W.data_ptr(), W_shared.data_ptr(), quant_X.data_ptr(),
+          (scalar_t*)Y.data_ptr(), (int*)routed_ids.data_ptr(), routed_top_k,
+          tokens, col, row, quant_X.stride(0), expert_stride_bytes, false, stream);
+    }
+  });
+  return Y;
+}
+
 int64_t ggml_moe_get_block_size(int64_t type) {
   switch (type) {
     case 2:
@@ -915,5 +1016,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ggml_moe_a8", &ggml_moe_a8, "");
   m.def("ggml_moe_a8_vec", &ggml_moe_a8_vec, "");
   m.def("ggml_moe_shared_a8_vec", &ggml_moe_shared_a8_vec, "");
+  m.def("ggml_moe_shared_silu_down_a8_vec", &ggml_moe_shared_silu_down_a8_vec, "");
   m.def("ggml_moe_get_block_size", &ggml_moe_get_block_size, "");
 }

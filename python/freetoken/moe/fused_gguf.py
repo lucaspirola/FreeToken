@@ -322,7 +322,10 @@ def fused_experts_gguf_with_shared(
     accepts that second pointer directly, so fusion consumes no offload-cache
     slots and is equally suitable for Q4_K_M and Q6_K.
     """
-    from freetoken.kernel.gguf import ggml_moe_shared_a8_vec
+    from freetoken.kernel.gguf import (
+        ggml_moe_shared_a8_vec,
+        ggml_moe_shared_silu_down_a8_vec,
+    )
     from freetoken.kernel.triton.shared_expert import fused_shared_route_reduce
 
     act_fn = _ACT.get(activation)
@@ -347,19 +350,32 @@ def fused_experts_gguf_with_shared(
         gate_up_q.shape[1],
         True,
     )
-    inter = act_fn(gate_up)
-    routes = ggml_moe_shared_a8_vec(
-        inter,
-        down_q,
-        shared_down_q,
-        topk_ids.contiguous(),
-        top_k,
-        int(down_type),
-        down_rows,
-        tokens,
-        down_q.shape[1],
-        False,
-    )
+    if activation == "silu":
+        routes = ggml_moe_shared_silu_down_a8_vec(
+            gate_up,
+            down_q,
+            shared_down_q,
+            topk_ids.contiguous(),
+            top_k,
+            int(down_type),
+            down_rows,
+            tokens,
+            down_q.shape[1],
+        )
+    else:
+        inter = act_fn(gate_up)
+        routes = ggml_moe_shared_a8_vec(
+            inter,
+            down_q,
+            shared_down_q,
+            topk_ids.contiguous(),
+            top_k,
+            int(down_type),
+            down_rows,
+            tokens,
+            down_q.shape[1],
+            False,
+        )
     return fused_shared_route_reduce(routes, topk_weights, shared_gate_logits)
 
 

@@ -246,6 +246,31 @@ def ggml_moe_shared_a8_vec(
     )
 
 
+def ggml_moe_shared_silu_down_a8_vec(
+    gate_up: torch.Tensor,
+    weight: torch.Tensor,
+    shared_weight: torch.Tensor,
+    routed_ids: torch.Tensor,
+    routed_top_k: int,
+    quant_type: int,
+    row: int,
+    tokens: int,
+    expert_stride_bytes: int,
+) -> torch.Tensor:
+    """Fused SwiGLU activation/Q8 quantization and shared+routed down MMVQ."""
+    return _module().ggml_moe_shared_silu_down_a8_vec(
+        gate_up,
+        weight,
+        shared_weight,
+        routed_ids,
+        routed_top_k,
+        quant_type,
+        row,
+        tokens,
+        expert_stride_bytes,
+    )
+
+
 def ggml_moe_get_block_size(quant_type: int) -> int:
     return _module().ggml_moe_get_block_size(quant_type)
 
@@ -260,5 +285,6 @@ __all__ = [
     "ggml_moe_a8",
     "ggml_moe_a8_vec",
     "ggml_moe_shared_a8_vec",
+    "ggml_moe_shared_silu_down_a8_vec",
     "ggml_moe_get_block_size",
 ]

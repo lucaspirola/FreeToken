@@ -260,6 +260,53 @@ def test_moe_vec_shared_route_matches_separate_kernels(qtype):
     torch.testing.assert_close(got, expected, rtol=0.0, atol=0.0)
 
 
+@pytest.mark.parametrize("qtype", [GGML_Q4_K, GGML_Q6_K])
+def test_moe_shared_fused_silu_down_matches_separate_kernels(qtype):
+    from freetoken.kernel.gguf import (
+        ggml_moe_shared_a8_vec,
+        ggml_moe_shared_silu_down_a8_vec,
+    )
+    from freetoken.kernel.triton.activation import silu_and_mul
+
+    block = BLOCK_SHAPE[qtype][0]
+    experts, rows, intermediate, tokens, top_k = 4, 8, block, 2, 2
+    raw = _packed_rows(qtype, rows=(experts + 1) * rows, seed=qtype + 52)
+    bank = np.ascontiguousarray(raw[: experts * rows].reshape(experts, rows, -1))
+    shared = np.ascontiguousarray(raw[experts * rows :].reshape(rows, -1))
+    packed_dense = torch.from_numpy(bank).cuda()
+    expert_stride = packed_dense.shape[1] * packed_dense.shape[2]
+    packed = packed_dense.reshape(experts, expert_stride)
+    packed_shared = torch.from_numpy(shared).cuda()
+    topk_ids = torch.tensor([[1, 3], [2, 0]], device="cuda", dtype=torch.int32)
+    gate_up = _randn((tokens * (top_k + 1), 2 * intermediate), seed=qtype + 53)
+
+    got = ggml_moe_shared_silu_down_a8_vec(
+        gate_up,
+        packed,
+        packed_shared,
+        topk_ids,
+        top_k,
+        qtype,
+        rows,
+        tokens,
+        expert_stride,
+    )
+    activated = silu_and_mul(gate_up)
+    expected = ggml_moe_shared_a8_vec(
+        activated,
+        packed,
+        packed_shared,
+        topk_ids,
+        top_k,
+        qtype,
+        rows,
+        tokens,
+        expert_stride,
+        False,
+    )
+    torch.testing.assert_close(got.float(), expected.float(), rtol=2e-2, atol=2e-2)
+
+
 def test_moe_mmq_skips_capacity_block_after_live_prefix():
     """The align buffers have spare capacity beyond ``num_tokens_post_padded``.
 
