@@ -326,7 +326,12 @@ def test_decode_launch_config_selects_ornith_quantized_tuning_only():
         compute_capability=(12, 0),
     ) == (64, 64, 8)
     assert decode_launch_config(
-        quant_name="q8_0", head_dim=256, num_q_heads=16, num_kv_heads=2
+        quant_name="q8_0", head_dim=256, num_q_heads=16, num_kv_heads=2,
+        compute_capability=(8, 9),
+    ) == (16, 64, 4)
+    assert decode_launch_config(
+        quant_name="q8_0", head_dim=256, num_q_heads=16, num_kv_heads=2,
+        compute_capability=(12, 0),
     ) == (64, 64, 4)
     assert decode_launch_config(
         quant_name="quant8", head_dim=256, num_q_heads=16, num_kv_heads=2

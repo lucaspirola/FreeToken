@@ -126,6 +126,14 @@ def mma_mmq_supported(quant_type: int) -> bool:
     return quant_type in _MMA_TYPES
 
 
+def warmup_mma_context(device: torch.device | int) -> None:
+    """Initialize MMQ's per-device CUDA state outside CUDA graph capture."""
+    index = device if isinstance(device, int) else device.index
+    if index is None:
+        index = torch.cuda.current_device()
+    _mma_module().warmup_mma_context(index)
+
+
 # ---- thin typed wrappers (signatures mirror sgl_kernel.quantization.gguf) ----
 
 
@@ -219,6 +227,25 @@ def ggml_moe_a8_vec(
     )
 
 
+def ggml_moe_shared_a8_vec(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    shared_weight: torch.Tensor,
+    routed_ids: torch.Tensor,
+    routed_top_k: int,
+    quant_type: int,
+    row: int,
+    tokens: int,
+    expert_stride_bytes: int,
+    broadcast: bool,
+) -> torch.Tensor:
+    """MMVQ over routed experts plus one separate always-active expert."""
+    return _module().ggml_moe_shared_a8_vec(
+        x, weight, shared_weight, routed_ids, routed_top_k, quant_type,
+        row, tokens, expert_stride_bytes, broadcast,
+    )
+
+
 def ggml_moe_get_block_size(quant_type: int) -> int:
     return _module().ggml_moe_get_block_size(quant_type)
 
@@ -232,5 +259,6 @@ __all__ = [
     "mma_mmq_supported",
     "ggml_moe_a8",
     "ggml_moe_a8_vec",
+    "ggml_moe_shared_a8_vec",
     "ggml_moe_get_block_size",
 ]

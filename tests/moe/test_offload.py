@@ -404,6 +404,35 @@ def test_lru_gpu_cache_assigns_unique_slots_for_large_miss_batch():
     assert cache.src_indices[:256].tolist() == list(range(256))
 
 
+def test_aging_lfu_keeps_frequent_expert_over_more_recent_one():
+    """LFU's frequency key must take priority over its LRU tie breaker."""
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    cache = OffloadMoeCache(
+        num_layers=2,
+        num_experts=2,
+        cache_size=2,
+        cache_policy="lfu",
+        device=torch.device("cpu"),
+    )
+    # Exercise the same compact-cache reference path used by mixed GGUF.
+    cache._size_class_enabled = True
+    cache._class_ranges = [(0, 2)]
+    cache._layer_cache_class = [0, 0]
+
+    for _ in range(3):
+        cache.ensure_experts(0, torch.tensor([[0]], dtype=torch.int32))
+    cache.ensure_experts(0, torch.tensor([[1]], dtype=torch.int32))
+    # Layer-1 expert 0 needs a slot. LRU would evict layer-0 expert 0 because
+    # expert 1 was touched most recently; aging LFU must evict expert 1.
+    cache.ensure_experts(1, torch.tensor([[0]], dtype=torch.int32))
+
+    assert int(cache.slot_for_id[0, 0]) >= 0
+    assert int(cache.slot_for_id[0, 1]) == -1
+    assert int(cache.expert_frequency[0, 0]) == 3
+    assert int(cache.expert_frequency[0, 1]) == 1
+
+
 def test_adjust_config_converts_moe_cache_rate_to_cache_size():
     from types import SimpleNamespace
 

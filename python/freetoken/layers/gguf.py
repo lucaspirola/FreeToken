@@ -101,8 +101,20 @@ _MMA_DENSE_GEOMETRY_SM89 = {
     # batch 4/8.  The packed all-Q4 GDN projection has 12352 rows and crosses at
     # batch 4.  Keep the smaller Q6 output on MMVQ until its measured batch-8
     # crossover.
-    GGML_Q4_K: ((8192, (2, 512)), (12352, (4, 512))),
-    GGML_Q6_K: ((8192, (2, 448)), (2048, (8, 64))),
+    GGML_Q4_K: (
+        (8192, 2048, (2, 512)),
+        (4160, 2048, (16, 256)),
+        (8704, 2048, (8, 512)),
+        (9216, 2048, (8, 512)),
+        (12352, 2048, (4, 512)),
+    ),
+    GGML_Q6_K: (
+        (2048, 512, (8, 64)),
+        (8192, 2048, (2, 448)),
+        (9216, 2048, (2, 256)),
+        (12352, 2048, (2, 256)),
+        (248320, 2048, (2, 8)),
+    ),
 }
 
 
@@ -148,7 +160,10 @@ def _mma_mmq_ok() -> bool:
 
 
 def mma_mmq_row_band(
-    quant_type: int, capability: tuple[int, int] | None, out_features: int
+    quant_type: int,
+    capability: tuple[int, int] | None,
+    out_features: int,
+    in_features: int,
 ) -> tuple[int, int | None] | None:
     """Measured row band where int8-MMA wins for this architecture/type.
 
@@ -161,8 +176,10 @@ def mma_mmq_row_band(
     if capability >= (12, 0):
         return _MMVQ_SAFE + 1, None
     if (8, 9) <= capability < (9, 0):
-        for measured_out_features, band in _MMA_DENSE_GEOMETRY_SM89.get(quant_type, ()):
-            if out_features == measured_out_features:
+        for measured_out_features, measured_in_features, band in _MMA_DENSE_GEOMETRY_SM89.get(
+            quant_type, ()
+        ):
+            if out_features == measured_out_features and in_features == measured_in_features:
                 return band
     return None
 
@@ -172,6 +189,7 @@ def _use_mma_mmq(
     capability: tuple[int, int] | None,
     rows: int,
     out_features: int,
+    in_features: int,
 ) -> bool:
     """int8-MMA MMQ replaces both the DP4A MMQ band and the dequant+cuBLAS band.
 
@@ -179,7 +197,7 @@ def _use_mma_mmq(
     at larger rows its lower-power cuBLAS path overtakes MMA again. MMVQ keeps
     the <= _MMVQ_SAFE decode band on both architectures.
     """
-    band = mma_mmq_row_band(quant_type, capability, out_features)
+    band = mma_mmq_row_band(quant_type, capability, out_features, in_features)
     if band is None:
         return False
     lower, upper = band
@@ -211,7 +229,9 @@ def fused_mul_mat_gguf(
         # small-batch MMVQ rule.  On Ada, selected Ornith projections cross at
         # batch 2 or 4; the old ordering made those measured bands unreachable
         # until batch 7.
-        if _use_mma_mmq(qweight_type, capability, x.shape[0], out_features):
+        if _use_mma_mmq(
+            qweight_type, capability, x.shape[0], out_features, x.shape[1]
+        ):
             from freetoken.kernel.gguf import ggml_mul_mat_a8_mma
 
             return ggml_mul_mat_a8_mma(qweight, x, qweight_type, out_features).to(

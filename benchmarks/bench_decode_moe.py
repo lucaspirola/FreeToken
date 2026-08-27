@@ -94,6 +94,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--cache-rate", type=float, default=None, help="cache slots as a fraction of L*E")
     p.add_argument(
+        "--cache-policy",
+        choices=("lru", "lfu"),
+        default="lru",
+        help="expert-cache eviction policy",
+    )
+    p.add_argument(
         "--hybrid-fetch",
         type=int,
         default=-1,
@@ -208,6 +214,7 @@ def serve_cmd(args: argparse.Namespace, backend: str, port: int) -> list[str]:
         "--memory-ratio", str(args.mem_ratio),
         "--cuda-graph-max-bs", "0" if args.no_graph else "1",
         "--moe-hybrid-max-fetch", str(args.hybrid_fetch),
+        "--moe-cache-policy", args.cache_policy,
     ]
     # Every flag below is opt-in and omitted unless passed, so a bare invocation keeps
     # the server's own defaults exactly as before this option set existed.
@@ -344,6 +351,7 @@ def run_one(args: argparse.Namespace, backend: str) -> dict:
     print(
         f"[bench] model={args.model}\n"
         f"[bench] backend={backend} cache={args.cache or args.cache_rate or 'auto'} "
+        f"policy={args.cache_policy} "
         f"mem_ratio={args.mem_ratio} decode={args.decode} graph={not args.no_graph}\n"
         f"[bench] max_context={args.max_context or f'{8192 + args.decode} (default)'} "
         f"kv_cache_dtype={args.kv_cache_dtype or 'auto (default)'} "

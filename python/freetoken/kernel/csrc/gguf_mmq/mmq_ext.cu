@@ -25,6 +25,9 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <array>
+#include <memory>
+#include <mutex>
 
 // ---------------------------------------------------------------------------
 // ggml backend shims
@@ -122,6 +125,29 @@ ggml_backend_cuda_context::~ggml_backend_cuda_context() = default;
 DECL_MMQ_CASE(GGML_TYPE_Q4_K);
 DECL_MMQ_CASE(GGML_TYPE_Q6_K);
 
+// Keep one backend context per CUDA device and share it between the dense and
+// grouped-MoE entry points.  The old function-local statics created two
+// contexts lazily.  If a projection first selected MMA while GraphRunner was
+// capturing a larger batch, that construction (and the CUDA state it owns)
+// happened inside capture and could leave the captured graph with an illegal
+// access.  GraphRunner explicitly warms this shared context before capture;
+// call_once keeps the normal hot path thread-safe without taking a mutex on
+// every projection.
+static ggml_backend_cuda_context & mma_context(int id) {
+    TORCH_CHECK(id >= 0 && id < GGML_CUDA_MAX_DEVICES, "invalid CUDA device id ", id);
+    static std::array<std::once_flag, GGML_CUDA_MAX_DEVICES> once;
+    static std::array<std::unique_ptr<ggml_backend_cuda_context>, GGML_CUDA_MAX_DEVICES> contexts;
+    std::call_once(once[id], [id]() {
+        contexts[id] = std::make_unique<ggml_backend_cuda_context>(id);
+    });
+    return *contexts[id];
+}
+
+static void warmup_mma_context(int64_t device_id) {
+    const c10::cuda::CUDAGuard guard((c10::DeviceIndex) device_id);
+    (void) mma_context((int) device_id);
+}
+
 // ---------------------------------------------------------------------------
 // Torch entry: y = x @ dequant(W).T, W packed ggml rows [nrows, row_bytes]
 // ---------------------------------------------------------------------------
@@ -176,7 +202,7 @@ static torch::Tensor ggml_mul_mat_a8_mma(torch::Tensor W, torch::Tensor X, int64
         /*nsamples_x=*/1, /*nsamples_y=*/1, /*stride_sample_x=*/0, /*stride_sample_y=*/s12, /*stride_sample_dst=*/0,
         /*ncols_max=*/ne11};
 
-    static ggml_backend_cuda_context ctx(id);
+    ggml_backend_cuda_context & ctx = mma_context(id);
     switch (type_x) {
         case GGML_TYPE_Q4_K:
             mul_mat_q_case<GGML_TYPE_Q4_K>(ctx, args, stream);
@@ -299,7 +325,7 @@ static torch::Tensor ggml_moe_a8_mma(
         /*nsamples_x=*/1, /*nsamples_y=*/1, /*stride_sample_x=*/0, /*stride_sample_y=*/s13, /*stride_sample_dst=*/s3,
         /*ncols_max=*/ne12};
 
-    static ggml_backend_cuda_context ctx(id);
+    ggml_backend_cuda_context & ctx = mma_context(id);
     switch (type_x) {
         case GGML_TYPE_Q4_K:
             mul_mat_q_case<GGML_TYPE_Q4_K>(ctx, args, stream);
@@ -315,6 +341,8 @@ static torch::Tensor ggml_moe_a8_mma(
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("warmup_mma_context", &warmup_mma_context,
+          "construct the per-device MMQ backend context before CUDA graph capture");
     m.def("ggml_mul_mat_a8_mma", &ggml_mul_mat_a8_mma,
           "y = x @ dequant(W).T via upstream int8-MMA MMQ (Q4_K/Q6_K)");
     m.def("ggml_moe_a8_mma", &ggml_moe_a8_mma,

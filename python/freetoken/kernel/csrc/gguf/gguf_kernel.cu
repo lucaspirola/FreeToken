@@ -829,6 +829,56 @@ torch::Tensor ggml_moe_a8_vec(
   return Y;
 }
 
+torch::Tensor ggml_moe_shared_a8_vec(
+    torch::Tensor X,
+    torch::Tensor W,
+    torch::Tensor W_shared,
+    torch::Tensor routed_ids,
+    int64_t routed_top_k,
+    int64_t type,
+    int64_t row,
+    int64_t tokens,
+    int64_t expert_stride_bytes,
+    bool broadcast) {
+  TORCH_CHECK(type == 12 || type == 14, "shared GGUF fusion supports Q4_K/Q6_K");
+  TORCH_CHECK(W.is_cuda() && W_shared.is_cuda() && X.is_cuda() && routed_ids.is_cuda());
+  TORCH_CHECK(W.dtype() == torch::kUInt8 && W_shared.dtype() == torch::kUInt8);
+  TORCH_CHECK(W.dim() == 2 && W_shared.dim() == 2 && W.is_contiguous() && W_shared.is_contiguous());
+  TORCH_CHECK(routed_ids.dtype() == torch::kInt32 && routed_ids.is_contiguous());
+  TORCH_CHECK(routed_ids.size(0) == tokens && routed_ids.size(1) == routed_top_k);
+  TORCH_CHECK(W_shared.size(0) == row, "shared weight row count mismatch");
+  const int64_t total_top_k = routed_top_k + 1;
+  TORCH_CHECK(X.size(0) == (broadcast ? tokens : tokens * total_top_k), "activation row count mismatch");
+
+  const int col = X.size(1);
+  const int padded = (col + 512 - 1) / 512 * 512;
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(X));
+  auto options = torch::TensorOptions().dtype(X.dtype()).device(W.device());
+  at::Tensor Y = torch::zeros({tokens * total_top_k, row}, options);
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+  options = torch::TensorOptions().dtype(torch::kInt32).device(W.device());
+  const int64_t activation_rows = X.size(0);
+  at::Tensor quant_X = torch::empty({activation_rows, padded / 32 * 9}, options);
+  DISPATCH_FLOAT_TYPES(X.scalar_type(), "ggml_moe_shared_vec_a8", [&] {
+    quantize_row_q8_1_cuda<scalar_t>(
+        (scalar_t*)X.data_ptr(), (void*)quant_X.data_ptr(), col, activation_rows, stream);
+    if (type == 12) {
+      moe_vec_with_shared_cuda<scalar_t, QK_K, QI4_K, block_q4_K,
+          VDR_Q4_K_Q8_1_MMVQ, vec_dot_q4_K_q8_1>(
+          W.data_ptr(), W_shared.data_ptr(), quant_X.data_ptr(),
+          (scalar_t*)Y.data_ptr(), (int*)routed_ids.data_ptr(), routed_top_k,
+          tokens, col, row, quant_X.stride(0), expert_stride_bytes, broadcast, stream);
+    } else {
+      moe_vec_with_shared_cuda<scalar_t, QK_K, QI6_K, block_q6_K,
+          VDR_Q6_K_Q8_1_MMVQ, vec_dot_q6_K_q8_1>(
+          W.data_ptr(), W_shared.data_ptr(), quant_X.data_ptr(),
+          (scalar_t*)Y.data_ptr(), (int*)routed_ids.data_ptr(), routed_top_k,
+          tokens, col, row, quant_X.stride(0), expert_stride_bytes, broadcast, stream);
+    }
+  });
+  return Y;
+}
+
 int64_t ggml_moe_get_block_size(int64_t type) {
   switch (type) {
     case 2:
@@ -864,5 +914,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ggml_mul_mat_a8", &ggml_mul_mat_a8, "");
   m.def("ggml_moe_a8", &ggml_moe_a8, "");
   m.def("ggml_moe_a8_vec", &ggml_moe_a8_vec, "");
+  m.def("ggml_moe_shared_a8_vec", &ggml_moe_shared_a8_vec, "");
   m.def("ggml_moe_get_block_size", &ggml_moe_get_block_size, "");
 }

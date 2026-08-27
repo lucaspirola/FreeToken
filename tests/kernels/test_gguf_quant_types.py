@@ -28,6 +28,7 @@ from freetoken.models.gguf.dequant import (
     GGML_Q3_K,
     GGML_Q4_K,
     GGML_Q5_K,
+    GGML_Q6_K,
     dequantize,
 )
 
@@ -142,7 +143,9 @@ def test_dense_gguf_prefill_uses_dequantized_cublas_result(qtype, monkeypatch):
     # On sm_120 Q4_K/Q6_K prefill dispatches to int8-MMA MMQ instead (different
     # rounding; covered by test_gguf_mma). This test validates the dequant path.
     monkeypatch.setattr(
-        layers_gguf, "_use_mma_mmq", lambda qt, cc, rows, out_features: False
+        layers_gguf,
+        "_use_mma_mmq",
+        lambda qt, cc, rows, out_features, in_features: False,
     )
 
     block = BLOCK_SHAPE[qtype][0]
@@ -212,6 +215,49 @@ def test_moe_vec_expert_stride_padded_bank(qtype):
     ref = ggml_moe_a8_vec(x, dense, topk_ids, top_k, qtype, rows, 1)
     got = ggml_moe_a8_vec(x, flat, topk_ids, top_k, qtype, rows, 1, stride)
     torch.testing.assert_close(got, ref, rtol=0.0, atol=0.0)
+
+
+@pytest.mark.parametrize("qtype", [GGML_Q4_K, GGML_Q6_K])
+def test_moe_vec_shared_route_matches_separate_kernels(qtype):
+    """The fused ninth route must be bit-exact to the existing MMVQ kernels."""
+    from freetoken.kernel.gguf import (
+        ggml_moe_a8_vec,
+        ggml_moe_shared_a8_vec,
+        ggml_mul_mat_vec_a8,
+    )
+
+    block = BLOCK_SHAPE[qtype][0]
+    experts, rows, cols, tokens, top_k = 4, 4, block, 2, 2
+    raw = _packed_rows(qtype, rows=(experts + 1) * rows, seed=qtype + 50)
+    bank = np.ascontiguousarray(raw[: experts * rows].reshape(experts, rows, -1))
+    shared = np.ascontiguousarray(raw[experts * rows :].reshape(rows, -1))
+    packed_dense = torch.from_numpy(bank).cuda()
+    expert_stride = packed_dense.shape[1] * packed_dense.shape[2]
+    packed = packed_dense.reshape(experts, expert_stride)
+    packed_shared = torch.from_numpy(shared).cuda()
+    x = _randn((tokens, cols), seed=qtype + 51)
+    topk_ids = torch.tensor([[1, 3], [2, 0]], device="cuda", dtype=torch.int32)
+
+    got = ggml_moe_shared_a8_vec(
+        x,
+        packed,
+        packed_shared,
+        topk_ids,
+        top_k,
+        qtype,
+        rows,
+        tokens,
+        expert_stride,
+        True,
+    ).reshape(tokens, top_k + 1, rows)
+    routed = ggml_moe_a8_vec(
+        x, packed, topk_ids, top_k, qtype, rows, tokens, expert_stride
+    ).reshape(tokens, top_k, rows)
+    shared_rows = torch.cat(
+        [ggml_mul_mat_vec_a8(packed_shared, x[i : i + 1], qtype, rows) for i in range(tokens)]
+    )
+    expected = torch.cat((routed, shared_rows[:, None, :]), dim=1)
+    torch.testing.assert_close(got, expected, rtol=0.0, atol=0.0)
 
 
 def test_moe_mmq_skips_capacity_block_after_live_prefix():

@@ -33,21 +33,25 @@ def test_mmq_min_tokens(capability, expected):
 
 
 @pytest.mark.parametrize(
-    "qtype,capability,out_features,expected",
+    "qtype,capability,out_features,in_features,expected",
     [
-        (GGML_Q4_K, (8, 9), 8192, (2, 512)),
-        (GGML_Q4_K, (8, 9), 12352, (4, 512)),
-        (GGML_Q4_K, (8, 9), 4096, None),
-        (GGML_Q6_K, (8, 9), 8192, (2, 448)),
-        (GGML_Q6_K, (8, 9), 2048, (8, 64)),
-        (GGML_Q6_K, (8, 9), 152064, None),
-        (GGML_Q4_K, (12, 0), 8, (7, None)),
-        (GGML_Q4_K, (9, 0), 8192, None),
-        (2, (8, 9), 8192, None),
+        (GGML_Q4_K, (8, 9), 8192, 2048, (2, 512)),
+        (GGML_Q4_K, (8, 9), 12352, 2048, (4, 512)),
+        (GGML_Q4_K, (8, 9), 4096, 2048, None),
+        (GGML_Q6_K, (8, 9), 8192, 2048, (2, 448)),
+        (GGML_Q6_K, (8, 9), 2048, 512, (8, 64)),
+        (GGML_Q6_K, (8, 9), 2048, 4096, None),
+        (GGML_Q6_K, (8, 9), 9216, 2048, (2, 256)),
+        (GGML_Q6_K, (8, 9), 12352, 2048, (2, 256)),
+        (GGML_Q6_K, (8, 9), 248320, 2048, (2, 8)),
+        (GGML_Q6_K, (8, 9), 152064, 2048, None),
+        (GGML_Q4_K, (12, 0), 8, 2048, (7, None)),
+        (GGML_Q4_K, (9, 0), 8192, 2048, None),
+        (2, (8, 9), 8192, 2048, None),
     ],
 )
-def test_mma_mmq_row_band(qtype, capability, out_features, expected):
-    assert mma_mmq_row_band(qtype, capability, out_features) == expected
+def test_mma_mmq_row_band(qtype, capability, out_features, in_features, expected):
+    assert mma_mmq_row_band(qtype, capability, out_features, in_features) == expected
 
 
 @pytest.mark.parametrize(
@@ -84,7 +88,9 @@ def test_dense_dispatch_branch(cuda, monkeypatch, capability, rows, expected_bra
 
     monkeypatch.setattr(layers_gguf, "_device_capability", lambda i: capability)
     # The MMA path (tested separately) sits above the dequant/DP4A crossover.
-    monkeypatch.setattr(layers_gguf, "_use_mma_mmq", lambda qt, cc, rows, out: False)
+    monkeypatch.setattr(
+        layers_gguf, "_use_mma_mmq", lambda qt, cc, rows, out, in_features: False
+    )
     block, type_size = BLOCK_SHAPE[GGML_Q4_K]
     in_features, out_features = 256, 8
     qweight = torch.zeros(
@@ -116,24 +122,24 @@ def test_dense_dispatch_branch(cuda, monkeypatch, capability, rows, expected_bra
 
 
 @pytest.mark.parametrize(
-    "capability,qtype,rows,out_features,expect_mma",
+    "capability,qtype,rows,out_features,in_features,expect_mma",
     [
-        ((12, 0), GGML_Q4_K, 64, 8, True),
-        ((12, 1), GGML_Q6_K, 2048, 8, True),
-        ((8, 9), GGML_Q4_K, 2, 8192, True),
-        ((8, 9), GGML_Q4_K, 4, 12352, True),
-        ((8, 9), GGML_Q4_K, 512, 8192, True),
-        ((8, 9), GGML_Q4_K, 513, 8192, False),
-        ((8, 9), GGML_Q4_K, 32, 4096, False),
-        ((8, 9), GGML_Q6_K, 448, 8192, True),
-        ((8, 9), GGML_Q6_K, 449, 8192, False),
-        ((8, 9), GGML_Q6_K, 64, 2048, True),
-        ((8, 9), GGML_Q6_K, 65, 2048, False),
-        ((9, 0), GGML_Q4_K, 64, 8192, False),
+        ((12, 0), GGML_Q4_K, 64, 8, 256, True),
+        ((12, 1), GGML_Q6_K, 2048, 8, 256, True),
+        ((8, 9), GGML_Q4_K, 2, 8192, 2048, True),
+        ((8, 9), GGML_Q4_K, 4, 12352, 2048, True),
+        ((8, 9), GGML_Q4_K, 512, 8192, 2048, True),
+        ((8, 9), GGML_Q4_K, 513, 8192, 2048, False),
+        ((8, 9), GGML_Q4_K, 32, 4096, 2048, False),
+        ((8, 9), GGML_Q6_K, 448, 8192, 2048, True),
+        ((8, 9), GGML_Q6_K, 449, 8192, 2048, False),
+        ((8, 9), GGML_Q6_K, 64, 2048, 512, True),
+        ((8, 9), GGML_Q6_K, 65, 2048, 512, False),
+        ((9, 0), GGML_Q4_K, 64, 8192, 2048, False),
     ],
 )
 def test_dense_dispatch_mma_branch(
-    cuda, monkeypatch, capability, qtype, rows, out_features, expect_mma
+        cuda, monkeypatch, capability, qtype, rows, out_features, in_features, expect_mma
 ):
     """Blackwell is uncapped; Ada MMA is bounded before cuBLAS retakes the lead."""
     import freetoken.kernel.gguf as kernel_gguf
@@ -141,7 +147,6 @@ def test_dense_dispatch_mma_branch(
     monkeypatch.setattr(layers_gguf, "_device_capability", lambda i: capability)
     monkeypatch.setattr(layers_gguf, "_mma_mmq_ok", lambda: True)
     block, type_size = BLOCK_SHAPE[qtype]
-    in_features = 256
     qweight = torch.zeros(
         (out_features, in_features // block * type_size),
         dtype=torch.uint8,

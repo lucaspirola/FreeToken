@@ -142,7 +142,7 @@ class OffloadMoeCache:
     hybrid_fetch_fraction: float = 0.0
 
     def __post_init__(self) -> None:
-        policy_ids = {"lru": 0}
+        policy_ids = {"lru": 0, "lfu": 1}
         assert self.cache_policy in policy_ids
         assert self.decode_target in ("gpu", "cpu", "hybrid"), self.decode_target
         assert self.quant_format in _BANK_SCHEMAS, f"unknown quant_format {self.quant_format!r}"
@@ -182,6 +182,17 @@ class OffloadMoeCache:
         )
         self.usage = torch.zeros((self.cache_size,), dtype=torch.int64, device=self.device)
         self.step = torch.zeros((), dtype=torch.int64, device=self.device)
+        # Aging LFU admission/eviction state. Frequency is kept per logical
+        # (layer, expert), not per slot, so a temporarily evicted hot expert
+        # retains its history. Each layer halves its counters every 256 calls;
+        # this adapts to topic/phase changes and bounds the counters while
+        # remaining entirely device-side and CUDA-graph safe.
+        self.expert_frequency = torch.zeros(
+            (self.num_layers, self.num_experts), dtype=torch.int32, device=self.device
+        )
+        self.policy_steps = torch.zeros(
+            (self.num_layers,), dtype=torch.int32, device=self.device
+        )
         self.active_mask = torch.zeros((self.num_experts,), dtype=torch.int32, device=self.device)
         # lru_ensure validates these against plan = min(batch * top_k, cache_size), so num_experts elements would under-size them
         plan_slots = max(self.num_experts, self.cache_size)
@@ -700,6 +711,8 @@ class OffloadMoeCache:
         self.evict_slots = torch.empty((plan_slots,), dtype=torch.int32, device=self.device)
         self.src_indices = torch.empty((plan_slots,), dtype=torch.int32, device=self.device)
         self.step.zero_()
+        self.expert_frequency.zero_()
+        self.policy_steps.zero_()
         self.active_mask.zero_()
         self.num_indices.zero_()
         self.num_missing_full.zero_()
@@ -1139,6 +1152,8 @@ class OffloadMoeCache:
         # Per-expert recency is not cache_size-shaped, so reset_cache leaves it alone; wipe
         # it here so a new sequence starts with cold hybrid fetch priorities.
         self.expert_recency.fill_(-1)
+        self.expert_frequency.zero_()
+        self.policy_steps.zero_()
 
     def reset_stats(self) -> None:
         self.prefill_hit_rows = 0

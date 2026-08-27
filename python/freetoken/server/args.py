@@ -587,8 +587,11 @@ def parse_args(
     parser.add_argument(
         "--moe-cache-policy",
         default=ServerArgs.moe_cache_policy,
-        choices=["lru"],
-        help="The unified MoE cache eviction policy.",
+        choices=["lru", "lfu"],
+        help=(
+            "The unified MoE cache eviction policy. lfu is an aging frequency-aware "
+            "policy tuned for recurring expert routes."
+        ),
     )
 
     parser.add_argument(

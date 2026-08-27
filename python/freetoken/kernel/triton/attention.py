@@ -49,6 +49,11 @@ def decode_launch_config(
         # The backend sees the public name (q8_0) while the low-level kernel
         # infers quant8 from the cache tensors. Accept both so CUDA-graph scratch
         # is allocated for all 64 splits and the kernel can actually select them.
+        if compute_capability == (8, 9):
+            # RTX 2000 Ada sweep: 16 splits is 2-5% faster than 64 at
+            # 50K/254K and statistically tied at 170K. The 64-token tile and
+            # four-warps geometry remain the fastest correct configuration.
+            return 16, 64, 4
         return 64, 64, 4
     return _MAX_KV_SPLITS, 32, 4
 
@@ -99,6 +104,7 @@ def _load_kv(
     QBLOCK: tl.constexpr,
     D_ON_ROWS: tl.constexpr,
     EPB: tl.constexpr,
+    PACKED_PRESCALE: tl.constexpr,
 ):
     """Load a K or V tile, dequantizing it when the pool stores quantized values.
 
@@ -148,10 +154,30 @@ def _load_kv(
         # division they do not introduce integer arithmetic on every KV element.
         lo = (packed & 15).to(tl.float32)
         hi = (packed >> 4).to(tl.float32)
-        if D_ON_ROWS:
-            vals = tl.interleave(lo.trans(), hi.trans()).trans()
+        scale = tl.load(scale_ptr + scale_offsets, mask=scale_mask, other=0.0)
+        if PACKED_PRESCALE:
+            # Decode/paged attention benefits from applying one scale to each
+            # packed 16-byte Q4_0 group before nibble interleave. Long-prefix
+            # extend is register-bound and uses the post-interleave form below.
+            if D_ON_ROWS:
+                packed_scale = tl.broadcast_to(
+                    scale[:, None, :], (nb_p, QBLOCK // EPB, n_p)
+                ).reshape(packed_d, n_p)
+                lo = (lo - 8.0) * packed_scale
+                hi = (hi - 8.0) * packed_scale
+                vals = tl.interleave(lo.trans(), hi.trans()).trans()
+            else:
+                packed_scale = tl.broadcast_to(
+                    scale[:, :, None], (n_p, nb_p, QBLOCK // EPB)
+                ).reshape(n_p, packed_d)
+                lo = (lo - 8.0) * packed_scale
+                hi = (hi - 8.0) * packed_scale
+                vals = tl.interleave(lo, hi)
         else:
-            vals = tl.interleave(lo, hi)
+            if D_ON_ROWS:
+                vals = tl.interleave(lo.trans(), hi.trans()).trans()
+            else:
+                vals = tl.interleave(lo, hi)
         # Masked lanes must read as 0 (like the ``other=0.0`` loads in the element path),
         # not as the -7 bias, or they would poison the dot when head_dim is not a power
         # of two and BLOCK_D probes past D.
@@ -163,12 +189,17 @@ def _load_kv(
             logical_mask = tl.broadcast_to(
                 scale_mask[:, :, None], (n_p, nb_p, QBLOCK)
             ).reshape(n_p, nb_p * QBLOCK)
+        if PACKED_PRESCALE:
+            return tl.where(logical_mask, vals, 0.0).to(out_dtype)
         vals = tl.where(logical_mask, vals - 8.0, 0.0)
-        scale = tl.load(scale_ptr + scale_offsets, mask=scale_mask, other=0.0)
         if D_ON_ROWS:
-            wide = tl.broadcast_to(scale[:, None, :], (nb_p, QBLOCK, n_p)).reshape(nb_p * QBLOCK, n_p)
+            wide = tl.broadcast_to(scale[:, None, :], (nb_p, QBLOCK, n_p)).reshape(
+                nb_p * QBLOCK, n_p
+            )
         else:
-            wide = tl.broadcast_to(scale[:, :, None], (n_p, nb_p, QBLOCK)).reshape(n_p, nb_p * QBLOCK)
+            wide = tl.broadcast_to(scale[:, :, None], (n_p, nb_p, QBLOCK)).reshape(
+                n_p, nb_p * QBLOCK
+            )
         return (vals * wide.to(tl.float32)).to(out_dtype)
 
     vals = tl.load(ptr + base + elem, mask=mask, other=0.0)
@@ -312,6 +343,7 @@ def _paged_attention_kernel(
                 QBLOCK,
                 False,
                 EPB,
+                True,
             ).to(tl.float32)
             scores = tl.sum(q[None, :] * k, axis=1) * sm_scale
             scores = tl.where(mask_n, scores, -float("inf"))
@@ -335,6 +367,7 @@ def _paged_attention_kernel(
                 QBLOCK,
                 False,
                 EPB,
+                True,
             ).to(tl.float32)
             acc = acc * alpha + tl.sum(p[:, None] * v, axis=0)
             l_i = l_i * alpha + tl.sum(p, axis=0)
@@ -468,6 +501,7 @@ def _decode_grouped_stage1_kernel(
                 QBLOCK,
                 True,
                 EPB,
+                True,
             )
             scores = tl.dot(q, k) * sm_scale
             scores = tl.where(mask_h[:, None] & mask_n[None, :], scores, -float("inf"))
@@ -485,6 +519,7 @@ def _decode_grouped_stage1_kernel(
                 QBLOCK,
                 False,
                 EPB,
+                True,
             )
 
             m_new = tl.maximum(tl.max(scores, axis=1), m_i)
@@ -887,6 +922,7 @@ def _extend_attention_kernel(
                 QBLOCK,
                 True,
                 EPB,
+                False,
             )
             scores = tl.dot(q.to(k.dtype), k) * sm_scale
             scores = tl.where(final_mask, scores, -float("inf"))
@@ -910,6 +946,7 @@ def _extend_attention_kernel(
                 QBLOCK,
                 False,
                 EPB,
+                False,
             )
             acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v)
             l_i = l_i * alpha + tl.sum(p, axis=1)
@@ -1039,6 +1076,7 @@ def _extend_attention_split_kernel(
                 QBLOCK,
                 True,
                 EPB,
+                False,
             )
             scores = tl.dot(q.to(k.dtype), k) * sm_scale
             scores = tl.where(final_mask, scores, -float("inf"))
@@ -1062,6 +1100,7 @@ def _extend_attention_split_kernel(
                 QBLOCK,
                 False,
                 EPB,
+                False,
             )
             acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v)
             l_i = l_i * alpha + tl.sum(p, axis=1)

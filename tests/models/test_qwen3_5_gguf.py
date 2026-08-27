@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import torch
+import pytest
 
 
 def _shim():
@@ -158,3 +159,16 @@ def test_split_linear_packs_adjacent_equal_quant_types(monkeypatch):
     out = linear.forward(torch.zeros((2, 256), dtype=torch.float32))
     assert calls == [(GGML_Q4_K, 5), (GGML_Q6_K, 1)]
     assert out.shape == (2, 6)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton shared-expert epilogue needs CUDA")
+def test_fused_shared_expert_epilogue_matches_torch():
+    from freetoken.kernel.triton.shared_expert import fused_shared_expert_add_
+
+    torch.manual_seed(0)
+    routed = torch.randn(8, 2048, device="cuda", dtype=torch.bfloat16)
+    shared = torch.randn_like(routed)
+    gate = torch.randn(8, 1, device="cuda", dtype=torch.bfloat16)
+    expected = routed.float() + shared.float() * torch.sigmoid(gate.float())
+
+    actual = fused_shared_expert_add_(routed.clone(), shared, gate)
+
+    torch.testing.assert_close(actual.float(), expected, atol=2e-2, rtol=2e-2)

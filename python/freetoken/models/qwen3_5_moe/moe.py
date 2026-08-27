@@ -98,10 +98,52 @@ class Qwen3_5MoE(BaseOP):
         # kernel may write into ``hidden_states`` in place, which would corrupt the
         # shared expert's input (HF also evaluates the shared expert first).
         router_logits = self.gate.forward(hidden_states)
+        shared_gate = self.shared_expert_gate.forward(hidden_states)
+        # Decode-only GGUF fast path: the shared expert has the same Q4_K/Q6_K
+        # projection types as the routed banks. Read its resident packed rows
+        # through the grouped MMVQ launches without duplicating them in the
+        # scarce expert cache (especially valuable for the larger Q6 model).
+        from freetoken.core import get_global_ctx
+        from freetoken.layers.moe import OffloadMoELayer
+        from freetoken.moe.fused import fused_topk
+
+        ctx = get_global_ctx()
+        gate_up = self.shared_expert.gate_up_proj
+        down = self.shared_expert.down_proj
+        cache = self.experts.offload_cache if isinstance(self.experts, OffloadMoELayer) else None
+        can_fuse_shared = (
+            ctx.batch.is_decode
+            and cache is not None
+            and cache.quant_format == "gguf"
+            and cache.decode_target == "gpu"
+            and not cache.is_cpu_layer(self.experts.layer_id)
+            and getattr(gate_up, "qweight", None) is not None
+            and getattr(down, "qweight", None) is not None
+            and getattr(gate_up, "_quant_type", None) == self.experts.gguf_gate_up_type
+            and getattr(down, "_quant_type", None) == self.experts.gguf_down_type
+        )
+        if can_fuse_shared:
+            topk_weights, topk_ids = fused_topk(
+                hidden_states=hidden_states,
+                gating_output=router_logits,
+                topk=self.experts.top_k,
+                renormalize=self.experts.renormalize,
+            )
+            routed = self.experts.routed_forward_with_shared_gguf(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                gate_up.qweight,
+                down.qweight,
+                shared_gate,
+            )
+            return routed.view(num_tokens, hidden_dim)
+
         shared = self.shared_expert.forward(hidden_states)
-        shared = shared * torch.sigmoid(self.shared_expert_gate.forward(hidden_states))
         routed = self.experts.forward(hidden_states=hidden_states, router_logits=router_logits)
-        return (routed + shared).view(num_tokens, hidden_dim)
+        from freetoken.kernel.triton.shared_expert import fused_shared_expert_add_
+
+        return fused_shared_expert_add_(routed, shared, shared_gate).view(num_tokens, hidden_dim)
 
 
 __all__ = ["Qwen3_5MoE", "Qwen3_5DenseMLP"]

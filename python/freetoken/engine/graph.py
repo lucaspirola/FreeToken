@@ -105,6 +105,7 @@ class GraphRunner:
         vocab_size: int,
         dummy_req: Req,
         moe_offload_cache: OffloadMoeCache | None = None,
+        gguf_mma_enabled: bool = False,
     ) -> None:
         cuda_graph_bs = _determine_cuda_graph_bs(
             cuda_graph_bs=cuda_graph_bs,
@@ -118,6 +119,7 @@ class GraphRunner:
         self.moe_offload_cache = moe_offload_cache
         self.stream = stream
         self.device = device
+        self.gguf_mma_enabled = gguf_mma_enabled
         self._capture_graphs(max_seq_len, vocab_size, model)
 
     def _reset_moe_offload_cache(self) -> None:
@@ -134,6 +136,20 @@ class GraphRunner:
         self.graph_map: Dict[int, torch.cuda.CUDAGraph] = {}
         if self.max_graph_bs == 0:
             return logger.info_rank0("CUDA graph is disabled.")
+
+        # The GGUF int8-MMA extension owns a small backend context.  Initialize
+        # it before capture rather than allowing a newly reached batch-size
+        # dispatch band to create CUDA state inside a graph.  Import/build only
+        # for models that actually carry GGUF expert type metadata.
+        if self.gguf_mma_enabled:
+            try:
+                from freetoken.kernel.gguf import warmup_mma_context
+                from freetoken.layers.gguf import _mma_mmq_ok
+
+                if _mma_mmq_ok():
+                    warmup_mma_context(self.device)
+            except Exception as exc:  # noqa: BLE001 - retain the existing fallback path
+                logger.warning_rank0("Could not prewarm GGUF MMA graph state: %s", exc)
 
         self.attn_backend.init_capture_graph(max_seq_len=max_seq_len, bs_list=self.graph_bs_list)
 
@@ -173,6 +189,10 @@ class GraphRunner:
             self.buffer.table_idx[:bs].fill_(dummy_slot)
             with get_global_ctx().forward_batch(batch):
                 self.buffer.logits[:bs] = model.forward()
+                # The eager warmup runs on the current stream while capture may
+                # use GraphRunner's private stream.  Complete all first-use
+                # kernels and allocator activity before capture begins.
+                torch.cuda.synchronize(self.device)
                 # Keep the offload cache warmed for capture. Resetting here forces
                 # CUDA graph capture to replay cold-cache expert copies.
                 with torch.cuda.graph(graph, pool=pool, stream=self.stream):

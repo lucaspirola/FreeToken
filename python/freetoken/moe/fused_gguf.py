@@ -300,4 +300,67 @@ def fused_experts_gguf(
     return out.sum(dim=1)
 
 
-__all__ = ["fused_experts_gguf"]
+def fused_experts_gguf_with_shared(
+    hidden_states: torch.Tensor,
+    gate_up_q: torch.Tensor,
+    down_q: torch.Tensor,
+    shared_gate_up_q: torch.Tensor,
+    shared_down_q: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    shared_gate_logits: torch.Tensor,
+    activation: str,
+    *,
+    gate_up_type: int,
+    down_type: int,
+    gate_up_rows: int,
+    down_rows: int,
+) -> torch.Tensor:
+    """Decode routed and shared GGUF experts through the same two MMVQ launches.
+
+    The shared packed rows stay in their resident dense tensors; the CUDA kernel
+    accepts that second pointer directly, so fusion consumes no offload-cache
+    slots and is equally suitable for Q4_K_M and Q6_K.
+    """
+    from freetoken.kernel.gguf import ggml_moe_shared_a8_vec
+    from freetoken.kernel.triton.shared_expert import fused_shared_route_reduce
+
+    act_fn = _ACT.get(activation)
+    if act_fn is None:
+        raise ValueError(f"unsupported MoE activation {activation!r}")
+    if gate_up_type not in (GGML_Q4_K, GGML_Q6_K) or down_type not in (
+        GGML_Q4_K,
+        GGML_Q6_K,
+    ):
+        raise ValueError("shared GGUF decode fusion requires Q4_K/Q6_K projections")
+    tokens = hidden_states.shape[0]
+    top_k = topk_ids.shape[1]
+    gate_up = ggml_moe_shared_a8_vec(
+        hidden_states,
+        gate_up_q,
+        shared_gate_up_q,
+        topk_ids.contiguous(),
+        top_k,
+        int(gate_up_type),
+        gate_up_rows,
+        tokens,
+        gate_up_q.shape[1],
+        True,
+    )
+    inter = act_fn(gate_up)
+    routes = ggml_moe_shared_a8_vec(
+        inter,
+        down_q,
+        shared_down_q,
+        topk_ids.contiguous(),
+        top_k,
+        int(down_type),
+        down_rows,
+        tokens,
+        down_q.shape[1],
+        False,
+    )
+    return fused_shared_route_reduce(routes, topk_weights, shared_gate_logits)
+
+
+__all__ = ["fused_experts_gguf", "fused_experts_gguf_with_shared"]

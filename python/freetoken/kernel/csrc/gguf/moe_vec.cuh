@@ -56,6 +56,72 @@ static __global__ void moe_vec_q(
   }
 }
 
+// Decode-specialized variant that treats the always-active shared expert as
+// route top_k without copying its packed weights into the evictable slot
+// cache. Routed ids remain [tokens, routed_top_k]; the extra route reads the
+// separate shared tensor. Gate/up broadcasts one activation row per token,
+// while down consumes one row per route.
+template <typename scalar_t, int qk, int qi, typename block_q_t, int vdr, vec_dot_q_cuda_t vec_dot_q_cuda>
+static __global__ void moe_vec_q_with_shared(
+    const void* __restrict__ vx,
+    const void* __restrict__ vx_shared,
+    const void* __restrict__ vy,
+    scalar_t* __restrict__ dst,
+    const int* routed_ids,
+    const int routed_top_k,
+    const int ncols,
+    const int nrows,
+    const int token_stride,
+    const int64_t expert_stride_bytes,
+    const bool broadcast) {
+  const int total_top_k = routed_top_k + 1;
+  const int route_row = blockIdx.z;
+  const int token = route_row / total_top_k;
+  const int route = route_row - token * total_top_k;
+  const bool is_shared = route == routed_top_k;
+  const int expert = is_shared ? 0 : routed_ids[token * routed_top_k + route];
+  const auto row = blockIdx.x * blockDim.y + threadIdx.y;
+  if (row >= nrows) return;
+
+  const int blocks_per_row = ncols / qk;
+  const int blocks_per_warp = vdr * WARP_SIZE / qi;
+  const block_q_t* x = is_shared
+      ? (const block_q_t*)vx_shared
+      : (expert_stride_bytes > 0
+          ? (const block_q_t*)((const char*)vx + (size_t)expert * expert_stride_bytes)
+          : ((const block_q_t*)vx) + expert * nrows * blocks_per_row);
+  const int activation_row = broadcast ? token : route_row;
+  const block_q8_1* y = (const block_q8_1*)(((const int*)vy) + activation_row * token_stride);
+
+  float tmp = 0.0f;
+  for (auto i = threadIdx.x / (qi / vdr); i < blocks_per_row; i += blocks_per_warp) {
+    const int ibx = row * blocks_per_row + i;
+    const int iby = i * (qk / QK8_1);
+    const int iqs = vdr * (threadIdx.x % (qi / vdr));
+    tmp += vec_dot_q_cuda(&x[ibx], &y[iby], iqs);
+  }
+#pragma unroll
+  for (int mask = WARP_SIZE / 2; mask > 0; mask >>= 1) {
+    tmp += SGLANG_SHFL_XOR_SYNC(uint32_t(-1), tmp, mask);
+  }
+  if (threadIdx.x == 0) dst[route_row * nrows + row] = tmp;
+}
+
+template <typename scalar_t, int qk, int qi, typename block_q_t, int vdr, vec_dot_q_cuda_t vec_dot_q_cuda>
+static void moe_vec_with_shared_cuda(
+    const void* vx, const void* vx_shared, const void* vy, scalar_t* dst,
+    const int* routed_ids, const int routed_top_k, const int tokens,
+    const int ncols, const int nrows, const int token_stride,
+    const int64_t expert_stride_bytes, const bool broadcast, cudaStream_t stream) {
+  const int block_num_y = (nrows + GGML_CUDA_MMV_Y - 1) / GGML_CUDA_MMV_Y;
+  const dim3 blocks(block_num_y, 1, tokens * (routed_top_k + 1));
+  const dim3 threads(WARP_SIZE, GGML_CUDA_MMV_Y, 1);
+  moe_vec_q_with_shared<scalar_t, qk, qi, block_q_t, vdr, vec_dot_q_cuda>
+      <<<blocks, threads, 0, stream>>>(
+          vx, vx_shared, vy, dst, routed_ids, routed_top_k, ncols, nrows,
+          token_stride, expert_stride_bytes, broadcast);
+}
+
 template <typename scalar_t>
 static void moe_vec_q4_0_q8_1_cuda(
     const void* vx,

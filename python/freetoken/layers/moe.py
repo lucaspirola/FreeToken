@@ -322,6 +322,41 @@ class OffloadMoELayer(MoELayer):
             is_prefill=False,
         )
 
+    def routed_forward_with_shared_gguf(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_gate_up_q: torch.Tensor,
+        shared_down_q: torch.Tensor,
+        shared_gate_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        """Decode Qwen3.5's routed and shared GGUF experts in two MMVQ launches."""
+        cache = self.offload_cache
+        assert cache is not None and cache.quant_format == "gguf"
+        assert cache.decode_target == "gpu" and not cache.is_cpu_layer(self.layer_id)
+        cache.ensure_experts(self.layer_id, topk_ids)
+        cache.copy_missing()
+        gate_up, down = cache.bank_views(layer_id=self.layer_id)
+        from freetoken.moe.fused_gguf import fused_experts_gguf_with_shared
+
+        out = fused_experts_gguf_with_shared(
+            hidden_states,
+            gate_up,
+            down,
+            shared_gate_up_q,
+            shared_down_q,
+            topk_weights,
+            topk_ids,
+            shared_gate_logits,
+            self.activation,
+            gate_up_type=self.gguf_gate_up_type,
+            down_type=self.gguf_down_type,
+            gate_up_rows=self.gguf_gate_up_rows,
+            down_rows=self.gguf_down_rows,
+        )
+        return self._maybe_all_reduce(out)
+
     def _decode_hybrid(
         self,
         cache: OffloadMoeCache,

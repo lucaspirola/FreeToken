@@ -25,7 +25,9 @@ def ensure_experts(cache, layer_id: int, expert_ids: torch.Tensor) -> None:
     tensor. ``out_indices`` aliases the input, preserving the in-place rewrite every
     downstream GEMM depends on.
     """
-    if cache._size_class_enabled:
+    # Aging LFU uses our graph-safe kernel for both uniform and mixed-size
+    # caches. flashlib currently exposes LRU only.
+    if cache._size_class_enabled or cache.cache_policy_id == 1:
         begin, end = cache.lru_slot_range(layer_id)
         if expert_ids.is_cuda:
             _ensure_experts_sized_gpu(cache, layer_id, expert_ids, begin, end)
@@ -60,6 +62,8 @@ def _ensure_experts_sized_gpu(cache, layer_id, expert_ids, begin, end) -> None:
         cache.src_indices,
         cache.num_indices,
         cache.lru_stats[layer_id],
+        cache.expert_frequency,
+        cache.policy_steps,
         layer_id,
         expert_ids.numel(),
         begin,
@@ -69,6 +73,7 @@ def _ensure_experts_sized_gpu(cache, layer_id, expert_ids, begin, end) -> None:
         BLOCK_E=block_e,
         BLOCK_C=block_c,
         COLLECT_STATS=cache.collect_stats,
+        POLICY_LFU=cache.cache_policy_id == 1,
         num_warps=8 if block_c >= 2048 else 4,
     )
 
@@ -82,6 +87,13 @@ def _ensure_experts_sized_cpu(cache, layer_id, expert_ids, begin, end) -> None:
     step = int(cache.step.item()) + 1
     cache.step.fill_(step)
     base = layer_id * cache.num_experts
+    policy_step = int(cache.policy_steps[layer_id].item()) + 1
+    cache.policy_steps[layer_id] = policy_step
+    if cache.cache_policy_id == 1:
+        if policy_step % 256 == 0:
+            cache.expert_frequency[layer_id].bitwise_right_shift_(1)
+        for expert in expert_ids.view(-1).tolist():
+            cache.expert_frequency[layer_id, expert] += 1
     for expert in seen:
         slot = int(cache.slot_for_id[layer_id, expert])
         if slot >= 0:
@@ -95,7 +107,15 @@ def _ensure_experts_sized_cpu(cache, layer_id, expert_ids, begin, end) -> None:
             for slot in range(begin, end)
             if int(cache.id_of_slot[slot]) not in active_ids
         ]
-        victim = min(candidates, key=lambda slot: (usage[slot], slot))
+        if cache.cache_policy_id == 1:
+            def victim_key(slot):
+                owner = int(cache.id_of_slot[slot])
+                freq = -1 if owner < 0 else int(cache.expert_frequency.view(-1)[owner])
+                return (freq, usage[slot], slot)
+        else:
+            def victim_key(slot):
+                return (usage[slot], slot)
+        victim = min(candidates, key=victim_key)
         old_id = int(cache.id_of_slot[victim])
         if old_id >= 0:
             cache.slot_for_id.view(-1)[old_id] = -1
@@ -344,6 +364,8 @@ def _ensure_experts_sized_kernel(
     src_indices_ptr,
     num_indices_ptr,
     stats_ptr,
+    frequency_ptr,
+    policy_steps_ptr,
     layer_id,
     num_active,
     class_begin,
@@ -353,6 +375,7 @@ def _ensure_experts_sized_kernel(
     BLOCK_E: tl.constexpr,
     BLOCK_C: tl.constexpr,
     COLLECT_STATS: tl.constexpr,
+    POLICY_LFU: tl.constexpr,
 ):
     """Timestamp LRU constrained to one compact GGUF row-size class.
 
@@ -367,9 +390,18 @@ def _ensure_experts_sized_kernel(
     off_e = tl.arange(0, BLOCK_E)
     e_mask = off_e < num_experts
     is_active = tl.zeros((BLOCK_E,), dtype=tl.int1)
+    active_count = tl.zeros((BLOCK_E,), dtype=tl.int32)
     for i in tl.range(num_active):
         e = tl.load(expert_ids_ptr + i)
         is_active = is_active | (off_e == e)
+        active_count += (off_e == e).to(tl.int32)
+    if POLICY_LFU:
+        policy_step = tl.load(policy_steps_ptr + layer_id) + 1
+        tl.store(policy_steps_ptr + layer_id, policy_step)
+        frequency = tl.load(frequency_ptr + base + off_e, mask=e_mask, other=0)
+        frequency = tl.where((policy_step & 255) == 0, frequency >> 1, frequency)
+        frequency += active_count
+        tl.store(frequency_ptr + base + off_e, frequency, mask=e_mask)
     slot = tl.load(slot_for_id_ptr + base + off_e, mask=e_mask, other=-1)
     is_missing = is_active & (slot < 0) & e_mask
     num_missing = tl.sum(is_missing.to(tl.int32))
@@ -396,8 +428,26 @@ def _ensure_experts_sized_kernel(
             expert = tl.load(expert_ids_ptr + i)
             owner_active = owner_active | (oid == base + expert)
         usage = tl.where(owner_active | (~allowed), 9223372036854775807, usage)
+        if POLICY_LFU:
+            owner_frequency = tl.load(
+                frequency_ptr + oid,
+                mask=allowed & (oid >= 0),
+                other=-1,
+            )
+            owner_frequency = tl.where(
+                owner_active | (~allowed), 2147483647, owner_frequency
+            )
         for i in tl.range(num_missing):
-            victim = tl.argmin(usage, axis=0).to(tl.int32)
+            if POLICY_LFU:
+                min_frequency = tl.min(owner_frequency, axis=0)
+                victim_usage = tl.where(
+                    owner_frequency == min_frequency,
+                    usage,
+                    9223372036854775807,
+                )
+                victim = tl.argmin(victim_usage, axis=0).to(tl.int32)
+            else:
+                victim = tl.argmin(usage, axis=0).to(tl.int32)
             old_id = tl.sum(tl.where(off_c == victim, oid, 0))
             if old_id >= 0:
                 tl.store(slot_for_id_ptr + old_id, -1)
@@ -408,6 +458,8 @@ def _ensure_experts_sized_kernel(
             tl.store(evict_slots_ptr + i, victim - class_begin)
             tl.store(src_indices_ptr + i, expert)
             usage = tl.where(off_c == victim, 9223372036854775807, usage)
+            if POLICY_LFU:
+                owner_frequency = tl.where(off_c == victim, 2147483647, owner_frequency)
 
     # Downstream compact tensors are indexed with class-local row ids.
     for i in tl.range(num_active):
