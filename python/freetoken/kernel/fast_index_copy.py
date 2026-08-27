@@ -150,6 +150,14 @@ def _jit_fast_index_copy_multi_module(*, num_threads: int, blocks_per_bank: int)
     )
 
 
+@lru_cache(maxsize=None)
+def _default_pcie_blocks_per_bank(device_index: int) -> int:
+    # The RTX 2000 Ada's mapped-host gather reaches its 12.8 GB/s WSL H2D roofline
+    # with 16 blocks/bank. Eight leaves small one-expert copies 10-12% below it.
+    # Retain the established geometry on Blackwell and unmeasured architectures.
+    return 16 if torch.cuda.get_device_capability(device_index) == (8, 9) else 8
+
+
 def fast_index_copy_multi_jit(
     dst_ptrs: torch.Tensor,
     src_ptrs: torch.Tensor,
@@ -159,18 +167,14 @@ def fast_index_copy_multi_jit(
     num_indices: torch.Tensor | None = None,
     *,
     num_threads: int = 1024,
-    blocks_per_bank: int = 8,
+    blocks_per_bank: int | None = None,
 ) -> None:
     """Fused multi-bank index copy: copy the same rows for every bank in ONE launch.
 
-    The copy is host->device PCIe-bandwidth bound (~31 GB/s measured, vs ~3 TB/s HBM), so what
-    saturates the link is the TOTAL in-flight request count, blocks_per_bank*num_threads
-    (~4096 threads/bank is the knee; blocks and threads are interchangeable -- 8x1024 ==
-    16x512 == 4x1024 all measure the same across small/medium/large-expert workloads). PCIe
-    is the bottleneck, not the GPU, so few blocks already feed it; the split only matters at
-    the extreme (~100k+ threads bumps the zero-copy launch overhead). 8x1024 = 8192/bank sits
-    ~2x past the knee. Launch count is one regardless of grid width, so the zero-copy launch-
-    overhead win (and a strict >= over the legacy per-bank kernel across all workloads) holds.
+    The copy is host->device PCIe-bandwidth bound. Datacenter GPUs use the established
+    8x1024 launch; Ada sm_89 uses 16x1024 because its small one-to-two-expert decode
+    copies otherwise underfill the WSL PCIe path. Launch count remains one regardless
+    of grid width, preserving the win over the legacy per-bank kernel.
 
     ``dst_ptrs``/``src_ptrs``/``feat_bytes`` are int64 [num_banks] device tensors built
     once by the caller (the per-bank slot-cache base addr, host-source base addr, and
@@ -179,6 +183,11 @@ def fast_index_copy_multi_jit(
     """
     if _skip_fast_index_copy_enabled():
         return
+    if blocks_per_bank is None:
+        device_index = dst_ptrs.device.index
+        if device_index is None:
+            device_index = torch.cuda.current_device()
+        blocks_per_bank = _default_pcie_blocks_per_bank(device_index)
     module = _jit_fast_index_copy_multi_module(
         num_threads=num_threads, blocks_per_bank=blocks_per_bank
     )
@@ -209,11 +218,16 @@ def fast_index_copy_multi_strided_jit(
     num_indices: torch.Tensor | None = None,
     *,
     num_threads: int = 1024,
-    blocks_per_bank: int = 8,
+    blocks_per_bank: int | None = None,
 ) -> None:
     """Fused index copy where compact source rows occupy a larger cache-row prefix."""
     if _skip_fast_index_copy_enabled():
         return
+    if blocks_per_bank is None:
+        device_index = dst_ptrs.device.index
+        if device_index is None:
+            device_index = torch.cuda.current_device()
+        blocks_per_bank = _default_pcie_blocks_per_bank(device_index)
     module = _jit_fast_index_copy_multi_strided_module(
         num_threads=num_threads, blocks_per_bank=blocks_per_bank
     )

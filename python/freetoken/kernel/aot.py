@@ -175,6 +175,9 @@ def default_kernel_specs() -> tuple[KernelSpec, ...]:
     )
     specs.append(_fast_index_copy_multi_spec(num_threads=1024, blocks_per_bank=8))
     specs.append(_fast_index_copy_multi_strided_spec(num_threads=1024, blocks_per_bank=8))
+    # RTX 2000 Ada decode gather geometry (other architectures keep 8 blocks/bank).
+    specs.append(_fast_index_copy_multi_spec(num_threads=1024, blocks_per_bank=16))
+    specs.append(_fast_index_copy_multi_strided_spec(num_threads=1024, blocks_per_bank=16))
     # prefill hit-D2D gather (HBM-bound: wide grid) + its miss-side batch H2D binding.
     specs.append(_fast_index_copy_multi_spec(num_threads=1024, blocks_per_bank=64))
     specs.append(_batch_memcpy_spec())
