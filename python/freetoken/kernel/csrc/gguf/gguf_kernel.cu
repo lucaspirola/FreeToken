@@ -72,6 +72,62 @@ static void quantize_row_q8_1_cuda(const scalar_t* x, void* vy, const int kx, co
 }
 
 template <typename scalar_t>
+static __global__ void quantize_permuted_v_q8_1(
+    const scalar_t* __restrict__ x,
+    void* __restrict__ vy,
+    const int kx,
+    const int kx_padded,
+    const int num_key_heads,
+    const int values_per_key,
+    const int head_dim) {
+  const int ix = blockDim.x * blockIdx.x + threadIdx.x;
+  if (ix >= kx_padded) return;
+  const int iy = blockDim.y * blockIdx.y + threadIdx.y;
+  const int i_padded = iy * kx_padded + ix;
+  block_q8_1* y = (block_q8_1*)vy;
+  const int ib = i_padded / QK8_1;
+  const int iqs = i_padded % QK8_1;
+
+  float value = 0.0f;
+  if (ix < kx) {
+    // Destination is llama.cpp tiled order [values_per_key, key_head, dim].
+    // Source FLA output is grouped order [key_head, values_per_key, dim].
+    const int dim = ix % head_dim;
+    const int head = ix / head_dim;
+    const int key_head = head % num_key_heads;
+    const int value_in_key = head / num_key_heads;
+    const int src = (key_head * values_per_key + value_in_key) * head_dim + dim;
+    value = static_cast<float>(x[(int64_t)iy * kx + src]);
+  }
+  float amax = fabsf(value);
+  float sum = value;
+#pragma unroll
+  for (int mask = 16; mask > 0; mask >>= 1) {
+    amax = fmaxf(amax, SGLANG_SHFL_XOR_SYNC_WIDTH(uint32_t(-1), amax, mask, 32));
+    sum += SGLANG_SHFL_XOR_SYNC_WIDTH(uint32_t(-1), sum, mask, 32);
+  }
+  const float d = amax / 127;
+  y[ib].qs[iqs] = amax == 0.0f ? 0 : roundf(value / d);
+  if (iqs == 0) {
+    y[ib].ds.x = __float2half(d);
+    y[ib].ds.y = __float2half(sum);
+  }
+}
+
+template <typename scalar_t>
+static void quantize_permuted_v_q8_1_cuda(
+    const scalar_t* x, void* vy, const int kx, const int rows,
+    const int num_key_heads, const int values_per_key, const int head_dim,
+    cudaStream_t stream) {
+  const int padded = (kx + 512 - 1) / 512 * 512;
+  const int blocks_x = (padded + CUDA_QUANTIZE_BLOCK_SIZE - 1) / CUDA_QUANTIZE_BLOCK_SIZE;
+  const dim3 blocks(blocks_x, rows, 1);
+  const dim3 threads(CUDA_DEQUANTIZE_BLOCK_SIZE, 1, 1);
+  quantize_permuted_v_q8_1<<<blocks, threads, 0, stream>>>(
+      x, vy, kx, padded, num_key_heads, values_per_key, head_dim);
+}
+
+template <typename scalar_t>
 static __global__ void quantize_silu_row_q8_1(
     const scalar_t* __restrict__ gate_up,
     void* __restrict__ vy,
@@ -236,6 +292,38 @@ torch::Tensor ggml_mul_mat_vec_a8(
             (void*)W.data_ptr(), (void*)quant_X.data_ptr(), (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
         break;
     }
+  });
+  return Y;
+}
+
+torch::Tensor ggml_mul_mat_vec_q6_permuted_a8(
+    torch::Tensor W,
+    torch::Tensor X,
+    int64_t row,
+    int64_t num_key_heads,
+    int64_t values_per_key,
+    int64_t head_dim) {
+  TORCH_CHECK(X.dim() == 2, "X must be rank 2");
+  TORCH_CHECK(X.is_contiguous(), "X must be contiguous");
+  const int col = X.sizes()[1];
+  const int vecs = X.sizes()[0];
+  TORCH_CHECK(
+      col == num_key_heads * values_per_key * head_dim,
+      "permuted V geometry does not match X width");
+  const int padded = (col + 512 - 1) / 512 * 512;
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(X));
+  auto options = torch::TensorOptions().dtype(X.dtype()).device(W.device());
+  at::Tensor Y = torch::empty({vecs, row}, options);
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+  options = torch::TensorOptions().dtype(torch::kInt32).device(W.device());
+  at::Tensor quant_X = torch::empty({vecs, padded / 32 * 9}, options);
+  DISPATCH_FLOAT_TYPES(X.scalar_type(), "ggml_mul_mat_vec_q6_permuted_a8", [&] {
+    quantize_permuted_v_q8_1_cuda<scalar_t>(
+        (scalar_t*)X.data_ptr(), (void*)quant_X.data_ptr(), col, vecs,
+        num_key_heads, values_per_key, head_dim, stream);
+    mul_mat_vec_q6_K_q8_1_cuda<scalar_t>(
+        (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+        (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
   });
   return Y;
 }
@@ -1029,6 +1117,7 @@ int64_t ggml_moe_get_block_size(int64_t type) {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ggml_dequantize", &ggml_dequantize, "");
   m.def("ggml_mul_mat_vec_a8", &ggml_mul_mat_vec_a8, "");
+  m.def("ggml_mul_mat_vec_q6_permuted_a8", &ggml_mul_mat_vec_q6_permuted_a8, "");
   m.def("ggml_mul_mat_a8", &ggml_mul_mat_a8, "");
   m.def("ggml_moe_a8", &ggml_moe_a8, "");
   m.def("ggml_moe_a8_vec", &ggml_moe_a8_vec, "");

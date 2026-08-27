@@ -183,6 +183,36 @@ def test_permuted_input_gguf_linear_uses_tiled_v_layout(monkeypatch):
     assert torch.equal(captured[0], expected)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GGUF MMVQ needs CUDA")
+def test_fused_q6_v_permutation_matches_explicit_layout():
+    from freetoken.kernel.gguf import (
+        ggml_mul_mat_vec_a8,
+        ggml_mul_mat_vec_q6_permuted_a8,
+    )
+    from freetoken.models.gguf.dequant import GGML_Q6_K, row_bytes
+
+    torch.manual_seed(7)
+    num_key_heads, values_per_key, head_dim = 2, 2, 64
+    width = num_key_heads * values_per_key * head_dim
+    rows = 32
+    weight = torch.randint(
+        0, 256, (rows, row_bytes(width, GGML_Q6_K)), device="cuda", dtype=torch.uint8
+    )
+    x = torch.randn(2, width, device="cuda", dtype=torch.bfloat16)
+    tiled = (
+        x.reshape(2, num_key_heads, values_per_key, head_dim)
+        .permute(0, 2, 1, 3)
+        .reshape(2, width)
+        .contiguous()
+    )
+
+    expected = ggml_mul_mat_vec_a8(weight, tiled, GGML_Q6_K, rows)
+    actual = ggml_mul_mat_vec_q6_permuted_a8(
+        weight, x, rows, num_key_heads, values_per_key, head_dim
+    )
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0, equal_nan=True)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton shared-expert epilogue needs CUDA")
 def test_fused_shared_expert_epilogue_matches_torch():
     from freetoken.kernel.triton.shared_expert import fused_shared_expert_add_

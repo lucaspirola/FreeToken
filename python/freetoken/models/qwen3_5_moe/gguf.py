@@ -361,6 +361,20 @@ class PermutedInputGGUFLinear(DeferredGGUFLinear):
         self._head_dim = head_dim
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        from freetoken.models.gguf.dequant import GGML_Q6_K
+
+        if x.is_cuda and x.shape[0] <= 6 and self._quant_type == GGML_Q6_K:
+            from freetoken.kernel.gguf import ggml_mul_mat_vec_q6_permuted_a8
+
+            assert self.qweight is not None
+            return ggml_mul_mat_vec_q6_permuted_a8(
+                self.qweight,
+                x,
+                self.out_features,
+                self._num_key_heads,
+                self._values_per_key,
+                self._head_dim,
+            )
         leading = x.shape[:-1]
         x = (
             x.reshape(-1, self._num_key_heads, self._values_per_key, self._head_dim)
