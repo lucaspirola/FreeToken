@@ -81,6 +81,11 @@ _MMA_TYPES = frozenset({12, 14})
 
 
 @functools.cache
+def _is_sm89(device_index: int) -> bool:
+    return torch.cuda.get_device_capability(device_index) == (8, 9)
+
+
+@functools.cache
 def _mma_module():
     """Upstream llama.cpp int8-tensor-core MMQ (csrc/gguf_mmq), sm_75+ hardware.
 
@@ -257,7 +262,17 @@ def ggml_moe_shared_silu_down_a8_vec(
     tokens: int,
     expert_stride_bytes: int,
 ) -> torch.Tensor:
-    """Fused SwiGLU activation/Q8 quantization and shared+routed down MMVQ."""
+    """Fused SwiGLU activation/Q8 quantization and shared+routed down MMVQ.
+
+    Ada uses four independent output-row warps per block for this nine-route down
+    projection. Gate/up remains one warp per block: its broadcast input and larger
+    weight rows measured slower with the grouped launch. Other architectures retain
+    the original geometry until measured independently.
+    """
+    device_index = gate_up.device.index
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+    ada_multiwarp = _is_sm89(device_index)
     return _module().ggml_moe_shared_silu_down_a8_vec(
         gate_up,
         weight,
@@ -268,6 +283,7 @@ def ggml_moe_shared_silu_down_a8_vec(
         row,
         tokens,
         expert_stride_bytes,
+        ada_multiwarp,
     )
 
 

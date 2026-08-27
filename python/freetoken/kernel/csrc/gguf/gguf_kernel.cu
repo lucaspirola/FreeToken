@@ -939,7 +939,8 @@ torch::Tensor ggml_moe_shared_silu_down_a8_vec(
     int64_t type,
     int64_t row,
     int64_t tokens,
-    int64_t expert_stride_bytes) {
+    int64_t expert_stride_bytes,
+    bool ada_multiwarp) {
   TORCH_CHECK(type == 12 || type == 14, "shared GGUF fusion supports Q4_K/Q6_K");
   TORCH_CHECK(GateUp.is_cuda() && W.is_cuda() && W_shared.is_cuda() && routed_ids.is_cuda());
   TORCH_CHECK(GateUp.dim() == 2 && GateUp.is_contiguous() && GateUp.size(1) % 2 == 0);
@@ -964,17 +965,33 @@ torch::Tensor ggml_moe_shared_silu_down_a8_vec(
     quantize_silu_row_q8_1_cuda<scalar_t>(
         (scalar_t*)GateUp.data_ptr(), quant_X.data_ptr(), col, activation_rows, stream);
     if (type == 12) {
-      moe_vec_with_shared_cuda<scalar_t, QK_K, QI4_K, block_q4_K,
-          VDR_Q4_K_Q8_1_MMVQ, vec_dot_q4_K_q8_1>(
-          W.data_ptr(), W_shared.data_ptr(), quant_X.data_ptr(),
-          (scalar_t*)Y.data_ptr(), (int*)routed_ids.data_ptr(), routed_top_k,
-          tokens, col, row, quant_X.stride(0), expert_stride_bytes, false, stream);
+      if (ada_multiwarp) {
+        moe_vec_with_shared_cuda<scalar_t, QK_K, QI4_K, block_q4_K,
+            VDR_Q4_K_Q8_1_MMVQ, vec_dot_q4_K_q8_1, 4>(
+            W.data_ptr(), W_shared.data_ptr(), quant_X.data_ptr(),
+            (scalar_t*)Y.data_ptr(), (int*)routed_ids.data_ptr(), routed_top_k,
+            tokens, col, row, quant_X.stride(0), expert_stride_bytes, false, stream);
+      } else {
+        moe_vec_with_shared_cuda<scalar_t, QK_K, QI4_K, block_q4_K,
+            VDR_Q4_K_Q8_1_MMVQ, vec_dot_q4_K_q8_1>(
+            W.data_ptr(), W_shared.data_ptr(), quant_X.data_ptr(),
+            (scalar_t*)Y.data_ptr(), (int*)routed_ids.data_ptr(), routed_top_k,
+            tokens, col, row, quant_X.stride(0), expert_stride_bytes, false, stream);
+      }
     } else {
-      moe_vec_with_shared_cuda<scalar_t, QK_K, QI6_K, block_q6_K,
-          VDR_Q6_K_Q8_1_MMVQ, vec_dot_q6_K_q8_1>(
-          W.data_ptr(), W_shared.data_ptr(), quant_X.data_ptr(),
-          (scalar_t*)Y.data_ptr(), (int*)routed_ids.data_ptr(), routed_top_k,
-          tokens, col, row, quant_X.stride(0), expert_stride_bytes, false, stream);
+      if (ada_multiwarp) {
+        moe_vec_with_shared_cuda<scalar_t, QK_K, QI6_K, block_q6_K,
+            VDR_Q6_K_Q8_1_MMVQ, vec_dot_q6_K_q8_1, 4>(
+            W.data_ptr(), W_shared.data_ptr(), quant_X.data_ptr(),
+            (scalar_t*)Y.data_ptr(), (int*)routed_ids.data_ptr(), routed_top_k,
+            tokens, col, row, quant_X.stride(0), expert_stride_bytes, false, stream);
+      } else {
+        moe_vec_with_shared_cuda<scalar_t, QK_K, QI6_K, block_q6_K,
+            VDR_Q6_K_Q8_1_MMVQ, vec_dot_q6_K_q8_1>(
+            W.data_ptr(), W_shared.data_ptr(), quant_X.data_ptr(),
+            (scalar_t*)Y.data_ptr(), (int*)routed_ids.data_ptr(), routed_top_k,
+            tokens, col, row, quant_X.stride(0), expert_stride_bytes, false, stream);
+      }
     }
   });
   return Y;

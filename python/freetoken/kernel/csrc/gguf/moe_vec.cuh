@@ -107,15 +107,16 @@ static __global__ void moe_vec_q_with_shared(
   if (threadIdx.x == 0) dst[route_row * nrows + row] = tmp;
 }
 
-template <typename scalar_t, int qk, int qi, typename block_q_t, int vdr, vec_dot_q_cuda_t vec_dot_q_cuda>
+template <typename scalar_t, int qk, int qi, typename block_q_t, int vdr,
+          vec_dot_q_cuda_t vec_dot_q_cuda, int mmv_y = GGML_CUDA_MMV_Y>
 static void moe_vec_with_shared_cuda(
     const void* vx, const void* vx_shared, const void* vy, scalar_t* dst,
     const int* routed_ids, const int routed_top_k, const int tokens,
     const int ncols, const int nrows, const int token_stride,
     const int64_t expert_stride_bytes, const bool broadcast, cudaStream_t stream) {
-  const int block_num_y = (nrows + GGML_CUDA_MMV_Y - 1) / GGML_CUDA_MMV_Y;
+  const int block_num_y = (nrows + mmv_y - 1) / mmv_y;
   const dim3 blocks(block_num_y, 1, tokens * (routed_top_k + 1));
-  const dim3 threads(WARP_SIZE, GGML_CUDA_MMV_Y, 1);
+  const dim3 threads(WARP_SIZE, mmv_y, 1);
   moe_vec_q_with_shared<scalar_t, qk, qi, block_q_t, vdr, vec_dot_q_cuda>
       <<<blocks, threads, 0, stream>>>(
           vx, vx_shared, vy, dst, routed_ids, routed_top_k, ncols, nrows,
