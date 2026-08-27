@@ -381,6 +381,7 @@ class DSV4PagedKVCache(BaseKVCachePool):
     def validate_rebuild(
         self, config, *, num_pages: int | None, target_moe: int, per_expert_bytes: int,
         baseline_free: int, weights_bytes: int, current_num_pages: int,
+        target_moe_bytes: int | None = None,
         extra_fixed_bytes: int = 0, extra_note: str = "",
         num_swa_pages: int | None = None, **targets,
     ) -> None:
@@ -413,7 +414,12 @@ class DSV4PagedKVCache(BaseKVCachePool):
         # The rebuilds are free-before-alloc, so the whole budget is available (no fixed
         # cache term); an unfit request must still reject BEFORE the teardown.
         budget = net_cache_budget_bytes(config.memory_ratio, baseline_free, weights_bytes, 0)
-        need = target_moe * per_expert_bytes + dsv4_pool_bytes(
+        moe_bytes = (
+            target_moe_bytes
+            if target_moe_bytes is not None
+            else target_moe * per_expert_bytes
+        )
+        need = moe_bytes + dsv4_pool_bytes(
             kv_sizes, dsv4_args, config.max_running_req + 1
         )
         if need > budget:

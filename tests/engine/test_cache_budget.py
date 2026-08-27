@@ -5,7 +5,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from freetoken.engine.cache_budget import expert_bytes_per_slot, plan_cache_budget, resolve_moe_cache_auto
+from freetoken.engine.cache_budget import (
+    expert_bytes_per_slot,
+    expert_cache_bytes,
+    expert_slot_signatures,
+    plan_cache_budget,
+    resolve_moe_cache_auto,
+)
 
 
 def test_moe_priority_fills_experts_up_to_total():
@@ -95,6 +101,47 @@ def test_expert_bytes_per_slot_sums_row_bytes_over_banks():
         "down": [torch.zeros(4, 8, 16, dtype=torch.float16)],     # row = 8*16*2 = 256
     }
     assert expert_bytes_per_slot(sources) == 512 + 256
+
+
+def test_mixed_slot_signatures_and_exact_cache_bytes():
+    sources = {
+        "gate_up": [
+            torch.zeros(2, 50, dtype=torch.uint8),
+            torch.zeros(2, 30, dtype=torch.uint8),
+        ],
+        "down": [
+            torch.zeros(2, 50, dtype=torch.uint8),
+            torch.zeros(2, 20, dtype=torch.uint8),
+        ],
+    }
+    signatures = expert_slot_signatures(sources)
+    assert signatures == ((50, 50), (30, 20))
+    # Four legacy-width prefill slots + five decode slots split 3/2.
+    assert expert_cache_bytes(
+        9,
+        slot_signatures=signatures,
+        num_experts=2,
+        prefill_overlap=True,
+        fallback_per_expert_bytes=100,
+    ) == 4 * 100 + 3 * 100 + 2 * 50
+
+
+def test_mixed_size_auto_reinvests_compact_cache_savings():
+    signatures = ((100,), (50,)) * 5
+    size, pages, overlap = plan_cache_budget(
+        budget_bytes=1400,
+        per_expert_bytes=100,
+        cache_per_page=10,
+        num_experts=2,
+        total_experts=20,
+        prefill_overlap=True,
+        kv_reserve_pages=10,
+        max_slots=20,
+        expert_slot_signatures=signatures,
+    )
+    assert overlap is True
+    assert size == 16
+    assert pages == 10
 
 
 def test_resolve_auto_applies_ratio_once_and_marlin_cap():

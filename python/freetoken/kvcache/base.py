@@ -97,6 +97,7 @@ class BaseKVCachePool(ABC):
     def validate_rebuild(
         self, config, *, num_pages: int | None, target_moe: int, per_expert_bytes: int,
         baseline_free: int, weights_bytes: int, current_num_pages: int,
+        target_moe_bytes: int | None = None,
         extra_fixed_bytes: int = 0, extra_note: str = "", **targets,
     ) -> None:
         """Budget fit-check for a runtime rebuild target, BEFORE any destructive free.
@@ -111,7 +112,7 @@ class BaseKVCachePool(ABC):
         sizing target by declaring it on ITS kv_cost, with no base-signature churn."""
         import inspect
 
-        from freetoken.engine.cache_budget import net_cache_budget_bytes, required_bytes
+        from freetoken.engine.cache_budget import net_cache_budget_bytes
 
         target_pages = num_pages if num_pages is not None else current_num_pages
         cost_params = inspect.signature(type(self).kv_cost).parameters
@@ -123,7 +124,11 @@ class BaseKVCachePool(ABC):
             config.memory_ratio, baseline_free, weights_bytes,
             fixed_cache_size + extra_fixed_bytes,
         )
-        need = required_bytes(target_moe, target_pages, per_expert_bytes, cache_per_page)
+        need = (
+            target_moe_bytes
+            if target_moe_bytes is not None
+            else target_moe * per_expert_bytes
+        ) + target_pages * cache_per_page
         if need > budget:
             raise CacheRebuildRejected(
                 f"requested cache (moe={target_moe} slots, kv={target_pages} pages{extra_note}) "

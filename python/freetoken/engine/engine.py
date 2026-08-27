@@ -512,7 +512,11 @@ class Engine:
         Pure glue over the Phase-1 budget policy; isolated here so it is unit-testable
         without a GPU. Reused by the Phase-2 runtime rebuild.
         """
-        from freetoken.engine.cache_budget import expert_bytes_per_slot, resolve_moe_cache_auto
+        from freetoken.engine.cache_budget import (
+            expert_bytes_per_slot,
+            expert_slot_signatures,
+            resolve_moe_cache_auto,
+        )
 
         cache_per_page, fixed_cache_size, page_tokens, min_reserve = self._pool_cls.kv_cost(config)
         fixed_cache_size += state_pool_bytes(config)  # sibling GDN state pool, engine-summed
@@ -541,6 +545,7 @@ class Engine:
             kv_reserve_tokens=kv_reserve_tokens,
             page_size=page_tokens,
             quant_format=banks.quant_format,
+            expert_slot_signatures=expert_slot_signatures(banks.sources),
         )
 
     def _init_offload_moe_cache(self, config: EngineConfig) -> OffloadMoeCache:
@@ -802,19 +807,32 @@ class Engine:
 
         return min_free_memory, max_free_memory
 
-    def _target_moe_and_expert_bytes(self, moe_cache_size: int | None) -> tuple[int, int]:
-        from freetoken.engine.cache_budget import expert_bytes_per_slot
+    def _target_moe_and_expert_bytes(
+        self, moe_cache_size: int | None
+    ) -> tuple[int, int, int]:
+        from freetoken.engine.cache_budget import (
+            expert_bytes_per_slot,
+            expert_cache_bytes,
+            expert_slot_signatures,
+        )
 
         target_moe = (
             moe_cache_size
             if moe_cache_size is not None
             else (self.moe_offload_cache.cache_size if self.moe_offload_cache else 0)
         )
-        per_expert_bytes = (
-            expert_bytes_per_slot(self.moe_offload_cache.bank_sources)
-            if self.moe_offload_cache is not None else 0
+        if self.moe_offload_cache is None:
+            return target_moe, 0, 0
+        sources = self.moe_offload_cache.bank_sources
+        per_expert_bytes = expert_bytes_per_slot(sources)
+        exact_bytes = expert_cache_bytes(
+            target_moe,
+            slot_signatures=expert_slot_signatures(sources),
+            num_experts=self.moe_offload_cache.num_experts,
+            prefill_overlap=self.moe_offload_cache.prefill_overlap,
+            fallback_per_expert_bytes=per_expert_bytes,
         )
-        return target_moe, per_expert_bytes
+        return target_moe, per_expert_bytes, exact_bytes
 
     def _resize_kv_pool(self, config, num_pages: int, num_swa_pages: int | None) -> None:
         # IN-PLACE, identity-preserving: the CacheManager's swa_pool reference, ctx.kv_cache and
@@ -910,7 +928,9 @@ class Engine:
         #     must reject (recoverable) so the old caches stay intact and serving continues,
         #     rather than freeing and then OOMing into permanent failure. The engine supplies
         #     the memory account; the pool answers whether its target geometry fits.
-        target_moe, per_expert_bytes = self._target_moe_and_expert_bytes(moe_cache_size)
+        target_moe, per_expert_bytes, target_moe_bytes = (
+            self._target_moe_and_expert_bytes(moe_cache_size)
+        )
         # Price the sibling GDN state pool at ITS target (physical slots = usable + padding
         # sink) and hand the bytes in -- the KV pool only budgets its own tiers.
         target_mamba = (
@@ -922,6 +942,7 @@ class Engine:
             config, num_pages=num_pages,
             num_swa_pages=num_swa_pages, target_moe=target_moe,
             per_expert_bytes=per_expert_bytes, baseline_free=self._baseline_free,
+            target_moe_bytes=target_moe_bytes,
             weights_bytes=self._weights_bytes, current_num_pages=self.num_pages,
             extra_fixed_bytes=(
                 state_pool_bytes(config, target_mamba) if target_mamba is not None else 0
