@@ -282,6 +282,48 @@ def test_ornith_q4_tuned_decode_matches_dequantized_oracle():
 
 
 @cuda_only
+def test_ornith_q8_native_score_matches_dequantized_oracle(monkeypatch):
+    """Pin the sm_89 Q8 integer-score path at Ornith's production geometry."""
+    import freetoken.kernel.triton.attention as attention
+
+    slots, q_heads, kv_heads, head_dim = 4097, 16, 2, 256
+    q = _kv(1, q_heads, head_dim, seed=84)
+    k = _kv(slots, kv_heads, head_dim, seed=85)
+    v = _kv(slots, kv_heads, head_dim, seed=86)
+    kq, ks, vq, vs, k_deq, v_deq = _quantized_pool(Q8_0, k, v)
+    indptr = torch.tensor([0, slots], device="cuda", dtype=torch.int32)
+    indices = torch.arange(slots, device="cuda", dtype=torch.int32)
+    q_pos = torch.tensor([slots - 1], device="cuda", dtype=torch.int32)
+
+    def run(k_cache, v_cache, splits, k_scale=None, v_scale=None):
+        logits = torch.empty(
+            1, q_heads, splits, head_dim, device="cuda", dtype=torch.float32
+        )
+        lse = torch.empty(1, q_heads, splits, device="cuda", dtype=torch.float32)
+        nsplits = torch.full((1,), splits, device="cuda", dtype=torch.int32)
+        return attention.decode_paged_attention(
+            q,
+            k_cache,
+            v_cache,
+            indptr,
+            indices,
+            q_pos,
+            logits,
+            lse,
+            nsplits,
+            splits,
+            head_dim**-0.5,
+            k_scale=k_scale,
+            v_scale=v_scale,
+        )
+
+    monkeypatch.setattr(attention, "_Q8_NATIVE_QK", True)
+    got = run(kq, vq, 16, ks, vs)
+    want = run(k_deq, v_deq, 8)
+    torch.testing.assert_close(got, want, rtol=2e-2, atol=2e-2)
+
+
+@cuda_only
 @pytest.mark.parametrize("spec", SPECS, ids=IDS)
 @pytest.mark.parametrize("split", [False, True], ids=["fused", "split"])
 def test_extend_attention_over_quantized_pool(spec, split):

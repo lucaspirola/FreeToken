@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import os
 
 import torch
 import triton
@@ -9,6 +10,10 @@ import triton.language as tl
 
 _MAX_KV_SPLITS = 8
 _MIN_BLOCK_KV = 32
+
+# The cache-native Q8 score path is independently switchable so its numerical and
+# performance gates can be compared against the dequantize-to-BF16 implementation.
+_Q8_NATIVE_QK = os.getenv("FREETOKEN_Q8_NATIVE_QK", "1").strip() != "0"
 
 
 def decode_launch_config(
@@ -426,6 +431,7 @@ def _decode_grouped_stage1_kernel(
     QBLOCK: tl.constexpr,
     EPB: tl.constexpr,
     KV_SPLITS: tl.constexpr,
+    Q8_NATIVE_QK: tl.constexpr,
 ):
     batch_id = tl.program_id(0)
     head_block_id = tl.program_id(1)
@@ -488,22 +494,67 @@ def _decode_grouped_stage1_kernel(
             logical_offs = effective_start + rel_offs
             slots = tl.load(indices_ptr + kv_start + logical_offs, mask=mask_n, other=0)
 
-            k = _load_kv(
-                k_ptr,
-                ks_ptr,
-                slots[None, :] * stride_ks + k_base_offsets,
-                offs_d[:, None],
-                slots[None, :] * stride_kss + ks_base_offsets,
-                mask_n[None, :] & mask_d[:, None],
-                mask_n[None, :] & mask_nb[:, None],
-                q.dtype,
-                QUANT,
-                QBLOCK,
-                True,
-                EPB,
-                True,
-            )
-            scores = tl.dot(q, k) * sm_scale
+            if Q8_NATIVE_QK:
+                # Q8 K is already in the integer domain. Quantize each 32-wide
+                # query block once, perform eight native int8 dot products, then
+                # apply the query/key block scales to the int32 partials. This
+                # avoids expanding K to BF16 and preserves Q8_0's per-block scale.
+                scores = tl.zeros((BLOCK_H, BLOCK_N), dtype=tl.float32)
+                for block_id in tl.static_range(BLOCK_D // QBLOCK):
+                    block_offs = block_id * QBLOCK + tl.arange(0, QBLOCK)
+                    q_block = tl.load(
+                        q_ptr
+                        + batch_id * stride_qt
+                        + q_heads[:, None] * stride_qh
+                        + block_offs[None, :],
+                        mask=mask_h[:, None] & (block_offs[None, :] < D),
+                        other=0.0,
+                    ).to(tl.float32)
+                    q_amax = tl.max(tl.abs(q_block), axis=1)
+                    q_scale = tl.where(q_amax > 0, q_amax / 127.0, 1.0)
+                    q_scaled = q_block / q_scale[:, None]
+                    q_int = tl.where(
+                        q_scaled >= 0,
+                        tl.floor(q_scaled + 0.5),
+                        tl.ceil(q_scaled - 0.5),
+                    ).to(tl.int8)
+                    k_int = tl.load(
+                        k_ptr
+                        + slots[None, :] * stride_ks
+                        + k_base_offsets
+                        + block_offs[:, None],
+                        mask=(block_offs[:, None] < D) & mask_n[None, :],
+                        other=0,
+                    ).to(tl.int8)
+                    k_scale = tl.load(
+                        ks_ptr
+                        + slots * stride_kss
+                        + kv_head * stride_ksh
+                        + block_id,
+                        mask=mask_n,
+                        other=0.0,
+                    ).to(tl.float32)
+                    scores += tl.dot(q_int, k_int, out_dtype=tl.int32).to(
+                        tl.float32
+                    ) * (q_scale[:, None] * k_scale[None, :])
+                scores *= sm_scale
+            else:
+                k = _load_kv(
+                    k_ptr,
+                    ks_ptr,
+                    slots[None, :] * stride_ks + k_base_offsets,
+                    offs_d[:, None],
+                    slots[None, :] * stride_kss + ks_base_offsets,
+                    mask_n[None, :] & mask_d[:, None],
+                    mask_n[None, :] & mask_nb[:, None],
+                    q.dtype,
+                    QUANT,
+                    QBLOCK,
+                    True,
+                    EPB,
+                    True,
+                )
+                scores = tl.dot(q, k) * sm_scale
             scores = tl.where(mask_h[:, None] & mask_n[None, :], scores, -float("inf"))
 
             v = _load_kv(
@@ -711,6 +762,17 @@ def decode_paged_attention(
     group = num_q_heads // num_kv_heads
     quant_name = "int4" if quant and epb == 2 else ("quant8" if quant else None)
     capability = torch.cuda.get_device_capability(q.device)
+    q8_native_qk = (
+        _Q8_NATIVE_QK
+        and quant
+        and epb == 1
+        and k_cache.dtype == torch.int8
+        and capability == (8, 9)
+        and qblock == 32
+        and head_dim == 256
+        and num_q_heads == 16
+        and num_kv_heads == 2
+    )
     preferred_splits, block_n, num_warps = decode_launch_config(
         quant_name=quant_name,
         head_dim=head_dim,
@@ -785,6 +847,7 @@ def decode_paged_attention(
         QBLOCK=qblock,
         EPB=epb,
         KV_SPLITS=launch_splits,
+        Q8_NATIVE_QK=q8_native_qk,
         num_warps=num_warps,
         num_stages=2,
     )
