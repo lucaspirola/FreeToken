@@ -612,8 +612,59 @@ def top_k_top_p_sampling_from_probs(probs, top_k, top_p, indices=None,
     return (out, torch.ones_like(out, dtype=torch.bool)) if return_valid else out
 
 
+def top_k_top_p_sampling_from_logits(
+    logits,
+    temperature,
+    top_k,
+    top_p=None,
+    *,
+    max_top_k,
+):
+    """Draw from top-k/top-p without materializing full-vocabulary probabilities.
+
+    Softmax preserves ordering, and renormalizing the selected probabilities cancels
+    the full-vocabulary softmax denominator. Consequently this is the same distribution
+    as ``softmax -> top-k -> renormalize -> top-p`` while softmax/cumsum touch at most
+    ``max_top_k`` values per row. ``max_top_k`` is supplied by the host-side batch
+    preparation so this path never synchronizes a CUDA top-k tensor back to the CPU.
+    """
+    logits = logits.float()
+    B, V = logits.shape
+    if not 1 <= max_top_k <= V:
+        raise ValueError(f"max_top_k must be in [1, {V}], got {max_top_k}")
+
+    if isinstance(temperature, torch.Tensor):
+        scaled = logits / temperature.float().to(logits.device).view(B, 1)
+    else:
+        scaled = logits / float(temperature)
+    values, indices = torch.topk(scaled, max_top_k, dim=-1, sorted=True)
+
+    ranks = torch.arange(max_top_k, device=logits.device).view(1, -1)
+    if isinstance(top_k, torch.Tensor):
+        keep_k = ranks < top_k.to(logits.device).view(B, 1)
+    else:
+        keep_k = ranks < int(top_k)
+    values = values.masked_fill(~keep_k, -float("inf"))
+    probs = torch.softmax(values, dim=-1)
+
+    if top_p is not None:
+        if isinstance(top_p, torch.Tensor):
+            p = top_p.float().to(logits.device).view(B, 1)
+        else:
+            p = float(top_p)
+        cdf = torch.cumsum(probs, dim=-1)
+        # Retain the first item crossing p, matching top-k-first nucleus sampling.
+        probs = probs.masked_fill((cdf - probs) >= p, 0.0)
+
+    cdf = torch.cumsum(probs, dim=-1)
+    target = torch.rand((B, 1), device=logits.device, dtype=torch.float32) * cdf[:, -1:]
+    selected = torch.sum(cdf < target, dim=-1, keepdim=True).clamp_max(max_top_k - 1)
+    return indices.gather(1, selected).squeeze(1)
+
+
 __all__ = [
     "softmax", "top_k_renorm_probs", "top_p_renorm_probs",
     "sampling_from_probs", "top_k_sampling_from_probs",
     "top_p_sampling_from_probs", "top_k_top_p_sampling_from_probs",
+    "top_k_top_p_sampling_from_logits",
 ]

@@ -15,6 +15,9 @@ class BatchSamplingArgs:
     temperatures: torch.Tensor | None
     top_k: torch.Tensor | None = None
     top_p: torch.Tensor | None = None
+    # Host-known upper bound lets the logits-domain sampler call torch.topk without a
+    # device-to-host synchronization. None means top-k filtering is disabled.
+    max_top_k: int | None = None
 
 
 def make_device_tensor(data: List, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
@@ -26,8 +29,25 @@ def sample_impl(
     temperatures: torch.Tensor,
     top_k: torch.Tensor | int | None,
     top_p: torch.Tensor | float | None,
+    max_top_k: int | None = None,
 ) -> torch.Tensor:
     from freetoken.kernel.backend import is_flashinfer_installed
+
+    # softmax is monotonic, so selecting top-k logits first and normalizing only those
+    # candidates is mathematically identical to full-vocabulary softmax -> top-k ->
+    # renormalize.  Ornith's 248K vocabulary makes avoiding the full probability tensor
+    # and its repeated scans worthwhile. Keep very large k on the general implementation.
+    if (
+        not is_flashinfer_installed()
+        and top_k is not None
+        and max_top_k is not None
+        and max_top_k <= 1024
+    ):
+        from freetoken.kernel.triton.sampling import top_k_top_p_sampling_from_logits
+
+        return top_k_top_p_sampling_from_logits(
+            logits, temperatures, top_k, top_p, max_top_k=max_top_k
+        )
 
     if is_flashinfer_installed():
         import flashinfer.sampling as sampling
@@ -70,11 +90,16 @@ class Sampler:
             top_k = make_device_tensor(top_ks, torch.int32, self.device)
         if any(p < 1.0 for p in top_ps):
             top_p = make_device_tensor(top_ps, torch.float32, self.device)
-        return BatchSamplingArgs(temperatures, top_k=top_k, top_p=top_p)
+        max_top_k = max(top_ks) if top_k is not None else None
+        return BatchSamplingArgs(
+            temperatures, top_k=top_k, top_p=top_p, max_top_k=max_top_k
+        )
 
     @nvtx_annotate("Sampler")
     def sample(self, logits: torch.Tensor, args: BatchSamplingArgs) -> torch.Tensor:
         with torch.cuda.nvtx.range("Sampler"):
             if args.temperatures is None:  # greedy sampling
                 return torch.argmax(logits, dim=-1)
-            return sample_impl(logits.float(), args.temperatures, args.top_k, args.top_p)
+            return sample_impl(
+                logits.float(), args.temperatures, args.top_k, args.top_p, args.max_top_k
+            )
