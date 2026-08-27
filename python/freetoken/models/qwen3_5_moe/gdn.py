@@ -217,8 +217,13 @@ class Qwen3_5GatedDeltaNet(BaseOP):
 
         core_out = core_out.reshape(-1, self.head_v_dim)
         z = z.reshape(-1, self.head_v_dim)
-        out = self.norm.forward(core_out, z).reshape(total, -1)
-        out = self.out_proj.forward(out)
+        if batch.is_decode and hasattr(self.out_proj, "forward_gdn_norm"):
+            out = self.out_proj.forward_gdn_norm(
+                core_out, z, self.norm.weight, self.norm.eps
+            )
+        else:
+            out = self.norm.forward(core_out, z).reshape(total, -1)
+            out = self.out_proj.forward(out)
         return out
 
 

@@ -384,6 +384,28 @@ class PermutedInputGGUFLinear(DeferredGGUFLinear):
         )
         return super().forward(x)
 
+    def forward_gdn_norm(
+        self,
+        x: torch.Tensor,
+        z: torch.Tensor,
+        norm_weight: torch.Tensor,
+        eps: float,
+    ) -> torch.Tensor:
+        from freetoken.kernel.gguf import ggml_mul_mat_vec_q6_gdn_a8
+
+        assert self.qweight is not None
+        return ggml_mul_mat_vec_q6_gdn_a8(
+            self.qweight,
+            x,
+            z,
+            norm_weight,
+            self.out_features,
+            self._num_key_heads,
+            self._values_per_key,
+            self._head_dim,
+            eps,
+        )
+
 
 class GGUFSplitLinear(BaseOP):
     """One logical fused projection backed by independently quantized GGUF parts."""

@@ -170,6 +170,23 @@ def ggml_mul_mat_vec_q6_permuted_a8(
     )
 
 
+def ggml_mul_mat_vec_q6_gdn_a8(
+    weight: torch.Tensor,
+    x: torch.Tensor,
+    z: torch.Tensor,
+    norm_weight: torch.Tensor,
+    row: int,
+    num_key_heads: int,
+    values_per_key: int,
+    head_dim: int,
+    eps: float,
+) -> torch.Tensor:
+    """Q6_K GDN output with gated RMSNorm, V permutation, and Q8_1 fused."""
+    return _module().ggml_mul_mat_vec_q6_gdn_a8(
+        weight, x, z, norm_weight, row, num_key_heads, values_per_key, head_dim, eps
+    )
+
+
 def ggml_mul_mat_a8(
     weight: torch.Tensor, x: torch.Tensor, quant_type: int, row: int
 ) -> torch.Tensor:
@@ -309,6 +326,7 @@ __all__ = [
     "ggml_dequantize",
     "ggml_mul_mat_vec_a8",
     "ggml_mul_mat_vec_q6_permuted_a8",
+    "ggml_mul_mat_vec_q6_gdn_a8",
     "ggml_mul_mat_a8",
     "ggml_mul_mat_a8_mma",
     "ggml_moe_a8_mma",

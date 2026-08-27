@@ -128,6 +128,69 @@ static void quantize_permuted_v_q8_1_cuda(
 }
 
 template <typename scalar_t>
+static __global__ void quantize_gdn_norm_permuted_v_q8_1(
+    const scalar_t* __restrict__ x,
+    const scalar_t* __restrict__ z,
+    const scalar_t* __restrict__ norm_weight,
+    void* __restrict__ vy,
+    const int rows,
+    const int num_key_heads,
+    const int values_per_key,
+    const int head_dim,
+    const float eps) {
+  const int ix = blockDim.x * blockIdx.x + threadIdx.x;
+  const int kx = num_key_heads * values_per_key * head_dim;
+  if (ix >= kx) return;
+  const int iy = blockIdx.y;
+  if (iy >= rows) return;
+  const int lane = threadIdx.x & 31;
+
+  const int dim = ix % head_dim;
+  const int tiled_head = ix / head_dim;
+  const int key_head = tiled_head % num_key_heads;
+  const int value_in_key = tiled_head / num_key_heads;
+  const int grouped_head = key_head * values_per_key + value_in_key;
+  const int num_value_heads = num_key_heads * values_per_key;
+  const int64_t src_base = ((int64_t)iy * num_value_heads + grouped_head) * head_dim;
+
+  float square_sum = 0.0f;
+  for (int d = lane; d < head_dim; d += 32) {
+    const float xv = static_cast<float>(x[src_base + d]);
+    square_sum += xv * xv;
+  }
+#pragma unroll
+  for (int mask = 16; mask > 0; mask >>= 1) {
+    square_sum += SGLANG_SHFL_XOR_SYNC_WIDTH(uint32_t(-1), square_sum, mask, 32);
+  }
+  const float rstd = rsqrtf(square_sum / head_dim + eps);
+  const float xv = static_cast<float>(x[src_base + dim]);
+  const float zv = static_cast<float>(z[src_base + dim]);
+  const float w = static_cast<float>(norm_weight[dim]);
+  // Match Triton's tl.sigmoid lowering used by rms_norm_gated.
+  const float gate = zv / (1.0f + exp2f(-zv * 1.4426950408889634f));
+  // Match the materialized BF16 gated-norm output before Q8_1 quantization.
+  const float value = static_cast<float>(static_cast<scalar_t>(xv * rstd * w * gate));
+
+  const int i_padded = iy * kx + ix;
+  block_q8_1* y = (block_q8_1*)vy;
+  const int ib = i_padded / QK8_1;
+  const int iqs = i_padded % QK8_1;
+  float amax = fabsf(value);
+  float sum = value;
+#pragma unroll
+  for (int mask = 16; mask > 0; mask >>= 1) {
+    amax = fmaxf(amax, SGLANG_SHFL_XOR_SYNC_WIDTH(uint32_t(-1), amax, mask, 32));
+    sum += SGLANG_SHFL_XOR_SYNC_WIDTH(uint32_t(-1), sum, mask, 32);
+  }
+  const float d = amax / 127;
+  y[ib].qs[iqs] = amax == 0.0f ? 0 : roundf(value / d);
+  if (iqs == 0) {
+    y[ib].ds.x = __float2half(d);
+    y[ib].ds.y = __float2half(sum);
+  }
+}
+
+template <typename scalar_t>
 static __global__ void quantize_silu_row_q8_1(
     const scalar_t* __restrict__ gate_up,
     void* __restrict__ vy,
@@ -321,6 +384,45 @@ torch::Tensor ggml_mul_mat_vec_q6_permuted_a8(
     quantize_permuted_v_q8_1_cuda<scalar_t>(
         (scalar_t*)X.data_ptr(), (void*)quant_X.data_ptr(), col, vecs,
         num_key_heads, values_per_key, head_dim, stream);
+    mul_mat_vec_q6_K_q8_1_cuda<scalar_t>(
+        (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+        (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
+  });
+  return Y;
+}
+
+torch::Tensor ggml_mul_mat_vec_q6_gdn_a8(
+    torch::Tensor W,
+    torch::Tensor X,
+    torch::Tensor Z,
+    torch::Tensor norm_weight,
+    int64_t row,
+    int64_t num_key_heads,
+    int64_t values_per_key,
+    int64_t head_dim,
+    double eps) {
+  TORCH_CHECK(X.dim() == 2 && Z.sizes() == X.sizes(), "X/Z shape mismatch");
+  TORCH_CHECK(X.is_contiguous() && Z.is_contiguous(), "X/Z must be contiguous");
+  TORCH_CHECK(norm_weight.numel() == head_dim, "bad GDN norm weight width");
+  const int num_value_heads = num_key_heads * values_per_key;
+  TORCH_CHECK(X.sizes()[0] % num_value_heads == 0, "bad GDN row count");
+  TORCH_CHECK(X.sizes()[1] == head_dim, "bad GDN head width");
+  const int vecs = X.sizes()[0] / num_value_heads;
+  const int col = num_value_heads * head_dim;
+  const int padded = (col + 512 - 1) / 512 * 512;
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(X));
+  auto options = torch::TensorOptions().dtype(X.dtype()).device(W.device());
+  at::Tensor Y = torch::empty({vecs, row}, options);
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+  options = torch::TensorOptions().dtype(torch::kInt32).device(W.device());
+  at::Tensor quant_X = torch::empty({vecs, padded / 32 * 9}, options);
+  DISPATCH_FLOAT_TYPES(X.scalar_type(), "ggml_mul_mat_vec_q6_gdn_a8", [&] {
+    const dim3 blocks((col + CUDA_QUANTIZE_BLOCK_SIZE - 1) / CUDA_QUANTIZE_BLOCK_SIZE, vecs, 1);
+    const dim3 threads(CUDA_DEQUANTIZE_BLOCK_SIZE, 1, 1);
+    quantize_gdn_norm_permuted_v_q8_1<<<blocks, threads, 0, stream>>>(
+        (scalar_t*)X.data_ptr(), (scalar_t*)Z.data_ptr(),
+        (scalar_t*)norm_weight.data_ptr(), (void*)quant_X.data_ptr(), vecs,
+        num_key_heads, values_per_key, head_dim, static_cast<float>(eps));
     mul_mat_vec_q6_K_q8_1_cuda<scalar_t>(
         (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
         (scalar_t*)Y.data_ptr(), col, row, vecs, stream);
@@ -1118,6 +1220,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ggml_dequantize", &ggml_dequantize, "");
   m.def("ggml_mul_mat_vec_a8", &ggml_mul_mat_vec_a8, "");
   m.def("ggml_mul_mat_vec_q6_permuted_a8", &ggml_mul_mat_vec_q6_permuted_a8, "");
+  m.def("ggml_mul_mat_vec_q6_gdn_a8", &ggml_mul_mat_vec_q6_gdn_a8, "");
   m.def("ggml_mul_mat_a8", &ggml_mul_mat_a8, "");
   m.def("ggml_moe_a8", &ggml_moe_a8, "");
   m.def("ggml_moe_a8_vec", &ggml_moe_a8_vec, "");

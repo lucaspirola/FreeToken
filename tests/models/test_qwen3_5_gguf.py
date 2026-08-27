@@ -213,6 +213,53 @@ def test_fused_q6_v_permutation_matches_explicit_layout():
     torch.testing.assert_close(actual, expected, rtol=0, atol=0, equal_nan=True)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GGUF MMVQ needs CUDA")
+def test_fused_q6_gdn_norm_matches_materialized_path():
+    from freetoken.kernel.fla import rms_norm_gated
+    from freetoken.kernel.gguf import ggml_mul_mat_vec_a8, ggml_mul_mat_vec_q6_gdn_a8
+    from freetoken.models.gguf.dequant import GGML_Q6_K, row_bytes
+
+    torch.manual_seed(11)
+    num_key_heads, values_per_key, head_dim = 2, 2, 64
+    num_value_heads = num_key_heads * values_per_key
+    width, rows = num_value_heads * head_dim, 32
+    weight = torch.randint(
+        0, 256, (rows, row_bytes(width, GGML_Q6_K)), device="cuda", dtype=torch.uint8
+    )
+    x = torch.randn(num_value_heads, head_dim, device="cuda", dtype=torch.bfloat16)
+    z = torch.randn_like(x)
+    norm_weight = torch.randn(head_dim, device="cuda", dtype=torch.bfloat16)
+    normed = rms_norm_gated(
+        x=x,
+        weight=norm_weight,
+        bias=None,
+        z=z,
+        eps=1e-6,
+        is_rms_norm=True,
+        norm_before_gate=True,
+        activation="silu",
+    ).reshape(1, width)
+    tiled = (
+        normed.reshape(1, num_key_heads, values_per_key, head_dim)
+        .permute(0, 2, 1, 3)
+        .reshape(1, width)
+        .contiguous()
+    )
+    expected = ggml_mul_mat_vec_a8(weight, tiled, GGML_Q6_K, rows)
+    actual = ggml_mul_mat_vec_q6_gdn_a8(
+        weight,
+        x,
+        z,
+        norm_weight,
+        rows,
+        num_key_heads,
+        values_per_key,
+        head_dim,
+        1e-6,
+    )
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0, equal_nan=True)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton shared-expert epilogue needs CUDA")
 def test_fused_shared_expert_epilogue_matches_torch():
     from freetoken.kernel.triton.shared_expert import fused_shared_expert_add_
