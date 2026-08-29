@@ -386,6 +386,15 @@ class Engine:
         self.ctx.kv_cache = self.kv_cache = create_kv_pool(
             config, self.num_pages, device=self.device, dtype=self.dtype
         )
+        if config.kv_grow_step_tokens:
+            final_moe, final_kv_bytes = self._plan_growable_kv(self.num_pages)
+            logger.info_rank0(
+                "Growable-KV ceiling validated: %d tokens, %s physical, minimum final "
+                "MoE cache %d slots",
+                self.num_pages * config.page_size,
+                mem_GB(final_kv_bytes),
+                final_moe,
+            )
 
         # ======================= Linear (GatedDeltaNet) state initialization ========================
         linear_group = config.model_config.linear_attention_group()
@@ -443,7 +452,8 @@ class Engine:
         # padded/dummy rows index the GDN padding slot (0) so gather/scatter hits scratch.
         if self.linear_state_pool is not None:
             self.dummy_req.linear_slot_idx = self.linear_state_pool.padding_slot
-        self.page_table[self.dummy_req.table_idx].fill_(num_tokens)  # point to dummy page
+        dummy_page = 0 if getattr(self.kv_cache, "growable", False) else num_tokens
+        self.page_table[self.dummy_req.table_idx].fill_(dummy_page)
         self.graph_runner = GraphRunner(
             stream=self.stream,
             device=self.device,
@@ -458,6 +468,7 @@ class Engine:
             moe_offload_cache=self.moe_offload_cache,
             gguf_mma_enabled=config.model_config.gguf_expert_types is not None,
         )
+        self._pending_graph_bs: list[int] | None = None
         if config.attention_backend.split(",")[0] == "triton":
             # Prefill runs on the first comma part; warm its autotune cache.
             self._warmup_prefill()
@@ -528,7 +539,23 @@ class Engine:
         # only the default 8K tokens.  The latter overcommitted Ornith 200K by about
         # 1.1 GiB and starved prefill kernels of all transient workspace.
         kv_reserve_tokens = max(config.kv_reserve_tokens, min_reserve)
-        if config.num_page_override is not None:
+        if getattr(config, "kv_grow_step_tokens", 0):
+            from freetoken.kernel.vmm import allocation_granularity
+
+            initial_pages = min(
+                config.num_page_override or (config.kv_grow_step_tokens // page_tokens),
+                config.kv_grow_step_tokens // page_tokens,
+            )
+            mapped = self._pool_cls.growable_mapped_bytes_for_config(
+                config, initial_pages, allocation_granularity(self.device)
+            )
+            # Convert VMM slab-rounding overhead to equivalent conventional pages so the
+            # existing joint budget solver reserves it exactly.
+            kv_reserve_tokens = max(
+                kv_reserve_tokens,
+                math.ceil(mapped / cache_per_page) * page_tokens,
+            )
+        elif config.num_page_override is not None:
             kv_reserve_tokens = max(
                 kv_reserve_tokens, config.num_page_override * page_tokens
             )
@@ -858,7 +885,8 @@ class Engine:
                 dtype=torch.int32,
                 device=self.device,
             )
-        self.page_table[self.dummy_req.table_idx].fill_(num_tokens)
+        dummy_page = 0 if getattr(self.kv_cache, "growable", False) else num_tokens
+        self.page_table[self.dummy_req.table_idx].fill_(dummy_page)
         self.kv_cache.attach_page_table(self.page_table)
 
     @torch.inference_mode()
@@ -879,6 +907,10 @@ class Engine:
         if (moe_cache_size is None and num_pages is None and num_mamba_slots is None
                 and num_swa_pages is None):
             return
+        if config.kv_grow_step_tokens:
+            raise CacheRebuildRejected(
+                "manual cache rebuild is disabled while growable KV owns the MoE/KV split"
+            )
 
         # 0a. Geometry prevalidation BEFORE any destructive free. An invalid target (moe
         #     slots on a model with no offload cache, moe below num_experts / above the
@@ -1010,6 +1042,140 @@ class Engine:
             moe_offload_cache=self.moe_offload_cache,
             gguf_mma_enabled=config.model_config.gguf_expert_types is not None,
         )
+
+    def _plan_growable_kv(self, target_pages: int) -> tuple[int, int]:
+        """Return the largest affordable MoE cache and exact mapped KV bytes."""
+        pool = self.kv_cache
+        moe = self.moe_offload_cache
+        assert moe is not None, "growable KV requires the MoE offload cache"
+        from freetoken.engine.cache_budget import (
+            expert_bytes_per_slot,
+            expert_cache_bytes,
+            expert_slot_signatures,
+            net_cache_budget_bytes,
+        )
+
+        _cache_per_page, fixed_cache_size, _page_tokens, _min_reserve = self._pool_cls.kv_cost(
+            self.config
+        )
+        fixed_cache_size += state_pool_bytes(self.config)
+        budget = net_cache_budget_bytes(
+            self.config.memory_ratio,
+            self._baseline_free,
+            self._weights_bytes,
+            fixed_cache_size,
+        )
+        kv_bytes = pool.mapped_bytes_for_pages(target_pages)
+        sources = moe.bank_sources
+        per_expert = expert_bytes_per_slot(sources)
+        signatures = expert_slot_signatures(sources)
+
+        def moe_bytes(size: int) -> int:
+            return expert_cache_bytes(
+                size,
+                slot_signatures=signatures,
+                num_experts=moe.num_experts,
+                prefill_overlap=moe.prefill_overlap,
+                fallback_per_expert_bytes=per_expert,
+            )
+
+        minimum = moe.num_experts
+        while minimum <= moe.cache_size:
+            try:
+                moe.validate_rebuild(minimum)
+                break
+            except ValueError:
+                minimum += 1
+        if minimum > moe.cache_size:
+            raise RuntimeError(
+                f"current MoE cache {moe.cache_size} has no valid growable-KV floor"
+            )
+        if moe_bytes(minimum) + kv_bytes > budget:
+            need = moe_bytes(minimum) + kv_bytes
+            raise RuntimeError(
+                f"KV growth to {target_pages} tokens cannot fit even with the minimum "
+                f"MoE cache ({minimum} slots): need {mem_GB(need)}, budget {mem_GB(budget)}"
+            )
+
+        old_moe = moe.cache_size
+        lo, hi = minimum, old_moe
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if moe_bytes(mid) + kv_bytes <= budget:
+                lo = mid
+            else:
+                hi = mid - 1
+        return lo, kv_bytes
+
+    @torch.inference_mode()
+    def grow_runtime_kv(self, required_pages: int) -> tuple[int, int]:
+        """Commit the next KV suffix at a safe batch boundary and fund it from MoE slots.
+
+        The KV tensors keep their virtual addresses, so existing K/V remains valid. When the
+        expert cache must shrink, its pointers do change; only then are decode graphs torn down
+        and recaptured. The growable scheduler runs without scheduler/forward overlap, making
+        this method's entry a no-forward-in-flight boundary.
+        """
+        pool = self.kv_cache
+        old_pages = int(getattr(pool, "committed_pages", self.num_pages))
+        if required_pages <= old_pages:
+            return old_pages, old_pages
+        step = self.config.kv_grow_step_tokens // self.config.page_size
+        target_pages = min(self.num_pages, math.ceil(required_pages / step) * step)
+        if target_pages <= old_pages:
+            return old_pages, old_pages
+
+        moe = self.moe_offload_cache
+        assert moe is not None, "growable KV requires the MoE offload cache"
+        old_moe = moe.cache_size
+        target_moe, kv_bytes = self._plan_growable_kv(target_pages)
+
+        torch.cuda.synchronize(self.device)
+        if self.config.tp_info.size > 1:
+            self.sync_all_ranks()
+        recapture = target_moe < moe.cache_size
+        if recapture:
+            if self._pending_graph_bs is None:
+                self._pending_graph_bs = list(self.graph_runner.graph_bs_list)
+                self.attn_backend.reset_capture()
+                self.graph_runner.destroy_cuda_graphs()
+            moe.rebuild(target_moe)
+            object.__setattr__(self.config, "moe_cache_size", target_moe)
+        pool.commit_pages(target_pages)
+        if self.config.tp_info.size > 1:
+            self.sync_all_ranks()
+        logger.info_rank0(
+            "Committed growable KV through %d tokens (%s physical); MoE slots %d -> %d",
+            target_pages,
+            mem_GB(kv_bytes),
+            old_moe,
+            target_moe,
+        )
+        return old_pages, target_pages
+
+    @torch.inference_mode()
+    def ensure_decode_graphs(self) -> None:
+        """Recapture once after the final prefill chunk, not once per 64K KV boundary."""
+        if self._pending_graph_bs is None:
+            return
+        graph_bs = self._pending_graph_bs
+        gc.collect()
+        free_min = self._sync_get_memory()[0]
+        self.graph_runner = GraphRunner(
+            stream=self.stream,
+            device=self.device,
+            model=self.model,
+            attn_backend=self.attn_backend,
+            cuda_graph_bs=graph_bs,
+            cuda_graph_max_bs=self.config.cuda_graph_max_bs,
+            free_memory=free_min,
+            max_seq_len=_page_table_width(self.max_seq_len, self.config.page_size),
+            vocab_size=self.config.model_config.vocab_size,
+            dummy_req=self.dummy_req,
+            moe_offload_cache=self.moe_offload_cache,
+            gguf_mma_enabled=self.config.model_config.gguf_expert_types is not None,
+        )
+        self._pending_graph_bs = None
 
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
         assert torch.cuda.current_stream() == self.stream
@@ -1650,6 +1816,39 @@ def _adjust_config(config: EngineConfig):
                 f"{(config.num_token_override // config.page_size + 1) * config.page_size}"
             )
         override("num_page_override", config.num_token_override // config.page_size)
+
+    if getattr(config, "kv_grow_step_tokens", 0):
+        from freetoken.kvcache.mha_pool import MHAKVCache
+
+        if config.kv_grow_step_tokens < 1:
+            raise ValueError("--kv-grow-step-tokens must be positive")
+        if config.kv_grow_step_tokens % config.page_size:
+            raise ValueError(
+                f"--kv-grow-step-tokens {config.kv_grow_step_tokens} must be divisible by "
+                f"page size {config.page_size}"
+            )
+        if config.page_size != 1:
+            raise ValueError("growable KV currently requires --page-size 1")
+        if config.num_page_override is None:
+            raise ValueError("--kv-grow-step-tokens requires --num-tokens or --num-pages")
+        if config.max_running_req != 1:
+            raise ValueError(
+                "growable KV currently requires --max-running-requests 1 so physical "
+                "growth and the expert-cache handoff are deterministic"
+            )
+        if config.moe_backend != "offload" or not config.moe_cache_auto:
+            raise ValueError(
+                "growable KV requires --moe-backend offload and --moe-cache-auto"
+            )
+        if config.moe_cpu_layers or config.moe_pageable_gpu:
+            raise ValueError("growable KV does not support CPU/pageable MoE layer splits")
+        if resolve_pool_class(config.model_config) is not MHAKVCache:
+            raise ValueError("growable KV currently supports dense MHA KV pools only")
+        initial_pages = config.kv_grow_step_tokens // config.page_size
+        if initial_pages >= config.num_page_override:
+            raise ValueError(
+                "--kv-grow-step-tokens must be smaller than the requested KV capacity"
+            )
 
     # The rope cos/sin table is baked to rotary_config.max_position, and neither rope kernel
     # bounds-checks the position it gathers with -- a longer ceiling reads past the table.

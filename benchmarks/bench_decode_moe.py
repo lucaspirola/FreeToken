@@ -231,6 +231,8 @@ def serve_cmd(args: argparse.Namespace, backend: str, port: int) -> list[str]:
     # the server's own defaults exactly as before this option set existed.
     if args.max_context is not None:
         cmd += ["--num-tokens", str(args.max_context)]
+    if getattr(args, "kv_grow_step_tokens", None):
+        cmd += ["--kv-grow-step-tokens", str(args.kv_grow_step_tokens)]
     if args.kv_cache_dtype is not None:
         cmd += ["--kv-cache-dtype", args.kv_cache_dtype]
         # Consumer Blackwell auto-selects FlashInfer, but FreeToken's packed

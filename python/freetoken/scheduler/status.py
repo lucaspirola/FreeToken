@@ -16,6 +16,9 @@ class SchedulerStatusReporter:
     _last_decode_time: float = field(init=False)
     _decode_forward_count: int = field(default=0, init=False)
     _decode_generated_tokens: int = field(default=0, init=False)
+    _prefill_key: tuple[int, ...] | None = field(default=None, init=False)
+    _prefill_elapsed: float = field(default=0.0, init=False)
+    _prefill_tokens: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         now = self.clock()
@@ -77,6 +80,17 @@ class SchedulerStatusReporter:
         new_tokens = batch.log_new_tokens
         cached_tokens = batch.log_cached_tokens
         input_throughput = new_tokens / gap if gap > 0 else 0.0
+        key = tuple(sorted(int(getattr(req, "uid", id(req))) for req in batch.reqs))
+        if key != self._prefill_key:
+            self._prefill_key = key
+            self._prefill_elapsed = 0.0
+            self._prefill_tokens = 0
+        self._prefill_elapsed += max(gap, 0.0)
+        self._prefill_tokens += new_tokens
+        average_throughput = (
+            self._prefill_tokens / self._prefill_elapsed
+            if self._prefill_elapsed > 0 else 0.0
+        )
         self.log(
             f"Prefill batch, "
             f"#new-seq: {len(batch.reqs)}, "
@@ -87,7 +101,8 @@ class SchedulerStatusReporter:
             f"{_mamba_msg(mamba_slots)}"
             f"#running-req: {running_reqs}, "
             f"#queue-req: {queue_reqs}, "
-            f"input throughput (token/s): {input_throughput:.2f}"
+            f"input throughput (token/s): {input_throughput:.2f} instant, "
+            f"{average_throughput:.2f} average"
         )
 
     def _report_decode(

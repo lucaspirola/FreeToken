@@ -75,6 +75,7 @@ class Scheduler(SchedulerIOMixin):
         # virtual full-token coordinate; model-specific tiers ride the plug-ins -- DSV4's
         # window/cmp/idx shadows via swa_pool, Gemma's swa via swa_pool, GDN state via
         # linear_state_pool. No model supplies its own manager.
+        growable_kv = getattr(self.engine.kv_cache, "growable", False)
         self.cache_manager = CacheManager(
             self.engine.num_pages, config.page_size, self.engine.page_table, config.cache_type,
             linear_state_pool=self.engine.linear_state_pool,
@@ -83,6 +84,8 @@ class Scheduler(SchedulerIOMixin):
                 (g.sliding_window for g in config.model_config.kv_cache_group_specs() if g.is_swa),
                 None,
             ) or getattr(self.engine.kv_cache, "sliding_window_size", None),
+            committed_pages=(self.engine.kv_cache.committed_pages if growable_kv else None),
+            page_index_offset=(1 if growable_kv else 0),
         )
         self.decode_manager = DecodeManager(config.page_size)
         self.prefill_manager = PrefillManager(
@@ -288,7 +291,7 @@ class Scheduler(SchedulerIOMixin):
         # backend's per-batch SNAPSHOT (staged in prepare_for_replay right before the replay, on
         # the same stream, like the generic out_loc copy_from), not the live slot maps -- so the
         # next batch's allocate_paged cannot corrupt the in-flight graph replay. DSV4 overlaps.
-        if ENV.DISABLE_OVERLAP_SCHEDULING:
+        if ENV.DISABLE_OVERLAP_SCHEDULING or self.config.kv_grow_step_tokens:
             with self.engine_stream_ctx:
                 self.engine.stream.wait_stream(self.stream)
                 while True:
@@ -765,7 +768,26 @@ class Scheduler(SchedulerIOMixin):
             logger.warning(f"could not log cache geometry: {e!r}")
 
     def _prepare_batch(self, batch: Batch) -> ForwardInput:
+        if batch.is_decode and self.config.kv_grow_step_tokens:
+            self.engine.ensure_decode_graphs()
         self.engine.graph_runner.pad_batch(batch)
+        if self.config.kv_grow_step_tokens:
+            required = max((req.device_len for req in batch.reqs), default=0)
+            old_pages, new_pages = self.engine.grow_runtime_kv(required)
+            if new_pages > old_pages:
+                self.cache_manager.add_committed_pages(new_pages)
+                logger.info_rank0(
+                    f"KV grew {old_pages} -> {new_pages} tokens; "
+                    f"MoE cache now {self.engine.moe_offload_cache.cache_size} slots"
+                )
+        if (
+            batch.is_prefill
+            and self.config.kv_grow_step_tokens
+            and not any(isinstance(req, ChunkedReq) for req in batch.reqs)
+        ):
+            # All KV growth is complete for this request. Rebuild decode graphs once here so
+            # the first streamed token-to-token interval contains inference, not recapture.
+            self.engine.ensure_decode_graphs()
         self._forward_iter += 1
         if batch.is_decode:
             # Free each decoding request's now-out-of-window SWA slots BEFORE the alloc below,

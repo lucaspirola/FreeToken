@@ -76,7 +76,16 @@ work too.
   --num-tokens 262144 --kv-cache-dtype q4_0 --max-running-requests 1
   --moe-backend offload --moe-cache-auto --max-prefill-length 8192`. Pass the
   backend explicitly: sm_120 auto-resolves to FlashInfer, which cannot read the
-  quantized KV pool. The attention launch tables are
+  quantized KV pool. For one long session, add `--kv-grow-step-tokens 65536`
+  to reserve the full virtual KV address range while physically committing only
+  64K-token segments. At each boundary FreeToken gives exactly enough expert-cache
+  VRAM to the new KV segment, preserves all earlier KV at stable addresses, and
+  recaptures decode graphs once after the final prefill chunk. This mode currently
+  requires one running request, the Triton MHA path, plain `offload`, and
+  `--moe-cache-auto`; it is opt-in because the changing expert geometry trades
+  early-context speed against final-context decode residency. Runtime logs show
+  both instant and cumulative-average prefill speed.
+  The attention launch tables are
   architecture-aware: the sm_120 Q4_0 decode launch (64 splits, 64-token tiles)
   runs a synthetic 262K full-attention layer in 0.36 ms versus 0.82 ms with the
   sm_89 tuning, and the extend/prefill kernels drop to 4 warps (1.12x on long-Q4

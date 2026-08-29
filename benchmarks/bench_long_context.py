@@ -41,9 +41,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--target-prompt-tokens", type=int, default=261_800)
     p.add_argument("--decode", type=int, default=128)
     p.add_argument("--max-context", type=int, default=262_144)
+    p.add_argument("--rope-yarn-factor", type=float)
+    p.add_argument("--rope-yarn-original-context", type=int)
     p.add_argument("--kv-cache-dtype", required=True)
     p.add_argument("--prefill-chunk", type=int, default=8192)
     p.add_argument("--mem-ratio", type=float, default=0.97)
+    p.add_argument("--kv-grow-step-tokens", type=int)
     p.add_argument("--cache-policy", choices=("lru", "lfu"), default="lfu")
     p.add_argument("--server-timeout", type=float, default=1800)
     p.add_argument("--json", dest="json_out")
@@ -77,8 +80,8 @@ def synthetic_needle_sample() -> tuple[str, str]:
     # Deliberately exceed the default 261.8K-token target for normal GGUF
     # tokenizers so the default invocation really exercises the requested
     # long-context length; trim_filler then preserves the centered needle.
-    before = "The orchard ledger says the copper marker is inactive.\n" * 20_000
-    after = "The harbor ledger says the silver marker is inactive.\n" * 20_000
+    before = "The orchard ledger says the copper marker is inactive.\n" * 50_000
+    after = "The harbor ledger says the silver marker is inactive.\n" * 50_000
     question = (
         "Read the records below. Remember the one secret passcode and ignore all "
         "inactive marker descriptions.\n\n"
@@ -228,6 +231,13 @@ def main() -> int:
     origin = f"http://127.0.0.1:{port}"
     fd, log_path = tempfile.mkstemp(prefix="bench-long-offload-", suffix=".log")
     cmd = common.serve_cmd(args, "offload", port)
+    if args.rope_yarn_factor is not None:
+        cmd += ["--rope-yarn-factor", str(args.rope_yarn_factor)]
+    if args.rope_yarn_original_context is not None:
+        cmd += [
+            "--rope-yarn-original-context",
+            str(args.rope_yarn_original_context),
+        ]
     print(
         f"[long] model={args.model}\n"
         f"[long] workload={workload} expected={expected!r}\n"
@@ -284,6 +294,7 @@ def main() -> int:
         "kv_cache_dtype": args.kv_cache_dtype,
         "prefill_chunk": args.prefill_chunk,
         "memory_ratio": args.mem_ratio,
+        "kv_grow_step_tokens": args.kv_grow_step_tokens,
         "output_sha1": hashlib.sha1(result["text"].encode()).hexdigest()[:12],
         "output": result["text"],
         "server_log": log_path,

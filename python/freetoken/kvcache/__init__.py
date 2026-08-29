@@ -107,6 +107,7 @@ def create_kv_pool(config, num_pages: int, device: torch.device, dtype: torch.dt
         device=device,
         dtype=dtype,
         quant=getattr(config, "kv_quant", None),
+        grow_step_tokens=getattr(config, "kv_grow_step_tokens", 0),
     )
 
 
@@ -118,6 +119,7 @@ def create_kvcache_pool(
     device: torch.device,
     num_swa_tokens: int | None = None,
     quant=None,
+    grow_step_tokens: int = 0,
 ) -> BaseKVCachePool:
     from .quant import NONE
 
@@ -214,6 +216,7 @@ def create_kvcache_pool(
         dtype=dtype,
         layer_ids=layer_ids,
         quant=quant,
+        grow_step_tokens=grow_step_tokens,
     )
 
 

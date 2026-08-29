@@ -100,6 +100,9 @@ class EngineConfig:
     # fp8_e4m3 store 8 bits, while int4/q4_0 use GGML Q4_0 with two values per byte.
     # Every quantized scheme carries a per-block scale. Resolved by the pools and cost model.
     kv_cache_dtype: str = "auto"
+    # Reserve the full KV virtual range but physically commit it in chunks, shrinking the
+    # GPU expert cache at each boundary. Zero keeps the conventional eager allocation.
+    kv_grow_step_tokens: int = 0
 
     @cached_property
     def kv_quant(self):

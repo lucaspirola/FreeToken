@@ -31,11 +31,17 @@ _SWA_RETAIN_GAP = 16
 
 class CacheManager:
     def __init__(self, num_pages: int, page_size: int, page_table: torch.Tensor, type: str,
-                 linear_state_pool=None, swa_pool=None, sliding_window_size=None):
+                 linear_state_pool=None, swa_pool=None, sliding_window_size=None,
+                 committed_pages: int | None = None, page_index_offset: int = 0):
         # The `_free_slots` follows a page-aligned manner. For example, if page_size = 2,
         # the `_free_slots` may look like [0, 2, 4, 6, ...], and each slot represents a page.
         device = page_table.device
-        self.free_slots = torch.arange(num_pages, dtype=torch.int32, device=device) * page_size
+        self.committed_pages = num_pages if committed_pages is None else committed_pages
+        self.page_index_offset = page_index_offset
+        self.free_slots = (
+            torch.arange(self.committed_pages, dtype=torch.int32, device=device)
+            * page_size + page_index_offset * page_size
+        )
         # Hybrid GDN models drive a second currency (GDN state snapshots in LinearStatePool)
         # through a HybridRadixCache; SWA models drive a second currency (swa-pool KV slots in
         # the HybridSWAKVCache global-paged mode) through a SWARadixCache; non-hybrid models keep
@@ -69,7 +75,7 @@ class CacheManager:
     def page_usage(self) -> tuple[int, int]:
         """(used_pages, total_pages): allocated, non-evictable pages over the pool total
         (active requests + protected prefix; evictable prefix-cache pages are excluded)."""
-        total = self.num_pages
+        total = self.committed_pages
         evictable = (self.prefix_cache.full_evictable_size if (self.is_hybrid or self.is_swa)
                      else self.prefix_cache.size_info.evictable_size)
         return total - len(self.free_slots) - evictable // self.page_size, total
@@ -105,7 +111,21 @@ class CacheManager:
     def available_size(self) -> int:
         evictable = (self.prefix_cache.full_evictable_size if (self.is_hybrid or self.is_swa)
                      else self.prefix_cache.size_info.evictable_size)
-        return evictable + len(self.free_slots) * self.page_size
+        future = (self.num_pages - self.committed_pages) * self.page_size
+        return evictable + len(self.free_slots) * self.page_size + future
+
+    def add_committed_pages(self, new_total: int) -> None:
+        """Expose a newly VMM-mapped suffix to the allocator."""
+        if not self.committed_pages < new_total <= self.num_pages:
+            raise ValueError(
+                f"new committed page total {new_total} outside "
+                f"({self.committed_pages}, {self.num_pages}]"
+            )
+        begin = self.committed_pages + self.page_index_offset
+        end = new_total + self.page_index_offset
+        added = torch.arange(begin, end, dtype=torch.int32, device=self.device) * self.page_size
+        self.free_slots = torch.cat((self.free_slots, added))
+        self.committed_pages = new_total
 
     @property
     def mamba_available_size(self) -> int:
@@ -561,11 +581,11 @@ class CacheManager:
         else:
             self.prefix_cache.check_integrity()
             cache_pages = self.prefix_cache.size_info.total_size // self.page_size
-        if len(self.free_slots) + cache_pages != self.num_pages:
+        if len(self.free_slots) + cache_pages != self.committed_pages:
             raise RuntimeError(
                 "CacheManager integrity check failed:"
                 f" free_pages({len(self.free_slots)}) +"
-                f" cache_pages({cache_pages}) != num_pages({self.num_pages})"
+                f" cache_pages({cache_pages}) != committed_pages({self.committed_pages})"
             )
         if self.page_size > 1:
             assert torch.all(self.free_slots % self.page_size == 0)
@@ -580,6 +600,8 @@ class CacheManager:
         device = page_table.device
         self.device = device
         self.num_pages = num_pages
+        self.committed_pages = num_pages
+        self.page_index_offset = 0
         self.page_table = page_table
         self.free_slots = torch.arange(num_pages, dtype=torch.int32, device=device) * self.page_size
         self.prefix_cache = self._make_prefix_cache(device, self.page_size, self.cache_type)

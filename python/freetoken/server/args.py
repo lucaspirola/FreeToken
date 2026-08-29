@@ -399,6 +399,17 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--kv-grow-step-tokens",
+        type=_positive_int,
+        default=None,
+        help=(
+            "Physically grow KV in fixed token increments while its CUDA virtual address "
+            "stays stable, surrendering MoE expert-cache space at each boundary. "
+            "Recommended for long-context single-request serving: 65536."
+        ),
+    )
+
+    parser.add_argument(
         "--attention-backend",
         "--attn",
         type=validate_attn_backend,
@@ -785,6 +796,8 @@ def parse_args(
     kwargs["tp_info"] = DistributedInfo(0, kwargs["tensor_parallel_size"])
     del kwargs["tensor_parallel_size"]
 
+    if kwargs.get("kv_grow_step_tokens") is None:
+        kwargs["kv_grow_step_tokens"] = 0
     result = ServerArgs(**kwargs)
     logger = init_logger(__name__)
     logger.info(f"Parsed arguments:\n{result}")

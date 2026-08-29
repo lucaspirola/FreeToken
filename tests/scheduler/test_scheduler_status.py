@@ -51,6 +51,26 @@ def test_prefill_line_reports_tokens_and_throughput():
     assert "#running-req: 2" in line
     assert "#queue-req: 1" in line
     assert "input throughput (token/s): 60.00" in line
+    assert "60.00 average" in line
+
+
+def test_prefill_line_keeps_cumulative_average_for_same_request():
+    rep, logs, clock = _reporter()
+    batch = _prefill_batch(new_tokens=30, cached_tokens=0, n_seqs=1)
+    batch.reqs[0].uid = 7
+    clock["t"] = 0.5
+    rep.report_batch(
+        batch, running_reqs=0, queue_reqs=1,
+        kv_used_pages=30, kv_total_pages=100, page_size=1,
+    )
+    continuation = _prefill_batch(new_tokens=30, cached_tokens=0, n_seqs=1)
+    continuation.reqs[0].uid = 7
+    clock["t"] = 2.0  # instant 20; cumulative 60 / 2 = 30 tok/s
+    rep.report_batch(
+        continuation, running_reqs=0, queue_reqs=1,
+        kv_used_pages=60, kv_total_pages=100, page_size=1,
+    )
+    assert "20.00 instant, 30.00 average" in logs[-1]
 
 
 def test_mamba_slots_reported_only_when_provided():
