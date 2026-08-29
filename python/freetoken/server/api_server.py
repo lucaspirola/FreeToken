@@ -23,7 +23,9 @@ from freetoken.message import (
     BaseTokenizerMsg,
     BatchFrontendMsg,
     CacheRebuildMsg,
+    CloseSessionMsg,
     CacheRebuildReply,
+    SessionClosedReply,
     TokenizeMsg,
     UserReply,
 )
@@ -126,6 +128,8 @@ class GenerateRequest(BaseModel):
     prompt: str
     max_tokens: int
     ignore_eos: bool = False
+    session_id: str | None = None
+    session_ttl_seconds: float | None = None
 
 
 @dataclass
@@ -143,6 +147,7 @@ class FrontendManager:
     # Runtime cache-rebuild control plane (correlated by uuid request_id, separate from
     # the int-uid generation ack machinery).
     rebuild_futures: Dict[str, asyncio.Future] = field(default_factory=dict)
+    session_close_futures: Dict[str, asyncio.Future] = field(default_factory=dict)
     # Lifecycle gate. Starts "loading" (uvicorn binds before weights finish; the three
     # API adapters 503 until this flips) -> "serving" once all workers ack ready ->
     # "rebuilding"/"failed" for runtime cache rebuilds.
@@ -243,6 +248,11 @@ class FrontendManager:
             msg = await self.recv_tokenizer.get()
             if isinstance(msg, CacheRebuildReply):
                 self._resolve_rebuild(msg)
+                continue
+            if isinstance(msg, SessionClosedReply):
+                fut = self.session_close_futures.pop(msg.request_id, None)
+                if fut is not None and not fut.done():
+                    fut.set_result(msg)
                 continue
             for msg in _unwrap_msg(msg):
                 # Global accounting follows actual admitted/sampled work even after the HTTP
@@ -353,7 +363,9 @@ class FrontendManager:
         yield b"data: [DONE]\n\n"
         logger.debug("Finished streaming response for user %s", uid)
 
-    async def stream_with_cancellation(self, generator, request: Request, uid: int):
+    async def stream_with_cancellation(
+        self, generator, request: Request, uid: int, session_id: str | None = None
+    ):
         try:
             async for chunk in generator:
                 # detect if the client has disconnected
@@ -362,10 +374,10 @@ class FrontendManager:
                     raise asyncio.CancelledError
                 yield chunk
         except asyncio.CancelledError:
-            asyncio.create_task(self.abort_user(uid))
+            asyncio.create_task(self.abort_user(uid, session_id=session_id))
             raise
 
-    async def abort_user(self, uid: int):
+    async def abort_user(self, uid: int, session_id: str | None = None):
         await asyncio.sleep(0.1)
         if uid in self.ack_map:
             del self.ack_map[uid]
@@ -373,7 +385,7 @@ class FrontendManager:
             del self.event_map[uid]
         self.stats.on_abort(uid)
         logger.warning("Aborting request for user %s", uid)
-        await self.send_one(AbortMsg(uid=uid))
+        await self.send_one(AbortMsg(uid=uid, session_id=session_id))
 
     def shutdown(self):
         self.send_tokenizer.stop()
@@ -834,13 +846,38 @@ async def generate(req: GenerateRequest, request: Request):
                 ignore_eos=req.ignore_eos,
                 max_tokens=req.max_tokens,
             ),
+            session_id=req.session_id,
+            session_ttl_seconds=req.session_ttl_seconds,
         )
     )
 
     return StreamingResponse(
-        state.stream_with_cancellation(state.stream_generate(uid), request, uid),
+        state.stream_with_cancellation(
+            state.stream_generate(uid), request, uid, session_id=req.session_id
+        ),
         media_type="text/event-stream",
     )
+
+
+@app.delete("/v1/sessions/{session_id}")
+async def close_session(session_id: str):
+    """End an agent session and make its protected KV reclaimable immediately."""
+    state = get_global_state()
+    if not session_id or len(session_id) > 256:
+        return JSONResponse({"error": "invalid session_id"}, status_code=400)
+    request_id = str(uuid.uuid4())
+    fut = asyncio.get_running_loop().create_future()
+    state.session_close_futures[request_id] = fut
+    await state.send_one(CloseSessionMsg(session_id=session_id, request_id=request_id))
+    try:
+        reply = await asyncio.wait_for(fut, timeout=30.0)
+    except asyncio.TimeoutError:
+        state.session_close_futures.pop(request_id, None)
+        return JSONResponse(
+            {"id": session_id, "status": "timeout"}, status_code=504
+        )
+    state.session_close_futures.pop(request_id, None)
+    return {"id": reply.session_id, "status": reply.status}
 
 
 def _install_shell_stop_handlers() -> None:

@@ -80,6 +80,8 @@ def chat_request_to_genspec(
         chat_template_kwargs=ctk,
         template_tools=_tools_for_template(req),
         parser_tools=(_all_tool_dicts(req.tools) if _should_parse_tools(req) else None),
+        session_id=req.session_id,
+        session_ttl_seconds=req.session_ttl_seconds,
     )
 
 
@@ -195,11 +197,18 @@ async def handle_chat_completion(
     if req.stream:
         chunks = stream_chat_completion_chunks(uid, req, state, spec)
         if request is not None:
-            chunks = state.stream_with_cancellation(chunks, request, uid)
+            chunks = (
+                state.stream_with_cancellation(chunks, request, uid, spec.session_id)
+                if spec.session_id is not None
+                else state.stream_with_cancellation(chunks, request, uid)
+            )
         return StreamingResponse(chunks, media_type="text/event-stream")
 
     try:
         result = await generate_full(uid, spec, state, source="/v1/chat/completions")
+    except asyncio.CancelledError:
+        await state.abort_user(uid, session_id=spec.session_id)
+        raise
     except GenerationError as exc:
         return create_error_response(str(exc), code=exc.code)
     message: dict[str, Any] = {"role": "assistant", "content": result.content}
@@ -397,11 +406,21 @@ async def handle_completion(
             return create_error_response("Streaming completions only support a single text prompt")
         uid = state.new_user()
         await state.send_one(
-            TokenizeMsg(uid=uid, text=prompts[0], sampling_params=_resolve_sampling(req, model_sampling))
+            TokenizeMsg(
+                uid=uid,
+                text=prompts[0],
+                sampling_params=_resolve_sampling(req, model_sampling),
+                session_id=req.session_id,
+                session_ttl_seconds=req.session_ttl_seconds,
+            )
         )
         chunks = stream_completion_chunks(uid, req, state)
         if request is not None:
-            chunks = state.stream_with_cancellation(chunks, request, uid)
+            chunks = (
+                state.stream_with_cancellation(chunks, request, uid, req.session_id)
+                if req.session_id is not None
+                else state.stream_with_cancellation(chunks, request, uid)
+            )
         return StreamingResponse(chunks, media_type="text/event-stream")
 
     choices: list[dict[str, Any]] = []
@@ -410,19 +429,31 @@ async def handle_completion(
     cached_tokens = 0
     for index, prompt in enumerate(prompts):
         uid = state.new_user()
-        await state.send_one(TokenizeMsg(uid=uid, text=prompt, sampling_params=_resolve_sampling(req, model_sampling)))
+        await state.send_one(
+            TokenizeMsg(
+                uid=uid,
+                text=prompt,
+                sampling_params=_resolve_sampling(req, model_sampling),
+                session_id=req.session_id,
+                session_ttl_seconds=req.session_ttl_seconds,
+            )
+        )
         text = ""
         finish_reason = "stop"
-        async for ack in state.wait_for_ack(uid):
-            if getattr(ack, "error", None):
-                return create_error_response(ack.error)
-            prompt_tokens += ack.prompt_tokens_delta
-            completion_tokens += ack.completion_tokens_delta
-            cached_tokens += ack.cached_tokens
-            text += ack.incremental_output
-            if ack.finished:
-                finish_reason = getattr(ack, "finish_reason", None) or "stop"
-                break
+        try:
+            async for ack in state.wait_for_ack(uid):
+                if getattr(ack, "error", None):
+                    return create_error_response(ack.error)
+                prompt_tokens += ack.prompt_tokens_delta
+                completion_tokens += ack.completion_tokens_delta
+                cached_tokens += ack.cached_tokens
+                text += ack.incremental_output
+                if ack.finished:
+                    finish_reason = getattr(ack, "finish_reason", None) or "stop"
+                    break
+        except asyncio.CancelledError:
+            await state.abort_user(uid, session_id=req.session_id)
+            raise
         choices.append({"index": index, "text": text, "finish_reason": finish_reason, "logprobs": None})
 
     return {

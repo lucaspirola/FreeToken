@@ -37,11 +37,20 @@ class UserMsg(BaseBackendMsg):
     # Optional precomputed multimodal soft-token embeddings (GPU tensor). Only used by
     # the in-process offline path; remains None for the (serialized) online path.
     mm_embeds: torch.Tensor | None = None
+    session_id: str | None = None
+    session_ttl_seconds: float | None = None
 
 
 @dataclass
 class AbortBackendMsg(BaseBackendMsg):
     uid: int
+    session_id: str | None = None
+
+
+@dataclass
+class CloseSessionBackendMsg(BaseBackendMsg):
+    session_id: str
+    request_id: str
 
 
 @dataclass

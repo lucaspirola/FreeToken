@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, NamedTuple, NoReturn, Set, Tuple, TypeAlias
 
 import torch
@@ -13,10 +15,12 @@ from freetoken.message import (
     BatchBackendMsg,
     CacheRebuildBackendMsg,
     CacheRebuildResultMsg,
+    CloseSessionBackendMsg,
     DetokenizeMsg,
     ErrorReplyMsg,
     ExitMsg,
     PromptAdmittedMsg,
+    SessionClosedResultMsg,
     UserMsg,
 )
 from freetoken.utils import (
@@ -58,6 +62,14 @@ class ForwardInput(NamedTuple):
 ForwardData: TypeAlias = "Tuple[ForwardInput, ForwardOutput]"
 
 
+@dataclass
+class SessionLease:
+    handle: object | None
+    ttl_seconds: float
+    expires_at: float | None = None
+    active_uid: int | None = None
+
+
 class Scheduler(SchedulerIOMixin):
     def __init__(self, config: SchedulerConfig):
         from freetoken.engine import Engine
@@ -90,7 +102,10 @@ class Scheduler(SchedulerIOMixin):
         )
         self.decode_manager = DecodeManager(config.page_size)
         self.prefill_manager = PrefillManager(
-            self.cache_manager, self.table_manager, self.decode_manager
+            self.cache_manager,
+            self.table_manager,
+            self.decode_manager,
+            interleave_chunks=bool(config.kv_grow_step_tokens and config.max_running_req > 1),
         )
 
         # some alias for easy access
@@ -99,6 +114,7 @@ class Scheduler(SchedulerIOMixin):
         # inbound control messages, then flush only AFTER _process_last_data publishes any
         # sampled replies from the prior overlapped forward.
         self._pending_abort_acks: Set[int] = set()
+        self._pending_session_close_acks: dict[int, tuple[str, str]] = {}
         # With multiple tokenizer workers, an AbortBackendMsg and its earlier UserMsg can arrive
         # through different PUSH producers and be observed out of order. Preserve a bounded
         # tombstone so an abort-before-admission request can never be resurrected after its
@@ -122,6 +138,9 @@ class Scheduler(SchedulerIOMixin):
         # an existing agent's stream latency while keeping the large prefill kernels efficient.
         self._growable_decode_burst = 32
         self._growable_decode_steps = 0
+        # Opt-in, client-named conversations. A completed turn leaves a radix handle locked;
+        # the lease is released only by explicit close, abort/disconnect, or idle expiry.
+        self._sessions: dict[str, SessionLease] = {}
         self.tokenizer = load_tokenizer(config.model_path)
         self.eos_token_ids = load_eos_token_ids(config.model_path, self.tokenizer)
         self.toolcall_anchor_id = None
@@ -223,14 +242,19 @@ class Scheduler(SchedulerIOMixin):
         # before the message loop is what makes the check airtight: the batch launched later
         # this iteration can only be probed by messages of the NEXT iteration, which sees it here.
         self._last_data = last_data
+        self._expire_sessions()
         blocking = not (
             last_data is not None  # don't block if we have a batch to be processed
             or self.prefill_manager.runnable
             or self.decode_manager.runnable
             or self._pending_rebuild is not None  # a queued rebuild to drain toward + execute
             or getattr(self, "_growable_shrink_pending", False)
+            or bool(getattr(self, "_sessions", {}))
         )
-        for msg in self.receive_msg(blocking=blocking):
+        messages = self.receive_msg(blocking=blocking)
+        if not messages and not blocking and self._only_idle_sessions(last_data):
+            time.sleep(0.01)
+        for msg in messages:
             self._process_one_msg(msg)
 
         self._maybe_shrink_growable_kv()
@@ -272,13 +296,18 @@ class Scheduler(SchedulerIOMixin):
         return ongoing_data
 
     def normal_loop(self) -> None:
+        self._expire_sessions()
         blocking = not (
             self.prefill_manager.runnable
             or self.decode_manager.runnable
             or self._pending_rebuild is not None  # a queued rebuild to execute at idle
             or getattr(self, "_growable_shrink_pending", False)
+            or bool(getattr(self, "_sessions", {}))
         )
-        for msg in self.receive_msg(blocking=blocking):
+        messages = self.receive_msg(blocking=blocking)
+        if not messages and not blocking and self._only_idle_sessions(None):
+            time.sleep(0.01)
+        for msg in messages:
             self._process_one_msg(msg)
 
         self._maybe_shrink_growable_kv()
@@ -398,7 +427,10 @@ class Scheduler(SchedulerIOMixin):
                 # NOTE: overlap scheduling may make the request freed twice, skip second free
                 if finished and req not in self.finished_reqs:
                     self.decode_manager.remove_req(req)
-                    self._free_req_resources(req)
+                    if getattr(req, "session_id", None) is not None:
+                        self._free_req_resources(req, retain_session=True)
+                    else:
+                        self._free_req_resources(req)
                     new_finished_reqs.add(req)
                 elif batch.is_prefill and req.table_idx != -1:
                     # for prefill, non-chunk req, cache the prefix.
@@ -513,6 +545,27 @@ class Scheduler(SchedulerIOMixin):
                     "Dropping request %d because its abort arrived before admission", msg.uid
                 )
                 return
+            if msg.session_id is not None:
+                if not msg.session_id or len(msg.session_id) > 256:
+                    self.send_result([ErrorReplyMsg(uid=msg.uid, error="invalid session_id")])
+                    return
+                if not hasattr(self, "_sessions"):
+                    self._sessions = {}
+                session = self._sessions.get(msg.session_id)
+                if session is not None and session.active_uid is not None:
+                    self.send_result(
+                        [ErrorReplyMsg(uid=msg.uid, error=f"session {msg.session_id!r} is busy")]
+                    )
+                    return
+                ttl = float(msg.session_ttl_seconds or 300.0)
+                if not math.isfinite(ttl):
+                    ttl = 300.0
+                ttl = min(max(ttl, 1.0), 86_400.0)
+                if session is None:
+                    session = self._sessions[msg.session_id] = SessionLease(None, ttl)
+                session.ttl_seconds = ttl
+                session.expires_at = None
+                session.active_uid = msg.uid
             input_len, max_seq_len = len(msg.input_ids), self.engine.max_seq_len
             max_output_len = max_seq_len - input_len
             if max_output_len <= 0:
@@ -538,6 +591,11 @@ class Scheduler(SchedulerIOMixin):
                         )
                     ]
                 )
+                if msg.session_id is not None:
+                    session = self._sessions.get(msg.session_id)
+                    if session is not None:
+                        session.active_uid = None
+                        session.expires_at = time.monotonic() + session.ttl_seconds
                 return
             if msg.sampling_params.max_tokens > max_output_len:
                 msg.sampling_params.max_tokens = max_output_len
@@ -551,6 +609,8 @@ class Scheduler(SchedulerIOMixin):
             if tombstones is None:
                 tombstones = self._abort_tombstones = {}
             tombstones[msg.uid] = None
+            if msg.session_id is not None:
+                self._close_session(msg.session_id)
             # Unknown aborts normally consume their tombstone when the cross-worker UserMsg
             # catches up. Bound hostile/no-followup abort traffic without affecting realistic
             # in-flight concurrency.
@@ -580,6 +640,23 @@ class Scheduler(SchedulerIOMixin):
             # _flush_abort_acks runs after _process_last_data, making this a true terminal
             # accounting barrier for FrontendManager/prepare-stop.
             self._pending_abort_acks.add(msg.uid)
+        elif isinstance(msg, CloseSessionBackendMsg):
+            existed, active_uid = self._close_session(msg.session_id)
+            if active_uid is None:
+                self.send_result(
+                    [
+                        SessionClosedResultMsg(
+                            session_id=msg.session_id,
+                            request_id=msg.request_id,
+                            status="closed" if existed else "not_found",
+                        )
+                    ]
+                )
+            else:
+                self._pending_session_close_acks[active_uid] = (
+                    msg.request_id,
+                    msg.session_id,
+                )
         elif isinstance(msg, CacheRebuildBackendMsg):
             # v1 scope: only if_idle, single-rank, non-owned-KV. drain mode and TP rebuild
             # need the drain-gate / all-rank failure-agreement machinery (deferred), so we
@@ -596,7 +673,11 @@ class Scheduler(SchedulerIOMixin):
                 self._reply_rebuild(
                     msg.request_id, "unsupported", "runtime rebuild unsupported under TP > 1"
                 )
-            elif self.prefill_manager.runnable or self.decode_manager.runnable:
+            elif (
+                self.prefill_manager.runnable
+                or self.decode_manager.runnable
+                or getattr(self, "_sessions", {})
+            ):
                 # if_idle: refuse rather than wait. (finished_reqs hold no resources — they
                 # are already freed — so they do not block a rebuild.)
                 self._reply_rebuild(msg.request_id, "busy")
@@ -618,7 +699,7 @@ class Scheduler(SchedulerIOMixin):
                 pool.copy_from(req.mamba_restore_src, req.linear_slot_idx)
                 req.mamba_restore_src = None  # consumed: restore exactly once
 
-    def _free_req_resources(self, req: Req) -> None:
+    def _free_req_resources(self, req: Req, *, retain_session: bool = False) -> None:
         # Idempotent: an EOS-finished request can stay in running_reqs (output budget left), so an
         # abort in the same overlap iteration races _process_last_data and would free it twice --
         # double-freeing its table_idx and (hybrid) GDN slots onto the free-list, handing the same
@@ -629,10 +710,62 @@ class Scheduler(SchedulerIOMixin):
         # to their tier free-lists; the generic manager frees its KV pages (it reads
         # page_table[req.table_idx], so free the table entry after).
         self.cache_manager.cache_req(req, finished=True)
+        if retain_session and req.session_id is not None and req.mm_embeds is None:
+            session = self._sessions.get(req.session_id)
+            if session is not None and session.active_uid == req.uid:
+                new_handle = self.cache_manager.retain_prefix(req.input_ids, req.cached_len)
+                old_handle = session.handle
+                session.handle = new_handle
+                session.active_uid = None
+                session.expires_at = time.monotonic() + session.ttl_seconds
+                if old_handle is not None:
+                    self.cache_manager.unlock(old_handle)
         self.table_manager.free(req.table_idx)
         req.table_idx = -1
         if getattr(getattr(self, "config", None), "kv_grow_step_tokens", 0):
             self._growable_shrink_pending = True
+
+    def _close_session(self, session_id: str) -> tuple[bool, int | None]:
+        session = getattr(self, "_sessions", {}).pop(session_id, None)
+        if session is None:
+            return False, None
+        if session.handle is not None:
+            self.cache_manager.unlock(session.handle)
+        if session.active_uid is not None:
+            req = self.prefill_manager.abort_req(session.active_uid)
+            req = req or self.decode_manager.abort_req(session.active_uid)
+            if req is not None:
+                inflight = self._last_data is not None and req in self._last_data[0].batch.reqs
+                if inflight:
+                    req.aborted = True
+                else:
+                    self._free_req_resources(req)
+            self._pending_abort_acks.add(session.active_uid)
+        self._growable_shrink_pending = True
+        logger.info_rank0("Closed session %s; retained KV is now reclaimable", session_id)
+        return True, session.active_uid
+
+    def _expire_sessions(self) -> None:
+        now = time.monotonic()
+        expired = [
+            sid
+            for sid, lease in getattr(self, "_sessions", {}).items()
+            if lease.active_uid is None
+            and lease.expires_at is not None
+            and lease.expires_at <= now
+        ]
+        for sid in expired:
+            logger.info_rank0("Session %s expired after idle timeout", sid)
+            self._close_session(sid)
+
+    def _only_idle_sessions(self, last_data: ForwardData | None) -> bool:
+        return (
+            last_data is None
+            and not self.prefill_manager.runnable
+            and not self.decode_manager.runnable
+            and self._pending_rebuild is None
+            and not getattr(self, "_growable_shrink_pending", False)
+        )
 
     @torch.inference_mode()
     def _maybe_shrink_growable_kv(self) -> None:
@@ -970,7 +1103,20 @@ class Scheduler(SchedulerIOMixin):
             return
         uids = sorted(pending)
         pending.clear()
-        self.send_result([ErrorReplyMsg(uid=uid, error="request aborted") for uid in uids])
+        replies = [ErrorReplyMsg(uid=uid, error="request aborted") for uid in uids]
+        close_acks = getattr(self, "_pending_session_close_acks", {})
+        for uid in uids:
+            close = close_acks.pop(uid, None)
+            if close is not None:
+                request_id, session_id = close
+                replies.append(
+                    SessionClosedResultMsg(
+                        session_id=session_id,
+                        request_id=request_id,
+                        status="closed",
+                    )
+                )
+        self.send_result(replies)
 
     def _forward(self, forward_input: ForwardInput) -> ForwardOutput:
         batch, sample_args, input_mapping, output_mapping = forward_input

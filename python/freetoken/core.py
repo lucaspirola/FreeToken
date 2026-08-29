@@ -43,6 +43,10 @@ class Req:
     # Optional precomputed multimodal soft-token embeddings (GPU, [num_image_tokens,
     # hidden]) scattered at image-token positions during this request's prefill.
     mm_embeds: torch.Tensor | None = None
+    # An opt-in session keeps this completed turn's prefix protected for the next turn.
+    # None preserves the ordinary one-shot request lifecycle.
+    session_id: str | None = None
+    session_ttl_seconds: float | None = None
 
     # --- hybrid-radix (GDN linear-state) per-request slots; None for non-hybrid models or
     # until allocated from LinearStatePool. Set by the scheduler (P2). ---

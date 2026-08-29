@@ -396,6 +396,29 @@ class CacheManager:
         else:
             self.prefix_cache.lock_handle(handle, unlock=True)
 
+    def retain_prefix(self, input_ids: torch.Tensor, cached_len: int) -> BaseCacheHandle:
+        """Lock the deepest reusable prefix after a session turn has finished.
+
+        ``cache_req(..., finished=True)`` first donates the request-owned KV (and, for
+        hybrid models, its final recurrent-state snapshot) to the radix tree.  This
+        second match converts that normally-evictable cache entry into a session lease.
+        """
+        ids = input_ids[:cached_len]
+        if self.is_swa:
+            from freetoken.kvcache.swa_radix_cache import SWACacheHandle
+
+            m = self.prefix_cache.match_prefix(ids)
+            handle = SWACacheHandle(m.cached_len, m.node, m.kv_indices)
+        elif self.is_hybrid:
+            from freetoken.kvcache.hybrid_radix_cache import HybridCacheHandle
+
+            m = self.prefix_cache.match_prefix(ids)
+            handle = HybridCacheHandle(m.cached_len, m.node, m.kv_indices)
+        else:
+            handle = self.prefix_cache.match_prefix(ids).cuda_handle
+        self.lock(handle)
+        return handle
+
     def _free_swa(self, indices: torch.Tensor) -> None:
         """Free the swa-pool slots backing ``indices`` (full-pool slots). Idempotent over the
         0 sentinel, so safe to call on any slots being returned to free_slots."""

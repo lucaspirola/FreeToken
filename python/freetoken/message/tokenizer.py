@@ -72,11 +72,27 @@ class TokenizeMsg(BaseTokenizerMsg):
     sampling_params: SamplingParams
     chat_template_kwargs: Dict[str, Any] | None = None
     tools: List[Dict[str, Any]] | None = None
+    session_id: str | None = None
+    session_ttl_seconds: float | None = None
 
 
 @dataclass
 class AbortMsg(BaseTokenizerMsg):
     uid: int
+    session_id: str | None = None
+
+
+@dataclass
+class CloseSessionMsg(BaseTokenizerMsg):
+    session_id: str
+    request_id: str
+
+
+@dataclass
+class SessionClosedResultMsg(BaseTokenizerMsg):
+    session_id: str
+    request_id: str
+    status: str  # "closed" | "not_found"
 
 
 @dataclass

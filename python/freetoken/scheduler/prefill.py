@@ -121,9 +121,12 @@ class PrefillAdder:
         next_track_idx: int = 0,
         restore_src: int | None = None,
         swa_evicted_seqlen: int = 0,
+        chunk_limit: int | None = None,
     ) -> Req | None:
         remain_len = pending_req.input_len - cached_len
         chunk_size = min(self.token_budget, remain_len)
+        if chunk_limit is not None:
+            chunk_size = min(chunk_size, chunk_limit)
         if self.cache_manager.swa_paged:
             # Cap this chunk by the swa the pool can back this pass. swa is allocated per token in
             # allocate_paged, and token_budget (max_extend_tokens, default 8192) won't chunk a
@@ -178,6 +181,8 @@ class PrefillAdder:
             cache_handle=cache_handle,
             sampling_params=pending_req.sampling_params,
             mm_embeds=pending_req.mm_embeds,
+            session_id=pending_req.session_id,
+            session_ttl_seconds=pending_req.session_ttl_seconds,
         )
         # Hybrid GDN per-request state slots (None for non-hybrid). On a fresh admit these are
         # freshly allocated; on a chunked continuation they are inherited from the prior chunk.
@@ -188,7 +193,7 @@ class PrefillAdder:
         req.swa_evicted_seqlen = swa_evicted_seqlen  # carry the extend-free watermark across chunks
         return req
 
-    def try_add_one(self, pending_req: PendingReq) -> Req | None:
+    def try_add_one(self, pending_req: PendingReq, chunk_limit: int | None = None) -> Req | None:
         if self.token_budget <= 0:
             return None
 
@@ -203,6 +208,7 @@ class PrefillAdder:
                 next_track_idx=chunked_req.mamba_next_track_idx,
                 restore_src=None,  # continuation chunk already has live state
                 swa_evicted_seqlen=chunked_req.swa_evicted_seqlen,  # extend-free watermark so far
+                chunk_limit=chunk_limit,
             )
 
         if resource := self._try_allocate_one(pending_req):
@@ -216,6 +222,7 @@ class PrefillAdder:
                 ping_pong=ping_pong,
                 next_track_idx=0,
                 restore_src=restore_src,
+                chunk_limit=chunk_limit,
             )
             if req is None:
                 # no aligned chunk this pass: undo the admission (a continuation keeps its
@@ -235,10 +242,20 @@ class PrefillManager:
     table_manager: TableManager
     decode_manager: DecodeManager
     pending_list: List[PendingReq] = field(default_factory=list)
+    # Growable multi-agent mode divides one aggregate prefill batch across all waiting agents.
+    # Total tokens per forward stay unchanged; no single long prompt monopolizes every chunk.
+    interleave_chunks: bool = False
 
     def add_one_req(self, req: UserMsg) -> None:
         self.pending_list.append(
-            PendingReq(req.uid, req.input_ids, req.sampling_params, mm_embeds=req.mm_embeds)
+            PendingReq(
+                req.uid,
+                req.input_ids,
+                req.sampling_params,
+                mm_embeds=req.mm_embeds,
+                session_id=req.session_id,
+                session_ttl_seconds=req.session_ttl_seconds,
+            )
         )
 
     def schedule_next_batch(self, prefill_budget: int) -> Batch | None:
@@ -260,9 +277,15 @@ class PrefillManager:
         # once at admission, so continuation chunks (already-chunked reqs) contribute 0.
         log_new_tokens = 0
         log_cached_tokens = 0
-        for pending_req in self.pending_list:
+        admitted_items = 0
+        for index, pending_req in enumerate(self.pending_list):
             is_continuation = pending_req.chunked_req is not None
-            if req := adder.try_add_one(pending_req):
+            chunk_limit = None
+            if self.interleave_chunks:
+                waiting = len(self.pending_list) - index
+                chunk_limit = max(1, adder.token_budget // waiting)
+            if req := adder.try_add_one(pending_req, chunk_limit=chunk_limit):
+                admitted_items += 1
                 pending_req.chunked_req = None
                 if isinstance(req, ChunkedReq):
                     pending_req.chunked_req = req
@@ -282,7 +305,17 @@ class PrefillManager:
                 break  # We cannot add more requests
         if len(reqs) == 0:
             return None
-        self.pending_list = chunked_list + self.pending_list[len(reqs) :]
+        remaining = self.pending_list[admitted_items:]
+        # Interleaved mode rotates unfinished lanes behind requests that did not run this pass.
+        # The default preserves the original strict chunked-prefill ordering.
+        # If admission stopped on a resource-constrained request, keep the active continuations
+        # first. Putting the blocked request at the head would make the next pass return no batch
+        # forever while a runnable continuation sat behind it.
+        self.pending_list = (
+            remaining + chunked_list
+            if self.interleave_chunks and not remaining
+            else chunked_list + remaining
+        )
         batch = Batch(reqs=reqs, phase="prefill")
         batch.log_new_tokens = log_new_tokens
         batch.log_cached_tokens = log_cached_tokens

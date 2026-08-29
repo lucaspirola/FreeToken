@@ -17,6 +17,7 @@ back into their assistant turn as ``reasoning_content``.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -106,6 +107,8 @@ class ResponsesRequest(BaseModel):
     background: bool = False
     metadata: dict[str, Any] | None = None
     parallel_tool_calls: bool | None = None
+    session_id: str | None = None
+    session_ttl_seconds: float | None = None
 
 
 def register_responses_routes(
@@ -167,11 +170,18 @@ async def handle_responses(
             cache_report=cache_report,
         )
         if request is not None:
-            events = state.stream_with_cancellation(events, request, uid)
+            events = (
+                state.stream_with_cancellation(events, request, uid, spec.session_id)
+                if spec.session_id is not None
+                else state.stream_with_cancellation(events, request, uid)
+            )
         return StreamingResponse(events, media_type="text/event-stream")
 
     try:
         result = await generate_full(uid, spec, state, source="/v1/responses")
+    except asyncio.CancelledError:
+        await state.abort_user(uid, session_id=spec.session_id)
+        raise
     except GenerationError as exc:
         return _error_response(400, str(exc), exc.code)
     response = build_responses_response(result, req, response_id, created, cache_report=cache_report)
@@ -248,6 +258,8 @@ def convert_responses_to_genspec(
         ),
         chat_template_kwargs=ctk,
         template_tools=template_tools,
+        session_id=req.session_id,
+        session_ttl_seconds=req.session_ttl_seconds,
         parser_tools=parser_tools,
     )
 

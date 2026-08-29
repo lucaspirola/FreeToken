@@ -150,3 +150,42 @@ def test_batched_prefill_carries_each_new_prompt_admission():
     batch = pm.schedule_next_batch(16)
     assert batch is not None
     assert batch.prompt_admissions == [(1, 3, 0), (2, 5, 0)]
+
+
+def test_interleaved_prefill_gives_each_waiting_agent_a_lane():
+    """Growable multi-agent mode fills one aggregate batch with fair prompt chunks."""
+    from freetoken.core import SamplingParams
+    from freetoken.scheduler.utils import PendingReq
+
+    _cm, _tm, _dm, pm = _build_managers(num_pages=64)
+    pm.interleave_chunks = True
+    pm.pending_list = [
+        PendingReq(1, torch.arange(24, dtype=torch.int32), SamplingParams(max_tokens=2)),
+        PendingReq(2, torch.arange(24, dtype=torch.int32) + 100, SamplingParams(max_tokens=2)),
+    ]
+
+    batch = pm.schedule_next_batch(16)
+
+    assert batch is not None
+    assert [req.uid for req in batch.reqs] == [1, 2]
+    assert [req.extend_len for req in batch.reqs] == [8, 8]
+    assert [req.uid for req in pm.pending_list] == [1, 2]
+
+
+def test_interleaved_prefill_does_not_queue_blocked_agent_before_active_lane():
+    """An agent that cannot reserve KV must not head-of-line block an admitted continuation."""
+    from freetoken.core import SamplingParams
+    from freetoken.scheduler.utils import PendingReq
+
+    _cm, _tm, _dm, pm = _build_managers(num_pages=32)
+    pm.interleave_chunks = True
+    pm.pending_list = [
+        PendingReq(1, torch.arange(20, dtype=torch.int32), SamplingParams(max_tokens=2)),
+        PendingReq(2, torch.arange(20, dtype=torch.int32) + 100, SamplingParams(max_tokens=20)),
+    ]
+
+    first = pm.schedule_next_batch(16)
+    second = pm.schedule_next_batch(16)
+
+    assert first is not None and [req.uid for req in first.reqs] == [1]
+    assert second is not None and second.reqs[0].uid == 1

@@ -85,7 +85,10 @@ work too.
   VRAM to the new KV segment, preserves all earlier KV at stable addresses, and
   recaptures decode graphs once after the final prefill chunk. Multiple requests
   use independent page-table rows over one shared physical arena; growth follows
-  their aggregate live-page demand. A 32-step decode burst between helper-prefill
+  their aggregate live-page demand. When several long prompts are queued, the
+  growable scheduler divides each 8K aggregate prefill batch into one fair lane per
+  waiting agent; this keeps agents progressing together while retaining the large
+  GGUF/MoE work batch. A 32-step decode burst between helper-prefill
   chunks prevents an established request from being starved. When a request stops,
   unlocked finished prefixes are evicted, surviving request-owned tail pages are
   compacted into low holes, complete VMM segments are decommitted, and the released
@@ -122,7 +125,19 @@ work too.
   at helper exit (262K → 128K, 3,483 → 4,036 expert slots) and recovered to about
   130 tok/s steady decode; Q4/INT4 released 0.35 GiB (192K → 128K, 5,644 → 5,842
   slots) and reached 154.04 tok/s over the final 80-token tail. Both surviving
-  agents remained coherent and neither emitted the other agent's passcode.
+  agents remained coherent and neither emitted the other agent's passcode. Clients
+  can opt into a persistent KV lease by sending the same `session_id` (and optional
+  `session_ttl_seconds`, default 300) on each full-conversation request to
+  `/v1/chat/completions`, `/v1/completions`, `/v1/messages`, or `/v1/responses`.
+  A normal EOS/stop/max-token turn ends only the turn: its reusable prefix and final
+  GDN snapshot stay protected for the next request. Sessions serialize their turns;
+  concurrent use of one id returns `session ... is busy`. `DELETE
+  /v1/sessions/{session_id}` is a scheduler barrier and returns `closed` only after
+  the lease is released (or `not_found`); a stream disconnect/abort also closes it,
+  and an inactive lease expires after its TTL. The client still sends the complete
+  conversation on each turn—the lease retains computation state, not message history.
+  Closing a helper makes its pages evictable immediately, allowing the growable KV
+  arena to decommit unused suffix segments and restore MoE residency.
 - Nemotron 3 Super uses its native hybrid Mamba-2 / full-attention / latent-MoE
   architecture. The NVFP4 release needs about 60 GiB of host RAM for expert banks and
   10.3 GiB of resident GPU weights. FreeToken currently serves one concurrent Nemotron

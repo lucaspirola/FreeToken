@@ -16,7 +16,11 @@ from freetoken.message import (
     CacheRebuildMsg,
     CacheRebuildReply,
     CacheRebuildResultMsg,
+    CloseSessionBackendMsg,
+    CloseSessionMsg,
     PromptAdmittedMsg,
+    SessionClosedReply,
+    SessionClosedResultMsg,
     TokenizeMsg,
     UserReply,
 )
@@ -28,6 +32,32 @@ def test_cache_rebuild_msg_roundtrip():
     out = BaseTokenizerMsg.decoder(BaseTokenizerMsg.encoder(msg))
     assert isinstance(out, CacheRebuildMsg)
     assert (out.request_id, out.moe_cache_size, out.num_pages, out.mode) == ("abc", 8, 1024, "if_idle")
+
+
+def test_session_control_messages_roundtrip():
+    close = CloseSessionMsg(session_id="agent-2", request_id="close-1")
+    close_out = BaseTokenizerMsg.decoder(BaseTokenizerMsg.encoder(close))
+    assert isinstance(close_out, CloseSessionMsg)
+    assert close_out.session_id == "agent-2"
+
+    backend = CloseSessionBackendMsg(session_id="agent-2", request_id="close-1")
+    backend_out = BaseBackendMsg.decoder(backend.encoder())
+    assert isinstance(backend_out, CloseSessionBackendMsg)
+    assert backend_out.session_id == "agent-2"
+
+    result = SessionClosedResultMsg(
+        session_id="agent-2", request_id="close-1", status="closed"
+    )
+    result_out = BaseTokenizerMsg.decoder(BaseTokenizerMsg.encoder(result))
+    assert isinstance(result_out, SessionClosedResultMsg)
+    assert result_out.status == "closed"
+
+    reply = SessionClosedReply(
+        session_id="agent-2", request_id="close-1", status="closed"
+    )
+    reply_out = BaseFrontendMsg.decoder(BaseFrontendMsg.encoder(reply))
+    assert isinstance(reply_out, SessionClosedReply)
+    assert reply_out.status == "closed"
 
 
 def test_cache_rebuild_backend_msg_roundtrip():

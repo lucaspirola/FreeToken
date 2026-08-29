@@ -17,9 +17,13 @@ from freetoken.message import (
     CacheRebuildMsg,
     CacheRebuildReply,
     CacheRebuildResultMsg,
+    CloseSessionBackendMsg,
+    CloseSessionMsg,
     DetokenizeMsg,
     ErrorReplyMsg,
     PromptAdmittedMsg,
+    SessionClosedReply,
+    SessionClosedResultMsg,
     TokenizeMsg,
     UserMsg,
     UserReply,
@@ -194,10 +198,31 @@ def tokenize_worker(
                             error=m.error,
                         )
                     )
+                elif isinstance(m, CloseSessionMsg):
+                    send_backend.put(
+                        CloseSessionBackendMsg(
+                            session_id=m.session_id, request_id=m.request_id
+                        )
+                    )
+                elif isinstance(m, SessionClosedResultMsg):
+                    send_frontend.put(
+                        SessionClosedReply(
+                            session_id=m.session_id,
+                            request_id=m.request_id,
+                            status=m.status,
+                        )
+                    )
             n_control = sum(
                 isinstance(
                     m,
-                    (CacheRebuildMsg, CacheRebuildResultMsg, ErrorReplyMsg, PromptAdmittedMsg),
+                    (
+                        CacheRebuildMsg,
+                        CacheRebuildResultMsg,
+                        CloseSessionMsg,
+                        SessionClosedResultMsg,
+                        ErrorReplyMsg,
+                        PromptAdmittedMsg,
+                    ),
                 )
                 for m in pending_msg
             )
@@ -254,13 +279,22 @@ def tokenize_worker(
                     )
                 if ok_msgs:
                     backend = [
-                        UserMsg(uid=msg.uid, input_ids=t, sampling_params=msg.sampling_params)
+                        UserMsg(
+                            uid=msg.uid,
+                            input_ids=t,
+                            sampling_params=msg.sampling_params,
+                            session_id=msg.session_id,
+                            session_ttl_seconds=msg.session_ttl_seconds,
+                        )
                         for msg, t in zip(ok_msgs, ok_tensors, strict=True)
                     ]
                     send_backend.put(backend[0] if len(backend) == 1 else BatchBackendMsg(data=backend))
             if len(abort_msg) > 0:
                 batch_output = BatchBackendMsg(
-                    data=[AbortBackendMsg(uid=msg.uid) for msg in abort_msg]
+                    data=[
+                        AbortBackendMsg(uid=msg.uid, session_id=msg.session_id)
+                        for msg in abort_msg
+                    ]
                 )
                 if len(batch_output.data) == 1:
                     batch_output = batch_output.data[0]

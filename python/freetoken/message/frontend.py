@@ -68,3 +68,10 @@ class CacheRebuildReply(BaseFrontendMsg):
     mamba_slots: int = 0
     num_swa_pages: int = 0
     error: str | None = None
+
+
+@dataclass
+class SessionClosedReply(BaseFrontendMsg):
+    session_id: str
+    request_id: str
+    status: str

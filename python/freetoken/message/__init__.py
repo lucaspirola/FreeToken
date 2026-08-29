@@ -3,19 +3,28 @@ from .backend import (
     BaseBackendMsg,
     BatchBackendMsg,
     CacheRebuildBackendMsg,
+    CloseSessionBackendMsg,
     ExitMsg,
     UserMsg,
 )
-from .frontend import BaseFrontendMsg, BatchFrontendMsg, CacheRebuildReply, UserReply
+from .frontend import (
+    BaseFrontendMsg,
+    BatchFrontendMsg,
+    CacheRebuildReply,
+    SessionClosedReply,
+    UserReply,
+)
 from .tokenizer import (
     AbortMsg,
     BaseTokenizerMsg,
     BatchTokenizerMsg,
     CacheRebuildMsg,
     CacheRebuildResultMsg,
+    CloseSessionMsg,
     DetokenizeMsg,
     ErrorReplyMsg,
     PromptAdmittedMsg,
+    SessionClosedResultMsg,
     TokenizeMsg,
 )
 
@@ -25,18 +34,22 @@ __all__ = [
     "BaseBackendMsg",
     "BatchBackendMsg",
     "CacheRebuildBackendMsg",
+    "CloseSessionBackendMsg",
     "ExitMsg",
     "UserMsg",
     "BaseTokenizerMsg",
     "BatchTokenizerMsg",
     "CacheRebuildMsg",
     "CacheRebuildResultMsg",
+    "CloseSessionMsg",
     "DetokenizeMsg",
     "ErrorReplyMsg",
     "PromptAdmittedMsg",
+    "SessionClosedResultMsg",
     "TokenizeMsg",
     "BaseFrontendMsg",
     "BatchFrontendMsg",
     "CacheRebuildReply",
+    "SessionClosedReply",
     "UserReply",
 ]

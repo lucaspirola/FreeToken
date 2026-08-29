@@ -10,6 +10,7 @@ It consumes typed events, not a re-parsed OpenAI stream.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -128,11 +129,18 @@ async def handle_anthropic_messages(
             req.model, uid, cache_report=cache_report,
         )
         if request is not None:
-            events = state.stream_with_cancellation(events, request, uid)
+            events = (
+                state.stream_with_cancellation(events, request, uid, spec.session_id)
+                if spec.session_id is not None
+                else state.stream_with_cancellation(events, request, uid)
+            )
         return StreamingResponse(events, media_type="text/event-stream")
 
     try:
         result = await generate_full(uid, spec, state, source="/v1/messages")
+    except asyncio.CancelledError:
+        await state.abort_user(uid, session_id=spec.session_id)
+        raise
     except GenerationError as exc:
         return _anthropic_error_response(400, "invalid_request_error", str(exc))
     response = anthropic_full_response(result, req.model, uid, cache_report=cache_report)
@@ -321,6 +329,8 @@ def convert_anthropic_to_genspec(
         chat_template_kwargs=ctk,
         template_tools=template_tools,
         parser_tools=parser_tools,
+        session_id=req.session_id,
+        session_ttl_seconds=req.session_ttl_seconds,
     )
 
 

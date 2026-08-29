@@ -139,6 +139,8 @@ class GenSpec:
     chat_template_kwargs: dict[str, Any] = field(default_factory=dict)
     template_tools: list[dict[str, Any]] | None = None   # tools the model sees (TokenizeMsg.tools)
     parser_tools: list[dict[str, Any]] | None = None     # tools for FunctionCallParser; None disables parsing
+    session_id: str | None = None
+    session_ttl_seconds: float | None = None
 
     @property
     def parse_tools(self) -> bool:
@@ -269,6 +271,8 @@ async def submit_generation(spec: GenSpec, state: Any) -> int:
             sampling_params=spec.sampling_params,
             chat_template_kwargs=spec.chat_template_kwargs,
             tools=spec.template_tools,
+            session_id=spec.session_id,
+            session_ttl_seconds=spec.session_ttl_seconds,
         )
     )
     return uid

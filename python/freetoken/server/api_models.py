@@ -90,6 +90,10 @@ class ChatCompletionRequest(BaseModel):
     function_call: Any | None = None
     logit_bias: dict[str, float] | None = None
     response_format: dict[str, Any] | None = None
+    # FreeToken extension: protect this conversation's completed KV until the next turn,
+    # explicit close, disconnect/abort, or idle expiry.
+    session_id: str | None = None
+    session_ttl_seconds: float | None = None
 
     @model_validator(mode="after")
     def _sync_max_completion_tokens(self) -> "ChatCompletionRequest":
@@ -120,6 +124,8 @@ class CompletionRequest(BaseModel):
     suffix: str | None = None
     logit_bias: dict[str, float] | None = None
     response_format: dict[str, Any] | None = None
+    session_id: str | None = None
+    session_ttl_seconds: float | None = None
 
     @model_validator(mode="after")
     def _sync_max_completion_tokens(self) -> "CompletionRequest":

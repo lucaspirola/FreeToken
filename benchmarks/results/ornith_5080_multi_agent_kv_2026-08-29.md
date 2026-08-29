@@ -41,3 +41,29 @@ implemented as the exact reverse of whole step commits. Four VMM/MHA tests cover
 commit, pointer stability, decommit, data preservation, and recommit. Scheduler tests
 cover aggregate demand, prefix-before-growth policy, private-page compaction, suffix
 removal, and bounded decode starvation.
+
+## Session leases and agent-aware scheduler follow-up
+
+The scheduler now distinguishes a completed **turn** from a closed **agent**. An
+opt-in session retains a locked radix prefix plus Ornith's final GDN snapshot between
+turns. A two-turn Q4/INT4 live gate reused 12,154 tokens and computed only 17 new
+tokens on turn two; both turns recovered passcode `5831047`. Explicit close crossed
+the tokenizer/scheduler control plane and released the protected handle. Close is a
+correlated barrier, while disconnect/abort closes implicitly and idle leases expire.
+
+Growable multi-agent prefill now divides the existing 8,192-token aggregate budget
+fairly across all waiting prompts. It does not increase the per-forward token budget;
+it makes each long agent a lane in the same forward and rotates unfinished lanes.
+
+| Short two-agent gate (20,832 prompt tokens each) | Result |
+|---|---:|
+| Q4/INT4 prior scheduler wall time | 133.73 s |
+| Q4/INT4 agent-aware lanes | 128.32 s (-4.0%) |
+| Q4/INT4 isolation | both own needles; no foreign needle |
+| Q6/Q8 agent-aware lanes wall time | 57.24 s |
+| Q6/Q8 paired prefill steady readings | ~840–860 tok/s instant |
+| Q6/Q8 isolation | both own needles; no foreign needle |
+
+The Q4 A/B used identical prompts and decode budgets on the same loaded server. The
+Q6 gate validates the accepted scheduling path and coherence; it is not presented as
+an A/B because no matching pre-change run was taken for that short workload.
