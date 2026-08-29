@@ -396,7 +396,7 @@ class Engine:
         if config.kv_grow_step_tokens:
             final_moe, final_kv_bytes = self._plan_growable_kv(self.num_pages)
             logger.info_rank0(
-                "Growable-KV ceiling validated: %d tokens, %s physical, minimum final "
+                "Growable-KV ceiling validated: %d tokens, %s physical, planned final "
                 "MoE cache %d slots",
                 self.num_pages * config.page_size,
                 mem_GB(final_kv_bytes),
@@ -685,6 +685,7 @@ class Engine:
                 parallel=expert_parallel,
                 decode_target=("cpu" if decode_target in ("cpu", "hybrid") else "gpu"),
                 layer_residency=requested_residency,
+                host_ram_reserve_bytes=int(config.host_ram_reserve_gb * 2**30),
             )
             if config.moe_cache_auto:
                 size, pages, overlap = self._resolve_auto_moe_cache_size(config, banks)
@@ -724,6 +725,7 @@ class Engine:
             cache.expert_hidden_size = config.model_config.hidden_size
             cache.expert_intermediate_size = config.model_config.moe_intermediate_size
             cache.pageable_gpu = config.moe_pageable_gpu
+            cache.direct_device_banks = bool(config.kv_grow_step_tokens)
             # before set_bank_sources: the residency validation and the copy plan's skip of non-pinned layers key on the CPU-layer set
             cache.cpu_layer_ids = cpu_layer_ids
             cache.set_bank_sources(banks.sources, layer_residency=banks.layer_residency)
@@ -1050,15 +1052,36 @@ class Engine:
             gguf_mma_enabled=config.model_config.gguf_expert_types is not None,
         )
 
-    def _plan_growable_kv(self, target_pages: int) -> tuple[int, int]:
+    def _growable_moe_bytes(self, cache_size: int) -> int:
+        """Exact GPU bytes for one growable mixed/uniform expert-cache geometry."""
+        from freetoken.engine.cache_budget import (
+            expert_bytes_per_slot,
+            expert_cache_bytes,
+            expert_slot_signatures,
+        )
+
+        moe = self.moe_offload_cache
+        assert moe is not None, "growable KV requires the MoE offload cache"
+        sources = moe.bank_sources
+        return expert_cache_bytes(
+            cache_size,
+            slot_signatures=expert_slot_signatures(sources),
+            num_experts=moe.num_experts,
+            prefill_overlap=(
+                self._growable_moe_prefill_overlap
+                and cache_size >= 2 * moe.num_experts
+            ),
+            fallback_per_expert_bytes=expert_bytes_per_slot(sources),
+        )
+
+    def _plan_growable_kv(
+        self, target_pages: int, *, extra_vmm_reserve_bytes: int = 0
+    ) -> tuple[int, int]:
         """Return the largest affordable MoE cache and exact mapped KV bytes."""
         pool = self.kv_cache
         moe = self.moe_offload_cache
         assert moe is not None, "growable KV requires the MoE offload cache"
         from freetoken.engine.cache_budget import (
-            expert_bytes_per_slot,
-            expert_cache_bytes,
-            expert_slot_signatures,
             net_cache_budget_bytes,
         )
 
@@ -1072,25 +1095,22 @@ class Engine:
             self._weights_bytes,
             fixed_cache_size,
         )
+        # A VMM growth step must make the new physical allocation resident before it
+        # can expose the mapping.  In particular, WSL/DXG needs more live headroom
+        # than the final pool-byte identity alone implies; with only memory_ratio's
+        # nominal slack, cuMemSetAccess can fail even though MoE released exactly as
+        # many bytes as KV is about to consume.  Keep a small, permanent commit
+        # cushion instead of discovering that condition by poisoning the CUDA
+        # context midway through a long prompt.
+        budget -= 256 * 1024 * 1024 + extra_vmm_reserve_bytes
+        if budget <= 0:
+            raise RuntimeError("growable KV has no budget after its 256 MiB VMM safety margin")
         kv_bytes = pool.mapped_bytes_for_pages(target_pages)
-        sources = moe.bank_sources
-        per_expert = expert_bytes_per_slot(sources)
-        signatures = expert_slot_signatures(sources)
-
         maximum = self._growable_moe_ceiling
         desired_overlap = self._growable_moe_prefill_overlap
 
         def overlap_at(size: int) -> bool:
             return desired_overlap and size >= 2 * moe.num_experts
-
-        def moe_bytes(size: int) -> int:
-            return expert_cache_bytes(
-                size,
-                slot_signatures=signatures,
-                num_experts=moe.num_experts,
-                prefill_overlap=overlap_at(size),
-                fallback_per_expert_bytes=per_expert,
-            )
 
         minimum = moe.num_experts
         while minimum <= maximum:
@@ -1107,8 +1127,8 @@ class Engine:
             raise RuntimeError(
                 f"MoE cache ceiling {maximum} has no valid growable-KV floor"
             )
-        if moe_bytes(minimum) + kv_bytes > budget:
-            need = moe_bytes(minimum) + kv_bytes
+        if self._growable_moe_bytes(minimum) + kv_bytes > budget:
+            need = self._growable_moe_bytes(minimum) + kv_bytes
             raise RuntimeError(
                 f"KV growth to {target_pages} tokens cannot fit even with the minimum "
                 f"MoE cache ({minimum} slots): need {mem_GB(need)}, budget {mem_GB(budget)}"
@@ -1117,7 +1137,7 @@ class Engine:
         lo, hi = minimum, maximum
         while lo < hi:
             mid = (lo + hi + 1) // 2
-            if moe_bytes(mid) + kv_bytes <= budget:
+            if self._growable_moe_bytes(mid) + kv_bytes <= budget:
                 lo = mid
             else:
                 hi = mid - 1
@@ -1155,12 +1175,56 @@ class Engine:
                 self._pending_graph_bs = list(self.graph_runner.graph_bs_list)
                 self.attn_backend.reset_capture()
                 self.graph_runner.destroy_cuda_graphs()
+        commit_bytes = kv_bytes - pool.mapped_bytes_for_pages(old_pages)
+        required_free = commit_bytes + 256 * 1024 * 1024
+        live_free_before = self._sync_get_memory()[0]
+        expected_free = (
+            live_free_before
+            + self._growable_moe_bytes(old_moe)
+            - self._growable_moe_bytes(target_moe)
+        )
+        # Pick the final geometry before allocating it. Rebuilding a second time can
+        # strand the first replacement in a partially occupied CUDA allocator segment,
+        # so the nominally released bytes never make it back to the driver.
+        desired_free = required_free + 128 * 1024 * 1024
+        if expected_free < desired_free:
+            shortage = desired_free - expected_free
+            target_moe, _ = self._plan_growable_kv(
+                target_pages,
+                extra_vmm_reserve_bytes=shortage + 64 * 1024 * 1024,
+            )
+            if target_moe >= old_moe:
+                raise RuntimeError(
+                    "growable KV live-memory guard could not fund the next VMM commit"
+                )
+            if not recapture:
+                if self._pending_graph_bs is None:
+                    self._pending_graph_bs = list(self.graph_runner.graph_bs_list)
+                    self.attn_backend.reset_capture()
+                    self.graph_runner.destroy_cuda_graphs()
+                recapture = True
+        if recapture:
             moe.prefill_overlap = (
                 self._growable_moe_prefill_overlap
                 and target_moe >= 2 * moe.num_experts
             )
             moe.rebuild(target_moe)
             object.__setattr__(self.config, "moe_cache_size", target_moe)
+        live_free = self._sync_get_memory()[0]
+        logger.info_rank0(
+            "Growable-KV pre-commit: %s free, %s commit, %s required "
+            "(allocator %s allocated / %s reserved)",
+            mem_GB(live_free),
+            mem_GB(commit_bytes),
+            mem_GB(required_free),
+            mem_GB(torch.cuda.memory_allocated(self.device)),
+            mem_GB(torch.cuda.memory_reserved(self.device)),
+        )
+        if live_free < required_free:
+            raise RuntimeError(
+                "growable KV refused an unsafe VMM commit: "
+                f"need {mem_GB(required_free)} free, have {mem_GB(live_free)}"
+            )
         pool.commit_pages(target_pages)
         if self.config.tp_info.size > 1:
             self.sync_all_ranks()
@@ -1549,6 +1613,19 @@ def _auto_pageable_gpu_layers(
     if not bank_bytes:
         return frozenset()
     budget = _pin_budget_bytes()
+    # This runs after dense weights have been initialized, immediately before expert-bank
+    # allocation. Cap the nominal CUDA pin quota by what the host can actually keep resident
+    # while preserving its configured reserve; the earlier CLI-time/free-RAM reading can be
+    # several GiB too optimistic once dense GGUF pages and runtime state are present.
+    try:
+        from freetoken.moe.expert_banks import _host_meminfo_bytes
+
+        available = _host_meminfo_bytes().get("MemAvailable")
+    except (OSError, ValueError):
+        available = None
+    if available is not None:
+        host_budget = max(0, available - int(config.host_ram_reserve_gb * 2**30))
+        budget = host_budget if budget is None else min(budget, host_budget)
     if budget is None or bank_bytes <= budget:
         logger.info_rank0(
             "--moe-pageable-gpu: expert banks fit the CUDA pin budget; keeping every "
@@ -1556,13 +1633,36 @@ def _auto_pageable_gpu_layers(
         )
         return frozenset()
     n = min(num_moe_layers, math.ceil(num_moe_layers * (1 - budget / bank_bytes)))
-    head = (n + 1) // 2
-    ids = frozenset(range(head)) | frozenset(
-        range(num_moe_layers - (n - head), num_moe_layers)
+    policy = "head+tail"
+    ids: frozenset[int]
+    types = getattr(config.model_config, "gguf_expert_types", None)
+    ornith_q6 = (
+        num_moe_layers == 40
+        and getattr(config.model_config, "num_experts", None) == 256
+        and getattr(config.model_config, "hidden_size", None) == 2048
+        and getattr(config.model_config, "moe_intermediate_size", None) == 512
+        and types
+        and all(pair == (14, 14) for pair in types)  # GGML Q6_K
     )
+    if ornith_q6:
+        # RTX 5080 deterministic two-agent profile, ranked by realized misses/step.
+        # Paging low-miss layers reduces pageable rows by ~33% versus the generic
+        # head+tail split. The fallback continues through inner layers before the
+        # consistently expensive first six layers if tighter hosts need >11 pages.
+        ranked = [39, 8, 20, 7, 15, 18, 30, 14, 19, 17, 12]
+        ranked += [i for i in range(6, num_moe_layers) if i not in ranked]
+        ranked += [i for i in range(6) if i not in ranked]
+        ids = frozenset(ranked[:n])
+        policy = "Ornith-Q6 measured-low-miss"
+    else:
+        head = (n + 1) // 2
+        ids = frozenset(range(head)) | frozenset(
+            range(num_moe_layers - (n - head), num_moe_layers)
+        )
     logger.info_rank0(
         f"--moe-pageable-gpu: banks {bank_bytes / 2**30:.2f} GiB > pin budget "
-        f"{budget / 2**30:.2f} GiB; {n} head+tail MoE layers use pageable staging "
+        f"{budget / 2**30:.2f} GiB effective resident budget; {n} head+tail MoE "
+        f"layers use pageable staging ({policy}) "
         f"and GPU compute ({sorted(ids)})"
     )
     return ids
@@ -1906,8 +2006,8 @@ def _adjust_config(config: EngineConfig):
             raise ValueError(
                 "growable KV requires --moe-backend offload and --moe-cache-auto"
             )
-        if config.moe_cpu_layers or config.moe_pageable_gpu:
-            raise ValueError("growable KV does not support CPU/pageable MoE layer splits")
+        if config.moe_cpu_layers:
+            raise ValueError("growable KV does not support CPU MoE layer splits")
         if resolve_pool_class(config.model_config) is not MHAKVCache:
             raise ValueError("growable KV currently supports dense MHA KV pools only")
         initial_pages = config.kv_grow_step_tokens // config.page_size

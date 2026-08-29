@@ -19,6 +19,13 @@ class EngineConfig:
     tp_info: DistributedInfo
     dtype: torch.dtype
     max_running_req: int = 4
+    # In growable multi-agent mode, tune the prefill/decode time slices from measured
+    # forward durations. The controller is active only while both phases are runnable.
+    adaptive_scheduler: bool = True
+    # Automatic Claude Code/Codex sessions protect their completed prefix for this
+    # grace period, then degrade to ordinary evictable radix state. Explicit client
+    # session_id leases remain protected until close/abort/TTL.
+    auto_session_grace_seconds: float = 30.0
     attention_backend: str = "auto"
     moe_backend: str = "auto"
     # NVFP4 routed-expert GEMM backend (--nvfp4-backend): auto|marlin|flashinfer|triton.
@@ -28,6 +35,10 @@ class EngineConfig:
     # parallel reader's extra (non-reclaimable) whole-shard buffer; "serial" forces the
     # low-memory reclaimable read; "parallel" forces the fast read.
     expert_load: str = "auto"
+    # Host memory kept outside resident expert banks. The pre-allocation gate rejects a
+    # configuration that would consume this reserve instead of letting Linux's OOM killer
+    # terminate the serving process (and, commonly, its launching terminal).
+    host_ram_reserve_gb: float = 3.0
     moe_cache_size: int = 0
     moe_cache_rate: float | None = None
     moe_cache_auto: bool = False

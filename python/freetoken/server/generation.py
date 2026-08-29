@@ -141,6 +141,7 @@ class GenSpec:
     parser_tools: list[dict[str, Any]] | None = None     # tools for FunctionCallParser; None disables parsing
     session_id: str | None = None
     session_ttl_seconds: float | None = None
+    session_reclaimable: bool = False
 
     @property
     def parse_tools(self) -> bool:
@@ -273,6 +274,7 @@ async def submit_generation(spec: GenSpec, state: Any) -> int:
             tools=spec.template_tools,
             session_id=spec.session_id,
             session_ttl_seconds=spec.session_ttl_seconds,
+            session_reclaimable=spec.session_reclaimable,
         )
     )
     return uid

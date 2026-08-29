@@ -146,6 +146,20 @@ work too.
   not message history. OpenAI `previous_response_id` storage is not emulated.
   Closing a helper makes its pages evictable immediately, allowing the growable KV
   arena to decommit unused suffix segments and restore MoE residency.
+  The production host-memory guard is 3 GiB. Growable mode now places its large
+  resizeable expert-cache banks in direct CUDA VMM allocations rather than the
+  PyTorch caching allocator, keeps a 256 MiB physical-commit cushion, and refuses a
+  growth step before `cuMemSetAccess` if live free VRAM is insufficient. Exact
+  1,048,576-token capacity gates (1,048,448 prompt + 128 output allowance, YaRN 4)
+  passed coherently: Q4_K_M + Q4_0 KV averaged 331.82 tok/s prefill and 46.03 tok/s
+  decode, ending with 5.70 GiB physical KV and 2,952 expert slots; Q6_K + Q8_0 KV
+  averaged 207.73 tok/s prefill and 15.21 tok/s decode, ending with 10.70 GiB KV and
+  258 expert slots. The latter is a single-request capacity profile and requires
+  `--linear-state-slots 5`, `--memory-ratio 0.99`, `--moe-pageable-gpu`, and a
+  sufficiently large pin budget; the default nine linear-state slots are correctly
+  rejected by the guarded 1M preflight. See
+  `benchmarks/results/ornith_5080_scheduler_safety_1m_2026-08-30.md` for the full
+  safety, session, scheduler, and measurement notes.
 - Nemotron 3 Super uses its native hybrid Mamba-2 / full-attention / latent-MoE
   architecture. The NVFP4 release needs about 60 GiB of host RAM for expert banks and
   10.3 GiB of resident GPU weights. FreeToken currently serves one concurrent Nemotron

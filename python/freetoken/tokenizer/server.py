@@ -285,6 +285,7 @@ def tokenize_worker(
                             sampling_params=msg.sampling_params,
                             session_id=msg.session_id,
                             session_ttl_seconds=msg.session_ttl_seconds,
+                            session_reclaimable=msg.session_reclaimable,
                         )
                         for msg, t in zip(ok_msgs, ok_tensors, strict=True)
                     ]

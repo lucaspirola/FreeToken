@@ -498,6 +498,7 @@ def test_route_binds_claude_code_header_to_scheduler_lease():
 
     assert response.status_code == 200
     assert fake.last_sent.session_id.startswith("auto:claude-code:")
+    assert fake.last_sent.session_reclaimable is True
     assert response.headers["x-freetoken-session-id"] == fake.last_sent.session_id
 
 

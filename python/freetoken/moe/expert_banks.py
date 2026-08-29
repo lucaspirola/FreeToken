@@ -468,6 +468,17 @@ def bank_bytes_estimate(model_config) -> int | None:
         model_config, "hidden_size", None
     )
     inter = getattr(model_config, "moe_intermediate_size", None)
+    gguf_types = getattr(model_config, "gguf_expert_types", None)
+    if fmt == "gguf" and gguf_types and all((experts, hidden, inter)):
+        from freetoken.models.gguf.dequant import row_bytes
+
+        def align(n: int) -> int:
+            return (n + 63) // 64 * 64
+        return experts * sum(
+            align(2 * inter * row_bytes(hidden, gate_type))
+            + align(hidden * row_bytes(inter, down_type))
+            for gate_type, down_type in gguf_types
+        )
     if fmt == "laguna_int4" and all((experts, hidden, inter)):
         from freetoken.models.gguf.dequant import GGML_BF16, GGML_Q4_0, row_bytes
 
@@ -496,6 +507,108 @@ def bank_bytes_estimate(model_config) -> int | None:
     return layers * experts * per_expert(hidden, inter)
 
 
+def bank_layer_bytes_estimate(model_config) -> list[int] | None:
+    """Estimated bytes per MoE layer, preserving mixed-GGUF size differences."""
+    total = bank_bytes_estimate(model_config)
+    layers = getattr(model_config, "num_moe_layers", None)
+    if not total or not layers:
+        return None
+    gguf_types = getattr(model_config, "gguf_expert_types", None)
+    if getattr(model_config, "expert_quant", None) == "gguf" and gguf_types:
+        from freetoken.models.gguf.dequant import row_bytes
+
+        experts = model_config.num_experts
+        hidden = model_config.hidden_size
+        inter = model_config.moe_intermediate_size
+
+        def align(n: int) -> int:
+            return (n + 63) // 64 * 64
+
+        return [
+            experts
+            * (
+                align(2 * inter * row_bytes(hidden, gate_type))
+                + align(hidden * row_bytes(inter, down_type))
+            )
+            for gate_type, down_type in gguf_types
+        ]
+    return [total // layers] * layers
+
+
+def _host_meminfo_bytes() -> dict[str, int]:
+    values: dict[str, int] = {}
+    try:
+        with open("/proc/meminfo") as meminfo:
+            for line in meminfo:
+                key, value = line.split(":", 1)
+                fields = value.split()
+                if fields:
+                    values[key] = int(fields[0]) * 1024
+    except (OSError, ValueError):
+        return {}
+    return values
+
+
+def validate_host_bank_memory(
+    model_config,
+    *,
+    reserve_bytes: int,
+    meminfo: dict[str, int] | None = None,
+    layer_residency: list[str] | None = None,
+    disk_free_bytes: int | None = None,
+) -> None:
+    """Reject an unsafe fully-resident expert-bank allocation before it starts.
+
+    ``MemAvailable`` already includes reclaimable file cache. Expert banks on the normal
+    GPU-offload path are anonymous and CUDA-registered after fill, so swap cannot provide
+    headroom for them; they and the requested system reserve must fit in available RAM.
+    Unknown model geometries or hosts without ``/proc/meminfo`` retain the old behavior.
+    """
+    layer_bytes = bank_layer_bytes_estimate(model_config)
+    bank_bytes = sum(layer_bytes) if layer_bytes else None
+    info = _host_meminfo_bytes() if meminfo is None else meminfo
+    available = info.get("MemAvailable")
+    if not bank_bytes or available is None:
+        return
+    reserve_bytes = max(0, int(reserve_bytes))
+    from freetoken.moe.host_banks import HostResidency
+
+    pageable_bytes = 0
+    if layer_residency is not None and layer_bytes is not None:
+        pageable_bytes = sum(
+            size
+            for size, residency in zip(layer_bytes, layer_residency, strict=True)
+            if residency == HostResidency.PAGEABLE.value
+        )
+    resident_bytes = bank_bytes - pageable_bytes
+    required = resident_bytes + reserve_bytes
+    if required > available:
+        short = required - available
+        raise MemoryError(
+            f"expert banks need {resident_bytes / 2**30:.2f} GiB resident host RAM plus "
+            f"{reserve_bytes / 2**30:.2f} GiB reserve, but MemAvailable is only "
+            f"{available / 2**30:.2f} GiB (short by {short / 2**30:.2f} GiB). "
+            "Refusing before allocation to prevent the OS OOM killer. Free host RAM, "
+            "increase the host memory limit, lower --host-ram-reserve-gb knowingly, or "
+            "use a pageable expert-bank configuration."
+        )
+    if pageable_bytes:
+        if disk_free_bytes is None:
+            import shutil
+            import tempfile
+
+            disk_free_bytes = shutil.disk_usage(
+                os.environ.get("FREETOKEN_BANK_CACHE_DIR") or tempfile.gettempdir()
+            ).free
+        disk_reserve = 2 << 30
+        if pageable_bytes + disk_reserve > disk_free_bytes:
+            raise MemoryError(
+                f"pageable expert banks need {pageable_bytes / 2**30:.2f} GiB temporary "
+                f"storage plus 2.00 GiB reserve, but only {disk_free_bytes / 2**30:.2f} "
+                "GiB is free; set FREETOKEN_BANK_CACHE_DIR to a larger local filesystem"
+            )
+
+
 def load_expert_banks(
     model_path: str,
     model_config,
@@ -509,6 +622,7 @@ def load_expert_banks(
     decode_target: str = "gpu",
     layer_sink=None,
     layer_residency: list[str] | None = None,
+    host_ram_reserve_bytes: int = 4 << 30,
 ) -> ExpertBanks:
     """Load (or fabricate, with ``dummy=True``) the expert banks. Two paths, both returning
     the same normalized ``ExpertBanks`` and both pinning after fill:
@@ -530,6 +644,12 @@ def load_expert_banks(
     ``layer_residency``: per-layer ``HostResidency`` labels applied at settle time -- explicitly on the FTW fast path, ambiently (``requested_residency``) in the slow-path providers.
     Applied labels are echoed on ``ExpertBanks.layer_residency``; a loader that settles some other way leaves it ``None`` (CPU-layer decode still works on pinned banks, it just saves no pin quota).
     """
+    validate_host_bank_memory(
+        model_config,
+        reserve_bytes=host_ram_reserve_bytes,
+        layer_residency=layer_residency,
+    )
+
     from freetoken.checkpoint.ftw import is_ftw_checkpoint, load_ftw_banks
 
     if model_path and is_ftw_checkpoint(model_path) and not dummy:

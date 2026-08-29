@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from dataclasses import dataclass
 from typing import Iterator
 
 import torch
 from flashlib.kernels.slot_cache import N_STATS, Stat
+from freetoken.utils import init_logger
 
 # Fuse the per-bank expert copies into a single multi-bank launch (one per copy_missing
 # instead of one per bank). Set FREETOKEN_FUSED_COPY=0 to force the legacy per-bank path
@@ -24,8 +26,6 @@ _FUSED_COPY = os.getenv("FREETOKEN_FUSED_COPY", "1").strip().lower() not in {"0"
 # whole layer is tiny) and are excluded from the hit gather, so every per-run
 # entry the batch sees is >= this size.
 _SMALL_BANK_FEAT_BYTES = 256 * 1024
-
-from freetoken.utils import init_logger
 
 logger = init_logger(__name__)
 
@@ -157,6 +157,12 @@ class OffloadMoeCache:
         # decode step's misses through a bounded pinned host/device staging pair.
         # The engine enables this before set_bank_sources and disables CUDA graphs.
         self.pageable_gpu = False
+        # Growable KV trades this storage back to CUDA VMM at runtime.  The native
+        # PyTorch caching allocator can strand hundreds of MiB in partially occupied
+        # segments after a resize, so the engine opts these large bank tensors into
+        # direct VMM-backed allocations.  Ordinary static caches keep torch.empty.
+        self.direct_device_banks = False
+        self._direct_bank_allocations: list[object] = []
         # num_experts floor + nvfp4_marlin slot cap, shared with the runtime-rebuild path.
         self.validate_rebuild(self.cache_size)
         assert not self.prefill_overlap or self.cache_size >= 2 * self.num_experts, (
@@ -301,6 +307,18 @@ class OffloadMoeCache:
         self._pageable_num_host: torch.Tensor | None = None
         self._pageable_src_host: torch.Tensor | None = None
         self._pageable_dst_host: torch.Tensor | None = None
+        # Opt-in host-side profiling for the eager pageable decode path. Kept as Python
+        # counters because this path already crosses a host synchronization and never runs
+        # inside CUDA graphs. They remain untouched unless --moe-collect-stats is enabled.
+        self.pageable_stage_calls = 0
+        self.pageable_stage_rows = 0
+        self.pageable_stage_bytes = 0
+        self.pageable_plan_wait_seconds = 0.0
+        self.pageable_gather_seconds = 0.0
+        self.pageable_stage_calls_layer = [0] * self.num_layers
+        self.pageable_stage_rows_layer = [0] * self.num_layers
+        self.pageable_plan_wait_layer = [0.0] * self.num_layers
+        self.pageable_gather_seconds_layer = [0.0] * self.num_layers
         # Per-bank [2, num_experts, ...] double-buffer views over the slot cache's
         # first 2 * num_experts slots (set up when prefill_overlap is enabled).
         self.prefill_bank_buffers: list[torch.Tensor] = []
@@ -323,6 +341,32 @@ class OffloadMoeCache:
         self._batch_memcpy = None
         self.prefill_hit_rows = 0
         self.prefill_total_rows = 0
+
+    def _alloc_device_bank_cache(
+        self, shape: tuple[int, ...], dtype: torch.dtype
+    ) -> torch.Tensor:
+        if not self.direct_device_banks or self.device.type != "cuda":
+            return torch.empty(shape, dtype=dtype, device=self.device)
+
+        from freetoken.kernel.vmm import VMMTensor, allocation_granularity
+
+        granularity = allocation_granularity(self.device)
+        nbytes = math.prod(shape) * torch.empty((), dtype=dtype).element_size()
+        mapped_bytes = ((nbytes + granularity - 1) // granularity) * granularity
+        chunk_bytes = max(granularity, (256 * 1024 * 1024 // granularity) * granularity)
+        ranges = [
+            (offset, min(chunk_bytes, mapped_bytes - offset))
+            for offset in range(0, mapped_bytes, chunk_bytes)
+        ]
+        allocation = VMMTensor(
+            shape,
+            dtype=dtype,
+            device=self.device,
+            reserved_bytes=mapped_bytes,
+            initial_ranges=ranges,
+        )
+        self._direct_bank_allocations.append(allocation)
+        return allocation.tensor
 
     def set_bank_sources(
         self,
@@ -411,10 +455,8 @@ class OffloadMoeCache:
                 if dtype is not torch.uint8:
                     raise ValueError("variable-size expert rows must use flat uint8 storage")
             self._bank_cache_shapes[name] = cache_tail
-            self.bank_caches[name] = torch.empty(
-                (self.cache_size, *cache_tail),
-                dtype=dtype,
-                device=self.device,
+            self.bank_caches[name] = self._alloc_device_bank_cache(
+                (self.cache_size, *cache_tail), dtype
             )
         self.banks = [(self.bank_sources[n], self.bank_caches[n]) for n in self.bank_schema]
         self._build_copy_plan()
@@ -471,8 +513,8 @@ class OffloadMoeCache:
             caches: dict[str, torch.Tensor] = {}
             for name in self.bank_schema:
                 source = sources[name][layer]
-                cache = torch.empty(
-                    (capacity, *source.shape[1:]), dtype=source.dtype, device=self.device
+                cache = self._alloc_device_bank_cache(
+                    (capacity, *source.shape[1:]), source.dtype
                 )
                 caches[name] = cache
                 self.bank_caches[f"{name}.class{class_id}"] = cache
@@ -685,12 +727,18 @@ class OffloadMoeCache:
         self._prefill_buffer_layer = [None, None]
         self._prefill_buffer_released = [True, True]
         self._prefill_buffer_has_release_event = [False, False]
+        # A standalone caller may not have entered through the engine's safe growth
+        # boundary.  Finish all users of the old mappings before their VMM owners are
+        # released; synchronizing afterwards is too late for direct-device banks.
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
         # 2. Drop old GPU tensors (free-before-alloc).
         self.banks = []
         self.bank_caches = {}
+        self._class_bank_caches = []
+        self._direct_bank_allocations = []
         self.cache_size = cache_size
         if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
             torch.cuda.empty_cache()
         # 3. Reallocate the slot cache from the retained host sources.
         if size_class_sources is not None:
@@ -698,8 +746,8 @@ class OffloadMoeCache:
         else:
             for name in self.bank_schema:
                 head = self.bank_sources[name][0]
-                self.bank_caches[name] = torch.empty(
-                    (cache_size, *self._bank_cache_shapes[name]), dtype=head.dtype, device=self.device
+                self.bank_caches[name] = self._alloc_device_bank_cache(
+                    (cache_size, *self._bank_cache_shapes[name]), head.dtype
                 )
             self.banks = [(self.bank_sources[n], self.bank_caches[n]) for n in self.bank_schema]
             self._build_copy_plan()  # slot caches were reallocated -> refresh fused-copy addrs
@@ -840,10 +888,9 @@ class OffloadMoeCache:
             for name in self.bank_schema:
                 per_layer = self.bank_sources[name]
                 max_layer = max(per_layer, key=lambda source: math.prod(source.shape[1:]))
-                buffer = torch.empty(
+                buffer = self._alloc_device_bank_cache(
                     (2, self.num_experts, *max_layer.shape[1:]),
-                    dtype=max_layer.dtype,
-                    device=self.device,
+                    max_layer.dtype,
                 )
                 self.prefill_bank_buffers.append(buffer)
                 self.bank_caches[f"{name}.prefill"] = buffer
@@ -1167,6 +1214,15 @@ class OffloadMoeCache:
         self.stat_active_layer.zero_()
         self.stat_fetched_layer.zero_()
         self.stat_steps_layer.zero_()
+        self.pageable_stage_calls = 0
+        self.pageable_stage_rows = 0
+        self.pageable_stage_bytes = 0
+        self.pageable_plan_wait_seconds = 0.0
+        self.pageable_gather_seconds = 0.0
+        self.pageable_stage_calls_layer = [0] * self.num_layers
+        self.pageable_stage_rows_layer = [0] * self.num_layers
+        self.pageable_plan_wait_layer = [0.0] * self.num_layers
+        self.pageable_gather_seconds_layer = [0.0] * self.num_layers
 
     def record_decode_stats(self, layer_id: int) -> None:
         """No-op: ``ensure_experts`` accumulates into ``lru_stats`` inside its own launch.
@@ -1213,6 +1269,11 @@ class OffloadMoeCache:
             # rows prefetched into the double buffer since the last reset.
             "prefill_hit_rows": self.prefill_hit_rows,
             "prefill_rows": self.prefill_total_rows,
+            "pageable_stage_calls": self.pageable_stage_calls,
+            "pageable_rows": self.pageable_stage_rows,
+            "pageable_gib": self.pageable_stage_bytes / 2**30,
+            "pageable_plan_wait_seconds": self.pageable_plan_wait_seconds,
+            "pageable_gather_seconds": self.pageable_gather_seconds,
         }
 
     def decode_miss_stats_per_layer(self) -> dict:
@@ -1240,6 +1301,10 @@ class OffloadMoeCache:
                 "missing_per_step": (m / s) if s else 0.0,
                 "miss_rate": (m / a) if a else 0.0,
                 "fetched_per_step": (f / s) if s else 0.0,
+                "pageable_stage_calls": self.pageable_stage_calls_layer[L],
+                "pageable_rows": self.pageable_stage_rows_layer[L],
+                "pageable_plan_wait_seconds": self.pageable_plan_wait_layer[L],
+                "pageable_gather_seconds": self.pageable_gather_seconds_layer[L],
             })
         return {"per_layer": per_layer}
 
@@ -1342,25 +1407,43 @@ class OffloadMoeCache:
             self._pageable_dst_host = torch.empty(
                 self.evict_slots.numel(), dtype=torch.int32, pin_memory=True
             )
+        profiling = self.collect_stats
+        wait_started = time.perf_counter() if profiling else 0.0
         stream = torch.cuda.current_stream(self.device)
         self._pageable_num_host.copy_(self.num_indices, non_blocking=True)
         self._pageable_src_host.copy_(self.src_indices, non_blocking=True)
         self._pageable_dst_host.copy_(self.evict_slots, non_blocking=True)
         stream.synchronize()
+        wait_seconds = time.perf_counter() - wait_started if profiling else 0.0
         n = int(self._pageable_num_host[0])
+        if profiling:
+            self.pageable_stage_calls += 1
+            self.pageable_plan_wait_seconds += wait_seconds
+            self.pageable_stage_calls_layer[layer_id] += 1
+            self.pageable_plan_wait_layer[layer_id] += wait_seconds
         if n == 0:
             return
         if n > self.src_indices.numel():
             raise RuntimeError(f"invalid pageable expert miss count {n}")
         self._ensure_pageable_stage(n, layer_id)
 
+        gather_started = time.perf_counter() if profiling else 0.0
         src_ids = self._pageable_src_host[:n].long()
+        row_bytes = 0
         for (per_layer, _cache), host_stage, device_stage in zip(
             self.banks, self._pageable_host_staging, self._pageable_device_staging
         ):
             source = per_layer[layer_id]
+            row_bytes += source[0].numel() * source.element_size()
             torch.index_select(source, 0, src_ids, out=host_stage[:n])
             device_stage[:n].copy_(host_stage[:n], non_blocking=True)
+        if profiling:
+            gather_seconds = time.perf_counter() - gather_started
+            self.pageable_stage_rows += n
+            self.pageable_stage_bytes += n * row_bytes
+            self.pageable_gather_seconds += gather_seconds
+            self.pageable_stage_rows_layer[layer_id] += n
+            self.pageable_gather_seconds_layer[layer_id] += gather_seconds
 
         # All current in-tree fixed-row formats use the fused plan. Variable-row
         # GGUF needs per-layer strides and is deliberately rejected until it has a

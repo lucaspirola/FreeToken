@@ -74,6 +74,7 @@ class TokenizeMsg(BaseTokenizerMsg):
     tools: List[Dict[str, Any]] | None = None
     session_id: str | None = None
     session_ttl_seconds: float | None = None
+    session_reclaimable: bool = False
 
 
 @dataclass

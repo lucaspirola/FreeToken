@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -69,6 +70,7 @@ class LaunchContext:
     extra_args: list[str]
     dry_run: bool
     assume_yes: bool = False
+    launch_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,7 @@ class CommandSpec:
     argv: list[str]
     env: dict[str, str]
     unset_env: tuple[str, ...] = ()
+    cleanup_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -346,6 +349,11 @@ def _codex_migrated_base_config_text(existing: str) -> str:
 
 
 def _codex_profile_text(ctx: LaunchContext, catalog_path: Path) -> str:
+    launch_header = (
+        f'http_headers = {{ "X-FreeToken-Launch-Id" = {_toml_string(ctx.launch_id)} }}\n'
+        if ctx.launch_id
+        else ""
+    )
     return (
         f"model = {_toml_string(ctx.model.model_id)}\n"
         + f"openai_base_url = {_toml_string(ctx.server.openai_base_url)}\n"
@@ -356,6 +364,7 @@ def _codex_profile_text(ctx: LaunchContext, catalog_path: Path) -> str:
         + f"base_url = {_toml_string(ctx.server.openai_base_url)}\n"
         + 'wire_api = "responses"\n'
         + f"env_key = {_toml_string(CODEX_PROVIDER_API_KEY_ENV)}\n"
+        + launch_header
     )
 
 
@@ -393,11 +402,20 @@ def prepare_codex(ctx: LaunchContext) -> CommandSpec:
         argv=argv,
         env={CODEX_PROVIDER_API_KEY_ENV: "freetoken"},
         unset_env=CODEX_CLEAR_ENV,
+        cleanup_url=(
+            f"{ctx.server.origin}/v1/client-launches/{ctx.launch_id}/sessions"
+            if ctx.launch_id
+            else None
+        ),
     )
 
 
 def prepare_claude(ctx: LaunchContext) -> CommandSpec:
     model_id = ctx.model.model_id
+    custom_headers = os.environ.get("ANTHROPIC_CUSTOM_HEADERS", "").strip()
+    if ctx.launch_id:
+        launch_header = f"X-FreeToken-Launch-Id: {ctx.launch_id}"
+        custom_headers = f"{custom_headers}\n{launch_header}".strip()
     return CommandSpec(
         argv=["claude", "--model", model_id, *ctx.extra_args],
         env={
@@ -413,7 +431,13 @@ def prepare_claude(ctx: LaunchContext) -> CommandSpec:
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": model_id,
             "CLAUDE_CODE_SUBAGENT_MODEL": model_id,
             "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+            **({"ANTHROPIC_CUSTOM_HEADERS": custom_headers} if custom_headers else {}),
         },
+        cleanup_url=(
+            f"{ctx.server.origin}/v1/client-launches/{ctx.launch_id}/sessions"
+            if ctx.launch_id
+            else None
+        ),
     )
 
 
@@ -860,6 +884,8 @@ def print_dry_run(ctx: LaunchContext, spec: CommandSpec) -> None:
         print("Unset environment:")
         for key in spec.unset_env:
             print(f"  {key}")
+    if spec.cleanup_url:
+        print(f"Exit cleanup: DELETE {spec.cleanup_url}")
 
 
 def _agent_binary_filename(binary: str) -> str:
@@ -974,12 +1000,25 @@ def ensure_agent_installed(
     return path
 
 
+def _cleanup_client_launch(url: str) -> None:
+    try:
+        request = Request(url, method="DELETE", headers={"Accept": "application/json"})
+        with urlopen(request, timeout=10) as response:
+            response.read()
+    except (HTTPError, URLError, OSError, TimeoutError) as exc:
+        print(f"warning: FreeToken session teardown failed: {exc}", file=sys.stderr)
+
+
 def run_command(spec: CommandSpec) -> int:
     env = os.environ.copy()
     for key in spec.unset_env:
         env.pop(key, None)
     env.update(spec.env)
-    return subprocess.run(spec.argv, env=env).returncode
+    try:
+        return subprocess.run(spec.argv, env=env).returncode
+    finally:
+        if spec.cleanup_url:
+            _cleanup_client_launch(spec.cleanup_url)
 
 
 def main(argv: list[str] | None = None, prog: str = "python -m freetoken.launch") -> int:
@@ -1001,12 +1040,14 @@ def main(argv: list[str] | None = None, prog: str = "python -m freetoken.launch"
 
         server = resolve_server_url(args.server)
         model = discover_server_model(server)
+        launch_id = f"ft-{uuid.uuid4()}"
         plan_ctx = LaunchContext(
             server=server,
             model=model,
             extra_args=args.extra_args,
             dry_run=True,
             assume_yes=args.yes,
+            launch_id=launch_id,
         )
         spec = PREPARERS[args.agent](plan_ctx)
         if args.dry_run:
@@ -1024,6 +1065,7 @@ def main(argv: list[str] | None = None, prog: str = "python -m freetoken.launch"
             extra_args=args.extra_args,
             dry_run=False,
             assume_yes=args.yes,
+            launch_id=launch_id,
         )
         spec = PREPARERS[args.agent](ctx)
         if binary_path != spec.argv[0]:
@@ -1031,6 +1073,7 @@ def main(argv: list[str] | None = None, prog: str = "python -m freetoken.launch"
                 argv=[binary_path, *spec.argv[1:]],
                 env=spec.env,
                 unset_env=spec.unset_env,
+                cleanup_url=spec.cleanup_url,
             )
         if args.config_only:
             return 0

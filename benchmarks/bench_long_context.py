@@ -47,8 +47,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--prefill-chunk", type=int, default=8192)
     p.add_argument("--mem-ratio", type=float, default=0.97)
     p.add_argument("--kv-grow-step-tokens", type=int)
+    p.add_argument("--linear-state-slots", type=int)
     p.add_argument("--cache-policy", choices=("lru", "lfu"), default="lfu")
     p.add_argument("--server-timeout", type=float, default=1800)
+    p.add_argument("--moe-pageable-gpu", action="store_true")
+    p.add_argument("--host-ram-reserve-gb", type=float, default=3.0)
     p.add_argument("--json", dest="json_out")
     # Attributes consumed by common.serve_cmd.
     p.set_defaults(
@@ -238,6 +241,11 @@ def main() -> int:
             "--rope-yarn-original-context",
             str(args.rope_yarn_original_context),
         ]
+    if args.moe_pageable_gpu:
+        cmd.append("--moe-pageable-gpu")
+    if args.linear_state_slots is not None:
+        cmd += ["--linear-state-slots", str(args.linear_state_slots)]
+    cmd += ["--host-ram-reserve-gb", str(args.host_ram_reserve_gb)]
     print(
         f"[long] model={args.model}\n"
         f"[long] workload={workload} expected={expected!r}\n"

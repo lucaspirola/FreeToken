@@ -59,6 +59,11 @@ python benchmarks/bench_ornith_attention.py --decode-lengths 8192 32768 131072 2
 gate. Pass `--synthetic-needle` for a portable built-in workload when the external RULER
 JSONL is unavailable on the host; the prompt is trimmed in token space to
 `--target-prompt-tokens` while preserving the needle and final question.
+Growable-KV runs accept `--kv-grow-step-tokens`; Q6 host-pressure runs additionally
+accept `--moe-pageable-gpu`, `--linear-state-slots`, and
+`--host-ram-reserve-gb` (production default: 3 GiB). Streaming output reports both
+the latest-chunk and cumulative-average prefill rates. Use short targets for A/B
+tuning and reserve exact maximum-context runs for final correctness/capacity gates.
 
 For host RAM vs PCIe bandwidth and the offload/hybrid backend pick, use `ft bench bw`
 instead — it writes the JSON profile the engine reads.

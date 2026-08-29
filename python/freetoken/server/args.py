@@ -247,6 +247,17 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--auto-session-grace-seconds",
+        type=float,
+        default=ServerArgs.auto_session_grace_seconds,
+        help=(
+            "Seconds an idle automatically detected Claude Code/Codex session keeps "
+            "its KV prefix protected before it becomes pressure-evictable. Explicit "
+            "session_id leases are unaffected."
+        ),
+    )
+
+    parser.add_argument(
         "--max-seq-len-override",
         type=int,
         default=ServerArgs.max_seq_len_override,
@@ -353,6 +364,17 @@ def parse_args(
         type=_positive_int,
         default=ServerArgs.decode_log_interval,
         help="Print one decode scheduler status line every N decode forwards.",
+    )
+
+    parser.add_argument(
+        "--disable-adaptive-scheduler",
+        action="store_false",
+        dest="adaptive_scheduler",
+        default=ServerArgs.adaptive_scheduler,
+        help=(
+            "Use the legacy fixed 8192-token prefill / 32-step decode slices when "
+            "growable KV has simultaneous prefill and decode work."
+        ),
     )
 
     kv_capacity_group = parser.add_mutually_exclusive_group()
@@ -655,6 +677,16 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--host-ram-reserve-gb",
+        type=float,
+        default=ServerArgs.host_ram_reserve_gb,
+        help=(
+            "Host RAM FreeToken must leave outside resident expert banks. Unsafe "
+            "loads fail before bank allocation instead of invoking the OS OOM killer."
+        ),
+    )
+
+    parser.add_argument(
         "--moe-hybrid-max-fetch",
         type=int,
         default=ServerArgs.moe_hybrid_max_fetch,
@@ -725,6 +757,11 @@ def parse_args(
 
     # Parse arguments
     kwargs = parser.parse_args(args).__dict__.copy()
+
+    if kwargs["auto_session_grace_seconds"] < 0:
+        parser.error("--auto-session-grace-seconds must be >= 0")
+    if kwargs["host_ram_reserve_gb"] < 0:
+        parser.error("--host-ram-reserve-gb must be >= 0")
 
     # resolve some arguments
     run_shell |= kwargs.pop("shell_mode")

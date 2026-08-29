@@ -68,6 +68,9 @@ class SessionLease:
     ttl_seconds: float
     expires_at: float | None = None
     active_uid: int | None = None
+    reclaimable: bool = False
+    protected_until: float | None = None
+    last_used_at: float = 0.0
 
 
 class Scheduler(SchedulerIOMixin):
@@ -138,6 +141,16 @@ class Scheduler(SchedulerIOMixin):
         # an existing agent's stream latency while keeping the large prefill kernels efficient.
         self._growable_decode_burst = 32
         self._growable_decode_steps = 0
+        # Work-conserving controller for the only scheduler path that cannot mix prefill and
+        # decode kernels. Forward timing is sampled after its CUDA completion barrier, so no
+        # synchronize is added to the hot path. Keep enough tokens per waiting lane for the
+        # efficient grouped-GEMM prefill path while targeting bounded wall-clock slices.
+        self._scheduler_prefill_tps_ewma: float | None = None
+        self._scheduler_prefill_key: tuple[int, ...] | None = None
+        self._scheduler_decode_seconds_ewma: float | None = None
+        self._scheduler_prefill_slice_seconds = 8.0
+        self._scheduler_decode_slice_seconds = 0.25
+        self._scheduler_min_prefill_tokens_per_lane = 2048
         # Opt-in, client-named conversations. A completed turn leaves a radix handle locked;
         # the lease is released only by explicit close, abort/disconnect, or idle expiry.
         self._sessions: dict[str, SessionLease] = {}
@@ -179,6 +192,31 @@ class Scheduler(SchedulerIOMixin):
             calls = int(stats["layer_calls"])
             if calls > self._last_moe_stats_calls:
                 logger.info_rank0("MoE decode miss stats: %s", stats)
+                per_layer = moe.decode_miss_stats_per_layer()["per_layer"]
+                pageable = [
+                    row
+                    for row in per_layer
+                    if row["pageable_stage_calls"]
+                ]
+                if pageable:
+                    hottest = sorted(
+                        pageable,
+                        key=lambda row: (
+                            row["pageable_plan_wait_seconds"]
+                            + row["pageable_gather_seconds"]
+                        ),
+                        reverse=True,
+                    )[:8]
+                    logger.info_rank0("MoE pageable layer stalls (top 8): %s", hottest)
+                    candidates = sorted(
+                        per_layer,
+                        key=lambda row: (row["missing_per_step"], row["miss_rate"]),
+                    )[: len(pageable)]
+                    logger.info_rank0(
+                        "MoE lowest-miss pageable candidates (%d): %s",
+                        len(candidates),
+                        candidates,
+                    )
                 self._last_moe_stats_calls = calls
         logger.info_rank0("Scheduler is idle, waiting for new reqs...")
         self.cache_manager.check_integrity()
@@ -243,6 +281,7 @@ class Scheduler(SchedulerIOMixin):
         # this iteration can only be probed by messages of the NEXT iteration, which sees it here.
         self._last_data = last_data
         self._expire_sessions()
+        self._release_due_soft_sessions()
         blocking = not (
             last_data is not None  # don't block if we have a batch to be processed
             or self.prefill_manager.runnable
@@ -297,6 +336,7 @@ class Scheduler(SchedulerIOMixin):
 
     def normal_loop(self) -> None:
         self._expire_sessions()
+        self._release_due_soft_sessions()
         blocking = not (
             self.prefill_manager.runnable
             or self.decode_manager.runnable
@@ -358,6 +398,12 @@ class Scheduler(SchedulerIOMixin):
 
         batch, (_, next_tokens_cpu, copy_done) = last_data[0].batch, last_data[1]
         copy_done.synchronize()
+        # Several low-level drain tests intentionally invoke this method with a
+        # minimal scheduler-shaped stub. Runtime schedulers always expose the
+        # observer; keeping it optional here preserves that narrow test seam.
+        observe_batch = getattr(self, "_observe_scheduler_batch", None)
+        if observe_batch is not None:
+            observe_batch(batch)
         reply: List[DetokenizeMsg] = []
         new_finished_reqs: Set[Req] = set()
         with self.cache_manager.lazy_free_region():
@@ -557,14 +603,20 @@ class Scheduler(SchedulerIOMixin):
                         [ErrorReplyMsg(uid=msg.uid, error=f"session {msg.session_id!r} is busy")]
                     )
                     return
+                self._reclaim_soft_sessions_for_admission(msg)
                 ttl = float(msg.session_ttl_seconds or 300.0)
                 if not math.isfinite(ttl):
                     ttl = 300.0
                 ttl = min(max(ttl, 1.0), 86_400.0)
                 if session is None:
-                    session = self._sessions[msg.session_id] = SessionLease(None, ttl)
+                    session = self._sessions[msg.session_id] = SessionLease(
+                        None, ttl, reclaimable=msg.session_reclaimable
+                    )
                 session.ttl_seconds = ttl
+                session.reclaimable = msg.session_reclaimable
                 session.expires_at = None
+                session.protected_until = None
+                session.last_used_at = time.monotonic()
                 session.active_uid = msg.uid
             input_len, max_seq_len = len(msg.input_ids), self.engine.max_seq_len
             max_output_len = max_seq_len - input_len
@@ -717,7 +769,14 @@ class Scheduler(SchedulerIOMixin):
                 old_handle = session.handle
                 session.handle = new_handle
                 session.active_uid = None
-                session.expires_at = time.monotonic() + session.ttl_seconds
+                now = time.monotonic()
+                session.expires_at = now + session.ttl_seconds
+                session.last_used_at = now
+                session.protected_until = (
+                    now + max(0.0, float(self.config.auto_session_grace_seconds))
+                    if session.reclaimable
+                    else None
+                )
                 if old_handle is not None:
                     self.cache_manager.unlock(old_handle)
         self.table_manager.free(req.table_idx)
@@ -757,6 +816,75 @@ class Scheduler(SchedulerIOMixin):
         for sid in expired:
             logger.info_rank0("Session %s expired after idle timeout", sid)
             self._close_session(sid)
+
+    def _release_soft_session_handle(self, session_id: str, reason: str) -> bool:
+        session = getattr(self, "_sessions", {}).get(session_id)
+        if (
+            session is None
+            or not session.reclaimable
+            or session.active_uid is not None
+            or session.handle is None
+        ):
+            return False
+        self.cache_manager.unlock(session.handle)
+        session.handle = None
+        session.protected_until = None
+        self._growable_shrink_pending = True
+        logger.info_rank0(
+            "Released soft session %s KV protection (%s); cached prefix is now evictable",
+            session_id,
+            reason,
+        )
+        return True
+
+    def _release_due_soft_sessions(self) -> None:
+        now = time.monotonic()
+        due = [
+            sid
+            for sid, lease in getattr(self, "_sessions", {}).items()
+            if lease.reclaimable
+            and lease.active_uid is None
+            and lease.handle is not None
+            and lease.protected_until is not None
+            and lease.protected_until <= now
+        ]
+        for sid in due:
+            self._release_soft_session_handle(sid, "grace expired")
+
+    def _reclaim_soft_sessions_for_admission(self, msg: UserMsg) -> None:
+        """Release oldest idle automatic leases only when they block this admission."""
+        cm = self.cache_manager
+        try:
+            from .utils import PendingReq
+
+            pending = PendingReq(msg.uid, msg.input_ids, msg.sampling_params)
+            cached_len = cm.match_req(pending).cuda_handle.cached_len
+        except Exception:  # matching is repeated by admission; stay conservative on failure
+            cached_len = 0
+        needed = max(0, len(msg.input_ids) - cached_len) + msg.sampling_params.max_tokens
+
+        def pressured() -> bool:
+            kv_short = needed > cm.available_size
+            state_short = cm.is_hybrid and cm.mamba_available_size < 3
+            return kv_short or state_short
+
+        if not pressured():
+            return
+        candidates = sorted(
+            (
+                (lease.last_used_at, sid)
+                for sid, lease in getattr(self, "_sessions", {}).items()
+                if sid != msg.session_id
+                and lease.reclaimable
+                and lease.active_uid is None
+                and lease.handle is not None
+            ),
+            key=lambda item: item[0],
+        )
+        for _last_used, sid in candidates:
+            if not pressured():
+                break
+            self._release_soft_session_handle(sid, "admission pressure")
 
     def _only_idle_sessions(self, last_data: ForwardData | None) -> bool:
         return (
@@ -1064,11 +1192,14 @@ class Scheduler(SchedulerIOMixin):
             and self.prefill_manager.runnable
             and self.decode_manager.runnable
         ):
-            if self._growable_decode_steps < self._growable_decode_burst:
+            decode_burst = self._adaptive_decode_burst()
+            if self._growable_decode_steps < decode_burst:
                 batch = self.decode_manager.schedule_next_batch()
                 self._growable_decode_steps += 1
             else:
-                batch = self.prefill_manager.schedule_next_batch(self.prefill_budget)
+                batch = self.prefill_manager.schedule_next_batch(
+                    self._adaptive_prefill_budget()
+                )
                 self._growable_decode_steps = 0
         else:
             batch = self.prefill_manager.schedule_next_batch(self.prefill_budget)
@@ -1079,8 +1210,60 @@ class Scheduler(SchedulerIOMixin):
         if batch is None:
             return None
         forward_input = self._prepare_batch(batch)
+        if getattr(getattr(self, "config", None), "adaptive_scheduler", False):
+            batch.scheduler_started_at = time.perf_counter()
         self._report_prompt_admissions(batch)
         return forward_input
+
+    def _adaptive_decode_burst(self) -> int:
+        """Decode forwards that approximate one short wall-clock service slice."""
+        if not getattr(getattr(self, "config", None), "adaptive_scheduler", False):
+            return self._growable_decode_burst
+        elapsed = getattr(self, "_scheduler_decode_seconds_ewma", None)
+        if not elapsed or elapsed <= 0:
+            return self._growable_decode_burst
+        target = getattr(self, "_scheduler_decode_slice_seconds", 0.25)
+        return min(64, max(8, round(target / elapsed)))
+
+    def _adaptive_prefill_budget(self) -> int:
+        """Size the aggregate prefill lane by measured throughput and waiting lanes."""
+        if not getattr(getattr(self, "config", None), "adaptive_scheduler", False):
+            return self.prefill_budget
+        tps = getattr(self, "_scheduler_prefill_tps_ewma", None)
+        if not tps or tps <= 0:
+            return self.prefill_budget
+        pending = len(getattr(self.prefill_manager, "pending_list", ()))
+        per_lane = getattr(self, "_scheduler_min_prefill_tokens_per_lane", 2048)
+        floor = min(self.prefill_budget, max(1, pending) * per_lane)
+        target = int(tps * getattr(self, "_scheduler_prefill_slice_seconds", 8.0))
+        page_size = max(1, int(getattr(self.config, "page_size", 1)))
+        target = max(page_size, target // page_size * page_size)
+        return min(self.prefill_budget, max(floor, target))
+
+    def _observe_scheduler_batch(self, batch: Batch) -> None:
+        """Update phase EWMAs using a forward's existing completion barrier."""
+        started = getattr(batch, "scheduler_started_at", None)
+        if started is None:
+            return
+        elapsed = max(time.perf_counter() - started, 1e-6)
+        alpha = 0.25
+        if batch.is_prefill:
+            tokens = int(getattr(batch, "log_new_tokens", 0))
+            if tokens <= 0:
+                return
+            sample = tokens / elapsed
+            key = tuple(sorted(int(getattr(req, "uid", id(req))) for req in batch.reqs))
+            old = getattr(self, "_scheduler_prefill_tps_ewma", None)
+            old_key = getattr(self, "_scheduler_prefill_key", None)
+            self._scheduler_prefill_key = key
+            self._scheduler_prefill_tps_ewma = sample if old is None or key != old_key else (
+                alpha * sample + (1.0 - alpha) * old
+            )
+        elif batch.is_decode:
+            old = getattr(self, "_scheduler_decode_seconds_ewma", None)
+            self._scheduler_decode_seconds_ewma = elapsed if old is None else (
+                alpha * elapsed + (1.0 - alpha) * old
+            )
 
     def _report_prompt_admissions(self, batch: Batch) -> None:
         """Publish first-prefill accounting only after batch preparation succeeded.

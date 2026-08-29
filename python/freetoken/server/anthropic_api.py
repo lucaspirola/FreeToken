@@ -89,8 +89,18 @@ def register_anthropic_routes(
         if mstate != "serving":
             detail = "model is still loading" if mstate == "loading" else "cache rebuild in progress"
             return _anthropic_error_response(503, "overloaded_error", detail)
+        explicit_session = req.session_id is not None
         req.session_id = anthropic_session_id(req, request)
-        return await handle_anthropic_messages(req, request, state, get_model_sampling())
+        tracker = getattr(state, "track_client_launch_session", None)
+        if tracker is not None:
+            tracker(request.headers.get("x-freetoken-launch-id"), req.session_id)
+        return await handle_anthropic_messages(
+            req,
+            request,
+            state,
+            get_model_sampling(),
+            session_reclaimable=req.session_id is not None and not explicit_session,
+        )
 
     @app.post("/v1/messages/count_tokens")
     async def v1_messages_count_tokens(req: AnthropicCountTokensRequest, request: Request):
@@ -114,12 +124,14 @@ async def handle_anthropic_messages(
     request: Request | None,
     state: Any,
     model_sampling: dict[str, Any],
+    session_reclaimable: bool = False,
 ):
     try:
         spec = convert_anthropic_to_genspec(
             req, model_sampling,
             reasoning_parser=getattr(state.config, "reasoning_parser", None),
         )
+        spec.session_reclaimable = session_reclaimable
         uid = await submit_generation(spec, state)
     except ValueError as exc:
         return _anthropic_error_response(400, "invalid_request_error", str(exc))

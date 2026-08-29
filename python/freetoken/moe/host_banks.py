@@ -23,6 +23,7 @@ import math
 import mmap
 import os
 import queue
+import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
@@ -52,6 +53,7 @@ _DEFAULT_CHUNK = 8 << 20
 
 # Hold the mmaps for the process lifetime; the offload cache reads from these banks forever.
 _LIVE_BUFFERS: list[mmap.mmap] = []
+_LIVE_FILES: list[object] = []
 
 def _env_born_pinned() -> bool | None:
     """``FREETOKEN_BANK_CUDA_ALLOC`` tri-state: unset -> ``None`` (default applies), else the parsed boolean."""
@@ -79,16 +81,26 @@ class HostBank:
 
     The buffer is rounded up to the O_DIRECT block; ``tensor`` views exactly ``nbytes``. ``backing=None`` follows ``FREETOKEN_BANK_CUDA_ALLOC``."""
 
-    __slots__ = ("tensor", "addr", "nbytes", "_buf", "_pinned", "_locked")
+    __slots__ = ("tensor", "addr", "nbytes", "_buf", "_file", "_pinned", "_locked")
 
     def __init__(self, shape: tuple[int, ...], dtype: torch.dtype,
-                 *, backing: str | None = None):
+                 *, backing: str | None = None, layer_id: int | None = None):
         if backing is None:
             plan = _requested_residency
+            if (
+                plan is not None
+                and layer_id is not None
+                and plan.labels[layer_id] == HostResidency.PAGEABLE.value
+            ):
+                # A pageable anonymous mmap still needs swap to survive pressure. A sparse
+                # temporary file makes these expert rows genuinely reclaimable by the kernel:
+                # clean pages can be dropped and faulted back without consuming swap.
+                backing = "file"
             # a plan with non-pinned labels vetoes born-pinned: cudaHostAlloc spends the pin quota the plan exists to save
-            born = _env_born_pinned() and (plan is None or not plan.has_unpinned)
-            backing = "cuda" if born else "mmap"
-        assert backing in ("mmap", "cuda"), backing
+            if backing is None:
+                born = _env_born_pinned() and (plan is None or not plan.has_unpinned)
+                backing = "cuda" if born else "mmap"
+        assert backing in ("mmap", "cuda", "file"), backing
         elsize = torch.empty((), dtype=dtype).element_size()
         self.nbytes = math.prod(shape) * elsize
         asize = ((self.nbytes + _BLK - 1) // _BLK) * _BLK
@@ -105,10 +117,20 @@ class HostBank:
             assert self.addr % _BLK == 0
             self._pinned = True  # born pinned+mapped; pin() is a no-op
         else:
-            self._buf = mmap.mmap(-1, asize)  # lazy: address space only, no resident pages yet
+            self._file = None
+            if backing == "file":
+                directory = os.environ.get("FREETOKEN_BANK_CACHE_DIR") or None
+                self._file = tempfile.TemporaryFile(prefix="freetoken-bank-", dir=directory)
+                self._file.truncate(asize)
+                self._buf = mmap.mmap(self._file.fileno(), asize)
+                _LIVE_FILES.append(self._file)
+            else:
+                self._buf = mmap.mmap(-1, asize)  # lazy: address space only, no resident pages yet
             _LIVE_BUFFERS.append(self._buf)
             self.addr = ctypes.addressof(ctypes.c_char.from_buffer(self._buf))
             self._pinned = False
+        if backing == "cuda":
+            self._file = None
         self.tensor = torch.frombuffer(self._buf, dtype=dtype, count=self.nbytes // elsize).view(*shape)
         self._locked = False
 
@@ -209,7 +231,7 @@ def alloc_layer_banks(
     -> one independently allocated (page-aligned, independently pin/lock-able)
     ``HostBank`` per layer per name."""
     return {
-        name: [HostBank(shape, dtype) for _ in range(num_layers)]
+        name: [HostBank(shape, dtype, layer_id=layer_id) for layer_id in range(num_layers)]
         for name, (shape, dtype) in specs.items()
     }
 

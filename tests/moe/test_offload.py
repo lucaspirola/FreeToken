@@ -827,6 +827,39 @@ def test_copy_plan_skips_locked_layers_and_keeps_fused_path():
     assert (cache._copy_src_ptrs[0] != 0).all(), "pinned layer rows must resolve"
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA VMM")
+def test_direct_device_bank_rebuild_replaces_vmm_allocations(monkeypatch):
+    """Growable KV must keep its resizeable expert banks out of torch's allocator."""
+    import freetoken.moe.offload_cache as offload_cache
+
+    monkeypatch.setattr(offload_cache, "_FUSED_COPY", False)
+    cache = offload_cache.OffloadMoeCache(
+        num_layers=2,
+        num_experts=4,
+        cache_size=12,
+        device=torch.device("cuda"),
+        prefill_overlap=True,
+    )
+    cache.direct_device_banks = True
+    cache.set_bank_sources(
+        {
+            "gate_up": [torch.randn(4, 8, 8) for _ in range(2)],
+            "down": [torch.randn(4, 8, 4) for _ in range(2)],
+        }
+    )
+
+    old_allocations = list(cache._direct_bank_allocations)
+    assert len(old_allocations) == 2
+    assert cache.bank_caches["gate_up"].shape == (12, 8, 8)
+
+    cache.rebuild(8)
+
+    assert len(cache._direct_bank_allocations) == 2
+    assert all(new is not old for new in cache._direct_bank_allocations for old in old_allocations)
+    assert cache.bank_caches["gate_up"].shape == (8, 8, 8)
+    assert cache.bank_caches["down"].shape == (8, 8, 4)
+
+
 def test_locked_layer_copy_missing_rejects_ensure_experts_staging():
     # the pageable branch presumes materialize_layer's position == expert id; staging via ensure_experts (LRU slot remap) on a locked layer must fail loudly, not gather other experts' weights
     # stage the state ensure_experts would (its kernel is CUDA-only; the fixture cache lives on the CPU)
@@ -873,6 +906,54 @@ def test_requested_residency_routes_layer_settles(monkeypatch):
     settled.clear()
     hb.pin_banks(banks)  # no ambient plan -> every layer pins
     assert settled == ["pin"] * 6
+
+
+def test_pageable_residency_uses_file_backing():
+    import freetoken.moe.host_banks as hb
+
+    labels = [hb.HostResidency.PINNED.value, hb.HostResidency.PAGEABLE.value]
+    with hb.requested_residency(labels):
+        pinned = hb.HostBank((4096,), torch.uint8, layer_id=0)
+        pageable = hb.HostBank((4096,), torch.uint8, layer_id=1)
+
+    assert pinned._file is None
+    assert pageable._file is not None
+    pageable.tensor.fill_(37)
+    pageable._buf.flush()
+    pageable._buf.madvise(hb.mmap.MADV_DONTNEED)
+    assert int(pageable.tensor[0]) == 37
+
+
+def test_pageable_profile_is_reported_and_reset():
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    _init_tp()
+    cache = OffloadMoeCache(
+        num_layers=2,
+        num_experts=4,
+        cache_size=8,
+        device=torch.device("cpu"),
+    )
+    cache.pageable_stage_calls = 3
+    cache.pageable_stage_rows = 7
+    cache.pageable_stage_bytes = 2**30
+    cache.pageable_plan_wait_seconds = 0.25
+    cache.pageable_gather_seconds = 0.5
+    cache.pageable_stage_calls_layer[1] = 3
+    cache.pageable_stage_rows_layer[1] = 7
+    cache.pageable_plan_wait_layer[1] = 0.25
+    cache.pageable_gather_seconds_layer[1] = 0.5
+
+    total = cache.decode_miss_stats()
+    assert total["pageable_stage_calls"] == 3
+    assert total["pageable_rows"] == 7
+    assert total["pageable_gib"] == 1.0
+    layer = cache.decode_miss_stats_per_layer()["per_layer"][1]
+    assert layer["pageable_plan_wait_seconds"] == 0.25
+    assert layer["pageable_gather_seconds"] == 0.5
+
+    cache.reset_stats()
+    assert cache.decode_miss_stats()["pageable_stage_calls"] == 0
 
 
 def test_echo_residency_stamps_honored_requests_only():

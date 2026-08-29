@@ -588,7 +588,8 @@ def _expert_layer_geometry(config: ModelConfig) -> tuple[tuple[int, int], ...]:
 
     assert config.gguf_expert_types
     h, inter = config.hidden_size, config.moe_intermediate_size
-    align = lambda n: (n + 63) // 64 * 64
+    def align(n: int) -> int:
+        return (n + 63) // 64 * 64
     return tuple(
         (
             align(2 * inter * row_bytes(h, gate_type)),
@@ -616,8 +617,14 @@ def load_gguf_expert_sources(
     # into GPU size classes; padding every Q4 down layer to Q6 here would hide the
     # distinction and waste both host RAM and VRAM.
     host = {
-        "gate_up": [HostBank((experts, gu), torch.uint8) for gu, _ in geometry],
-        "down": [HostBank((experts, down), torch.uint8) for _, down in geometry],
+        "gate_up": [
+            HostBank((experts, gu), torch.uint8, layer_id=layer_id)
+            for layer_id, (gu, _) in enumerate(geometry)
+        ],
+        "down": [
+            HostBank((experts, down), torch.uint8, layer_id=layer_id)
+            for layer_id, (_, down) in enumerate(geometry)
+        ],
     }
     banks = {name: [b.tensor for b in per_layer] for name, per_layer in host.items()}
     seen_gu, seen_down = set(), set()
@@ -672,12 +679,12 @@ def dummy_gguf_expert_sources(config: ModelConfig) -> dict[str, list[torch.Tenso
 
     host = {
         "gate_up": [
-            HostBank((config.num_experts, gu), torch.uint8)
-            for gu, _ in _expert_layer_geometry(config)
+            HostBank((config.num_experts, gu), torch.uint8, layer_id=layer_id)
+            for layer_id, (gu, _) in enumerate(_expert_layer_geometry(config))
         ],
         "down": [
-            HostBank((config.num_experts, down), torch.uint8)
-            for _, down in _expert_layer_geometry(config)
+            HostBank((config.num_experts, down), torch.uint8, layer_id=layer_id)
+            for layer_id, (_, down) in enumerate(_expert_layer_geometry(config))
         ],
     }
     banks = {name: [b.tensor for b in per_layer] for name, per_layer in host.items()}

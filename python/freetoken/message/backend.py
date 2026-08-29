@@ -39,6 +39,7 @@ class UserMsg(BaseBackendMsg):
     mm_embeds: torch.Tensor | None = None
     session_id: str | None = None
     session_ttl_seconds: float | None = None
+    session_reclaimable: bool = False
 
 
 @dataclass

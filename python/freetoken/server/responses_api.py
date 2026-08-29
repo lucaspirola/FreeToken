@@ -137,8 +137,18 @@ def register_responses_routes(
                 "previous_response_id is not supported (stateless server); "
                 "resend full context in 'input'",
             )
+        explicit_session = req.session_id is not None
         req.session_id = responses_session_id(req, request)
-        return await handle_responses(req, request, state, get_model_sampling())
+        tracker = getattr(state, "track_client_launch_session", None)
+        if tracker is not None:
+            tracker(request.headers.get("x-freetoken-launch-id"), req.session_id)
+        return await handle_responses(
+            req,
+            request,
+            state,
+            get_model_sampling(),
+            session_reclaimable=req.session_id is not None and not explicit_session,
+        )
 
     @app.get("/v1/responses/{response_id}")
     async def v1_responses_get(response_id: str):
@@ -154,6 +164,7 @@ async def handle_responses(
     request: Request | None,
     state: Any,
     model_sampling: dict[str, Any],
+    session_reclaimable: bool = False,
 ):
     response_id = f"resp_{uuid.uuid4().hex}"
     created = int(time.time())
@@ -165,6 +176,7 @@ async def handle_responses(
             req, model_sampling, default_max_tokens=default_max,
             reasoning_parser=getattr(state.config, "reasoning_parser", None),
         )
+        spec.session_reclaimable = session_reclaimable
         uid = await submit_generation(spec, state)
     except ValueError as exc:
         return _error_response(400, str(exc))

@@ -148,6 +148,7 @@ class FrontendManager:
     # the int-uid generation ack machinery).
     rebuild_futures: Dict[str, asyncio.Future] = field(default_factory=dict)
     session_close_futures: Dict[str, asyncio.Future] = field(default_factory=dict)
+    client_launch_sessions: Dict[str, set[str]] = field(default_factory=dict)
     # Lifecycle gate. Starts "loading" (uvicorn binds before weights finish; the three
     # API adapters 503 until this flips) -> "serving" once all workers ack ready ->
     # "rebuilding"/"failed" for runtime cache rebuilds.
@@ -163,6 +164,11 @@ class FrontendManager:
     # Runtime metrics for /v1/stats: throughput sliding window + last-known kv/mamba/vram
     # snapshot, fed from every UserReply in listen().
     stats: Any = None
+
+    def track_client_launch_session(self, launch_id: str | None, session_id: str | None) -> None:
+        if not launch_id or len(launch_id) > 128 or session_id is None:
+            return
+        self.client_launch_sessions.setdefault(launch_id, set()).add(session_id)
     # Optional backend metadata delivered once on the ack path at ready: per-unit cache VRAM
     # costs {"kv_bytes_per_token", "moe_bytes_per_expert", "mamba_bytes_per_slot"}. None until
     # the ("meta", …) ack arrives (or forever, on an engine build that doesn't emit one).
@@ -865,6 +871,13 @@ async def close_session(session_id: str):
     state = get_global_state()
     if not session_id or len(session_id) > 256:
         return JSONResponse({"error": "invalid session_id"}, status_code=400)
+    result, status_code = await _close_session_on_state(state, session_id)
+    if status_code != 200:
+        return JSONResponse(result, status_code=status_code)
+    return result
+
+
+async def _close_session_on_state(state, session_id: str) -> tuple[dict[str, str], int]:
     request_id = str(uuid.uuid4())
     fut = asyncio.get_running_loop().create_future()
     state.session_close_futures[request_id] = fut
@@ -873,11 +886,34 @@ async def close_session(session_id: str):
         reply = await asyncio.wait_for(fut, timeout=30.0)
     except asyncio.TimeoutError:
         state.session_close_futures.pop(request_id, None)
-        return JSONResponse(
-            {"id": session_id, "status": "timeout"}, status_code=504
-        )
+        return {"id": session_id, "status": "timeout"}, 504
     state.session_close_futures.pop(request_id, None)
-    return {"id": reply.session_id, "status": reply.status}
+    for launch_id, sessions in list(
+        getattr(state, "client_launch_sessions", {}).items()
+    ):
+        sessions.discard(session_id)
+        if not sessions:
+            state.client_launch_sessions.pop(launch_id, None)
+    return {"id": reply.session_id, "status": reply.status}, 200
+
+
+@app.delete("/v1/client-launches/{launch_id}/sessions")
+async def close_client_launch_sessions(launch_id: str):
+    """Close every main/subagent lease observed under one ``ft launch`` process."""
+    if not launch_id or len(launch_id) > 128:
+        return JSONResponse({"error": "invalid launch_id"}, status_code=400)
+    state = get_global_state()
+    sessions = sorted(
+        getattr(state, "client_launch_sessions", {}).pop(launch_id, set())
+    )
+    results = []
+    status_code = 200
+    for session_id in sessions:
+        result, close_status = await _close_session_on_state(state, session_id)
+        results.append(result)
+        status_code = max(status_code, close_status)
+    payload = {"launch_id": launch_id, "sessions": results}
+    return JSONResponse(payload, status_code=status_code)
 
 
 def _install_shell_stop_handlers() -> None:
