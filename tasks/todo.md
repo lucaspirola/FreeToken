@@ -1,5 +1,29 @@
 # Ornith RTX 5080 full-context optimization
 
+## Phase 3 (2026-08-29): post-Ada SM120 revalidation
+
+- [x] Rebuilt the native GGUF extensions as real sm_120 cubins on RTX 5080,
+  Torch 2.11/CUDA 13/Triton 3.6, and re-captured Q4+INT4/Q6+Q8 baselines.
+- [x] Enabled four output-row warps for fused routed+shared GGUF decode on sm_120.
+  Exact 128-token live A/B: Q4 164.51 -> 168.08 tok/s (+2.17%), Q6 125.64 ->
+  128.52 tok/s (+2.29%); both retained their exact pre-change output hashes and
+  produced coherent derivations.
+- [x] Lowered the sm_120 grouped-MMA crossover 320 -> 272 after all three routed
+  projections won at 272 and still lost at 256.
+- [x] Added exact Q6_K dense bands: the 8K cold-prefill live A/B improved 528.14
+  -> 623.31 tok/s (+18.0%). The analogous Q4 bands regressed 1259.52 -> 1149.97
+  tok/s under real H2D/GEMM overlap and were removed despite microbenchmark wins.
+- [x] Added a portable `--synthetic-needle` serving gate and fixed benchmark
+  quantized-KV backend selection plus adjacent distributed-port allocation.
+- [x] After each accepted inference change, both model/KV pairs recovered passcode
+  5663623 from 4K/8K prompts and returned coherent explicit answers.
+- [x] Final validation: 147 focused GGUF/model/benchmark tests passed; ruff and
+  `git diff --check` passed. The full non-slow suite reached 1,622 passed, 9
+  skipped, with 8 unrelated failures and 6 setup errors in the same documented
+  clean-main failure families.
+- [x] Rejected further attention changes: 128 splits, alternate tiles/warps, and
+  Q8 native-score variants did not beat the existing 64-split sm_120 launches.
+
 - [x] Add reproducible Ornith Q4_0 attention and serving benchmark controls.
 - [x] Record unchanged-main RTX 5080 synthetic baselines.
 - [x] Sweep and implement numerically safe sm_120 attention launch geometry.

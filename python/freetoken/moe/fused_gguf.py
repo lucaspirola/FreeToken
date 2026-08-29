@@ -83,10 +83,11 @@ def _moe_vec_chunked(x, weight, topk_ids, top_k, quant_type, rows, tokens, strid
 _MMA_MAX_TOKENS = 16384
 
 # Below this the DP4A grouped MMQ wins: with E=256 top-8 the per-expert row
-# count is tiny and mul_mat_q's per-expert MMA tiles waste work (sm_120,
-# Ornith geometry: 256 tokens mma 1.64 vs dp4a 1.48 ms; 320 tokens 1.55 vs
-# 1.76; 8192 tokens 9.1 vs 38.5 -- the full-prefill-chunk regime is the win).
-_MMA_MOE_MIN_TOKENS = 320
+# count is tiny and mul_mat_q's per-expert MMA tiles waste work. A fresh RTX
+# 5080 sweep across all three Ornith projections found the aligned 272-token
+# tile to be the stable crossover: Q4 gate/up 0.781 vs 0.933 ms, Q6 gate/up
+# 1.007 vs 1.193 ms, and Q6 down 0.604 vs 0.628 ms. At 256 DP4A still wins.
+_MMA_MOE_MIN_TOKENS = 272
 
 # On the 70 W RTX 2000 Ada, the Ornith projections cross reliably at 272
 # tokens: Q4_K gate/up 3.55 vs 4.28 ms, Q6_K gate/up 4.24 vs 5.82 ms, and

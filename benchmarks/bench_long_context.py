@@ -13,7 +13,6 @@ import hashlib
 import json
 import os
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -34,6 +33,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model", required=True)
     p.add_argument("--ruler", default=DEFAULT_RULER)
     p.add_argument("--sample", type=int, default=0)
+    p.add_argument(
+        "--synthetic-needle",
+        action="store_true",
+        help="use the built-in deterministic needle prompt instead of --ruler",
+    )
     p.add_argument("--target-prompt-tokens", type=int, default=261_800)
     p.add_argument("--decode", type=int, default=128)
     p.add_argument("--max-context", type=int, default=262_144)
@@ -65,6 +69,23 @@ def load_row(path: str, index: int) -> tuple[str, str]:
                     expected = expected[0]
                 return row["question"], str(expected)
     raise SystemExit(f"sample {index} not found in {path}")
+
+
+def synthetic_needle_sample() -> tuple[str, str]:
+    """Portable retrieval/coherence gate when the external RULER data is absent."""
+    expected = "5663623"
+    # Deliberately exceed the default 261.8K-token target for normal GGUF
+    # tokenizers so the default invocation really exercises the requested
+    # long-context length; trim_filler then preserves the centered needle.
+    before = "The orchard ledger says the copper marker is inactive.\n" * 20_000
+    after = "The harbor ledger says the silver marker is inactive.\n" * 20_000
+    question = (
+        "Read the records below. Remember the one secret passcode and ignore all "
+        "inactive marker descriptions.\n\n"
+        f"{before}\nThe secret passcode is {expected}.\n{after}\n"
+        "What is the secret passcode? State the digits clearly."
+    )
+    return question, expected
 
 
 def _needle_token_index(ids: list[int], needle_ids: list[int]) -> int:
@@ -185,7 +206,12 @@ def stream_completion(
 
 def main() -> int:
     args = parse_args()
-    question, expected = load_row(args.ruler, args.sample)
+    if args.synthetic_needle:
+        question, expected = synthetic_needle_sample()
+        workload = "built-in synthetic needle"
+    else:
+        question, expected = load_row(args.ruler, args.sample)
+        workload = f"{args.ruler} sample={args.sample}"
     from freetoken.models.gguf.tokenizer import load_gguf_tokenizer
 
     tokenizer = load_gguf_tokenizer(args.model)
@@ -204,7 +230,7 @@ def main() -> int:
     cmd = common.serve_cmd(args, "offload", port)
     print(
         f"[long] model={args.model}\n"
-        f"[long] ruler={args.ruler} sample={args.sample} expected={expected!r}\n"
+        f"[long] workload={workload} expected={expected!r}\n"
         f"[long] prompt tokens: original={original_tokens}, trimmed={trimmed_tokens}, "
         f"target={args.target_prompt_tokens}\n"
         f"[long] context={args.max_context} decode={args.decode} "
@@ -241,7 +267,8 @@ def main() -> int:
     prompt_tokens = int(usage["prompt_tokens"])
     row = {
         "model": args.model,
-        "ruler": args.ruler,
+        "workload": workload,
+        "ruler": None if args.synthetic_needle else args.ruler,
         "sample": args.sample,
         "expected": expected,
         "expected_found": expected in result["text"],

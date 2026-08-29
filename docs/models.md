@@ -85,7 +85,13 @@ work too.
   Q4_K/Q6_K GGUF matmuls (dense prefill and large routed-expert batches) run on
   llama.cpp's int8-tensor-core MMQ (vendored under `kernel/csrc/gguf_mmq/`,
   JIT-built on first use): ~13x over the DP4A kernels and ~1.3x over transient
-  dequant+cuBLAS at 8K-token chunks, with the same lossless packed weights.
+  dequant+cuBLAS at 8K-token chunks, with the same lossless packed weights. A
+  second sm_120 pass tunes the fused routed+shared decode MMVQ to four output-row
+  warps (about +2.2% live decode for both Q4 and Q6), moves the grouped-MMA prefill
+  crossover from 320 to 272 tokens, and sends only measured small/output Q6_K
+  projections back to transient dequant+cuBLAS (+18.0% on an 8K cold-prefill live
+  A/B). Q4_K retains uncapped MMA: the analogous isolated-kernel change reduced
+  end-to-end overlapped prefill and was rejected.
 - Nemotron 3 Super uses its native hybrid Mamba-2 / full-attention / latent-MoE
   architecture. The NVFP4 release needs about 60 GiB of host RAM for expert banks and
   10.3 GiB of resident GPU weights. FreeToken currently serves one concurrent Nemotron

@@ -55,6 +55,11 @@ python benchmarks/bench_ornith_attention.py --decode-lengths 8192 32768 131072 2
     --kv-quant int4 q8_0 --batch-sizes 1 4 16 --json out.jsonl
 ```
 
+**`bench_long_context.py`** — cold serving-path prefill, retrieval, and coherent-answer
+gate. Pass `--synthetic-needle` for a portable built-in workload when the external RULER
+JSONL is unavailable on the host; the prompt is trimmed in token space to
+`--target-prompt-tokens` while preserving the needle and final question.
+
 For host RAM vs PCIe bandwidth and the offload/hybrid backend pick, use `ft bench bw`
 instead — it writes the JSON profile the engine reads.
 

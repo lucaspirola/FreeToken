@@ -197,9 +197,20 @@ def get_json(url: str, timeout: float = 10) -> dict:
 
 
 def free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+    # FreeToken uses the API port plus the adjacent port for torch.distributed.
+    # Probe the pair together; checking only the API port makes otherwise valid
+    # benchmark runs fail nondeterministically with EADDRINUSE during startup.
+    while True:
+        with socket.socket() as api, socket.socket() as distributed:
+            api.bind(("127.0.0.1", 0))
+            port = api.getsockname()[1]
+            if port == 65535:
+                continue
+            try:
+                distributed.bind(("127.0.0.1", port + 1))
+            except OSError:
+                continue
+            return port
 
 
 def serve_cmd(args: argparse.Namespace, backend: str, port: int) -> list[str]:
@@ -222,6 +233,12 @@ def serve_cmd(args: argparse.Namespace, backend: str, port: int) -> list[str]:
         cmd += ["--num-tokens", str(args.max_context)]
     if args.kv_cache_dtype is not None:
         cmd += ["--kv-cache-dtype", args.kv_cache_dtype]
+        # Consumer Blackwell auto-selects FlashInfer, but FreeToken's packed
+        # Q4/Q8 KV pools are implemented by the Triton backend.  Keep this
+        # benchmark self-contained so its documented full-context commands
+        # exercise the requested cache format instead of failing at startup.
+        if args.kv_cache_dtype not in {"auto", "bf16"}:
+            cmd += ["--attention-backend", "triton"]
     if args.prefill_chunk is not None:
         cmd += ["--max-prefill-length", str(args.prefill_chunk)]
     if args.prefill_hit_d2d:

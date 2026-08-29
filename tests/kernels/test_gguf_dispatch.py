@@ -8,6 +8,7 @@ they only need any CUDA device (branch selection, not numerics).
 from __future__ import annotations
 
 import freetoken.layers.gguf as layers_gguf
+import freetoken.kernel.gguf as kernel_gguf
 import freetoken.moe.fused_gguf as moe_gguf
 import pytest
 import torch
@@ -46,6 +47,14 @@ def test_mmq_min_tokens(capability, expected):
         (GGML_Q6_K, (8, 9), 248320, 2048, (2, 8)),
         (GGML_Q6_K, (8, 9), 152064, 2048, None),
         (GGML_Q4_K, (12, 0), 8, 2048, (7, None)),
+        (GGML_Q4_K, (12, 0), 2048, 4096, (7, None)),
+        (GGML_Q4_K, (12, 0), 1024, 2048, (7, None)),
+        (GGML_Q4_K, (12, 0), 2048, 512, (7, None)),
+        (GGML_Q6_K, (12, 0), 2048, 4096, (7, 2048)),
+        (GGML_Q6_K, (12, 0), 4096, 2048, (7, 2048)),
+        (GGML_Q6_K, (12, 0), 1024, 2048, (7, 23)),
+        (GGML_Q6_K, (12, 0), 512, 2048, None),
+        (GGML_Q6_K, (12, 1), 12352, 2048, (7, None)),
         (GGML_Q4_K, (9, 0), 8192, 2048, None),
         (2, (8, 9), 8192, 2048, None),
     ],
@@ -54,18 +63,37 @@ def test_mma_mmq_row_band(qtype, capability, out_features, in_features, expected
     assert mma_mmq_row_band(qtype, capability, out_features, in_features) == expected
 
 
+def test_sm120_uncapped_ab_control(monkeypatch):
+    monkeypatch.setenv("FREETOKEN_GGUF_SM120_DENSE_UNCAPPED", "1")
+    assert mma_mmq_row_band(GGML_Q6_K, (12, 0), 2048, 512) == (7, None)
+
+
 @pytest.mark.parametrize(
     "qtype,capability,expected",
     [
         (GGML_Q4_K, (8, 9), (272, 16384)),
         (GGML_Q6_K, (8, 9), (272, 16384)),
-        (GGML_Q4_K, (12, 0), (320, 16384)),
+        (GGML_Q4_K, (12, 0), (272, 16384)),
         (GGML_Q4_K, (9, 0), None),
         (2, (8, 9), None),
     ],
 )
 def test_mma_moe_token_range(qtype, capability, expected):
     assert mma_moe_token_range(qtype, capability) == expected
+
+
+@pytest.mark.parametrize(
+    "capability,gate_up,expected",
+    [
+        ((8, 9), True, False),
+        ((8, 9), False, True),
+        ((9, 0), False, False),
+        ((12, 0), True, True),
+        ((12, 0), False, True),
+    ],
+)
+def test_shared_vec_multiwarp(capability, gate_up, expected):
+    assert kernel_gguf.shared_vec_multiwarp(capability, gate_up=gate_up) is expected
 
 
 @pytest.fixture
@@ -126,6 +154,9 @@ def test_dense_dispatch_branch(cuda, monkeypatch, capability, rows, expected_bra
     [
         ((12, 0), GGML_Q4_K, 64, 8, 256, True),
         ((12, 1), GGML_Q6_K, 2048, 8, 256, True),
+        ((12, 0), GGML_Q6_K, 2048, 2048, 4096, True),
+        ((12, 0), GGML_Q6_K, 2049, 2048, 4096, False),
+        ((12, 0), GGML_Q6_K, 64, 512, 2048, False),
         ((8, 9), GGML_Q4_K, 2, 8192, 2048, True),
         ((8, 9), GGML_Q4_K, 4, 12352, 2048, True),
         ((8, 9), GGML_Q4_K, 512, 8192, 2048, True),
@@ -213,7 +244,7 @@ def test_moe_use_mma_gate(monkeypatch):
     """_use_mma_moe: measured arch/range + supported type + aligned stride."""
     monkeypatch.setattr(layers_gguf, "_mma_mmq_ok", lambda: True)
     type_size = BLOCK_SHAPE[GGML_Q4_K][1]
-    assert moe_gguf._use_mma_moe(GGML_Q4_K, 4 * type_size, (12, 0), 320, 4, True, 2)
+    assert moe_gguf._use_mma_moe(GGML_Q4_K, 4 * type_size, (12, 0), 272, 4, True, 2)
     assert moe_gguf._use_mma_moe(GGML_Q4_K, 4 * type_size, (8, 9), 272, 1024, True, 8)
     assert moe_gguf._use_mma_moe(
         GGML_Q6_K, 4 * BLOCK_SHAPE[GGML_Q6_K][1], (8, 9), 272, 1024, True, 8

@@ -117,6 +117,25 @@ _MMA_DENSE_GEOMETRY_SM89 = {
     ),
 }
 
+# Consumer Blackwell has enough tensor-core throughput that MMA remains best
+# for Ornith's large fused QKV projections. Selected Q6 small/output matrices
+# do not amortize MMA at prefill sizes; Q4's superficially similar microbench
+# wins regressed live overlap and were rejected. These exact BF16 bands were
+# swept on an RTX 5080 with real packed weights, then gated end-to-end. Unlisted
+# geometries retain the broadly validated uncapped Blackwell path.
+_MMA_DENSE_GEOMETRY_SM120 = {
+    GGML_Q6_K: {
+        # GDN/full-attention outputs cross back by 4K rows (1.29x at 8K).
+        (2048, 4096): (7, 2048),
+        # Standalone attention-gate geometry, retained for mixed-type runs.
+        (4096, 2048): (7, 2048),
+        # Q6 shared gate/up crosses after the short-tail regime.
+        (1024, 2048): (7, 23),
+        (512, 2048): None,
+        (2048, 512): None,
+    },
+}
+
 
 def dequant_gemm_min_rows(compute_capability: tuple[int, int] | None) -> int:
     """Row count from which transient dequant+cuBLAS beats the DP4A MMQ kernel."""
@@ -167,13 +186,24 @@ def mma_mmq_row_band(
 ) -> tuple[int, int | None] | None:
     """Measured row band where int8-MMA wins for this architecture/type.
 
-    Blackwell keeps the uncapped path validated on the RTX 5080. Ada uses an
-    upper bound because cuBLAS dequant GEMM retakes the lead on large chunks.
-    Other architectures remain on their previously validated dispatch.
+    Blackwell uses exact bands for its measured small Ornith projections and
+    keeps the uncapped path for other geometries. Ada uses finite measured
+    bands because cuBLAS dequant GEMM retakes the lead on larger chunks. Other
+    architectures remain on their previously validated dispatch.
     """
     if capability is None:
         return None
     if capability >= (12, 0):
+        # Reproducible A/B control for the original Blackwell policy. This is
+        # intentionally narrower than FREETOKEN_GGUF_DISABLE_MMA: large fused
+        # projections still use MMA, while measured small shapes can be forced
+        # back to the old uncapped choice for live serving comparisons.
+        if os.environ.get("FREETOKEN_GGUF_SM120_DENSE_UNCAPPED", "") not in ("", "0"):
+            return _MMVQ_SAFE + 1, None
+        measured = _MMA_DENSE_GEOMETRY_SM120.get(quant_type, {})
+        geometry = (out_features, in_features)
+        if geometry in measured:
+            return measured[geometry]
         return _MMVQ_SAFE + 1, None
     if (8, 9) <= capability < (9, 0):
         for measured_out_features, measured_in_features, band in _MMA_DENSE_GEOMETRY_SM89.get(
