@@ -105,5 +105,9 @@ class VMMTensor:
     def commit_ranges(self, ranges: list[tuple[int, int]]) -> None:
         self._allocation.commit_ranges(ranges)
 
+    def uncommit_ranges(self, ranges: list[tuple[int, int]]) -> None:
+        """Unmap fully committed, granularity-aligned ranges without moving the tensor."""
+        self._allocation.uncommit_ranges(ranges)
+
 
 __all__ = ["VMMTensor", "allocation_granularity"]

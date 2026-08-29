@@ -236,6 +236,62 @@ class VMMAllocation {
     state_->mappings.insert(state_->mappings.end(), added.begin(), added.end());
   }
 
+  void uncommit_ranges(const std::vector<std::pair<int64_t, int64_t>>& ranges) {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    check_cuda(cudaSetDevice(state_->device), "cudaSetDevice");
+
+    std::vector<Mapping> requested;
+    requested.reserve(ranges.size());
+    for (const auto& range : ranges) {
+      TORCH_CHECK(range.first >= 0 && range.second > 0, "invalid VMM unmapping range");
+      const size_t offset = static_cast<size_t>(range.first);
+      const size_t size = static_cast<size_t>(range.second);
+      TORCH_CHECK(
+          offset % state_->granularity == 0 && size % state_->granularity == 0,
+          "VMM ranges must be aligned to ", state_->granularity, " bytes");
+      TORCH_CHECK(
+          offset <= state_->reserved_bytes && size <= state_->reserved_bytes - offset,
+          "VMM unmapping range exceeds reservation");
+      requested.push_back({offset, size});
+    }
+    std::sort(requested.begin(), requested.end(), [](const Mapping& a, const Mapping& b) {
+      return a.offset < b.offset;
+    });
+    for (size_t i = 1; i < requested.size(); ++i) {
+      TORCH_CHECK(
+          requested[i - 1].offset + requested[i - 1].size <= requested[i].offset,
+          "overlapping ranges in one VMM uncommit");
+    }
+
+    // CUDA only permits unmapping a complete physical mapping. Require each requested range
+    // to exactly match one commit_ranges allocation; growth therefore creates one mapping per
+    // shrink step. Prevalidate the whole operation before the first destructive unmap.
+    for (const auto& range : requested) {
+      const auto found = std::find_if(
+          state_->mappings.begin(), state_->mappings.end(),
+          [&range](const Mapping& mapped) {
+            return mapped.offset == range.offset && mapped.size == range.size;
+          });
+      TORCH_CHECK(
+          found != state_->mappings.end(),
+          "VMM uncommit range must exactly match an existing mapping");
+    }
+
+    for (const auto& range : requested) {
+      check_cu(cuMemUnmap(state_->base + range.offset, range.size), "cuMemUnmap");
+    }
+
+    std::vector<Mapping> remaining;
+    for (const auto& mapped : state_->mappings) {
+      const auto removed = std::any_of(
+          requested.begin(), requested.end(), [&mapped](const Mapping& range) {
+            return mapped.offset == range.offset && mapped.size == range.size;
+          });
+      if (!removed) remaining.push_back(mapped);
+    }
+    state_->mappings = std::move(remaining);
+  }
+
  private:
   std::shared_ptr<VMMState> state_;
   torch::Tensor tensor_;
@@ -256,5 +312,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def_property_readonly("granularity", &VMMAllocation::granularity)
       .def_property_readonly("reserved_bytes", &VMMAllocation::reserved_bytes)
       .def_property_readonly("mapped_bytes", &VMMAllocation::mapped_bytes)
-      .def("commit_ranges", &VMMAllocation::commit_ranges);
+      .def("commit_ranges", &VMMAllocation::commit_ranges)
+      .def("uncommit_ranges", &VMMAllocation::uncommit_ranges);
 }

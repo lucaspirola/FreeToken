@@ -83,11 +83,17 @@ work too.
   the full virtual KV address range while physically committing fixed-size segments.
   At each boundary FreeToken gives exactly enough expert-cache
   VRAM to the new KV segment, preserves all earlier KV at stable addresses, and
-  recaptures decode graphs once after the final prefill chunk. This mode currently
-  requires one running request, the Triton MHA path, plain `offload`, and
-  `--moe-cache-auto`; it is opt-in because the changing expert geometry trades
-  early-context speed against final-context decode residency. Runtime logs show
-  both instant and cumulative-average prefill speed.
+  recaptures decode graphs once after the final prefill chunk. Multiple requests
+  use independent page-table rows over one shared physical arena; growth follows
+  their aggregate live-page demand. A 32-step decode burst between helper-prefill
+  chunks prevents an established request from being starved. When a request stops,
+  unlocked finished prefixes are evicted, surviving request-owned tail pages are
+  compacted into low holes, complete VMM segments are decommitted, and the released
+  VRAM expands the MoE cache again. A protected high prefix is never moved, so it
+  conservatively delays shrink rather than risking stale radix references. This mode
+  requires the Triton MHA path, plain `offload`, and `--moe-cache-auto`; it is opt-in
+  because changing expert geometry trades early-context speed against final-context
+  decode residency. Runtime logs show both instant and cumulative-average prefill speed.
   The attention launch tables are
   architecture-aware: the sm_120 Q4_0 decode launch (64 splits, 64-token tiles)
   runs a synthetic 262K full-attention layer in 0.36 ms versus 0.82 ms with the
@@ -111,7 +117,12 @@ work too.
   a 524,000-token prompt under a 524,288-token ceiling with YaRN factor 2. All
   three 128K transitions completed (expert slots 4,096 → 3,544 → 2,991 →
   2,438), and the coherent exact-needle result reached 402.10 tok/s average
-  prefill, 268.71 tok/s on the last full chunk, and 62.28 tok/s decode.
+  prefill, 268.71 tok/s on the last full chunk, and 62.28 tok/s decode. Two-agent
+  teardown gates used disjoint 70K prompts and passcodes. Q6/Q8 released 1.33 GiB
+  at helper exit (262K → 128K, 3,483 → 4,036 expert slots) and recovered to about
+  130 tok/s steady decode; Q4/INT4 released 0.35 GiB (192K → 128K, 5,644 → 5,842
+  slots) and reached 154.04 tok/s over the final 80-token tail. Both surviving
+  agents remained coherent and neither emitted the other agent's passcode.
 - Nemotron 3 Super uses its native hybrid Mamba-2 / full-attention / latent-MoE
   architecture. The NVFP4 release needs about 60 GiB of host RAM for expert banks and
   10.3 GiB of resident GPU weights. FreeToken currently serves one concurrent Nemotron

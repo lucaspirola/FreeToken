@@ -372,6 +372,13 @@ class Engine:
         self.cpu_moe_executor = None
         if is_offload_moe_backend(config.moe_backend):
             self._init_offload_moe_cache(config)
+        if config.kv_grow_step_tokens:
+            assert self.moe_offload_cache is not None
+            # Growth may temporarily trade expert slots for KV. Preserve the startup ceiling
+            # and requested overlap policy so teardown can spend released KV VRAM on experts
+            # again instead of making the decode penalty permanent.
+            self._growable_moe_ceiling = self.moe_offload_cache.cache_size
+            self._growable_moe_prefill_overlap = self.moe_offload_cache.prefill_overlap
         if hasattr(self.model, "prepare_for_runtime"):
             self.model.prepare_for_runtime()
 
@@ -1070,25 +1077,35 @@ class Engine:
         per_expert = expert_bytes_per_slot(sources)
         signatures = expert_slot_signatures(sources)
 
+        maximum = self._growable_moe_ceiling
+        desired_overlap = self._growable_moe_prefill_overlap
+
+        def overlap_at(size: int) -> bool:
+            return desired_overlap and size >= 2 * moe.num_experts
+
         def moe_bytes(size: int) -> int:
             return expert_cache_bytes(
                 size,
                 slot_signatures=signatures,
                 num_experts=moe.num_experts,
-                prefill_overlap=moe.prefill_overlap,
+                prefill_overlap=overlap_at(size),
                 fallback_per_expert_bytes=per_expert,
             )
 
         minimum = moe.num_experts
-        while minimum <= moe.cache_size:
+        while minimum <= maximum:
+            current_overlap = moe.prefill_overlap
             try:
+                moe.prefill_overlap = overlap_at(minimum)
                 moe.validate_rebuild(minimum)
                 break
             except ValueError:
                 minimum += 1
-        if minimum > moe.cache_size:
+            finally:
+                moe.prefill_overlap = current_overlap
+        if minimum > maximum:
             raise RuntimeError(
-                f"current MoE cache {moe.cache_size} has no valid growable-KV floor"
+                f"MoE cache ceiling {maximum} has no valid growable-KV floor"
             )
         if moe_bytes(minimum) + kv_bytes > budget:
             need = moe_bytes(minimum) + kv_bytes
@@ -1097,8 +1114,7 @@ class Engine:
                 f"MoE cache ({minimum} slots): need {mem_GB(need)}, budget {mem_GB(budget)}"
             )
 
-        old_moe = moe.cache_size
-        lo, hi = minimum, old_moe
+        lo, hi = minimum, maximum
         while lo < hi:
             mid = (lo + hi + 1) // 2
             if moe_bytes(mid) + kv_bytes <= budget:
@@ -1139,6 +1155,10 @@ class Engine:
                 self._pending_graph_bs = list(self.graph_runner.graph_bs_list)
                 self.attn_backend.reset_capture()
                 self.graph_runner.destroy_cuda_graphs()
+            moe.prefill_overlap = (
+                self._growable_moe_prefill_overlap
+                and target_moe >= 2 * moe.num_experts
+            )
             moe.rebuild(target_moe)
             object.__setattr__(self.config, "moe_cache_size", target_moe)
         pool.commit_pages(target_pages)
@@ -1148,6 +1168,57 @@ class Engine:
             "Committed growable KV through %d tokens (%s physical); MoE slots %d -> %d",
             target_pages,
             mem_GB(kv_bytes),
+            old_moe,
+            target_moe,
+        )
+        return old_pages, target_pages
+
+    @torch.inference_mode()
+    def shrink_runtime_kv(self, target_pages: int) -> tuple[int, int]:
+        """Decommit a free KV suffix and regrow the expert cache from the released VRAM."""
+        pool = self.kv_cache
+        old_pages = int(getattr(pool, "committed_pages", self.num_pages))
+        if target_pages >= old_pages:
+            return old_pages, old_pages
+        step = self.config.kv_grow_step_tokens // self.config.page_size
+        initial = min(self.num_pages, step)
+        target_pages = max(initial, math.ceil(target_pages / step) * step)
+        if target_pages >= old_pages:
+            return old_pages, old_pages
+
+        moe = self.moe_offload_cache
+        assert moe is not None, "growable KV requires the MoE offload cache"
+        old_moe = moe.cache_size
+        target_moe, kv_bytes = self._plan_growable_kv(target_pages)
+        old_kv_bytes = pool.mapped_bytes_for_pages(old_pages)
+
+        torch.cuda.synchronize(self.device)
+        if self.config.tp_info.size > 1:
+            self.sync_all_ranks()
+        recapture = target_moe != old_moe
+        if recapture:
+            if self._pending_graph_bs is None:
+                self._pending_graph_bs = list(self.graph_runner.graph_bs_list)
+                self.attn_backend.reset_capture()
+                self.graph_runner.destroy_cuda_graphs()
+
+        # Free KV first so expert-cache expansion never needs old and new geometries resident
+        # simultaneously. Stable virtual addresses keep all surviving KV views valid.
+        pool.decommit_pages(target_pages)
+        if recapture:
+            moe.prefill_overlap = (
+                self._growable_moe_prefill_overlap
+                and target_moe >= 2 * moe.num_experts
+            )
+            moe.rebuild(target_moe)
+            object.__setattr__(self.config, "moe_cache_size", target_moe)
+        if self.config.tp_info.size > 1:
+            self.sync_all_ranks()
+        logger.info_rank0(
+            "Released growable KV %d -> %d tokens (%s returned); MoE slots %d -> %d",
+            old_pages,
+            target_pages,
+            mem_GB(old_kv_bytes - kv_bytes),
             old_moe,
             target_moe,
         )
@@ -1831,11 +1902,6 @@ def _adjust_config(config: EngineConfig):
             raise ValueError("growable KV currently requires --page-size 1")
         if config.num_page_override is None:
             raise ValueError("--kv-grow-step-tokens requires --num-tokens or --num-pages")
-        if config.max_running_req != 1:
-            raise ValueError(
-                "growable KV currently requires --max-running-requests 1 so physical "
-                "growth and the expert-cache handoff are deterministic"
-            )
         if config.moe_backend != "offload" or not config.moe_cache_auto:
             raise ValueError(
                 "growable KV requires --moe-backend offload and --moe-cache-auto"

@@ -66,6 +66,11 @@ class MHAKVCache(QuantizedKVStorageMixin, BaseKVCachePool):
         self._committed_pages = (
             min(num_pages - 1, self._grow_step_pages) if self._grow_step_pages else num_pages - 1
         )
+        self._initial_committed_pages = self._committed_pages
+        # Each entry is one logical growth boundary plus the exact CUDA VMM mappings created
+        # for it. CUDA can only unmap a complete physical mapping, so retaining these records
+        # makes shrink an exact reverse of growth even when slab rounding differs by KV dtype.
+        self._growth_segments: list[tuple[int, list[tuple[object, list[tuple[int, int]], int]]]] = []
         self._kv_vmm = None
         self._scale_vmm = None
         buffer_dtype = self._buffer_dtype(dtype)
@@ -173,28 +178,111 @@ class MHAKVCache(QuantizedKVStorageMixin, BaseKVCachePool):
             raise ValueError(
                 f"cannot commit {usable_pages} pages; maximum is {self._logical_num_pages - 1}"
             )
-        for allocation, geometry in (
-            (self._kv_vmm, self._kv_vmm_geometry),
-            (self._scale_vmm, getattr(self, "_scale_vmm_geometry", None)),
-        ):
-            if allocation is None:
-                continue
-            slabs, row_bytes, slab_bytes, old_mapped = geometry
-            granularity = allocation.granularity
-            new_mapped = (
-                (usable_pages + 1) * row_bytes + granularity - 1
-            ) // granularity * granularity
-            if new_mapped > old_mapped:
-                allocation.commit_ranges([
-                    (i * slab_bytes + old_mapped, new_mapped - old_mapped)
-                    for i in range(slabs)
-                ])
-                geometry = (slabs, row_bytes, slab_bytes, new_mapped)
+        while self._committed_pages < usable_pages:
+            next_boundary = min(
+                usable_pages,
+                ((self._committed_pages // self._grow_step_pages) + 1)
+                * self._grow_step_pages,
+            )
+            committed: list[tuple[object, list[tuple[int, int]], int]] = []
+            try:
+                for allocation, geometry in (
+                    (self._kv_vmm, self._kv_vmm_geometry),
+                    (self._scale_vmm, getattr(self, "_scale_vmm_geometry", None)),
+                ):
+                    if allocation is None:
+                        continue
+                    slabs, row_bytes, slab_bytes, old_mapped = geometry
+                    granularity = allocation.granularity
+                    new_mapped = (
+                        (next_boundary + 1) * row_bytes + granularity - 1
+                    ) // granularity * granularity
+                    ranges = (
+                        [
+                            (i * slab_bytes + old_mapped, new_mapped - old_mapped)
+                            for i in range(slabs)
+                        ]
+                        if new_mapped > old_mapped
+                        else []
+                    )
+                    if ranges:
+                        allocation.commit_ranges(ranges)
+                    committed.append((allocation, ranges, old_mapped))
+            except Exception:
+                for allocation, ranges, _old_mapped in reversed(committed):
+                    if ranges:
+                        allocation.uncommit_ranges(ranges)
+                raise
+
+            for allocation, _ranges, old_mapped in committed:
                 if allocation is self._kv_vmm:
-                    self._kv_vmm_geometry = geometry
+                    slabs, row_bytes, slab_bytes, _ = self._kv_vmm_geometry
+                    new_mapped = self._mapped_per_slab(next_boundary, allocation, row_bytes)
+                    self._kv_vmm_geometry = (slabs, row_bytes, slab_bytes, new_mapped)
                 else:
-                    self._scale_vmm_geometry = geometry
+                    slabs, row_bytes, slab_bytes, _ = self._scale_vmm_geometry
+                    new_mapped = self._mapped_per_slab(next_boundary, allocation, row_bytes)
+                    self._scale_vmm_geometry = (slabs, row_bytes, slab_bytes, new_mapped)
+            self._growth_segments.append((next_boundary, committed))
+            self._committed_pages = next_boundary
+
+    @staticmethod
+    def _mapped_per_slab(usable_pages: int, allocation, row_bytes: int) -> int:
+        granularity = allocation.granularity
+        return (
+            (usable_pages + 1) * row_bytes + granularity - 1
+        ) // granularity * granularity
+
+    def decommit_pages(self, usable_pages: int) -> None:
+        """Release complete growth segments above ``usable_pages`` without moving pointers."""
+        if not self.growable:
+            raise RuntimeError("KV pool is not growable")
+        if not self._initial_committed_pages <= usable_pages <= self._committed_pages:
+            raise ValueError(
+                f"cannot decommit to {usable_pages} pages; valid range is "
+                f"[{self._initial_committed_pages}, {self._committed_pages}]"
+            )
+        valid_boundaries = {
+            self._initial_committed_pages,
+            *(boundary for boundary, _entries in self._growth_segments),
+        }
+        if usable_pages not in valid_boundaries:
+            raise ValueError(
+                f"decommit target {usable_pages} is not a committed growth boundary"
+            )
+
+        while self._growth_segments and self._growth_segments[-1][0] > usable_pages:
+            _boundary, committed = self._growth_segments.pop()
+            for allocation, ranges, _old_mapped in reversed(committed):
+                if ranges:
+                    allocation.uncommit_ranges(ranges)
+            for allocation, _ranges, old_mapped in committed:
+                if allocation is self._kv_vmm:
+                    slabs, row_bytes, slab_bytes, _ = self._kv_vmm_geometry
+                    self._kv_vmm_geometry = (slabs, row_bytes, slab_bytes, old_mapped)
+                else:
+                    slabs, row_bytes, slab_bytes, _ = self._scale_vmm_geometry
+                    self._scale_vmm_geometry = (slabs, row_bytes, slab_bytes, old_mapped)
         self._committed_pages = usable_pages
+
+    def copy_pages(self, source_pages: torch.Tensor, destination_pages: torch.Tensor) -> None:
+        """Copy complete physical pages for scheduler compaction.
+
+        Page zero is the graph dummy page and is never supplied here. The copy is enqueued on
+        the caller's current stream; the scheduler performs compaction only at a no-forward-
+        in-flight boundary and rewrites page-table references after these copies.
+        """
+        if source_pages.numel() != destination_pages.numel():
+            raise ValueError("source and destination page counts differ")
+        if source_pages.numel() == 0:
+            return
+        src = source_pages.to(device=self._device, dtype=torch.long)
+        dst = destination_pages.to(device=self._device, dtype=torch.long)
+        self._kv_buffer.index_copy_(2, dst, self._kv_buffer.index_select(2, src))
+        if self._scale_buffer is not None:
+            self._scale_buffer.index_copy_(
+                2, dst, self._scale_buffer.index_select(2, src)
+            )
 
     def rebuild(self, num_pages: int) -> None:
         """Reallocate the KV buffer for ``num_pages`` pages IN PLACE.

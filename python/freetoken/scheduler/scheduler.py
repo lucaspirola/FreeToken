@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, List, NamedTuple, NoReturn, Set, Tuple, TypeAlias
 
 import torch
@@ -112,6 +113,15 @@ class Scheduler(SchedulerIOMixin):
         # A received-but-not-yet-executed runtime cache rebuild (CacheRebuildBackendMsg),
         # run at the next idle safe point in overlap_loop. None when no rebuild is pending.
         self._pending_rebuild: CacheRebuildBackendMsg | None = None
+        # Set when a request releases pages. Growable mode checks this at the next no-forward-
+        # in-flight boundary, compacts surviving private pages, decommits a free suffix, and
+        # spends the returned VRAM on MoE expert slots.
+        self._growable_shrink_pending = False
+        # Chunked prefill and decode use different kernels, so a truly mixed batch is not yet
+        # available. Time-slice a short decode burst between helper-prefill chunks: this bounds
+        # an existing agent's stream latency while keeping the large prefill kernels efficient.
+        self._growable_decode_burst = 32
+        self._growable_decode_steps = 0
         self.tokenizer = load_tokenizer(config.model_path)
         self.eos_token_ids = load_eos_token_ids(config.model_path, self.tokenizer)
         self.toolcall_anchor_id = None
@@ -218,9 +228,12 @@ class Scheduler(SchedulerIOMixin):
             or self.prefill_manager.runnable
             or self.decode_manager.runnable
             or self._pending_rebuild is not None  # a queued rebuild to drain toward + execute
+            or getattr(self, "_growable_shrink_pending", False)
         )
         for msg in self.receive_msg(blocking=blocking):
             self._process_one_msg(msg)
+
+        self._maybe_shrink_growable_kv()
 
         # Execute a queued cache rebuild once the scheduler is fully idle (the safe point):
         # no last batch to process, no pending prefill, no running decode. finished_reqs is
@@ -263,9 +276,12 @@ class Scheduler(SchedulerIOMixin):
             self.prefill_manager.runnable
             or self.decode_manager.runnable
             or self._pending_rebuild is not None  # a queued rebuild to execute at idle
+            or getattr(self, "_growable_shrink_pending", False)
         )
         for msg in self.receive_msg(blocking=blocking):
             self._process_one_msg(msg)
+
+        self._maybe_shrink_growable_kv()
 
         # Non-overlap mode has no last_data to drain; execute a queued rebuild as soon as
         # the scheduler is idle (no pending prefill / running decode). Without this, a
@@ -615,6 +631,56 @@ class Scheduler(SchedulerIOMixin):
         self.cache_manager.cache_req(req, finished=True)
         self.table_manager.free(req.table_idx)
         req.table_idx = -1
+        if getattr(getattr(self, "config", None), "kv_grow_step_tokens", 0):
+            self._growable_shrink_pending = True
+
+    @torch.inference_mode()
+    def _maybe_shrink_growable_kv(self) -> None:
+        """Physically release unused KV steps and restore expert residency after teardown."""
+        grow_step_tokens = getattr(
+            getattr(self, "config", None), "kv_grow_step_tokens", 0
+        )
+        if not grow_step_tokens or not getattr(self, "_growable_shrink_pending", False):
+            return
+        # A queued helper is about to consume the space again. Deferring avoids a costly
+        # decommit/rebuild/recapture immediately followed by the inverse operation.
+        if self.prefill_manager.runnable:
+            return
+        self._growable_shrink_pending = False
+        cm = self.cache_manager
+        step = grow_step_tokens // self.config.page_size
+        initial = min(cm.num_pages, step)
+        if cm.committed_pages <= initial:
+            return
+
+        evicted = cm.evict_all_unlocked_prefixes()
+        occupied_pages = cm.committed_pages - len(cm.free_slots)
+        compacted_target = max(initial, math.ceil(occupied_pages / step) * step)
+        compacted_target = cm.compact_active_pages(
+            list(self.decode_manager.running_reqs),
+            compacted_target,
+            self.engine.kv_cache.copy_pages,
+        )
+        target = max(initial, math.ceil(compacted_target / step) * step)
+        if target >= cm.committed_pages:
+            logger.info_rank0(
+                "Growable KV teardown evicted %d prefix pages; protected/live pages keep "
+                "%d tokens committed",
+                evicted,
+                cm.committed_pages,
+            )
+            return
+
+        old_pages, new_pages = self.engine.shrink_runtime_kv(target)
+        if new_pages < old_pages:
+            cm.remove_committed_pages(new_pages)
+            logger.info_rank0(
+                "KV shrank %d -> %d tokens after agent teardown; MoE cache restored to "
+                "%d slots",
+                old_pages,
+                new_pages,
+                self.engine.moe_offload_cache.cache_size,
+            )
 
     def _reply_rebuild(self, request_id: str, status: str, error: str | None = None) -> None:
         # Single source of truth with the rollback snapshot (_current_cache_geometry): mamba is
@@ -768,11 +834,8 @@ class Scheduler(SchedulerIOMixin):
             logger.warning(f"could not log cache geometry: {e!r}")
 
     def _prepare_batch(self, batch: Batch) -> ForwardInput:
-        if batch.is_decode and self.config.kv_grow_step_tokens:
-            self.engine.ensure_decode_graphs()
-        self.engine.graph_runner.pad_batch(batch)
         if self.config.kv_grow_step_tokens:
-            required = max((req.device_len for req in batch.reqs), default=0)
+            required = self.cache_manager.committed_pages_required(batch.reqs)
             old_pages, new_pages = self.engine.grow_runtime_kv(required)
             if new_pages > old_pages:
                 self.cache_manager.add_committed_pages(new_pages)
@@ -780,14 +843,21 @@ class Scheduler(SchedulerIOMixin):
                     f"KV grew {old_pages} -> {new_pages} tokens; "
                     f"MoE cache now {self.engine.moe_offload_cache.cache_size} slots"
                 )
+            # A growth event reallocates the expert cache and destroys every decode graph.
+            # Recapture only after the final geometry for this batch is known; doing this
+            # before aggregate growth would pad/replay through stale expert pointers.
+            if batch.is_decode:
+                self.engine.ensure_decode_graphs()
         if (
             batch.is_prefill
             and self.config.kv_grow_step_tokens
             and not any(isinstance(req, ChunkedReq) for req in batch.reqs)
+            and not self.prefill_manager.runnable
         ):
-            # All KV growth is complete for this request. Rebuild decode graphs once here so
-            # the first streamed token-to-token interval contains inference, not recapture.
+            # No queued prefill can immediately grow again. Rebuild once here so the first
+            # streamed token-to-token interval contains inference, not graph recapture.
             self.engine.ensure_decode_graphs()
+        self.engine.graph_runner.pad_batch(batch)
         self._forward_iter += 1
         if batch.is_decode:
             # Free each decoding request's now-out-of-window SWA slots BEFORE the alloc below,
@@ -856,11 +926,23 @@ class Scheduler(SchedulerIOMixin):
             batch.mm_embeds = torch.cat(parts, dim=0)
 
     def _schedule_next_batch(self) -> ForwardInput | None:
-        # TODO: support other policies: e.g. DECODE first
-        batch = (
-            self.prefill_manager.schedule_next_batch(self.prefill_budget)
-            or self.decode_manager.schedule_next_batch()
-        )
+        if (
+            getattr(getattr(self, "config", None), "kv_grow_step_tokens", 0)
+            and self.prefill_manager.runnable
+            and self.decode_manager.runnable
+        ):
+            if self._growable_decode_steps < self._growable_decode_burst:
+                batch = self.decode_manager.schedule_next_batch()
+                self._growable_decode_steps += 1
+            else:
+                batch = self.prefill_manager.schedule_next_batch(self.prefill_budget)
+                self._growable_decode_steps = 0
+        else:
+            batch = self.prefill_manager.schedule_next_batch(self.prefill_budget)
+            if batch is not None:
+                self._growable_decode_steps = 0
+            else:
+                batch = self.decode_manager.schedule_next_batch()
         if batch is None:
             return None
         forward_input = self._prepare_batch(batch)

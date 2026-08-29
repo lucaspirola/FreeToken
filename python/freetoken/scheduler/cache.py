@@ -75,7 +75,7 @@ class CacheManager:
     def page_usage(self) -> tuple[int, int]:
         """(used_pages, total_pages): allocated, non-evictable pages over the pool total
         (active requests + protected prefix; evictable prefix-cache pages are excluded)."""
-        total = self.committed_pages
+        total = getattr(self, "committed_pages", self.num_pages)
         evictable = (self.prefix_cache.full_evictable_size if (self.is_hybrid or self.is_swa)
                      else self.prefix_cache.size_info.evictable_size)
         return total - len(self.free_slots) - evictable // self.page_size, total
@@ -114,6 +114,39 @@ class CacheManager:
         future = (self.num_pages - self.committed_pages) * self.page_size
         return evictable + len(self.free_slots) * self.page_size + future
 
+    def committed_pages_required(self, reqs: List[Req]) -> int:
+        """Physical page ceiling needed to allocate ``reqs``' next forward.
+
+        Admission reasons about the whole logical pool, including VMM pages that can be
+        committed later. Allocation, however, may use only the currently committed free-list
+        plus evictable prefix pages. With multiple requests the growth trigger must therefore
+        follow their *aggregate* page demand -- the longest sequence is insufficient (two 64K
+        agents need 128K physical pages even though neither is longer than 64K).
+
+        Prefix pages remain first-class reclaimable capacity: growing KV costs MoE residency,
+        so an unlocked cached prefix is evicted before a new physical suffix is committed.
+        """
+        needed_pages = sum(
+            div_ceil(req.device_len, self.page_size)
+            - div_ceil(req.cached_len, self.page_size)
+            for req in reqs
+        )
+        evictable_tokens = (
+            self.prefix_cache.full_evictable_size
+            if (self.is_hybrid or self.is_swa)
+            else self.prefix_cache.size_info.evictable_size
+        )
+        allocatable_pages = len(self.free_slots) + evictable_tokens // self.page_size
+        shortage = max(0, needed_pages - allocatable_pages)
+        required = self.committed_pages + shortage
+        if required > self.num_pages:
+            raise RuntimeError(
+                f"batch needs {needed_pages} pages but only {allocatable_pages} are "
+                f"physically allocatable and {self.num_pages - self.committed_pages} "
+                "logical pages remain"
+            )
+        return required
+
     def add_committed_pages(self, new_total: int) -> None:
         """Expose a newly VMM-mapped suffix to the allocator."""
         if not self.committed_pages < new_total <= self.num_pages:
@@ -125,6 +158,102 @@ class CacheManager:
         end = new_total + self.page_index_offset
         added = torch.arange(begin, end, dtype=torch.int32, device=self.device) * self.page_size
         self.free_slots = torch.cat((self.free_slots, added))
+        self.committed_pages = new_total
+
+    def evict_all_unlocked_prefixes(self) -> int:
+        """Return every evictable prefix page to the free-list before physical shrink."""
+        if self.is_swa:
+            ev = self.prefix_cache.evict_full(self.prefix_cache.full_evictable_size)
+            evicted = ev.kv_indices
+            self._free_swa(ev.swa_indices)
+        elif self.is_hybrid:
+            er = self.prefix_cache.evict_full(self.prefix_cache.full_evictable_size)
+            evicted = er.kv_indices
+            if er.mamba_slots:
+                self.linear_state_pool.free(er.mamba_slots)
+        else:
+            evictable = self.prefix_cache.size_info.evictable_size
+            evicted = self.prefix_cache.evict(evictable)
+        if len(evicted) > 0:
+            self.free_slots = torch.cat((self.free_slots, evicted[:: self.page_size]))
+        return len(evicted) // self.page_size
+
+    def compact_active_pages(
+        self,
+        reqs: List[Req],
+        target_pages: int,
+        copy_pages,
+    ) -> int:
+        """Move request-owned high pages into low holes and return the resulting ceiling.
+
+        Prefix-owned pages are deliberately immovable: radix nodes also retain their physical
+        ids. Pages after a request's matched prefix belong only to that live request, so their
+        page-table entries can be safely rewritten. If a protected high prefix prevents the
+        requested target, the returned ceiling remains above it and shrink is conservative.
+        """
+        if self.page_size != 1:
+            raise RuntimeError("growable KV compaction currently requires page_size=1")
+        if target_pages >= self.committed_pages:
+            return self.committed_pages
+        first_page_id = self.page_index_offset
+        cutoff_id = first_page_id + target_pages
+        low_free = self.free_slots[self.free_slots < cutoff_id]
+
+        high_private: list[torch.Tensor] = []
+        for req in reqs:
+            if req.table_idx == -1:
+                continue
+            private_start = int(req.cache_handle.cached_len)
+            private_end = int(req.cached_len)
+            if private_end > private_start:
+                row = self.page_table[req.table_idx, private_start:private_end]
+                high_private.append(row[row >= cutoff_id])
+        if high_private and len(low_free) > 0:
+            sources = torch.unique(torch.cat(high_private), sorted=True)
+            count = min(len(sources), len(low_free))
+            sources = sources[:count]
+            destinations = torch.sort(low_free)[0][:count]
+            copy_pages(sources, destinations)
+
+            # Rewrite every private reference. In normal decode these ids are unique, but a
+            # global replacement keeps the operation correct if a future path aliases one.
+            for req in reqs:
+                if req.table_idx == -1:
+                    continue
+                private_start = int(req.cache_handle.cached_len)
+                private_end = int(req.cached_len)
+                row = self.page_table[req.table_idx, private_start:private_end]
+                for src, dst in zip(sources, destinations, strict=True):
+                    row[row == src] = dst
+
+            keep = ~torch.isin(self.free_slots, destinations)
+            self.free_slots = torch.cat((self.free_slots[keep], sources.to(torch.int32)))
+
+        free_mask = torch.zeros(
+            self.committed_pages, dtype=torch.bool, device=self.device
+        )
+        normalized = self.free_slots // self.page_size - self.page_index_offset
+        free_mask[normalized.to(torch.long)] = True
+        occupied = (~free_mask).nonzero()
+        required = int(occupied[-1].item()) + 1 if len(occupied) else 0
+        return max(target_pages, required)
+
+    def remove_committed_pages(self, new_total: int) -> None:
+        """Remove an entirely free physical suffix from allocator accounting."""
+        if not 0 <= new_total < self.committed_pages:
+            raise ValueError(
+                f"new committed page total {new_total} outside [0, {self.committed_pages})"
+            )
+        normalized = self.free_slots // self.page_size - self.page_index_offset
+        tail = normalized >= new_total
+        expected = self.committed_pages - new_total
+        actual = int(tail.sum().item())
+        if actual != expected:
+            raise RuntimeError(
+                f"cannot decommit through page {new_total}: tail has {actual} free pages, "
+                f"expected {expected}"
+            )
+        self.free_slots = self.free_slots[~tail]
         self.committed_pages = new_total
 
     @property
