@@ -33,6 +33,7 @@ from .anthropic_models import (
     AnthropicStreamEvent,
     AnthropicUsage,
 )
+from .client_sessions import anthropic_session_id
 from .generation import (
     KEEPALIVE,
     ContentDelta,
@@ -88,6 +89,7 @@ def register_anthropic_routes(
         if mstate != "serving":
             detail = "model is still loading" if mstate == "loading" else "cache rebuild in progress"
             return _anthropic_error_response(503, "overloaded_error", detail)
+        req.session_id = anthropic_session_id(req, request)
         return await handle_anthropic_messages(req, request, state, get_model_sampling())
 
     @app.post("/v1/messages/count_tokens")
@@ -123,6 +125,9 @@ async def handle_anthropic_messages(
         return _anthropic_error_response(400, "invalid_request_error", str(exc))
 
     cache_report = getattr(state.config, "enable_cache_report", False)
+    response_headers = (
+        {"X-FreeToken-Session-Id": spec.session_id} if spec.session_id is not None else None
+    )
     if req.stream:
         events = anthropic_event_stream(
             generate_events(uid, spec, state, source="/v1/messages"),
@@ -134,7 +139,9 @@ async def handle_anthropic_messages(
                 if spec.session_id is not None
                 else state.stream_with_cancellation(events, request, uid)
             )
-        return StreamingResponse(events, media_type="text/event-stream")
+        return StreamingResponse(
+            events, media_type="text/event-stream", headers=response_headers
+        )
 
     try:
         result = await generate_full(uid, spec, state, source="/v1/messages")
@@ -144,7 +151,9 @@ async def handle_anthropic_messages(
     except GenerationError as exc:
         return _anthropic_error_response(400, "invalid_request_error", str(exc))
     response = anthropic_full_response(result, req.model, uid, cache_report=cache_report)
-    return JSONResponse(content=response.model_dump(exclude_none=True))
+    return JSONResponse(
+        content=response.model_dump(exclude_none=True), headers=response_headers
+    )
 
 
 async def handle_anthropic_count_tokens(req: AnthropicCountTokensRequest, state: Any):

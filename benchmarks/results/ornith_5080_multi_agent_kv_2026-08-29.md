@@ -67,3 +67,25 @@ it makes each long agent a lane in the same forward and rotates unfinished lanes
 The Q4 A/B used identical prompts and decode budgets on the same loaded server. The
 Q6 gate validates the accepted scheduling path and coherence; it is not presented as
 an A/B because no matching pre-change run was taken for that short workload.
+
+## Transparent Claude Code and Codex integration
+
+FreeToken now derives leases from identifiers already emitted by the stock clients:
+Claude Code's `X-Claude-Code-Session-Id` plus child-agent id, and Codex's
+`prompt_cache_key`/thread identity. Explicit `session_id` still takes precedence.
+No client patch or custom request body is needed.
+
+| Live two-turn gate | Q4_K_M + INT4 KV / Claude Code wire | Q6_K + Q8_0 KV / Codex wire |
+|---|---:|---:|
+| First-turn prompt tokens | 16,238 | 14,438 |
+| Second-turn cached tokens | 16,245 | 14,445 |
+| New second-turn input | 25 | 25 |
+| Same derived lease both turns | PASS | PASS |
+| Exact passcode both turns | `7319046` | `8462751` |
+
+Both gates used the production `/v1/messages` or `/v1/responses` route, the accepted
+growable-KV step for that pair, and `--enable-cache-report`. A deliberately too-small
+48-token Q4 screen was rejected as a coherence failure even though it reused 62,976
+tokens: reasoning consumed the output budget and left an empty/partial visible answer.
+The retained gate disabled thinking and allowed 192 output tokens, then returned the
+exact passcode in eight tokens on each turn.

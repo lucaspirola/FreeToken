@@ -428,6 +428,7 @@ class FakeState:
         )
         self._uid = 0
         self._count_manager = None
+        self.last_sent = None
 
     def frontend_tokenizer(self):
         return self._count_manager
@@ -437,6 +438,7 @@ class FakeState:
         return self._uid
 
     async def send_one(self, msg):
+        self.last_sent = msg
         return None
 
     async def wait_for_ack(self, uid):
@@ -479,6 +481,59 @@ def test_route_nonstream_text():
     assert body["stop_reason"] == "end_turn"
     assert body["usage"]["input_tokens"] == 5
     assert body["usage"]["output_tokens"] == 2
+
+
+def test_route_binds_claude_code_header_to_scheduler_lease():
+    fake = FakeState([("OK", True, 5, 1)])
+    client = _client(fake)
+    response = client.post(
+        "/v1/messages",
+        headers={"X-Claude-Code-Session-Id": "claude-session-1"},
+        json={
+            "model": "claude-x",
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "reply OK"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert fake.last_sent.session_id.startswith("auto:claude-code:")
+    assert response.headers["x-freetoken-session-id"] == fake.last_sent.session_id
+
+
+def test_claude_code_header_gets_transparent_per_agent_session():
+    req = AnthropicMessagesRequest.model_validate(
+        {"model": "claude-x", "max_tokens": 8, "messages": [{"role": "user", "content": "hi"}]}
+    )
+    main_request = SimpleNamespace(
+        headers={"x-claude-code-session-id": "session-1"}
+    )
+    child_request = SimpleNamespace(
+        headers={
+            "x-claude-code-session-id": "session-1",
+            "x-claude-code-agent-id": "agent-2",
+        }
+    )
+
+    main = A.anthropic_session_id(req, main_request)
+    child = A.anthropic_session_id(req, child_request)
+
+    assert main.startswith("auto:claude-code:")
+    assert child.startswith("auto:claude-code:")
+    assert main != child
+
+
+def test_explicit_anthropic_session_overrides_claude_code_header():
+    req = AnthropicMessagesRequest.model_validate(
+        {
+            "model": "claude-x",
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}],
+            "session_id": "manual",
+        }
+    )
+    request = SimpleNamespace(headers={"x-claude-code-session-id": "session-1"})
+    assert A.anthropic_session_id(req, request) == "manual"
 
 
 def test_route_stream_text():

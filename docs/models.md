@@ -125,17 +125,25 @@ work too.
   at helper exit (262K → 128K, 3,483 → 4,036 expert slots) and recovered to about
   130 tok/s steady decode; Q4/INT4 released 0.35 GiB (192K → 128K, 5,644 → 5,842
   slots) and reached 154.04 tok/s over the final 80-token tail. Both surviving
-  agents remained coherent and neither emitted the other agent's passcode. Clients
-  can opt into a persistent KV lease by sending the same `session_id` (and optional
-  `session_ttl_seconds`, default 300) on each full-conversation request to
-  `/v1/chat/completions`, `/v1/completions`, `/v1/messages`, or `/v1/responses`.
+  agents remained coherent and neither emitted the other agent's passcode. Claude
+  Code and Codex receive persistent KV leases automatically: FreeToken binds
+  Claude's `X-Claude-Code-Session-Id` (plus its child-agent id) and Codex's stable
+  `prompt_cache_key`/thread headers to separate internal session ids. No client
+  patch or custom request field is required. Other clients can opt in by sending
+  the same `session_id` (and optional `session_ttl_seconds`, default 300) on each
+  full-conversation request to `/v1/chat/completions`, `/v1/completions`,
+  `/v1/messages`, or `/v1/responses`. The resolved id is returned as
+  `X-FreeToken-Session-Id` for observability and explicit teardown.
   A normal EOS/stop/max-token turn ends only the turn: its reusable prefix and final
   GDN snapshot stay protected for the next request. Sessions serialize their turns;
   concurrent use of one id returns `session ... is busy`. `DELETE
   /v1/sessions/{session_id}` is a scheduler barrier and returns `closed` only after
   the lease is released (or `not_found`); a stream disconnect/abort also closes it,
-  and an inactive lease expires after its TTL. The client still sends the complete
-  conversation on each turn—the lease retains computation state, not message history.
+  and an inactive lease expires after its TTL. Because neither agent protocol sends
+  a normal process-exit event, a cleanly idle auto-bound session is reclaimed at that
+  timeout; cancellation and disconnect reclaim it immediately. Both clients still
+  send the complete conversation on each turn—the lease retains computation state,
+  not message history. OpenAI `previous_response_id` storage is not emulated.
   Closing a helper makes its pages evictable immediately, allowing the growable KV
   arena to decommit unused suffix segments and restore MoE residency.
 - Nemotron 3 Super uses its native hybrid Mamba-2 / full-attention / latent-MoE

@@ -72,6 +72,24 @@ def test_convert_defaults_max_output_tokens_when_omitted():
     assert RP.convert_responses_to_genspec(req, {}, default_max_tokens=2048).sampling_params.max_tokens == 2048
 
 
+def test_codex_prompt_cache_key_gets_transparent_session():
+    req = ResponsesRequest.model_validate(
+        {"model": "gpt-x", "input": "hi", "prompt_cache_key": "thread-1"}
+    )
+    session = RP.responses_session_id(req, SimpleNamespace(headers={}))
+    assert session.startswith("auto:codex:")
+    assert session == RP.responses_session_id(req, SimpleNamespace(headers={}))
+
+
+def test_codex_headers_fallback_and_explicit_session_override():
+    req = ResponsesRequest.model_validate({"model": "gpt-x", "input": "hi"})
+    request = SimpleNamespace(headers={"session-id": "thread-1"})
+    assert RP.responses_session_id(req, request).startswith("auto:codex:")
+
+    req.session_id = "manual"
+    assert RP.responses_session_id(req, request) == "manual"
+
+
 def test_convert_list_input_with_tool_roundtrip_and_tools():
     req = ResponsesRequest.model_validate(
         {
@@ -360,6 +378,19 @@ def test_route_nonstream_text():
     assert body["status"] == "completed"
     assert body["output"][0]["content"][0]["text"] == "Hello world"
     assert body["usage"]["input_tokens"] == 5 and body["usage"]["output_tokens"] == 2
+
+
+def test_route_binds_codex_prompt_cache_key_to_scheduler_lease():
+    fake = FakeState([("OK", True, 5, 1)])
+    client = _client(fake)
+    response = client.post(
+        "/v1/responses",
+        json={"model": "gpt-x", "input": "reply OK", "prompt_cache_key": "codex-thread-1"},
+    )
+
+    assert response.status_code == 200
+    assert fake.last_sent.session_id.startswith("auto:codex:")
+    assert response.headers["x-freetoken-session-id"] == fake.last_sent.session_id
 
 
 def test_route_stream_text():

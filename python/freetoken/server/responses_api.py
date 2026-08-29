@@ -7,9 +7,10 @@ protocol-neutral primitive (:func:`freetoken.server.openai_api.submit_generation
 Responses typed items + stream events using the real ``openai.types.responses``
 SDK models. It consumes typed events, not a re-parsed OpenAI stream.
 
-Scope: a STATELESS subset (``store``/``previous_response_id``/``background`` are
-ignored; ``GET /v1/responses/{id}`` and ``/cancel`` are stubbed) — enough to drive
-codex, which resends full context as ``input`` when not storing. Reasoning streams
+Scope: a stateless-message subset (``store``/``previous_response_id``/``background``
+are not implemented; ``GET /v1/responses/{id}`` and ``/cancel`` are stubbed). Codex
+resends full context as ``input`` while its stable prompt-cache key transparently
+retains the matching computation state. Reasoning streams
 as a first-class ``reasoning`` item (``response.reasoning_text.delta``, the shape
 vLLM emits and codex renders); reasoning items replayed as ``input`` are folded
 back into their assistant turn as ``reasoning_content``.
@@ -58,6 +59,7 @@ from openai.types.responses.response_usage import (
 )
 from pydantic import BaseModel, ConfigDict
 
+from .client_sessions import responses_session_id
 from .generation import (
     DEFAULT_MAX_OUTPUT_TOKENS,
     KEEPALIVE,
@@ -101,12 +103,15 @@ class ResponsesRequest(BaseModel):
     tools: list[dict[str, Any]] | None = None
     tool_choice: Any | None = None
     reasoning: dict[str, Any] | None = None
-    # Stateful features are accepted but ignored in this subset.
+    # Stored-response continuation is not implemented. prompt_cache_key is also
+    # Codex's stable thread identity and is used for a transparent KV lease.
     store: bool = False
     previous_response_id: str | None = None
     background: bool = False
     metadata: dict[str, Any] | None = None
     parallel_tool_calls: bool | None = None
+    prompt_cache_key: str | None = None
+    client_metadata: dict[str, Any] | None = None
     session_id: str | None = None
     session_ttl_seconds: float | None = None
 
@@ -132,6 +137,7 @@ def register_responses_routes(
                 "previous_response_id is not supported (stateless server); "
                 "resend full context in 'input'",
             )
+        req.session_id = responses_session_id(req, request)
         return await handle_responses(req, request, state, get_model_sampling())
 
     @app.get("/v1/responses/{response_id}")
@@ -164,6 +170,9 @@ async def handle_responses(
         return _error_response(400, str(exc))
 
     cache_report = getattr(state.config, "enable_cache_report", False)
+    response_headers = (
+        {"X-FreeToken-Session-Id": spec.session_id} if spec.session_id is not None else None
+    )
     if req.stream:
         events = responses_stream_generator(
             generate_events(uid, spec, state, source="/v1/responses"), req, response_id, created,
@@ -175,7 +184,9 @@ async def handle_responses(
                 if spec.session_id is not None
                 else state.stream_with_cancellation(events, request, uid)
             )
-        return StreamingResponse(events, media_type="text/event-stream")
+        return StreamingResponse(
+            events, media_type="text/event-stream", headers=response_headers
+        )
 
     try:
         result = await generate_full(uid, spec, state, source="/v1/responses")
@@ -185,7 +196,9 @@ async def handle_responses(
     except GenerationError as exc:
         return _error_response(400, str(exc), exc.code)
     response = build_responses_response(result, req, response_id, created, cache_report=cache_report)
-    return JSONResponse(content=response.model_dump(mode="json"))
+    return JSONResponse(
+        content=response.model_dump(mode="json"), headers=response_headers
+    )
 
 
 # --------------------------------------------------------------------------- #
