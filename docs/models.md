@@ -107,7 +107,11 @@ work too.
   the Q6_K + Q8_0 128K-step configuration reached 527.36 tok/s average prefill,
   416.57 tok/s on the last full chunk, and 78.40 tok/s decode while recovering the
   deterministic needle coherently. That is +62.1% prefill and +32.0% decode over
-  the same growable configuration with 64K steps.
+  the same growable configuration with 64K steps. A repeated-growth gate then ran
+  a 524,000-token prompt under a 524,288-token ceiling with YaRN factor 2. All
+  three 128K transitions completed (expert slots 4,096 → 3,544 → 2,991 →
+  2,438), and the coherent exact-needle result reached 402.10 tok/s average
+  prefill, 268.71 tok/s on the last full chunk, and 62.28 tok/s decode.
 - Nemotron 3 Super uses its native hybrid Mamba-2 / full-attention / latent-MoE
   architecture. The NVFP4 release needs about 60 GiB of host RAM for expert banks and
   10.3 GiB of resident GPU weights. FreeToken currently serves one concurrent Nemotron

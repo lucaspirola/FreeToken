@@ -51,7 +51,31 @@ prefill. The retained full gate therefore uses `--kv-grow-step-tokens 131072`:
 Against the rejected 64K step, the 128K step improves average prefill by 62.1%,
 last-full-chunk prefill by 25.6%, and decode by 32.0%. Against static KV it
 improves average prefill by 34.1% and the last full chunk by 40.7%, with a 5.5%
-decode tradeoff. Use 64K growth for Q4_0 KV and 128K growth for Q8_0 KV on this
+decode tradeoff. Because this 262K test contains only one 128K resize, it is the
+controlled performance comparison, not sufficient by itself to validate repeated
+growth.
+
+### Repeated-growth gate at 512K
+
+The multi-step Q6_K + Q8_0 gate used a 524,000-token prompt, 128 requested output
+tokens, a 524,288-token ceiling (exactly four 131,072-token segments), static YaRN
+factor 2 from the native 262,144-token context, and otherwise the same LFU,
+8,192-token-chunk, and 0.97-memory-ratio settings. It exercised three live growth
+events:
+
+| Event | Physically committed KV | Expert slots | Boundary / first post-growth prefill |
+|---|---:|---:|---:|
+| Startup | 131,072 tokens | 4,096 | — |
+| Growth 1 | 262,144 tokens | 3,544 | 293.98 instant / 624.28 average; next 548.53 instant |
+| Growth 2 | 393,216 tokens | 2,991 | 408.27 instant / 539.92 average; next 400.16 instant |
+| Growth 3 | 524,288 tokens | 2,438 | 324.36 instant / 463.22 average; next 316.09 instant |
+
+Every transition preserved the old KV and resumed without a sustained throughput
+collapse. The completed run reached 402.10 tok/s average prefill, 268.71 tok/s on
+the last full 8,192-token chunk, 228.51 tok/s on the final 7,904-token remainder,
+and 62.28 tok/s decode. It recovered `5663623` exactly and produced a coherent,
+explicit answer. This is the repeated-growth validation supporting the 128K Q8_0
+recommendation. Use 64K growth for Q4_0 KV and 128K growth for Q8_0 KV on this
 RTX 5080 host.
 
 Additional transition gates crossed one boundary at 70,000 tokens for both pairs

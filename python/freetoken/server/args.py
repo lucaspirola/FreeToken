@@ -407,7 +407,7 @@ def parse_args(
             "stays stable, surrendering MoE expert-cache space at each boundary. "
             "For Ornith on a 16 GiB RTX 5080, use 65536 with Q4_0 KV and 131072 "
             "with Q8_0 KV; the larger Q8_0 step avoids a costly intermediate "
-            "expert-cache rebuild."
+            "expert-cache rebuild and is validated through a 524288-token ceiling."
         ),
     )
 
