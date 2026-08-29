@@ -405,7 +405,9 @@ def parse_args(
         help=(
             "Physically grow KV in fixed token increments while its CUDA virtual address "
             "stays stable, surrendering MoE expert-cache space at each boundary. "
-            "Recommended for long-context single-request serving: 65536."
+            "For Ornith on a 16 GiB RTX 5080, use 65536 with Q4_0 KV and 131072 "
+            "with Q8_0 KV; the larger Q8_0 step avoids a costly intermediate "
+            "expert-cache rebuild."
         ),
     )
 

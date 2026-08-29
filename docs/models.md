@@ -76,9 +76,12 @@ work too.
   --num-tokens 262144 --kv-cache-dtype q4_0 --max-running-requests 1
   --moe-backend offload --moe-cache-auto --max-prefill-length 8192`. Pass the
   backend explicitly: sm_120 auto-resolves to FlashInfer, which cannot read the
-  quantized KV pool. For one long session, add `--kv-grow-step-tokens 65536`
-  to reserve the full virtual KV address range while physically committing only
-  64K-token segments. At each boundary FreeToken gives exactly enough expert-cache
+  quantized KV pool. For one long Q4_K_M + Q4_0 KV session, add
+  `--kv-grow-step-tokens 65536`; for Q6_K + Q8_0 KV use
+  `--kv-grow-step-tokens 131072`. The Q8-specific 128K step avoids the expensive
+  intermediate expert-cache rebuild seen with 64K steps on this host. Both reserve
+  the full virtual KV address range while physically committing fixed-size segments.
+  At each boundary FreeToken gives exactly enough expert-cache
   VRAM to the new KV segment, preserves all earlier KV at stable addresses, and
   recaptures decode graphs once after the final prefill chunk. This mode currently
   requires one running request, the Triton MHA path, plain `offload`, and
@@ -100,7 +103,11 @@ work too.
   crossover from 320 to 272 tokens, and sends only measured small/output Q6_K
   projections back to transient dequant+cuBLAS (+18.0% on an 8K cold-prefill live
   A/B). Q4_K retains uncapped MMA: the analogous isolated-kernel change reduced
-  end-to-end overlapped prefill and was rejected.
+  end-to-end overlapped prefill and was rejected. At the exact 262,144-token gate,
+  the Q6_K + Q8_0 128K-step configuration reached 527.36 tok/s average prefill,
+  416.57 tok/s on the last full chunk, and 78.40 tok/s decode while recovering the
+  deterministic needle coherently. That is +62.1% prefill and +32.0% decode over
+  the same growable configuration with 64K steps.
 - Nemotron 3 Super uses its native hybrid Mamba-2 / full-attention / latent-MoE
   architecture. The NVFP4 release needs about 60 GiB of host RAM for expert banks and
   10.3 GiB of resident GPU weights. FreeToken currently serves one concurrent Nemotron
