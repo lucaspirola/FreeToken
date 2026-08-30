@@ -67,3 +67,47 @@ def test_pageable_gather_clamps_count_to_capacity():
 
     torch.testing.assert_close(destination, source[source_ids.long()], rtol=0, atol=0)
     assert gather.stats()[:2] == [1, 3]
+
+
+def test_pageable_gather_reuses_pool_across_small_and_large_jobs():
+    if not torch.cuda.is_available():
+        pytest.skip("cudaLaunchHostFunc requires CUDA")
+
+    from freetoken.kernel import _pageable_stage
+
+    rows = 9
+    capacity = 4
+    sources = [
+        torch.arange(rows * width, dtype=torch.int32).view(rows, width)
+        for width in (129, 67)
+    ]
+    destinations = [
+        torch.empty((capacity, source.shape[1]), dtype=source.dtype, pin_memory=True)
+        for source in sources
+    ]
+    source_ids = torch.tensor([8, 5, 2, 0], dtype=torch.int32, pin_memory=True)
+    count = torch.tensor([1], dtype=torch.int64, pin_memory=True)
+    gather = _pageable_stage.PageableGather(
+        [source.data_ptr() for source in sources],
+        [destination.data_ptr() for destination in destinations],
+        [source[0].numel() * source.element_size() for source in sources],
+        count.data_ptr(),
+        source_ids.data_ptr(),
+        capacity,
+        rows,
+    )
+
+    stream = torch.cuda.Stream()
+    for job_rows in (1, capacity, 1, 2, capacity):
+        count.fill_(job_rows)
+        gather.launch(stream.cuda_stream)
+        stream.synchronize()
+        for source, destination in zip(sources, destinations):
+            torch.testing.assert_close(
+                destination[:job_rows],
+                source[source_ids[:job_rows].long()],
+                rtol=0,
+                atol=0,
+            )
+
+    assert gather.stats()[:2] == [5, 1 + capacity + 1 + 2 + capacity]

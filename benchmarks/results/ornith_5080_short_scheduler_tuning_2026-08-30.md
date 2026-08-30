@@ -45,6 +45,19 @@ default: reserving eight GDN/graph lanes reduced the initial MoE cache from 5,63
 are absent. Dynamic graph/GDN-lane growth is the follow-up required before making eight
 on-request lanes free at idle.
 
+## Accepted: task-aware pageable gather workers
+
+The persistent CPU gather pool now waits only for workers that can contribute to the
+current copy. A one-row decode miss has two weight-bank copies, so the caller and one
+worker execute them while the other workers remain outside the completion barrier;
+larger multi-agent batches still activate the full pool.
+
+On a paired Q6/Q8 gate with the same eight pageable layers, two 1,024-token runs
+averaged 53.24 tok/s versus 52.27 tok/s (+1.9%), while measured pageable gather time
+fell from 8.70 to 8.25 seconds (-5.2%). Four-session simultaneous decode remained
+batch-scaled and edged from 105.47 to 106.17 tok/s (+0.7%). All single- and
+four-session arithmetic answers were coherent.
+
 ## Rejected screens
 
 - A 20 ms idle admission window successfully placed four requests in the first prefill,

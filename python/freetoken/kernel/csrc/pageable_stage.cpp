@@ -25,7 +25,8 @@ class ParallelCopyPool {
     }
     thread_count_ = std::min<int>(requested, detected);
     for (int i = 1; i < thread_count_; ++i) {
-      workers_.emplace_back([this] { worker_loop(); });
+      const int worker_id = i - 1;
+      workers_.emplace_back([this, worker_id] { worker_loop(worker_id); });
     }
   }
 
@@ -64,7 +65,11 @@ class ParallelCopyPool {
       source_rows_ = source_rows;
       task_count_ = tasks;
       next_task_.store(0, std::memory_order_relaxed);
-      remaining_workers_ = static_cast<int>(workers_.size());
+      // The submitting thread consumes work too. Do not make it wait for more
+      // background workers than the job can use (decode commonly stages one
+      // row from two banks: exactly one worker can help the caller).
+      active_workers_ = std::min<int64_t>(workers_.size(), tasks - 1);
+      remaining_workers_ = active_workers_;
       ++generation_;
     }
     start_.notify_all();
@@ -105,7 +110,7 @@ class ParallelCopyPool {
     }
   }
 
-  void worker_loop() {
+  void worker_loop(int worker_id) {
     uint64_t seen_generation = 0;
     while (true) {
       {
@@ -115,6 +120,7 @@ class ParallelCopyPool {
         });
         if (stopping_) return;
         seen_generation = generation_;
+        if (worker_id >= active_workers_) continue;
       }
       consume_tasks();
       {
@@ -134,6 +140,7 @@ class ParallelCopyPool {
   bool stopping_ = false;
   uint64_t generation_ = 0;
   int remaining_workers_ = 0;
+  int active_workers_ = 0;
   std::atomic<int64_t> next_task_{0};
   int64_t task_count_ = 0;
   const std::vector<const uint8_t*>* sources_ = nullptr;
