@@ -146,6 +146,11 @@ class Scheduler(SchedulerIOMixin):
                 config.kv_grow_step_tokens and config.max_running_req > 1
             ),
             max_batch_seqs=max_prefill_seqs,
+            small_prompt_group_tokens=(
+                1280
+                if config.max_prefill_seqs is None and max_prefill_seqs == 1
+                else 0
+            ),
         )
         if max_prefill_seqs:
             logger.info_rank0(

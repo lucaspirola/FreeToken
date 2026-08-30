@@ -87,6 +87,16 @@ removed the short-lived 4-to-3 recapture and went directly 4-to-2, restoring 13 
 4,036 MoE slots without an extra rebuild. The four-agent regression remained coherent
 at 105.65 tok/s simultaneous decode.
 
+## Accepted: adaptive small-prompt grouping
+
+The automatic one-lane GGUF policy now groups only fresh prompts of at most 1,280
+templated tokens when the complete group fits one prefill budget. Continuations,
+larger prompts, and explicit `--max-prefill-sequences` values retain their prior
+semantics. Four ~1,032-token requests completed in 12.86 seconds versus 21.97 seconds
+with unconditional serialization (-41.5%); the first arrival retained a 3.83-second
+TTFT and the other three shared one prefill. All answers were coherent. Four
+~2,056-token controls stayed on the serialized path, preserving main-agent latency.
+
 ## Rejected screens
 
 - A 20 ms idle admission window successfully placed four requests in the first prefill,

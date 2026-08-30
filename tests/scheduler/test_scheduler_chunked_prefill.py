@@ -192,6 +192,44 @@ def test_single_lane_prefill_rotates_long_prompts_without_grouping_them():
     assert [req.uid for req in pm.pending_list] == [1, 2]
 
 
+def test_auto_single_lane_groups_fresh_small_prompts():
+    from freetoken.core import SamplingParams
+    from freetoken.scheduler.utils import PendingReq
+
+    _cm, _tm, _dm, pm = _build_managers(num_pages=64)
+    pm.interleave_chunks = True
+    pm.max_batch_seqs = 1
+    pm.small_prompt_group_tokens = 8
+    pm.pending_list = [
+        PendingReq(1, torch.arange(8, dtype=torch.int32), SamplingParams(max_tokens=2)),
+        PendingReq(2, torch.arange(8, dtype=torch.int32) + 100, SamplingParams(max_tokens=2)),
+    ]
+
+    batch = pm.schedule_next_batch(16)
+
+    assert batch is not None
+    assert [(req.uid, req.extend_len) for req in batch.reqs] == [(1, 8), (2, 8)]
+
+
+def test_auto_small_prompt_group_must_fit_one_prefill_budget():
+    from freetoken.core import SamplingParams
+    from freetoken.scheduler.utils import PendingReq
+
+    _cm, _tm, _dm, pm = _build_managers(num_pages=64)
+    pm.interleave_chunks = True
+    pm.max_batch_seqs = 1
+    pm.small_prompt_group_tokens = 8
+    pm.pending_list = [
+        PendingReq(1, torch.arange(8, dtype=torch.int32), SamplingParams(max_tokens=2)),
+        PendingReq(2, torch.arange(8, dtype=torch.int32) + 100, SamplingParams(max_tokens=2)),
+    ]
+
+    batch = pm.schedule_next_batch(12)
+
+    assert batch is not None
+    assert [(req.uid, req.extend_len) for req in batch.reqs] == [(1, 8)]
+
+
 def test_prefill_sequence_limit_auto_scope():
     cases = [
         (None, 65_536, 4, ((12, 12),), 1),

@@ -247,6 +247,10 @@ class PrefillManager:
     # unfinished long prompts fair between chunks.
     interleave_chunks: bool = False
     max_batch_seqs: int = 0
+    # Auto-selected GGUF serialization has a measured small-prompt exception:
+    # grouping fresh prompts through this length amortizes full-layer setup.
+    # Zero keeps ``max_batch_seqs`` a hard cap (including explicit CLI values).
+    small_prompt_group_tokens: int = 0
 
     def add_one_req(self, req: UserMsg) -> None:
         self.pending_list.append(
@@ -263,6 +267,20 @@ class PrefillManager:
     def schedule_next_batch(self, prefill_budget: int) -> Batch | None:
         if len(self.pending_list) == 0:
             return None
+
+        lane_cap = self.max_batch_seqs
+        if (
+            lane_cap == 1
+            and self.small_prompt_group_tokens > 0
+            and len(self.pending_list) > 1
+            and all(
+                req.chunked_req is None
+                and req.input_len <= self.small_prompt_group_tokens
+                for req in self.pending_list
+            )
+            and sum(req.input_len for req in self.pending_list) <= prefill_budget
+        ):
+            lane_cap = 0
 
         # estimated offset due to in-flight decode
         adder = PrefillAdder(
@@ -287,8 +305,8 @@ class PrefillManager:
             if self.interleave_chunks:
                 waiting = len(self.pending_list) - index
                 available_lanes = (
-                    max(self.max_batch_seqs - len(reqs), 1)
-                    if self.max_batch_seqs
+                    max(lane_cap - len(reqs), 1)
+                    if lane_cap
                     else waiting
                 )
                 chunk_limit = max(1, adder.token_budget // min(waiting, available_lanes))
@@ -309,7 +327,7 @@ class PrefillManager:
                 log_new_tokens += req.extend_len
                 if not is_continuation:
                     log_cached_tokens += req.cache_handle.cached_len
-                if self.max_batch_seqs and len(reqs) >= self.max_batch_seqs:
+                if lane_cap and len(reqs) >= lane_cap:
                     stopped_for_lane_cap = index + 1 < len(self.pending_list)
                     break
             else:
