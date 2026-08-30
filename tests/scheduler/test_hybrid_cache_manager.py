@@ -126,6 +126,22 @@ def test_pool_sizing_covers_4mr_floor():
         assert _linear_pool_num_slots(c) >= 4 * mr + 1, (mr, _linear_pool_num_slots(c))
 
 
+def test_radix_snapshot_slot_remap():
+    pool = _pool(num_slots=16)
+    pt = torch.zeros(4, 64, dtype=torch.int32)
+    cm = CacheManager(64, 1, pt, "hybrid_radix", linear_state_pool=pool)
+    live = pool.alloc(1)[0]
+    cm.prefix_cache.insert(
+        torch.tensor([1, 2, 3, 4], dtype=torch.int32),
+        torch.tensor([10, 11, 12, 13], dtype=torch.int32),
+        live,
+    )
+    cm.remap_mamba_slots({live: 1})
+    assert cm.prefix_cache.match_prefix(
+        torch.tensor([1, 2, 3, 4], dtype=torch.int32)
+    ).mamba_value == 1
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -62,6 +62,16 @@ setup(
             libraries=["cudart"],
             extra_compile_args=["-O3", "-std=c++17", "-pthread"],
         ),
+        CppExtension(
+            name="freetoken.kernel._pageable_stage",
+            sources=[
+                "python/freetoken/kernel/csrc/pageable_stage.cpp",
+            ],
+            include_dirs=cuda_include_dirs,
+            library_dirs=cuda_library_dirs,
+            libraries=["cudart"],
+            extra_compile_args=["-O3", "-std=c++17"],
+        ),
     ],
     cmdclass={"build_ext": BuildExtension.with_options(use_ninja=True)},
 )

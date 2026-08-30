@@ -124,6 +124,51 @@ class LinearStatePool:
         self._num_slots = num_slots
         self._free_slots = list(range(1, num_slots))
 
+    def resize_preserve(self, num_slots: int, remap: dict[int, int]) -> None:
+        """Resize while preserving every occupied slot according to ``remap``.
+
+        The caller owns all external slot references and updates them at the same
+        no-forward-in-flight boundary.  Unlike :meth:`rebuild`, this supports live
+        elastic-capacity changes without dropping an agent's recurrent state.
+        """
+        occupied = set(range(1, self._num_slots)) - set(self._free_slots)
+        if set(remap) != occupied:
+            raise ValueError(
+                f"linear-state remap covers {len(remap)} slots, expected {len(occupied)}"
+            )
+        targets = list(remap.values())
+        if len(set(targets)) != len(targets) or any(
+            target <= 0 or target >= num_slots for target in targets
+        ):
+            raise ValueError(f"invalid linear-state remap for {num_slots} slots")
+
+        n_layers, _, local_conv_dim, km1 = self.conv_states.shape
+        _, _, local_v_heads, key_head_dim, value_head_dim = self.recurrent_states.shape
+        new_conv = torch.zeros(
+            (n_layers, num_slots, local_conv_dim, km1),
+            dtype=self.conv_states.dtype,
+            device=self._device,
+        )
+        new_recurrent = torch.zeros(
+            (n_layers, num_slots, local_v_heads, key_head_dim, value_head_dim),
+            dtype=self.recurrent_states.dtype,
+            device=self._device,
+        )
+        if remap:
+            src = torch.tensor(list(remap), dtype=torch.long, device=self._device)
+            dst = torch.tensor(targets, dtype=torch.long, device=self._device)
+            new_conv[:, dst] = self.conv_states[:, src]
+            new_recurrent[:, dst] = self.recurrent_states[:, src]
+        self.conv_states = new_conv
+        self.recurrent_states = new_recurrent
+        self._num_slots = num_slots
+        used = set(targets)
+        self._free_slots = [slot for slot in range(1, num_slots) if slot not in used]
+
+    @property
+    def occupied_slots(self) -> set[int]:
+        return set(range(1, self._num_slots)) - set(self._free_slots)
+
     def free(self, slots) -> None:
         """Return slot ids to the free-list. Accepts an int, list, or 1-D tensor."""
         if isinstance(slots, torch.Tensor):
@@ -216,7 +261,7 @@ def _linear_pool_num_slots(config) -> int:
     """LinearStatePool slot count. Hybrid-radix non-evictable peak is 4 slots per running request
     (1 live + 2 ping-pong + 1 committed snapshot locked through decode), plus a cross-request
     snapshot cache and a padding sink; naive GDN keeps the old (max_running_req + 1)."""
-    mr = config.max_running_req
+    mr = getattr(config, "elastic_initial_requests", None) or config.max_running_req
     override = getattr(config, "linear_state_slots_override", None)
     if override is not None:
         minimum = mr + 1 if config.cache_type != "hybrid_radix" else 4 * mr + 1
@@ -232,6 +277,14 @@ def _linear_pool_num_slots(config) -> int:
     ratio = config.linear_state_cache_ratio
     n_cache = max(4, int(ratio * mr))
     return 4 * mr + n_cache + 1  # live + 2 ping-pong + locked committed snapshot + cache + padding
+
+
+def linear_pool_slots_for_capacity(config, capacity: int) -> int:
+    """Default physical slot geometry for an elastic request capacity."""
+    if config.cache_type != "hybrid_radix":
+        return capacity + 1
+    n_cache = max(4, int(config.linear_state_cache_ratio * capacity))
+    return 4 * capacity + n_cache + 1
 
 
 def _linear_pool_min_slots(config) -> int:

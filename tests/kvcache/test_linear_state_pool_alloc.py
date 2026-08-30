@@ -64,6 +64,29 @@ def test_copy_from_snapshot():
     assert torch.equal(pool.recurrent_states[:, dst], pool.recurrent_states[:, src])
 
 
+def test_resize_preserve_compacts_occupied_slots():
+    pool = _pool(num_slots=10)
+    occupied = pool.alloc(4)
+    for value, slot in enumerate(occupied, 1):
+        pool.conv_states[:, slot].fill_(value)
+        pool.recurrent_states[:, slot].fill_(value + 10)
+    remap = {slot: i + 1 for i, slot in enumerate(sorted(occupied))}
+    pool.resize_preserve(6, remap)
+    assert pool.num_slots == 6
+    assert pool.occupied_slots == set(remap.values())
+    for value, old in enumerate(occupied, 1):
+        new = remap[old]
+        assert bool((pool.conv_states[:, new] == value).all())
+        assert bool((pool.recurrent_states[:, new] == value + 10).all())
+
+
+def test_resize_preserve_rejects_incomplete_remap():
+    pool = _pool(num_slots=6)
+    pool.alloc(2)
+    with pytest.raises(ValueError, match="remap covers"):
+        pool.resize_preserve(8, {})
+
+
 if __name__ == "__main__":
     test_alloc_free_roundtrip()
     test_alloc_exhaustion_raises()

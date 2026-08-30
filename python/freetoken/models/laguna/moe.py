@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Tuple
 import torch
 import torch.nn.functional as F
 
+from freetoken.core import get_global_ctx
 from freetoken.layers import BaseOP, LinearReplicated, make_moe_layer, silu_and_mul
 
 if TYPE_CHECKING:
@@ -81,8 +82,29 @@ class LagunaSparseMoeBlock(BaseOP):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         topk_weights, topk_ids = self._route(hidden_states)
-        out = self.experts.routed_forward(hidden_states, topk_weights, topk_ids)
-        out = out + self.shared_experts.forward(hidden_states)
+        from freetoken.layers.moe import OffloadMoELayer
+
+        cache = (
+            self.experts.offload_cache
+            if isinstance(self.experts, OffloadMoELayer)
+            else None
+        )
+        overlap_pageable = (
+            cache is not None
+            and cache.pageable_gpu
+            and cache.is_unpinned_layer(self.experts.layer_id)
+            and not get_global_ctx().batch.is_prefill
+        )
+        if overlap_pageable:
+            self.experts.begin_pageable_routed(topk_ids)
+            shared = self.shared_experts.forward(hidden_states)
+            routed = self.experts.finish_pageable_routed(
+                hidden_states, topk_weights, topk_ids
+            )
+            out = routed + shared
+        else:
+            out = self.experts.routed_forward(hidden_states, topk_weights, topk_ids)
+            out = out + self.shared_experts.forward(hidden_states)
         return out.view(num_tokens, hidden_dim)
 
 

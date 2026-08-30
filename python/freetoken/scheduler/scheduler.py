@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, NamedTuple, NoReturn, Set, Tuple, TypeAlias
@@ -96,21 +97,33 @@ class Scheduler(SchedulerIOMixin):
         torch.cuda.set_stream(self.stream)
 
         # initialize other managers
-        self.table_manager = TableManager(config.max_running_req, self.engine.page_table)
+        self.table_manager = TableManager(
+            config.max_running_req, self.engine.page_table
+        )
         # ONE cache manager for every model (ShadowRadix layering): the shared page table is the
         # virtual full-token coordinate; model-specific tiers ride the plug-ins -- DSV4's
         # window/cmp/idx shadows via swa_pool, Gemma's swa via swa_pool, GDN state via
         # linear_state_pool. No model supplies its own manager.
         growable_kv = getattr(self.engine.kv_cache, "growable", False)
         self.cache_manager = CacheManager(
-            self.engine.num_pages, config.page_size, self.engine.page_table, config.cache_type,
+            self.engine.num_pages,
+            config.page_size,
+            self.engine.page_table,
+            config.cache_type,
             linear_state_pool=self.engine.linear_state_pool,
             swa_pool=self.engine.kv_cache,
             sliding_window_size=next(
-                (g.sliding_window for g in config.model_config.kv_cache_group_specs() if g.is_swa),
+                (
+                    g.sliding_window
+                    for g in config.model_config.kv_cache_group_specs()
+                    if g.is_swa
+                ),
                 None,
-            ) or getattr(self.engine.kv_cache, "sliding_window_size", None),
-            committed_pages=(self.engine.kv_cache.committed_pages if growable_kv else None),
+            )
+            or getattr(self.engine.kv_cache, "sliding_window_size", None),
+            committed_pages=(
+                self.engine.kv_cache.committed_pages if growable_kv else None
+            ),
             page_index_offset=(1 if growable_kv else 0),
         )
         self.decode_manager = DecodeManager(config.page_size)
@@ -119,7 +132,9 @@ class Scheduler(SchedulerIOMixin):
             self.cache_manager,
             self.table_manager,
             self.decode_manager,
-            interleave_chunks=bool(config.kv_grow_step_tokens and config.max_running_req > 1),
+            interleave_chunks=bool(
+                config.kv_grow_step_tokens and config.max_running_req > 1
+            ),
             max_batch_seqs=max_prefill_seqs,
         )
         if max_prefill_seqs:
@@ -140,7 +155,9 @@ class Scheduler(SchedulerIOMixin):
         # tombstone so an abort-before-admission request can never be resurrected after its
         # terminal accounting acknowledgement has already been published.
         self._abort_tombstones: dict[int, None] = {}
-        self._forward_iter = 0  # global forward counter; drives the SWA proactive-eviction cadence
+        self._forward_iter = (
+            0  # global forward counter; drives the SWA proactive-eviction cadence
+        )
         # The launched-but-not-yet-drained batch (overlap): set at the top of each overlap_loop
         # iteration so the abort handler can tell whether a request's forward is still in flight
         # (mark it, defer the free to _process_last_data) or not (free immediately). Stays None
@@ -153,6 +170,10 @@ class Scheduler(SchedulerIOMixin):
         # in-flight boundary, compacts surviving private pages, decommits a free suffix, and
         # spends the returned VRAM on MoE expert slots.
         self._growable_shrink_pending = False
+        self._elastic_capacity = (
+            config.elastic_initial_requests or config.max_running_req
+        )
+        self._elastic_resize_pending = False
         # Chunked prefill and decode use different kernels, so a truly mixed batch is not yet
         # available. Time-slice a short decode burst between helper-prefill chunks: this bounds
         # an existing agent's stream latency while keeping the large prefill kernels efficient.
@@ -189,7 +210,9 @@ class Scheduler(SchedulerIOMixin):
         # instead of OOMing _alloc_window on a prompt longer than the window pool.
         _chunk_cap = self.cache_manager.prefill_chunk_budget
         self.prefill_budget = (
-            min(config.max_extend_tokens, _chunk_cap) if _chunk_cap else config.max_extend_tokens
+            min(config.max_extend_tokens, _chunk_cap)
+            if _chunk_cap
+            else config.max_extend_tokens
         )
         self.config = config
         self.status_reporter = SchedulerStatusReporter(
@@ -197,6 +220,10 @@ class Scheduler(SchedulerIOMixin):
             decode_log_interval=config.decode_log_interval,
         )
         self._last_moe_stats_calls = 0
+        self._pageable_cost_history: dict[int, float] = {}
+        self._pageable_trial: tuple[int, int] | None = None
+        self._pageable_rejected: set[tuple[int, int]] = set()
+        self._pageable_retune_disabled = False
 
         # Initialize the I/O mixin
         super().__init__(config, self.engine.tp_cpu_group)
@@ -210,11 +237,7 @@ class Scheduler(SchedulerIOMixin):
             if calls > self._last_moe_stats_calls:
                 logger.info_rank0("MoE decode miss stats: %s", stats)
                 per_layer = moe.decode_miss_stats_per_layer()["per_layer"]
-                pageable = [
-                    row
-                    for row in per_layer
-                    if row["pageable_stage_calls"]
-                ]
+                pageable = [row for row in per_layer if row["pageable_stage_calls"]]
                 if pageable:
                     hottest = sorted(
                         pageable,
@@ -234,9 +257,136 @@ class Scheduler(SchedulerIOMixin):
                         len(candidates),
                         candidates,
                     )
-                self._last_moe_stats_calls = calls
+                    self._maybe_retune_pageable_layers(per_layer)
+                self._last_moe_stats_calls = int(moe.decode_miss_stats()["layer_calls"])
         logger.info_rank0("Scheduler is idle, waiting for new reqs...")
         self.cache_manager.check_integrity()
+
+    def _maybe_retune_pageable_layers(self, per_layer: list[dict]) -> None:
+        """Explore one measured host-residency swap at a full idle boundary."""
+        moe = self.engine.moe_offload_cache
+        if (
+            self._pageable_retune_disabled
+            or moe is None
+            or not moe.pageable_gpu
+            or self.config.tp_info.size > 1
+            or not moe._unpinned_layers
+        ):
+            return
+        if min((int(row["steps"]) for row in per_layer), default=0) < 128:
+            return
+
+        pageable = set(moe._unpinned_layers)
+        row_seconds = [
+            row["pageable_gather_seconds"] / row["pageable_rows"]
+            for row in per_layer
+            if row["pageable_rows"] and row["pageable_gather_seconds"] > 0
+        ]
+        if not row_seconds:
+            return
+        row_seconds.sort()
+        median_row_seconds = row_seconds[len(row_seconds) // 2]
+        for row in per_layer:
+            layer = int(row["layer"])
+            if layer in pageable and row["steps"]:
+                measured = row["pageable_gather_seconds"] / row["steps"]
+                prior = self._pageable_cost_history.get(layer)
+                self._pageable_cost_history[layer] = (
+                    measured if prior is None else 0.5 * prior + 0.5 * measured
+                )
+
+        def cost(layer: int) -> float:
+            if layer in self._pageable_cost_history:
+                return self._pageable_cost_history[layer]
+            return float(per_layer[layer]["missing_per_step"]) * median_row_seconds
+
+        # Save a complete ranking, rather than only today's pageable subset, so
+        # startup can select any count dictated by the next run's RAM/pin budget.
+        # This is the safe default on WSL: measurement happens at an idle boundary,
+        # while host registration and graph capture happen on the next clean start.
+        ranking = sorted(range(moe.num_layers), key=cost)
+        from freetoken.moe.placement import save_pageable_ranking
+
+        try:
+            profile = save_pageable_ranking(
+                self.config.model_path,
+                ranking,
+                [cost(layer) for layer in ranking],
+            )
+            recommended = sorted(ranking[: len(pageable)])
+            if set(recommended) != pageable:
+                logger.info_rank0(
+                    "Measured pageable placement for next startup: %s (current %s, "
+                    "profile %s)",
+                    recommended,
+                    sorted(pageable),
+                    profile,
+                )
+        except (OSError, ValueError) as exc:
+            logger.warning_rank0("Could not save pageable placement profile: %s", exc)
+
+        # Live pin/unpin remains an expert-only diagnostic. cudaHostRegister can
+        # leave WSL's CUDA context unusable when the driver rejects a swap.
+        if os.getenv("FREETOKEN_MOE_LIVE_RETUNE", "0") != "1":
+            return
+
+        if self._pageable_trial is not None:
+            old_layer, new_layer = self._pageable_trial
+            old_cost = self._pageable_cost_history.get(old_layer)
+            new_cost = self._pageable_cost_history.get(new_layer)
+            if (
+                old_cost is not None
+                and new_cost is not None
+                and new_cost > old_cost * 1.05
+            ):
+                target = frozenset((pageable - {new_layer}) | {old_layer})
+                logger.info_rank0(
+                    "Reverting pageable placement trial %d -> %d: measured %.3f ms/layer "
+                    "versus %.3f ms/layer",
+                    old_layer,
+                    new_layer,
+                    new_cost * 1e3,
+                    old_cost * 1e3,
+                )
+                try:
+                    self.engine.retune_pageable_layers(target)
+                except Exception as exc:  # keep serving on registration rejection
+                    logger.warning_rank0("Disabling pageable retuning: %s", exc)
+                    self._pageable_retune_disabled = True
+                self._pageable_rejected.add((old_layer, new_layer))
+                self._pageable_trial = None
+                self._last_moe_stats_calls = 0
+                return
+            self._pageable_trial = None
+
+        worst = max(pageable, key=cost)
+        candidates = [
+            layer
+            for layer in range(moe.num_layers)
+            if layer not in pageable and (worst, layer) not in self._pageable_rejected
+        ]
+        if not candidates:
+            return
+        best = min(candidates, key=cost)
+        if cost(best) >= cost(worst) * 0.85:
+            return
+        target = frozenset((pageable - {worst}) | {best})
+        logger.info_rank0(
+            "Pageable placement trial %d -> %d at idle: predicted %.3f -> %.3f "
+            "ms/layer from measured gather cost",
+            worst,
+            best,
+            cost(worst) * 1e3,
+            cost(best) * 1e3,
+        )
+        try:
+            self.engine.retune_pageable_layers(target)
+        except Exception as exc:
+            logger.warning_rank0("Disabling pageable retuning: %s", exc)
+            self._pageable_retune_disabled = True
+            return
+        self._pageable_trial = (worst, best)
+        self._last_moe_stats_calls = 0
 
     @torch.inference_mode()
     def rebuild_cache(
@@ -259,10 +409,16 @@ class Scheduler(SchedulerIOMixin):
         if self.config.tp_info.size > 1:
             self.sync_all_ranks()
         self.engine.rebuild_runtime_cache(
-            moe_cache_size=moe_cache_size, num_pages=num_pages, num_mamba_slots=num_mamba_slots,
+            moe_cache_size=moe_cache_size,
+            num_pages=num_pages,
+            num_mamba_slots=num_mamba_slots,
             num_swa_pages=num_swa_pages,
         )
-        if num_pages is not None or num_mamba_slots is not None or num_swa_pages is not None:
+        if (
+            num_pages is not None
+            or num_mamba_slots is not None
+            or num_swa_pages is not None
+        ):
             # Any of these resizes invalidates the prefix cache: a KV resize leaves stale page
             # indices, a mamba resize leaves stale GDN-snapshot slot ids, and a window-pool resize
             # (num_swa_pages) reallocates the SWA/window token pool, leaving stale slot ids in the
@@ -281,7 +437,8 @@ class Scheduler(SchedulerIOMixin):
         _chunk_cap = self.cache_manager.prefill_chunk_budget
         self.prefill_budget = (
             min(self.config.max_extend_tokens, _chunk_cap)
-            if _chunk_cap else self.config.max_extend_tokens
+            if _chunk_cap
+            else self.config.max_extend_tokens
         )
         if self.config.tp_info.size > 1:
             self.sync_all_ranks()
@@ -303,7 +460,8 @@ class Scheduler(SchedulerIOMixin):
             last_data is not None  # don't block if we have a batch to be processed
             or self.prefill_manager.runnable
             or self.decode_manager.runnable
-            or self._pending_rebuild is not None  # a queued rebuild to drain toward + execute
+            or self._pending_rebuild
+            is not None  # a queued rebuild to drain toward + execute
             or getattr(self, "_growable_shrink_pending", False)
             or bool(getattr(self, "_sessions", {}))
         )
@@ -314,12 +472,15 @@ class Scheduler(SchedulerIOMixin):
             self._process_one_msg(msg)
 
         self._maybe_shrink_growable_kv()
+        self._maybe_resize_elastic_capacity()
 
         # Execute a queued cache rebuild once the scheduler is fully idle (the safe point):
         # no last batch to process, no pending prefill, no running decode. finished_reqs is
         # NOT a gate — those requests are already freed (no live GPU/page resources).
-        if self._pending_rebuild is not None and last_data is None and not (
-            self.prefill_manager.runnable or self.decode_manager.runnable
+        if (
+            self._pending_rebuild is not None
+            and last_data is None
+            and not (self.prefill_manager.runnable or self.decode_manager.runnable)
         ):
             self._execute_pending_rebuild()
 
@@ -368,6 +529,7 @@ class Scheduler(SchedulerIOMixin):
             self._process_one_msg(msg)
 
         self._maybe_shrink_growable_kv()
+        self._maybe_resize_elastic_capacity()
 
         # Non-overlap mode has no last_data to drain; execute a queued rebuild as soon as
         # the scheduler is idle (no pending prefill / running decode). Without this, a
@@ -457,7 +619,8 @@ class Scheduler(SchedulerIOMixin):
                 # EOS and stop strings win over length.
                 hit_length = not req.can_decode
                 hit_eos = (
-                    not req.sampling_params.ignore_eos and next_token in self.eos_token_ids
+                    not req.sampling_params.ignore_eos
+                    and next_token in self.eos_token_ids
                 )
                 matched_stop = (
                     self._match_stop_str(req)
@@ -605,19 +768,26 @@ class Scheduler(SchedulerIOMixin):
             if tombstones is not None and msg.uid in tombstones:
                 tombstones.pop(msg.uid, None)
                 logger.debug_rank0(
-                    "Dropping request %d because its abort arrived before admission", msg.uid
+                    "Dropping request %d because its abort arrived before admission",
+                    msg.uid,
                 )
                 return
             if msg.session_id is not None:
                 if not msg.session_id or len(msg.session_id) > 256:
-                    self.send_result([ErrorReplyMsg(uid=msg.uid, error="invalid session_id")])
+                    self.send_result(
+                        [ErrorReplyMsg(uid=msg.uid, error="invalid session_id")]
+                    )
                     return
                 if not hasattr(self, "_sessions"):
                     self._sessions = {}
                 session = self._sessions.get(msg.session_id)
                 if session is not None and session.active_uid is not None:
                     self.send_result(
-                        [ErrorReplyMsg(uid=msg.uid, error=f"session {msg.session_id!r} is busy")]
+                        [
+                            ErrorReplyMsg(
+                                uid=msg.uid, error=f"session {msg.session_id!r} is busy"
+                            )
+                        ]
                     )
                     return
                 self._reclaim_soft_sessions_for_admission(msg)
@@ -732,15 +902,21 @@ class Scheduler(SchedulerIOMixin):
             # reject them cleanly rather than ship hang-prone half-wired paths.
             if not self.cache_manager.supports_runtime_rebuild:
                 self._reply_rebuild(
-                    msg.request_id, "unsupported", "this model's cache does not support runtime rebuild"
+                    msg.request_id,
+                    "unsupported",
+                    "this model's cache does not support runtime rebuild",
                 )
             elif msg.mode != "if_idle":
                 self._reply_rebuild(
-                    msg.request_id, "unsupported", f"mode {msg.mode!r} unsupported (use if_idle)"
+                    msg.request_id,
+                    "unsupported",
+                    f"mode {msg.mode!r} unsupported (use if_idle)",
                 )
             elif self.config.tp_info.size > 1:
                 self._reply_rebuild(
-                    msg.request_id, "unsupported", "runtime rebuild unsupported under TP > 1"
+                    msg.request_id,
+                    "unsupported",
+                    "runtime rebuild unsupported under TP > 1",
                 )
             elif (
                 self.prefill_manager.runnable
@@ -782,7 +958,9 @@ class Scheduler(SchedulerIOMixin):
         if retain_session and req.session_id is not None and req.mm_embeds is None:
             session = self._sessions.get(req.session_id)
             if session is not None and session.active_uid == req.uid:
-                new_handle = self.cache_manager.retain_prefix(req.input_ids, req.cached_len)
+                new_handle = self.cache_manager.retain_prefix(
+                    req.input_ids, req.cached_len
+                )
                 old_handle = session.handle
                 session.handle = new_handle
                 session.active_uid = None
@@ -800,6 +978,8 @@ class Scheduler(SchedulerIOMixin):
         req.table_idx = -1
         if getattr(getattr(self, "config", None), "kv_grow_step_tokens", 0):
             self._growable_shrink_pending = True
+        if getattr(getattr(self, "config", None), "elastic_initial_requests", None):
+            self._elastic_resize_pending = True
 
     def _close_session(self, session_id: str) -> tuple[bool, int | None]:
         session = getattr(self, "_sessions", {}).pop(session_id, None)
@@ -811,14 +991,18 @@ class Scheduler(SchedulerIOMixin):
             req = self.prefill_manager.abort_req(session.active_uid)
             req = req or self.decode_manager.abort_req(session.active_uid)
             if req is not None:
-                inflight = self._last_data is not None and req in self._last_data[0].batch.reqs
+                inflight = (
+                    self._last_data is not None and req in self._last_data[0].batch.reqs
+                )
                 if inflight:
                     req.aborted = True
                 else:
                     self._free_req_resources(req)
             self._pending_abort_acks.add(session.active_uid)
         self._growable_shrink_pending = True
-        logger.info_rank0("Closed session %s; retained KV is now reclaimable", session_id)
+        logger.info_rank0(
+            "Closed session %s; retained KV is now reclaimable", session_id
+        )
         return True, session.active_uid
 
     def _expire_sessions(self) -> None:
@@ -876,9 +1060,13 @@ class Scheduler(SchedulerIOMixin):
 
             pending = PendingReq(msg.uid, msg.input_ids, msg.sampling_params)
             cached_len = cm.match_req(pending).cuda_handle.cached_len
-        except Exception:  # matching is repeated by admission; stay conservative on failure
+        except (
+            Exception
+        ):  # matching is repeated by admission; stay conservative on failure
             cached_len = 0
-        needed = max(0, len(msg.input_ids) - cached_len) + msg.sampling_params.max_tokens
+        needed = (
+            max(0, len(msg.input_ids) - cached_len) + msg.sampling_params.max_tokens
+        )
 
         def pressured() -> bool:
             kv_short = needed > cm.available_size
@@ -960,7 +1148,83 @@ class Scheduler(SchedulerIOMixin):
                 self.engine.moe_offload_cache.cache_size,
             )
 
-    def _reply_rebuild(self, request_id: str, status: str, error: str | None = None) -> None:
+    def _elastic_live_requests(self) -> list[Req]:
+        """Every request object that currently owns GDN slots (deduplicated)."""
+        reqs = list(self.decode_manager.running_reqs)
+        reqs.extend(
+            pending.chunked_req
+            for pending in self.prefill_manager.pending_list
+            if pending.chunked_req is not None
+        )
+        return list({id(req): req for req in reqs}.values())
+
+    def _elastic_demand(self) -> int:
+        # Every pending item is one independent agent. A chunked continuation is not
+        # also in decode, so decode + pending is the exact admission demand here.
+        return len(self.decode_manager.running_reqs) + len(
+            self.prefill_manager.pending_list
+        )
+
+    def _remap_req_mamba_slots(self, req: Req, remap: dict[int, int]) -> None:
+        if req.linear_slot_idx is not None:
+            req.linear_slot_idx = remap[req.linear_slot_idx]
+        if req.mamba_ping_pong is not None:
+            req.mamba_ping_pong = tuple(remap[slot] for slot in req.mamba_ping_pong)
+        if req.mamba_restore_src is not None:
+            req.mamba_restore_src = remap[req.mamba_restore_src]
+
+    @torch.inference_mode()
+    def _maybe_resize_elastic_capacity(self) -> None:
+        initial = getattr(
+            getattr(self, "config", None), "elastic_initial_requests", None
+        )
+        if initial is None:
+            return
+        demand = self._elastic_demand()
+        target = initial if demand <= initial else self.config.max_running_req
+        if target == self._elastic_capacity:
+            self._elastic_resize_pending = False
+            return
+
+        pool = self.engine.linear_state_pool
+        assert pool is not None
+        from freetoken.kvcache.linear_state_pool import linear_pool_slots_for_capacity
+
+        target_slots = linear_pool_slots_for_capacity(self.config, target)
+        if target < self._elastic_capacity:
+            # Unlocked snapshots are cache, not live agent state. Evict just enough
+            # to fit the compact pool; protected session snapshots postpone shrink.
+            overflow = max(0, len(pool.occupied_slots) - (target_slots - 1))
+            if overflow:
+                self.cache_manager.ensure_mamba_slots(pool.num_free_slots + overflow)
+            if len(pool.occupied_slots) > target_slots - 1:
+                self._elastic_resize_pending = True
+                logger.info_rank0(
+                    "Elastic shrink deferred: %d protected/live GDN slots exceed the "
+                    "%d-slot compact capacity",
+                    len(pool.occupied_slots),
+                    target_slots - 1,
+                )
+                return
+
+        occupied = sorted(pool.occupied_slots)
+        remap = {slot: i + 1 for i, slot in enumerate(occupied)}
+        self.engine.resize_elastic_capacity(target, remap)
+        self.cache_manager.remap_mamba_slots(remap)
+        for req in self._elastic_live_requests():
+            self._remap_req_mamba_slots(req, remap)
+        self._elastic_capacity = target
+        self._elastic_resize_pending = False
+        # The exact page-conservation check is idle-only: live requests own pages
+        # that are intentionally in neither the free list nor the radix tree.
+        # Elastic growth normally happens with active requests, so limit the
+        # full check to the truly idle shrink boundary.
+        if not self.prefill_manager.runnable and not self.decode_manager.runnable:
+            self.cache_manager.check_integrity()
+
+    def _reply_rebuild(
+        self, request_id: str, status: str, error: str | None = None
+    ) -> None:
         # Single source of truth with the rollback snapshot (_current_cache_geometry): mamba is
         # usable slots (padding sink excluded, matching the status-bar gauge), and num_swa_pages
         # reports 0 unless the model actually has a window pool.
@@ -1010,7 +1274,9 @@ class Scheduler(SchedulerIOMixin):
             if not getattr(self.engine, "rebuild_teardown_started", True):
                 # Failed before the destructive phase began: graphs and pools are untouched and
                 # the engine is still serving. A destructive rollback would only add risk.
-                logger.error(f"cache rebuild failed before teardown: {e!r} — old cache intact")
+                logger.error(
+                    f"cache rebuild failed before teardown: {e!r} — old cache intact"
+                )
                 self._reply_rebuild(msg.request_id, "rejected", error=repr(e))
                 return
             if self.config.tp_info.size > 1:
@@ -1029,21 +1295,29 @@ class Scheduler(SchedulerIOMixin):
             # CUDA state is not guaranteed sane — a rollback that succeeds here may still surface
             # a deferred fault on a later request; that residual risk is accepted over always
             # forcing a restart.)
-            logger.error(f"cache rebuild failed: {e!r} — rolling back to the previous geometry")
+            logger.error(
+                f"cache rebuild failed: {e!r} — rolling back to the previous geometry"
+            )
             try:
                 self.rebuild_cache(**prior)
             except Exception as e2:  # noqa: BLE001 — rollback failed too; genuinely unrecoverable
-                logger.error(f"cache rebuild rollback failed: {e2!r} — server latched failed")
+                logger.error(
+                    f"cache rebuild rollback failed: {e2!r} — server latched failed"
+                )
                 self._reply_rebuild(
                     msg.request_id,
                     "failed",
                     error=f"{e!r}; rollback to the prior geometry also failed: {e2!r}",
                 )
                 return
-            logger.warning("cache rebuild rolled back to the previous geometry — still serving")
+            logger.warning(
+                "cache rebuild rolled back to the previous geometry — still serving"
+            )
             self._log_cache_geometry("Cache rolled back")
             self._reply_rebuild(
-                msg.request_id, "rejected", error=f"rebuild failed and was rolled back: {e!r}"
+                msg.request_id,
+                "rejected",
+                error=f"rebuild failed and was rolled back: {e!r}",
             )
             return
         # Outside the try: an ack/send failure after a fully-applied rebuild must not be
@@ -1063,16 +1337,24 @@ class Scheduler(SchedulerIOMixin):
         num_swa_pages = None
         if getattr(mc, "dsv4_args", None) is not None:
             sizes = getattr(eng.kv_cache, "sizes", None)
-            if sizes is not None:  # usable window pages = physical n_win_pages minus the dummy page
+            if (
+                sizes is not None
+            ):  # usable window pages = physical n_win_pages minus the dummy page
                 num_swa_pages = max(0, sizes.n_win_pages - 1)
         elif getattr(mc, "has_swa_attention", False) and (
             getattr(config, "cache_type", None) == "swa_radix"
         ):  # usable window tokens = pool tokens minus the slot-0 sentinel
-            num_swa_pages = max(0, int(getattr(eng.kv_cache, "swa_num_tokens", 0) or 0) - 1)
+            num_swa_pages = max(
+                0, int(getattr(eng.kv_cache, "swa_num_tokens", 0) or 0) - 1
+            )
         return dict(
             num_pages=eng.num_pages,
-            moe_cache_size=eng.moe_offload_cache.cache_size if eng.moe_offload_cache is not None else None,
-            num_mamba_slots=(eng.linear_state_pool.num_slots - 1) if eng.linear_state_pool is not None else None,
+            moe_cache_size=eng.moe_offload_cache.cache_size
+            if eng.moe_offload_cache is not None
+            else None,
+            num_mamba_slots=(eng.linear_state_pool.num_slots - 1)
+            if eng.linear_state_pool is not None
+            else None,
             num_swa_pages=num_swa_pages,
         )
 
@@ -1080,7 +1362,10 @@ class Scheduler(SchedulerIOMixin):
         """One-line readout of every pool's new size + VRAM after a rebuild changed them:
         full KV always; swa/mamba/MoE only for models with the pool. Byte figures are
         best-effort (0 when a unit cost cannot be measured) and must never block the reply."""
-        from freetoken.kvcache.cache_status import compute_cache_pools, compute_cache_unit_bytes
+        from freetoken.kvcache.cache_status import (
+            compute_cache_pools,
+            compute_cache_unit_bytes,
+        )
 
         try:
             pools = compute_cache_pools(self.engine)
@@ -1142,7 +1427,8 @@ class Scheduler(SchedulerIOMixin):
             # so they can back the new token -- this is what bounds the per-request swa
             # footprint during decode. (no-op unless the model is SWA / paged swa pool.)
             self.cache_manager.maybe_free_swa_out_of_window(
-                batch.reqs, forward_iter=self._forward_iter)
+                batch.reqs, forward_iter=self._forward_iter
+            )
             for req in batch.reqs:
                 req.decode_batch_idx += 1
         else:
@@ -1170,8 +1456,12 @@ class Scheduler(SchedulerIOMixin):
                 # the old keying = input_mapping's table_idx column (already staged, no H2D).
                 if self.cache_manager.is_hybrid:
                     pool = self.engine.linear_state_pool
-                    slots = [r.linear_slot_idx if r.linear_slot_idx is not None
-                             else pool.padding_slot for r in batch.padded_reqs]
+                    slots = [
+                        r.linear_slot_idx
+                        if r.linear_slot_idx is not None
+                        else pool.padding_slot
+                        for r in batch.padded_reqs
+                    ]
                     batch.linear_table_idx = torch.tensor(
                         slots, dtype=torch.int32, device="cpu", pin_memory=True
                     ).to(self.device, non_blocking=True)
@@ -1273,13 +1563,15 @@ class Scheduler(SchedulerIOMixin):
             old = getattr(self, "_scheduler_prefill_tps_ewma", None)
             old_key = getattr(self, "_scheduler_prefill_key", None)
             self._scheduler_prefill_key = key
-            self._scheduler_prefill_tps_ewma = sample if old is None or key != old_key else (
-                alpha * sample + (1.0 - alpha) * old
+            self._scheduler_prefill_tps_ewma = (
+                sample
+                if old is None or key != old_key
+                else (alpha * sample + (1.0 - alpha) * old)
             )
         elif batch.is_decode:
             old = getattr(self, "_scheduler_decode_seconds_ewma", None)
-            self._scheduler_decode_seconds_ewma = elapsed if old is None else (
-                alpha * elapsed + (1.0 - alpha) * old
+            self._scheduler_decode_seconds_ewma = (
+                elapsed if old is None else (alpha * elapsed + (1.0 - alpha) * old)
             )
 
     def _report_prompt_admissions(self, batch: Batch) -> None:
@@ -1292,7 +1584,9 @@ class Scheduler(SchedulerIOMixin):
             return
         self.send_result(
             [
-                PromptAdmittedMsg(uid=uid, prompt_tokens=prompt_tokens, cached_tokens=cached_tokens)
+                PromptAdmittedMsg(
+                    uid=uid, prompt_tokens=prompt_tokens, cached_tokens=cached_tokens
+                )
                 for uid, prompt_tokens, cached_tokens in batch.prompt_admissions
             ]
         )
@@ -1360,4 +1654,6 @@ def _make_write_tuple(batch: Batch, device: torch.device) -> Indice2D:
     mapping_host = torch.tensor(mapping_list, dtype=torch.int64, pin_memory=True)
     write_list = [(req.device_len if req.can_decode else -1) for req in batch.reqs]
     write_host = torch.tensor(write_list, dtype=torch.int64, pin_memory=True)
-    return mapping_host.to(device, non_blocking=True), write_host.to(device, non_blocking=True)
+    return mapping_host.to(device, non_blocking=True), write_host.to(
+        device, non_blocking=True
+    )

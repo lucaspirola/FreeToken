@@ -1,0 +1,59 @@
+# Ornith RTX 5080 elastic sessions and pageable CUDA graphs (2026-08-30)
+
+Host: RTX 5080 16 GiB under WSL, approximately 29 GiB host RAM. The production
+host-memory reserve remained 3 GiB throughout. These are short inner-loop gates;
+the already completed 262K/1M capacity results remain the long-context reference.
+
+## Accepted implementation
+
+- Elastic hybrid-GDN capacity starts with four agents and admits up to eight. It
+  compacts and copies every occupied recurrent-state slot, remaps live requests and
+  radix snapshots, resizes CUDA graph coverage, and funds the temporary state from
+  the MoE cache. When demand returns to four it releases the extra state and graphs.
+- Q6 pageable expert staging no longer fences Python or copies a fixed 32-row device
+  buffer. A `cudaLaunchHostFunc` node gathers only routed misses into 78.8 MiB of
+  mapped pinned staging; the fused GPU scatter reads it directly. The side stream is
+  overlapped with the independent shared-expert calculation and is graph replayable.
+- Idle decode telemetry ranks layers by measured gather time per step (using miss
+  count estimates for presently pinned layers), persists a profile tied to the exact
+  GGUF path/size/mtime, and applies it on the next clean start. Live WSL
+  `cudaHostRegister` swaps are not enabled by default because a rejected registration
+  can poison that CUDA context.
+
+## Coherence and performance gates
+
+| Pair / gate | Prefill instant | Prefill average | Simultaneous decode | Result |
+|---|---:|---:|---:|---|
+| Q6_K + Q8_0, 4 agents, 4,096 prompt + 256 output, zero-copy graph path | 1,733.34 tok/s | 1,733.34 tok/s | 106.37 tok/s | 4/4 coherent |
+| Q4_K_M + INT4, elastic 4→8→4, 4,096 prompt + 128 output | 5,122.26 tok/s | 5,122.26 tok/s | 171.10 tok/s | 8/8 coherent |
+| Q6 placement training run, 4,096 + 160 | 757.06 tok/s | 757.06 tok/s | 84.12 tok/s | 4/4 coherent |
+| Q6 persisted placement applied, same short gate | 819.99 tok/s | 819.99 tok/s | 94.38 tok/s | 4/4 coherent |
+
+The Q4 burst changed GDN slots `25 → 49 → 25` and MoE slots
+`5,635 → 4,682 → 5,635`; exact restoration means there is no permanent decode
+residency toll after helper agents stop. The Q6 profile application reduced pageable
+rows from 8,446 to 7,562 (10.5%) and measured gather time from 4.12 s to 3.66 s while
+improving simultaneous decode by 12.2% in that paired run. The higher 106.37 tok/s
+Q6 result remains the accepted best because short-run host-copy timing is variable.
+
+## Command shape
+
+Q4 elastic production shape:
+
+```bash
+ft serve --model /path/to/Ornith-1.5-35B-Q4_K_M.gguf \
+  --moe-backend offload --moe-cache-auto \
+  --max-running-requests 8 --elastic-initial-requests 4 \
+  --num-tokens 262144 --kv-cache-dtype int4 \
+  --kv-grow-step-tokens 65536 --host-ram-reserve-gb 3
+```
+
+Q6 pageable/profile shape:
+
+```bash
+ft serve --model /path/to/Ornith-1.5-35B-Q6_K.gguf \
+  --moe-backend offload --moe-cache-auto --moe-pageable-gpu \
+  --moe-collect-stats --max-running-requests 4 \
+  --num-tokens 262144 --kv-cache-dtype q8_0 \
+  --kv-grow-step-tokens 131072 --host-ram-reserve-gb 3
+```

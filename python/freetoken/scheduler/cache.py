@@ -290,6 +290,11 @@ class CacheManager:
             self.linear_state_pool.free(er.mamba_slots)
             self._free(er.kv_indices)
 
+    def remap_mamba_slots(self, remap: dict[int, int]) -> None:
+        if not self.is_hybrid:
+            return
+        self.prefix_cache.remap_mamba_slots(remap)
+
     def snapshot_toolcall_anchor(self, reqs: List[Req]) -> None:
         """Freeze each decoding request's GDN state at its tool-call anchor, into the ping-pong
         slot that is idle during decode (the kernel-side ×CHUNK track only runs on prefill

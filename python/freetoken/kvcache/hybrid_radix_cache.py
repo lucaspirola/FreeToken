@@ -209,6 +209,13 @@ class HybridRadixCache:
         for n in self._snapshot_nodes():
             assert n.mamba_value is not None and n.mamba_ref_count >= 0 and n.ref_count >= 0
 
+    def remap_mamba_slots(self, remap: dict[int, int]) -> None:
+        """Rewrite snapshot slot ids after a state-pool-preserving compaction."""
+        for node in self._snapshot_nodes():
+            if node.mamba_value not in remap:
+                raise RuntimeError(f"missing remap for radix snapshot slot {node.mamba_value}")
+            node.mamba_value = remap[node.mamba_value]
+
     # ---------------------------------------------------------------- helpers
     def _free_node_mamba(self, node: RadixTreeNode, out: List[int]) -> None:
         if node.mamba_value is not None:

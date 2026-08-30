@@ -37,7 +37,9 @@ PASSCODES = (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True)
-    parser.add_argument("--agents", type=int, default=2, choices=range(2, len(PASSCODES) + 1))
+    parser.add_argument(
+        "--agents", type=int, default=2, choices=range(2, len(PASSCODES) + 1)
+    )
     parser.add_argument("--prompt-tokens", type=int, default=70_000)
     parser.add_argument("--decode", type=int, default=64)
     parser.add_argument(
@@ -45,8 +47,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         help="shorter output budget for agents 1..N (exercises teardown while agent 0 lives)",
     )
-    parser.add_argument("--max-context", type=int, default=131_072, help="per-agent ceiling")
-    parser.add_argument("--num-tokens", type=int, default=262_144, help="shared KV-page ceiling")
+    parser.add_argument(
+        "--max-context", type=int, default=131_072, help="per-agent ceiling"
+    )
+    parser.add_argument(
+        "--num-tokens", type=int, default=262_144, help="shared KV-page ceiling"
+    )
     parser.add_argument("--kv-cache-dtype", default="q8_0")
     parser.add_argument("--kv-grow-step-tokens", type=int, default=131_072)
     parser.add_argument("--prefill-chunk", type=int, default=8192)
@@ -55,6 +61,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--moe-pageable-gpu", action="store_true")
     parser.add_argument("--moe-collect-stats", action="store_true")
     parser.add_argument("--max-prefill-sequences", type=int)
+    parser.add_argument("--elastic-initial-requests", type=int)
     parser.add_argument("--server-timeout", type=float, default=1800)
     parser.add_argument(
         "--agent-stagger",
@@ -123,6 +130,10 @@ def serve_cmd(args: argparse.Namespace, port: int) -> list[str]:
         command.append("--moe-collect-stats")
     if args.max_prefill_sequences is not None:
         command.extend(("--max-prefill-sequences", str(args.max_prefill_sequences)))
+    if args.elastic_initial_requests is not None:
+        command.extend(
+            ("--elastic-initial-requests", str(args.elastic_initial_requests))
+        )
     return command
 
 
@@ -152,7 +163,9 @@ def _prefill_rates(log_path: str) -> dict[str, float | int | None]:
 
 def main() -> int:
     args = parse_args()
-    decode_by_agent = [args.decode] + [args.helper_decode or args.decode] * (args.agents - 1)
+    decode_by_agent = [args.decode] + [args.helper_decode or args.decode] * (
+        args.agents - 1
+    )
     if args.prompt_tokens + max(decode_by_agent) > args.max_context:
         raise SystemExit("prompt plus decode exceeds the per-agent context ceiling")
     if args.agents * args.prompt_tokens + sum(decode_by_agent) > args.num_tokens:
@@ -169,7 +182,9 @@ def main() -> int:
             tokenizer, raw, needle, args.prompt_tokens
         )
         if actual != args.prompt_tokens:
-            raise SystemExit(f"agent {agent} trimmed to {actual}, expected {args.prompt_tokens}")
+            raise SystemExit(
+                f"agent {agent} trimmed to {actual}, expected {args.prompt_tokens}"
+            )
         prompts.append(prompt)
         expected.append(needle)
 
@@ -196,12 +211,17 @@ def main() -> int:
             results[agent] = long_context.stream_completion(
                 origin, model_id, prompts[agent], decode_by_agent[agent]
             )
-        except BaseException as error:  # retain every worker failure for the main thread
+        except (
+            BaseException
+        ) as error:  # retain every worker failure for the main thread
             errors[agent] = error
 
     with os.fdopen(fd, "wb") as log_f:
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
         )
         pump = threading.Thread(
             target=common.pump_output, args=(proc.stdout, log_f), daemon=True
@@ -244,7 +264,9 @@ def main() -> int:
         answer_prefix = result["text"].split("<|im_end|>", 1)[0]
         own_found = expected[agent] in answer_prefix
         foreign_found = any(
-            needle in answer_prefix for other, needle in enumerate(expected) if other != agent
+            needle in answer_prefix
+            for other, needle in enumerate(expected)
+            if other != agent
         )
         post_eos_foreign_prompt = any(
             f"Agent {other} orchard record marks amber inactive." in result["text"]
@@ -298,7 +320,13 @@ def main() -> int:
     overlap_tokens = sum(
         max(
             0,
-            len([stamp for stamp in result["stamps"] if overlap_start <= stamp <= overlap_end])
+            len(
+                [
+                    stamp
+                    for stamp in result["stamps"]
+                    if overlap_start <= stamp <= overlap_end
+                ]
+            )
             - 1,
         )
         for result in results
@@ -318,10 +346,13 @@ def main() -> int:
         summary["teardown"] = {
             "main_tokens_while_helpers_live": len(during),
             "main_tokens_after_helpers_stop": len(after),
-            "first_post_helper_token_seconds": after[0] - helper_done if after else None,
+            "first_post_helper_token_seconds": after[0] - helper_done
+            if after
+            else None,
             "largest_post_helper_token_gap_seconds": (
                 max(b - a for a, b in zip(after, after[1:], strict=False))
-                if len(after) > 1 else None
+                if len(after) > 1
+                else None
             ),
             "main_post_teardown_tok_s": (
                 (len(after) - 1) / (after[-1] - after[0]) if len(after) > 1 else None

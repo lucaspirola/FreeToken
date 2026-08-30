@@ -147,6 +147,18 @@ work too.
   not message history. OpenAI `previous_response_id` storage is not emulated.
   Closing a helper makes its pages evictable immediately, allowing the growable KV
   arena to decommit unused suffix segments and restore MoE residency.
+  Hybrid-GDN serving can also reserve only the normal four-agent recurrent-state and
+  graph footprint while admitting an eight-agent burst with
+  `--max-running-requests 8 --elastic-initial-requests 4`. Demand above four compacts
+  and preserves live/session GDN states, trades MoE residency for 8-way state and
+  graphs, then reverses the trade as soon as demand returns to four. An RTX 5080 Q4
+  gate preserved all eight independent answers across 25 → 49 → 25 physical GDN
+  slots and restored the exact original 5,635-slot MoE cache after the burst.
+  For Q6 hosts constrained by WSL's CUDA pin quota, pageable routed misses now use
+  CUDA-graph host callbacks and mapped pinned zero-copy scatter while shared-expert
+  GPU work runs concurrently. With `--moe-collect-stats`, an idle boundary writes a
+  model-file-scoped time-cost layer ranking under FreeToken's cache directory; the
+  next clean start applies it, avoiding unsafe live host re-registration.
   The production host-memory guard is 3 GiB. Growable mode now places its large
   resizeable expert-cache banks in direct CUDA VMM allocations rather than the
   PyTorch caching allocator, keeps a 256 MiB physical-commit cushion, and refuses a
@@ -166,7 +178,9 @@ work too.
   10.3 GiB of resident GPU weights. FreeToken currently serves one concurrent Nemotron
   session. On WSL, `--moe-pageable-gpu` keeps the pin-budget overflow banks pageable,
   stages only their routed misses through a small pinned buffer, and still executes every
-  ReLU² expert on GPU. This eager path disables CUDA graphs and prefill overlap. A minimal
+  ReLU² expert on GPU. Decode gathers are CUDA-graph host nodes and overlap the shared
+  expert calculation; idle telemetry saves a model-scoped time-cost ranking that is
+  applied on the next clean start. A minimal
   all-GPU-compute launch is:
   `ft serve --model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
   --max-running-requests 1 --moe-backend offload --moe-cpu-layers 0

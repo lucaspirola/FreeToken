@@ -41,6 +41,7 @@ parsers all resolve automatically from the checkpoint and the GPU.
 | `--host` | 127.0.0.1 | Bind address |
 | `--port` | 1919 | Bind port |
 | `--max-running-requests` | 4 | Max concurrently running requests |
+| `--elastic-initial-requests` | off | Hybrid-GDN startup capacity; grows to `--max-running-requests` on demand and shrinks after sessions release state |
 | `--max-output-tokens` | 32768 | Default output budget for requests that omit one |
 | `--max-seq-len-override` | from checkpoint | Max sequence length |
 | `--max-prefill-length` | 8192 | Chunked-prefill chunk size in tokens |
@@ -68,7 +69,7 @@ See [models.md](models.md#moe-backends) for what each backend does.
 | `--kv-reserve-tokens` | 8192 | KV token floor reserved before `--moe-cache-auto` fills experts |
 | `--moe-cpu-threads` | physical cores | CPU worker threads for the cpu/hybrid executor |
 | `--moe-cpu-layers` | all on GPU | With `offload`: which MoE layers decode on CPU (`3,7,11`, a count, or a fraction) |
-| `--moe-pageable-gpu` | off | On WSL pin-quota overflow, stage selected misses through a bounded pinned buffer so all expert math remains on GPU (disables CUDA graphs and prefill overlap) |
+| `--moe-pageable-gpu` | off | On WSL pin-quota overflow, asynchronously gather selected misses into mapped pinned staging; all expert math and CUDA graph replay remain on GPU |
 | `--moe-hybrid-max-fetch` | auto | With `hybrid`: max experts fetched over PCIe per layer per step; rest computed on CPU |
 | `--moe-prefill-hit-d2d` | off | Prefill: copy cache-hit experts device-side, stream only misses (CUDA >= 13) |
 | `--disable-moe-prefill-overlap` | overlap on | Disable the two-buffer prefill copy overlap |

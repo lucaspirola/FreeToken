@@ -256,6 +256,17 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--elastic-initial-requests",
+        type=_positive_int,
+        default=ServerArgs.elastic_initial_requests,
+        help=(
+            "Start hybrid-GDN recurrent state and decode graphs at this smaller "
+            "request capacity, then grow on demand through --max-running-requests "
+            "and shrink after the extra agents release their state."
+        ),
+    )
+
+    parser.add_argument(
         "--auto-session-grace-seconds",
         type=float,
         default=ServerArgs.auto_session_grace_seconds,
@@ -691,8 +702,8 @@ def parse_args(
         help=(
             "On hosts with a CUDA pinning quota (notably WSL), keep expert-bank "
             "overflow layers pageable and stage only routed cache misses through a "
-            "small pinned buffer. All expert math remains on GPU, at the cost of "
-            "eager decode and an extra RAM copy for overflow layers."
+            "small mapped pinned buffer. All expert math remains on GPU and decode "
+            "supports CUDA graph replay; overflow layers pay an extra RAM copy."
         ),
     )
 

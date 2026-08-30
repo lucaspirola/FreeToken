@@ -322,6 +322,38 @@ class OffloadMoELayer(MoELayer):
             is_prefill=False,
         )
 
+    def begin_pageable_routed(
+        self,
+        topk_ids: torch.Tensor,
+    ) -> None:
+        """Start a pageable decode copy so a model can overlap independent GPU work."""
+        cache = self.offload_cache
+        assert cache is not None and cache.pageable_gpu
+        assert cache.is_unpinned_layer(self.layer_id)
+        cache.ensure_experts(self.layer_id, topk_ids)
+        cache.begin_pageable_copy(self.layer_id)
+
+    def finish_pageable_routed(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        cache = self.offload_cache
+        assert cache is not None
+        cache.wait_pageable_copy(self.layer_id)
+        out = self._expert_gemm(
+            cache,
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            views=cache.bank_views(layer_id=self.layer_id),
+            n=None,
+            alphas=cache.alphas_for_slots(self.layer_id),
+            is_prefill=False,
+        )
+        return self._maybe_all_reduce(out)
+
     def routed_forward_with_shared_gguf(
         self,
         hidden_states: torch.Tensor,
