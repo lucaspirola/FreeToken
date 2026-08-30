@@ -58,6 +58,16 @@ fell from 8.70 to 8.25 seconds (-5.2%). Four-session simultaneous decode remaine
 batch-scaled and edged from 105.47 to 106.17 tok/s (+0.7%). All single- and
 four-session arithmetic answers were coherent.
 
+## Accepted: exact three-agent elastic graph
+
+The 2-to-4 on-request tier now captures decode batch size 3 as well as 1, 2, and
+4. A main agent with two helpers no longer pads every decode step with a fourth
+dummy request. Two paired three-session Q6/Q8 runs raised simultaneous decode
+from 79.72 to 91.14 tok/s (+14.3%) and end-to-end aggregate decode from 53.90 to
+58.78 tok/s (+9.1%). All six answers were coherent. The extra graph is destroyed
+when demand returns to two; both gates restored the 4,036-slot idle MoE cache from
+the 3,632-slot burst geometry.
+
 ## Rejected screens
 
 - A 20 ms idle admission window successfully placed four requests in the first prefill,

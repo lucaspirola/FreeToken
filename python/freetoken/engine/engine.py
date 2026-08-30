@@ -1475,7 +1475,7 @@ class Engine:
         moe = self.moe_offload_cache
         assert moe is not None
         old_moe = moe.cache_size
-        graph_bs = [bs for bs in (1, 2, 4, 8) if bs <= target_capacity]
+        graph_bs = _elastic_graph_batch_sizes(target_capacity)
 
         torch.cuda.synchronize(self.device)
         self.attn_backend.reset_capture()
@@ -1982,6 +1982,16 @@ _DENSE_MOE_SETTINGS = {
 }
 
 
+def _elastic_graph_batch_sizes(capacity: int) -> list[int]:
+    """Decode graphs retained by the on-request Hybrid-GDN capacity tier.
+
+    Three agents are a common main-plus-two-helpers shape. Capturing that exact
+    size avoids padding it to four, while larger optional bursts keep the sparse
+    power-of-two set so graph memory does not grow linearly with their ceiling.
+    """
+    return [bs for bs in (1, 2, 3, 4, 8) if bs <= capacity]
+
+
 def _adjust_config(config: EngineConfig):
     def override(attr: str, value: Any):  # this is dangerous, use with caution
         object.__setattr__(config, attr, value)
@@ -2030,7 +2040,7 @@ def _adjust_config(config: EngineConfig):
         if config.cuda_graph_bs is None:
             override(
                 "cuda_graph_bs",
-                [bs for bs in (1, 2, 4, 8) if bs <= elastic_initial],
+                _elastic_graph_batch_sizes(elastic_initial),
             )
         override("cuda_graph_max_bs", elastic_initial)
 
