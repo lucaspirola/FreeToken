@@ -1947,7 +1947,12 @@ def _auto_pageable_gpu_layers(
     # churn, which can poison a WSL CUDA context after a registration rejection.
     from freetoken.moe.placement import load_pageable_ranking
 
-    measured = load_pageable_ranking(config.model_path, num_moe_layers)
+    profile_mode = getattr(config, "moe_pageable_profile", "off")
+    measured = (
+        load_pageable_ranking(config.model_path, num_moe_layers)
+        if profile_mode in {"read", "train"}
+        else None
+    )
     if measured is not None:
         ids = frozenset(measured[:n])
         policy = "persisted measured-time-cost"
@@ -1982,6 +1987,11 @@ def _adjust_config(config: EngineConfig):
         object.__setattr__(config, attr, value)
 
     model_config = config.model_config
+    if (
+        getattr(config, "moe_pageable_profile", "off") == "train"
+        and not getattr(config, "moe_collect_stats", False)
+    ):
+        override("moe_collect_stats", True)
     single_stream_only = getattr(model_config, "single_stream_only", False)
     is_dsv4 = getattr(model_config, "dsv4_args", None) is not None
     has_swa_attention = getattr(model_config, "has_swa_attention", False)

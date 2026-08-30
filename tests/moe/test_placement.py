@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 from freetoken.moe.placement import (
     load_pageable_ranking,
@@ -53,3 +54,14 @@ def test_pageable_placement_profile_rejects_invalid_permutation(tmp_path, monkey
     )
 
     assert load_pageable_ranking(str(model), 2) is None
+
+
+def test_pageable_profile_is_not_trained_in_off_or_read_modes():
+    from freetoken.scheduler.scheduler import Scheduler
+
+    for mode in ("off", "read"):
+        scheduler = SimpleNamespace(
+            config=SimpleNamespace(moe_pageable_profile=mode),
+            engine=SimpleNamespace(moe_offload_cache=object()),
+        )
+        Scheduler._maybe_retune_pageable_layers(scheduler, [])

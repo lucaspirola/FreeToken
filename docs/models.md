@@ -167,9 +167,11 @@ work too.
   slots and restored the exact original 5,635-slot MoE cache after the burst.
   For Q6 hosts constrained by WSL's CUDA pin quota, pageable routed misses now use
   CUDA-graph host callbacks and mapped pinned zero-copy scatter while shared-expert
-  GPU work runs concurrently. With `--moe-collect-stats`, an idle boundary writes a
-  model-file-scoped time-cost layer ranking under FreeToken's cache directory; the
-  next clean start applies it, avoiding unsafe live host re-registration.
+  GPU work runs concurrently. Persistent placement is opt-in because an arbitrary
+  production workload can train a model-wide regression: `--moe-pageable-profile read`
+  applies an existing model-file-scoped time-cost ranking, while `train` also enables
+  decode telemetry and updates it at idle boundaries. The default `off` keeps the
+  validated deterministic placement and avoids unsafe live host re-registration.
   The production host-memory guard is 3 GiB. Growable mode now places its large
   resizeable expert-cache banks in direct CUDA VMM allocations rather than the
   PyTorch caching allocator, keeps a 256 MiB physical-commit cushion, and refuses a

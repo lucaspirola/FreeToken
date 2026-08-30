@@ -716,6 +716,17 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--moe-pageable-profile",
+        default=ServerArgs.moe_pageable_profile,
+        choices=["off", "read", "train"],
+        help=(
+            "Persistent pageable-layer placement policy. 'off' keeps the deterministic "
+            "built-in placement, 'read' applies an existing model-scoped profile, and "
+            "'train' applies then updates the profile from decode telemetry."
+        ),
+    )
+
+    parser.add_argument(
         "--moe-cpu-threads",
         type=int,
         default=ServerArgs.moe_cpu_threads,

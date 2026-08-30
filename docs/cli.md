@@ -74,6 +74,7 @@ See [models.md](models.md#moe-backends) for what each backend does.
 | `--moe-cpu-threads` | physical cores | CPU worker threads for the cpu/hybrid executor |
 | `--moe-cpu-layers` | all on GPU | With `offload`: which MoE layers decode on CPU (`3,7,11`, a count, or a fraction) |
 | `--moe-pageable-gpu` | off | On WSL pin-quota overflow, asynchronously gather selected misses into mapped pinned staging; all expert math and CUDA graph replay remain on GPU |
+| `--moe-pageable-profile` | off | Persistent pageable-layer policy: `off` uses the deterministic built-in placement, `read` applies an existing model-scoped profile, and `train` also updates it from telemetry |
 | `--moe-hybrid-max-fetch` | auto | With `hybrid`: max experts fetched over PCIe per layer per step; rest computed on CPU |
 | `--moe-prefill-hit-d2d` | off | Prefill: copy cache-hit experts device-side, stream only misses (CUDA >= 13) |
 | `--disable-moe-prefill-overlap` | overlap on | Disable the two-buffer prefill copy overlap |

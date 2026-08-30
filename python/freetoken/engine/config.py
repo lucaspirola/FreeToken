@@ -61,6 +61,12 @@ class EngineConfig:
     # (cudaMemcpyBatchAsync); no-op unless moe_cache_size > 2 * num_experts.
     moe_prefill_hit_d2d: bool = False
     moe_collect_stats: bool = False  # capture decode miss-rate counters into the cuda graph
+    # Persistent pageable-layer profiles are deliberately opt-in. Production traffic can
+    # have a very different expert-routing distribution from a tuning gate, so silently
+    # training and applying a model-wide profile can regress every later server boot.
+    # ``read`` applies an existing model-scoped profile; ``train`` also updates it at idle
+    # boundaries (and enables the counters needed to do so).
+    moe_pageable_profile: str = "off"  # off | read | train
     # CPU MoE backend (--moe-backend cpu): number of CPU worker threads computing
     # the decode experts. 0 = auto (physical cores). Ignored by other backends.
     moe_cpu_threads: int = 0

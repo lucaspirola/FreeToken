@@ -174,3 +174,41 @@ def test_ornith_q6_pageable_split_uses_profiled_low_miss_layers(monkeypatch):
     assert engine._auto_pageable_gpu_layers(config, 40) == frozenset(
         {39, 8, 20, 7, 15, 18, 30, 14, 19, 17, 12}
     )
+
+
+def test_ornith_q6_pageable_profile_is_explicit(monkeypatch):
+    import freetoken.engine.engine as engine
+    import freetoken.moe.expert_banks as expert_banks
+    import freetoken.moe.placement as placement
+
+    config = SimpleNamespace(
+        model_path="/not-ftw",
+        model_config=SimpleNamespace(
+            expert_quant="gguf",
+            moe_weight_format="gguf",
+            num_layers=40,
+            num_moe_layers=40,
+            num_experts=256,
+            num_experts_per_tok=8,
+            hidden_size=2048,
+            expert_hidden_size=2048,
+            moe_intermediate_size=512,
+            gguf_expert_types=((14, 14),) * 40,
+        ),
+        host_ram_reserve_gb=4.0,
+        max_running_req=1,
+        moe_pageable_profile="read",
+    )
+    layers = expert_banks.bank_layer_bytes_estimate(config.model_config)
+    assert layers is not None
+    resident_budget = sum(layers[:29]) + layers[29] // 2
+    monkeypatch.setattr(engine, "_pin_budget_bytes", lambda: resident_budget)
+    monkeypatch.setattr(
+        expert_banks,
+        "_host_meminfo_bytes",
+        lambda: {"MemAvailable": resident_budget + (4 << 30)},
+    )
+    ranking = tuple(range(29, -1, -1)) + tuple(range(30, 40))
+    monkeypatch.setattr(placement, "load_pageable_ranking", lambda *_: ranking)
+
+    assert engine._auto_pageable_gpu_layers(config, 40) == frozenset(ranking[:11])

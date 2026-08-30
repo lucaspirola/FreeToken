@@ -283,7 +283,8 @@ class Scheduler(SchedulerIOMixin):
         """Explore one measured host-residency swap at a full idle boundary."""
         moe = self.engine.moe_offload_cache
         if (
-            self._pageable_retune_disabled
+            getattr(self.config, "moe_pageable_profile", "off") != "train"
+            or self._pageable_retune_disabled
             or moe is None
             or not moe.pageable_gpu
             or self.config.tp_info.size > 1
