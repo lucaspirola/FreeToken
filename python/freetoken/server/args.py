@@ -470,8 +470,9 @@ def parse_args(
             "KV-cache element storage. 'auto' keeps the compute dtype (bf16); 'q8_0' and "
             "'fp8_e4m3' use 1.0625 bytes/element, while 'q4_0' (also accepted as 'int4') "
             "uses 0.5625 bytes/element with llama.cpp-compatible GGML Q4_0 quantization. "
-            "Each includes an fp16 scale per 32 head-dim elements. q8_0 is the most accurate "
-            "compact format; q4_0 maximizes capacity. Needs the triton "
+            "Each includes an fp16 scale per 32 head-dim elements. q5_0 and q6_0 are "
+            "available only in the validated independent K/V pairs described below. "
+            "q8_0 is the most accurate compact format; q4_0 maximizes capacity. Needs the triton "
             "attention backend and head_dim divisible by 32."
         ),
     )
@@ -490,7 +491,8 @@ def parse_args(
         default=ServerArgs.kv_cache_dtype_v,
         help=(
             "Independent value-cache format; defaults to --kv-cache-dtype. "
-            "The validated asymmetric lane is q8_0 keys with q6_0 values."
+            "Validated asymmetric lanes are q8_0 keys with q6_0 values and q6_0 "
+            "keys with q5_0 values."
         ),
     )
 

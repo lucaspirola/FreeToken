@@ -192,21 +192,20 @@ def _validate_kv_cache_dtype(config, model_config) -> None:
     if not quants:
         return
     names = "/".join(q.name if q is not None else "auto" for q in (quant_k, quant_v))
-    if any(q.name == "q6_0" for q in quants) and (quant_k.name, quant_v.name) != (
-        "q8_0",
-        "q6_0",
-    ):
+    pair = (quant_k.name, quant_v.name)
+    validated_pairs = {("q8_0", "q6_0"), ("q6_0", "q5_0")}
+    if any(q.name in {"q5_0", "q6_0"} for q in quants) and pair not in validated_pairs:
         raise ValueError(
-            "q6_0 is currently supported only as the value side of the validated "
-            "--kv-cache-dtype-k q8_0 --kv-cache-dtype-v q6_0 pair"
+            "q5_0/q6_0 are currently supported only in the validated asymmetric "
+            "Q8-K/Q6-V and Q6-K/Q5-V pairs"
         )
-    if quant_k != quant_v and (quant_k.name, quant_v.name) != ("q8_0", "q6_0"):
+    if quant_k != quant_v and pair not in validated_pairs:
         raise ValueError(
             f"independent KV formats {names} are not a validated kernel pair; "
-            "use --kv-cache-dtype-k q8_0 --kv-cache-dtype-v q6_0"
+            "use Q8-K/Q6-V or Q6-K/Q5-V"
         )
     if quant_k != quant_v and model_config.has_swa_attention:
-        raise ValueError("independent Q8-K/Q6-V is currently limited to MHA/full-attention pools")
+        raise ValueError("independent KV formats are currently limited to MHA/full-attention pools")
 
     from freetoken.kvcache.quant import BLOCK
 

@@ -96,8 +96,16 @@ class TritonAttentionBackend(BaseAttnBackend):
         )
         from freetoken.kernel.triton.attention import decode_launch_config
 
-        quant = getattr(self.kvcache, "quant", None)
-        quant_name = getattr(quant, "name", None) if getattr(quant, "enabled", False) else None
+        quant_k = getattr(self.kvcache, "quant_k", getattr(self.kvcache, "quant", None))
+        quant_v = getattr(self.kvcache, "quant_v", getattr(self.kvcache, "quant", None))
+        pair = (getattr(quant_k, "name", None), getattr(quant_v, "name", None))
+        quant_name = (
+            "q8_q6" if pair == ("q8_0", "q6_0")
+            else "q6_q5" if pair == ("q6_0", "q5_0")
+            else getattr(quant_k, "name", None)
+            if getattr(quant_k, "enabled", False)
+            else None
+        )
         capability = (
             torch.cuda.get_device_capability(self.device)
             if self.device.type == "cuda"

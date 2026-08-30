@@ -8,7 +8,8 @@ channels, and a block of 32 keeps an outlier from stretching the scale of the wh
 head.
 
 The 8-bit schemes store one element per byte; ``int4`` stores two signed values in each
-``uint8`` byte using llama.cpp/GGML Q4_0 scale selection. All share the store kernel and
+``uint8`` byte using llama.cpp/GGML Q4_0 scale selection. Q5 and Q6 use cache-native
+contiguous bit planes with GGML Q5_0/Q6_0 scale selection. All share the store kernel and
 the dequant path in the attention kernels; the format only changes payload layout and
 the divisor mapping a block's extreme onto its representable range. The scale varies
 along ``head_dim``, the reduction dimension of ``q @ k``, so attention dequantizes
@@ -63,9 +64,9 @@ class KVQuantSpec:
     def elements_per_byte(self) -> int:
         """Compatibility helper for the byte-aligned q8/q4 formats.
 
-        Q6 uses three bytes per four values and therefore has no integral
-        elements-per-byte ratio. New code should use :meth:`storage_dim` and
-        :meth:`logical_dim`; asking for this legacy ratio on q6 is an error.
+        Q5/Q6 have fractional byte ratios and therefore no integral elements-per-byte
+        ratio. New code should use :meth:`storage_dim` and :meth:`logical_dim`; asking
+        for this legacy ratio on either format is an error.
         """
         if 8 % self.bits:
             raise ValueError(f"{self.name} has a fractional elements-per-byte ratio")
@@ -143,6 +144,26 @@ class KVQuantSpec:
             odd = q[..., 1::2]
             return even | (odd << 4), scales
 
+        if self.bits == 5:
+            # GGML Q5_0 scale/codes with a cache-native plane layout: adjacent low
+            # nibbles first, then one packed high-bit byte per eight logical values.
+            # Keeping both planes contiguous avoids GGML's per-block metadata stride
+            # in the attention hot path.
+            abs_blocks = blocks.abs()
+            extreme = blocks.gather(
+                -1, abs_blocks.argmax(dim=-1, keepdim=True)
+            ).squeeze(-1)
+            scales = torch.where(extreme != 0, extreme / -16.0, torch.ones_like(extreme))
+            scales = scales.to(SCALE_DTYPE)
+            codes = torch.floor(blocks / scales.float().unsqueeze(-1) + 16.5).clamp_(0, 31)
+            codes = codes.flatten(-2).to(torch.uint8)
+            lo = (codes[..., 0::2] & 0x0F) | ((codes[..., 1::2] & 0x0F) << 4)
+            hi = sum(
+                (((codes[..., lane::8] >> 4) & 0x01) << lane)
+                for lane in range(8)
+            )
+            return torch.cat((lo, hi), dim=-1), scales
+
         if self.bits == 6:
             # Use GGML Q6_0's quantizer with a cache-native plane layout: all adjacent
             # low-nibble pairs first, then all adjacent upper-two-bit quads. Keeping
@@ -199,6 +220,18 @@ class KVQuantSpec:
             values = torch.stack([blocks & 0x0F, blocks >> 4], dim=-1)
             values = values.reshape(*blocks.shape[:-1], BLOCK).float()
             values = values - 8.0
+        elif self.bits == 5:
+            logical_d = self.logical_dim(q.shape[-1])
+            nblock = logical_d // BLOCK
+            payload = q.to(torch.uint8)
+            lo, hi = payload[..., : logical_d // 2], payload[..., logical_d // 2 :]
+            lower = torch.stack((lo & 0x0F, lo >> 4), dim=-1).flatten(-2)
+            upper = torch.stack(
+                tuple((hi >> lane) & 0x01 for lane in range(8)), dim=-1
+            ).flatten(-2)
+            values = (lower | (upper << 4)).float().unflatten(
+                -1, (nblock, BLOCK)
+            ) - 16.0
         elif self.bits == 6:
             logical_d = self.logical_dim(q.shape[-1])
             nblock = logical_d // BLOCK
@@ -227,9 +260,10 @@ INT4 = KVQuantSpec(
     name="int4", storage_dtype=torch.uint8, max_magnitude=8.0, bits=4
 )
 Q6_0 = KVQuantSpec(name="q6_0", storage_dtype=torch.uint8, max_magnitude=32.0, bits=6)
+Q5_0 = KVQuantSpec(name="q5_0", storage_dtype=torch.uint8, max_magnitude=16.0, bits=5)
 NONE = KVQuantSpec(name="auto", storage_dtype=None, max_magnitude=0.0)
 
-_BY_NAME = {spec.name: spec for spec in (NONE, Q8_0, FP8_E4M3, INT4, Q6_0)}
+_BY_NAME = {spec.name: spec for spec in (NONE, Q8_0, FP8_E4M3, INT4, Q5_0, Q6_0)}
 _BY_NAME["q4_0"] = INT4
 KV_CACHE_DTYPES = tuple(_BY_NAME)
 
@@ -254,6 +288,7 @@ __all__ = [
     "Q8_0",
     "FP8_E4M3",
     "INT4",
+    "Q5_0",
     "Q6_0",
     "NONE",
     "resolve_kv_quant",

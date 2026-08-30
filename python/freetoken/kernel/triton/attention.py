@@ -44,6 +44,18 @@ def decode_launch_config(
         # launch (0.492 vs 0.655 ms per layer); 128 splits regressed.
         return 64, 32, 8
     if (
+        quant_name == "q6_q5"
+        and head_dim == 256
+        and num_q_heads == 16
+        and num_kv_heads == 2
+        and compute_capability is not None
+        and compute_capability >= (12, 0)
+    ):
+        # The denser Q6-K/Q5-V unpack needs more independent partitions but fewer
+        # warps than Q8-K/Q6-V. At 262K on RTX 5080, 128/32/4 reached 0.480 ms per
+        # layer versus 0.546 for the inherited 64/32/8 launch and 0.494 for Q8/Q6.
+        return 128, 32, 4
+    if (
         quant_name == "int4"
         and head_dim == 256
         and num_q_heads == 16
@@ -140,6 +152,58 @@ def _load_kv(
     cannot be folded in after the dot -- the tile is dequantized into ``out_dtype`` (the
     query's dtype) and fed to the tensor cores like the bf16 path does.
     """
+    if FORMAT == 4:
+        # Cache-native Q5 planes: D/2 adjacent low-nibble pairs followed by D/8
+        # bytes carrying the high bit of eight consecutive logical values.
+        if D_ON_ROWS:
+            q5_nb: tl.constexpr = scale_offsets.shape[0]
+            q5_n: tl.constexpr = scale_offsets.shape[1]
+            q5_d: tl.constexpr = q5_nb * QBLOCK
+            low_elem = tl.arange(0, q5_d // 2)[:, None]
+            high_elem = q5_d // 2 + tl.arange(0, q5_d // 8)[:, None]
+            low_mask = tl.broadcast_to(
+                scale_mask[:, None, :], (q5_nb, QBLOCK // 2, q5_n)
+            ).reshape(q5_d // 2, q5_n)
+            high_mask = tl.broadcast_to(
+                scale_mask[:, None, :], (q5_nb, QBLOCK // 8, q5_n)
+            ).reshape(q5_d // 8, q5_n)
+        else:
+            q5_n: tl.constexpr = scale_offsets.shape[0]
+            q5_nb: tl.constexpr = scale_offsets.shape[1]
+            q5_d: tl.constexpr = q5_nb * QBLOCK
+            low_elem = tl.arange(0, q5_d // 2)[None, :]
+            high_elem = q5_d // 2 + tl.arange(0, q5_d // 8)[None, :]
+            low_mask = tl.broadcast_to(
+                scale_mask[:, :, None], (q5_n, q5_nb, QBLOCK // 2)
+            ).reshape(q5_n, q5_d // 2)
+            high_mask = tl.broadcast_to(
+                scale_mask[:, :, None], (q5_n, q5_nb, QBLOCK // 8)
+            ).reshape(q5_n, q5_d // 8)
+        low = tl.load(ptr + base + low_elem, mask=low_mask, other=0)
+        high = tl.load(ptr + base + high_elem, mask=high_mask, other=0)
+        if D_ON_ROWS:
+            lower = tl.interleave((low & 15).trans(), (low >> 4).trans()).trans()
+            high_t = high.trans()
+            planes = tl.broadcast_to(high_t[:, :, None], (q5_n, q5_d // 8, 8))
+            lane = tl.arange(0, 8)[None, None, :]
+            upper = ((planes >> lane) & 1).reshape(q5_n, q5_d).trans()
+        else:
+            lower = tl.interleave(low & 15, low >> 4)
+            planes = tl.broadcast_to(high[:, :, None], (q5_n, q5_d // 8, 8))
+            lane = tl.arange(0, 8)[None, None, :]
+            upper = ((planes >> lane) & 1).reshape(q5_n, q5_d)
+        vals = ((lower | (upper << 4)).to(tl.float32) - 16.0)
+        scale = tl.load(scale_ptr + scale_offsets, mask=scale_mask, other=0.0)
+        if D_ON_ROWS:
+            wide = tl.broadcast_to(
+                scale[:, None, :], (q5_nb, QBLOCK, q5_n)
+            ).reshape(q5_d, q5_n)
+        else:
+            wide = tl.broadcast_to(
+                scale[:, :, None], (q5_n, q5_nb, QBLOCK)
+            ).reshape(q5_n, q5_d)
+        return (vals * wide.to(tl.float32)).to(out_dtype)
+
     if FORMAT == 3:
         # Cache-native Q6 planes: D/2 adjacent low-nibble pairs, then D/4 adjacent
         # upper-two-bit quads. Load every payload byte once and unpack in registers.
@@ -739,7 +803,7 @@ def _decode_stage2_kernel(
 def _cache_format(cache, scale, head_dim: int) -> int:
     """Infer the compile-time storage format from logical and physical geometry.
 
-    0=unquantized, 1=byte-per-value quantized, 2=Q4_0, 3=Q6_0.
+    0=unquantized, 1=byte-per-value quantized, 2=Q4_0, 3=Q6_0, 4=Q5_0.
     """
     if scale is None:
         assert cache.shape[-1] == head_dim
@@ -750,6 +814,8 @@ def _cache_format(cache, scale, head_dim: int) -> int:
         return 2
     if cache.shape[-1] * 4 == head_dim * 3:
         return 3
+    if cache.shape[-1] * 8 == head_dim * 5:
+        return 4
     raise AssertionError(
         f"KV storage dim {cache.shape[-1]} is incompatible with logical head_dim {head_dim}"
     )
@@ -836,6 +902,7 @@ def decode_paged_attention(
     group = num_q_heads // num_kv_heads
     quant_name = (
         "q8_q6" if (k_format, v_format) == (1, 3)
+        else "q6_q5" if (k_format, v_format) == (3, 4)
         else "int4" if k_format == 2
         else "quant8" if k_format == 1
         else None
@@ -1357,6 +1424,16 @@ def extend_paged_attention(
     # extension); sm_89 measured faster with 8. BLOCK_N=16 corrupts the packed
     # loader in the extend kernels too and must never be selected here.
     num_warps = 4 if torch.cuda.get_device_capability(q.device) >= (12, 0) else 8
+    if (
+        (k_format, v_format) == (3, 4)
+        and torch.cuda.get_device_capability(q.device) >= (12, 0)
+        and (head_dim, block_m, block_n) == (256, 64, 32)
+    ):
+        # Q6/Q5 benefits from the extra unpacking lanes: 8 warps / 2 stages cut the
+        # 8K-prefix + 2K-chunk kernel from 12.31 to 9.69 ms on RTX 5080. BLOCK_N=16
+        # failed the numerical oracle and 64 overflowed consumer Blackwell shared memory.
+        num_warps = 8
+        num_stages = 2
     grid = (qo_indptr.numel() - 1, num_q_heads, triton.cdiv(max_q_len, block_m))
     if k_extend is not None or v_extend is not None:
         assert k_extend is not None and v_extend is not None

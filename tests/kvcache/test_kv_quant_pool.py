@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from freetoken.kvcache.quant import BLOCK, FP8_E4M3, INT4, NONE, Q6_0, Q8_0
+from freetoken.kvcache.quant import BLOCK, FP8_E4M3, INT4, NONE, Q5_0, Q6_0, Q8_0
 
 from .test_hybrid_swa_kv_cache import _kv_group_specs, _patch_tp
 
@@ -179,7 +179,14 @@ def test_mha_pool_quantizes_and_round_trips(monkeypatch, spec):
 
 @cuda_only
 @pytest.mark.parametrize("grow_step", [0, 64], ids=["static", "growable"])
-def test_mha_pool_supports_independent_q8_keys_q6_values(monkeypatch, grow_step):
+@pytest.mark.parametrize(
+    ("quant_k", "quant_v", "k_dim", "v_dim"),
+    [(Q8_0, Q6_0, 256, 192), (Q6_0, Q5_0, 192, 160)],
+    ids=["q8-k-q6-v", "q6-k-q5-v"],
+)
+def test_mha_pool_supports_independent_formats(
+    monkeypatch, grow_step, quant_k, quant_v, k_dim, v_dim
+):
     from freetoken.distributed.info import DistributedInfo
     from freetoken.kvcache.mha_pool import MHAKVCache
 
@@ -188,24 +195,26 @@ def test_mha_pool_supports_independent_q8_keys_q6_values(monkeypatch, grow_step)
     )
     pool = MHAKVCache(
         num_kv_heads=2, num_layers=4, head_dim=256, num_pages=257, page_size=1,
-        dtype=torch.bfloat16, device=torch.device("cuda"), quant_k=Q8_0,
-        quant_v=Q6_0, grow_step_tokens=grow_step,
+        dtype=torch.bfloat16, device=torch.device("cuda"), quant_k=quant_k,
+        quant_v=quant_v, grow_step_tokens=grow_step,
     )
-    assert pool.k_cache(0).shape[-1] == 256
-    assert pool.v_cache(0).shape[-1] == 192
+    assert pool.k_cache(0).shape[-1] == k_dim
+    assert pool.v_cache(0).shape[-1] == v_dim
     assert pool.unit_bytes()[0] == 4 * 2 * 256 * (
-        Q8_0.bytes_per_element(torch.bfloat16) + Q6_0.bytes_per_element(torch.bfloat16)
+        quant_k.bytes_per_element(torch.bfloat16)
+        + quant_v.bytes_per_element(torch.bfloat16)
     )
 
     k = torch.randn(6, 2, 256, device="cuda", dtype=torch.bfloat16)
     v = torch.randn_like(k)
     indices = torch.arange(1, 7, device="cuda", dtype=torch.int32)
     pool.store_kv(k, v, indices, 0)
-    got_v = Q6_0.dequantize(
-        pool.v_cache(0).view(-1, 2, 192)[indices.long()],
+    got_v = quant_v.dequantize(
+        pool.v_cache(0).view(-1, 2, v_dim)[indices.long()],
         pool.v_scale(0).view(-1, 2, 8)[indices.long()],
     )
-    assert ((got_v - v.float()).norm() / v.float().norm()).item() < 0.03
+    max_rel = 0.05 if quant_v is Q5_0 else 0.03
+    assert ((got_v - v.float()).norm() / v.float().norm()).item() < max_rel
 
     if grow_step:
         before = pool.mapped_bytes_for_pages(pool.committed_pages)

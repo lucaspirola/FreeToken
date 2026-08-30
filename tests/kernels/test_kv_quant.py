@@ -3,7 +3,16 @@ from __future__ import annotations
 import pytest
 import torch
 
-from freetoken.kvcache.quant import BLOCK, FP8_E4M3, INT4, NONE, Q6_0, Q8_0, resolve_kv_quant
+from freetoken.kvcache.quant import (
+    BLOCK,
+    FP8_E4M3,
+    INT4,
+    NONE,
+    Q5_0,
+    Q6_0,
+    Q8_0,
+    resolve_kv_quant,
+)
 
 SPECS = [Q8_0, FP8_E4M3, INT4]
 IDS = [spec.name for spec in SPECS]
@@ -22,8 +31,10 @@ def test_bytes_per_element_amortizes_the_scale():
     assert FP8_E4M3.bytes_per_element(torch.bfloat16) == 1.0 + 2 / 32
     # Packed int4 stores two values per byte, with the same scale slab.
     assert INT4.bytes_per_element(torch.bfloat16) == 0.5 + 2 / 32
+    assert Q5_0.bytes_per_element(torch.bfloat16) == 0.625 + 2 / 32
     assert Q6_0.bytes_per_element(torch.bfloat16) == 0.75 + 2 / 32
     assert INT4.storage_shape((7, 4, 256)) == (7, 4, 128)
+    assert Q5_0.storage_shape((7, 4, 256)) == (7, 4, 160)
     assert Q6_0.storage_shape((7, 4, 256)) == (7, 4, 192)
     # Unquantized pools price at the compute dtype.
     assert NONE.bytes_per_element(torch.bfloat16) == 2.0
@@ -36,6 +47,7 @@ def test_resolve_and_scale_shape():
     assert resolve_kv_quant("q8_0") is Q8_0
     assert resolve_kv_quant("int4") is INT4
     assert resolve_kv_quant("q4_0") is INT4
+    assert resolve_kv_quant("q5_0") is Q5_0
     assert resolve_kv_quant("q6_0") is Q6_0
     assert Q8_0.scale_shape((7, 4, 256)) == (7, 4, 8)
     with pytest.raises(ValueError, match="not a multiple"):
@@ -84,6 +96,111 @@ def test_q6_0_reference_layout_and_roundtrip():
     back = Q6_0.dequantize(payload, scales)
     assert back.shape == x.shape
     assert ((back - x).norm() / x.norm()).item() < 0.03
+
+
+def test_q5_0_reference_layout_and_roundtrip():
+    x = torch.linspace(-4, 4, BLOCK).view(1, 1, BLOCK)
+    payload, scales = Q5_0.quantize(x)
+    assert payload.shape == (1, 1, 20)
+    back = Q5_0.dequantize(payload, scales)
+    assert back.shape == x.shape
+    assert ((back - x).norm() / x.norm()).item() < 0.05
+
+
+@cuda_only
+def test_q6_k_q5_v_store_and_attention_paths_match_dequantized_oracle():
+    from freetoken.kernel.triton.attention import (
+        decode_paged_attention,
+        extend_paged_attention,
+        paged_attention,
+    )
+    from freetoken.kernel.triton.kv_quant import store_kv_quant
+
+    slots, q_heads, kv_heads, dim = 96, 8, 2, 256
+    q = _kv(6, q_heads, dim, seed=51)
+    k = _kv(slots, kv_heads, dim, seed=52)
+    v = _kv(slots, kv_heads, dim, seed=53)
+    indices = torch.arange(slots, device="cuda", dtype=torch.int32)
+    kq = torch.empty(
+        slots, kv_heads, Q6_0.storage_dim(dim), device="cuda", dtype=torch.uint8
+    )
+    vq = torch.empty(
+        slots, kv_heads, Q5_0.storage_dim(dim), device="cuda", dtype=torch.uint8
+    )
+    ks = torch.empty(slots, kv_heads, dim // BLOCK, device="cuda", dtype=torch.float16)
+    vs = torch.empty_like(ks)
+    store_kv_quant(kq, ks, vq, vs, indices, k, v, Q6_0, Q5_0)
+
+    want_kq, want_ks = Q6_0.quantize(k.float())
+    want_vq, want_vs = Q5_0.quantize(v.float())
+    torch.testing.assert_close(kq, want_kq)
+    torch.testing.assert_close(vq, want_vq)
+    torch.testing.assert_close(ks, want_ks)
+    torch.testing.assert_close(vs, want_vs)
+
+    indptr = torch.tensor([0, 40, 96], device="cuda", dtype=torch.int32)
+    q_to_req = torch.tensor([0, 0, 0, 1, 1, 1], device="cuda", dtype=torch.int32)
+    q_pos = torch.tensor([10, 25, 39, 5, 30, 55], device="cuda", dtype=torch.int32)
+    kwargs = dict(
+        indptr=indptr,
+        indices=indices,
+        q_to_req=q_to_req,
+        q_positions=q_pos,
+        sm_scale=dim**-0.5,
+    )
+    got = paged_attention(q, kq, vq, k_scale=ks, v_scale=vs, **kwargs)
+    want = paged_attention(
+        q,
+        Q6_0.dequantize(kq, ks).to(torch.bfloat16),
+        Q5_0.dequantize(vq, vs).to(torch.bfloat16),
+        **kwargs,
+    )
+    torch.testing.assert_close(got, want, rtol=2e-2, atol=2e-2)
+
+    decode_indptr = torch.tensor([0, slots], device="cuda", dtype=torch.int32)
+    decode_pos = torch.tensor([slots - 1], device="cuda", dtype=torch.int32)
+
+    def decode(k_cache, v_cache, splits, k_scale=None, v_scale=None):
+        logits = torch.empty(
+            1, q_heads, splits, dim, device="cuda", dtype=torch.float32
+        )
+        lse = torch.empty(1, q_heads, splits, device="cuda", dtype=torch.float32)
+        nsplits = torch.full((1,), splits, device="cuda", dtype=torch.int32)
+        return decode_paged_attention(
+            q[:1], k_cache, v_cache, decode_indptr, indices, decode_pos,
+            logits, lse, nsplits, splits, dim**-0.5,
+            k_scale=k_scale, v_scale=v_scale,
+        )
+
+    got = decode(kq, vq, 128, ks, vs)
+    want = decode(
+        Q6_0.dequantize(kq, ks).to(torch.bfloat16),
+        Q5_0.dequantize(vq, vs).to(torch.bfloat16),
+        8,
+    )
+    torch.testing.assert_close(got, want, rtol=2e-2, atol=2e-2)
+
+    prefix, q_len = 64, q.shape[0]
+    extend_kwargs = dict(
+        qo_indptr=torch.tensor([0, q_len], device="cuda", dtype=torch.int32),
+        kv_indptr=torch.tensor([0, prefix], device="cuda", dtype=torch.int32),
+        kv_indices=indices[:prefix],
+        prefix_lens=torch.tensor([prefix], device="cuda", dtype=torch.int32),
+        max_q_len=q_len,
+        sm_scale=dim**-0.5,
+        k_extend=k[:q_len],
+        v_extend=v[:q_len],
+    )
+    got = extend_paged_attention(
+        q, kq, vq, k_scale=ks, v_scale=vs, **extend_kwargs
+    )
+    want = extend_paged_attention(
+        q,
+        Q6_0.dequantize(kq, ks).to(torch.bfloat16),
+        Q5_0.dequantize(vq, vs).to(torch.bfloat16),
+        **extend_kwargs,
+    )
+    torch.testing.assert_close(got, want, rtol=2e-2, atol=2e-2)
 
 
 @cuda_only

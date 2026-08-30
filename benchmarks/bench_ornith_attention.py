@@ -48,7 +48,9 @@ Q_HEADS = 16
 KV_HEADS = 2
 HEAD_DIM = 256
 
-QUANT_CHOICES = ("int4", "q4_0", "q8_0", "q8_q6", "fp8_e4m3", "bf16")
+QUANT_CHOICES = (
+    "int4", "q4_0", "q8_0", "q8_q6", "q6_q5", "fp8_e4m3", "bf16"
+)
 # CLI spelling -> freetoken.kvcache.quant spec name. "q4_0"/"int4" are the same packed
 # scheme (llama.cpp naming vs the internal one); "bf16" means the unquantized pool.
 _QUANT_ALIAS = {
@@ -56,6 +58,7 @@ _QUANT_ALIAS = {
     "q4_0": "int4",
     "q8_0": "q8_0",
     "q8_q6": "q8_q6",
+    "q6_q5": "q6_q5",
     "fp8_e4m3": "fp8_e4m3",
     "bf16": "auto",
 }
@@ -251,6 +254,8 @@ def run_decode(case: DecodeCase, quant_specs, device, args) -> dict:
     quant_name = (
         "q8_q6"
         if (k_spec.name, v_spec.name) == ("q8_0", "q6_0")
+        else "q6_q5"
+        if (k_spec.name, v_spec.name) == ("q6_0", "q5_0")
         else "int4"
         if k_spec.name == "int4"
         else "quant8"
@@ -431,7 +436,7 @@ def main(argv: list[str] | None = None) -> int:
 
     import torch
 
-    from freetoken.kvcache.quant import FP8_E4M3, INT4, NONE, Q6_0, Q8_0
+    from freetoken.kvcache.quant import FP8_E4M3, INT4, NONE, Q5_0, Q6_0, Q8_0
 
     assert torch.cuda.is_available(), "CUDA is required"
     torch.cuda.set_device(args.device)
@@ -440,6 +445,7 @@ def main(argv: list[str] | None = None) -> int:
         "int4": (INT4, INT4),
         "q8_0": (Q8_0, Q8_0),
         "q8_q6": (Q8_0, Q6_0),
+        "q6_q5": (Q6_0, Q5_0),
         "fp8_e4m3": (FP8_E4M3, FP8_E4M3),
         "auto": (NONE, NONE),
     }

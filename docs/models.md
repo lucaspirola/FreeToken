@@ -192,6 +192,12 @@ work too.
   and recovered the needle coherently. Isolated Q8/Q8 attention remains faster, so
   this is a long-context capacity/residency trade rather than the new universal
   default. See `benchmarks/results/ornith_5080_asymmetric_kv_2026-08-30.md`.
+  A more compact opt-in lane is `--kv-cache-dtype-k q6_0
+  --kv-cache-dtype-v q5_0`. It cuts logical KV another 20% versus Q8/Q6 and crosses
+  over to faster isolated decode attention around 131K on RTX 5080, but exact-64K
+  live decode and final-chunk prefill were about 7% slower. It therefore remains a
+  long-context/capacity tier rather than the Q6 default. See
+  `benchmarks/results/ornith_5080_q6_q5_kv_2026-08-30.md`.
 - Nemotron 3 Super uses its native hybrid Mamba-2 / full-attention / latent-MoE
   architecture. The NVFP4 release needs about 60 GiB of host RAM for expert banks and
   10.3 GiB of resident GPU weights. FreeToken currently serves one concurrent Nemotron

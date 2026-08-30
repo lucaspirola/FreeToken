@@ -124,8 +124,8 @@ class EngineConfig:
     # Every quantized scheme carries a per-block scale. Resolved by the pools and cost model.
     kv_cache_dtype: str = "auto"
     # Optional independent formats. When omitted each inherits kv_cache_dtype. This is
-    # useful because keys are more quality-sensitive than values; Q8-K/Q6-V saves
-    # bandwidth and VRAM without forcing keys below eight bits.
+    # useful because keys are more quality-sensitive than values. Validated pairs are
+    # the high-fidelity Q8-K/Q6-V lane and the smaller Q6-K/Q5-V lane.
     kv_cache_dtype_k: str | None = None
     kv_cache_dtype_v: str | None = None
     # Reserve the full KV virtual range but physically commit it in chunks, shrinking the

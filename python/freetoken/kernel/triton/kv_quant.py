@@ -177,6 +177,29 @@ def _store_one_quant_kernel(
     block_idx = tl.arange(0, BLOCK)[None, :]
     extreme = tl.sum(tl.where(block_idx == extreme_idx[:, None], x, 0.0), axis=1)
 
+    if BITS == 5:
+        scale = tl.where(amax > 0, extreme / -16.0, 1.0)
+        scale = scale.to(scale_ptr.dtype.element_ty).to(tl.float32)
+        q = tl.minimum(
+            tl.maximum(tl.floor(tl.math.div_rn(x, scale[:, None]) + 16.5), 0.0),
+            31.0,
+        ).to(tl.uint8).reshape(NBLOCK * BLOCK)
+        even, odd = tl.split(q.reshape(NBLOCK * BLOCK // 2, 2))
+        low = (even & 15) | ((odd & 15) << 4)
+        high_values = q.reshape(NBLOCK * BLOCK // 8, 8)
+        high_lanes = tl.arange(0, 8)[None, :]
+        high = tl.sum(((high_values >> 4) & 1) << high_lanes, axis=1)
+        low_offs = tl.arange(0, NBLOCK * BLOCK // 2)
+        high_offs = tl.arange(0, NBLOCK * BLOCK // 8)
+        tl.store(dst_ptr + slot * stride_ct + head * stride_ch + low_offs, low)
+        tl.store(
+            dst_ptr + slot * stride_ct + head * stride_ch
+            + NBLOCK * BLOCK // 2 + high_offs,
+            high,
+        )
+        tl.store(scale_ptr + slot * stride_st + head * stride_sh + scale_offs, scale)
+        return
+
     if BITS == 6:
         initial = tl.where(amax > 0, extreme / -32.0, 1.0)
         q = tl.minimum(
