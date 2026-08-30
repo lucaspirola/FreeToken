@@ -242,9 +242,11 @@ class PrefillManager:
     table_manager: TableManager
     decode_manager: DecodeManager
     pending_list: List[PendingReq] = field(default_factory=list)
-    # Growable multi-agent mode divides one aggregate prefill batch across all waiting agents.
-    # Total tokens per forward stay unchanged; no single long prompt monopolizes every chunk.
+    # Growable multi-agent mode shares one aggregate token budget across waiting agents. A
+    # max_batch_seqs cap can serialize inefficient grouped GGUF prefills while rotation keeps
+    # unfinished long prompts fair between chunks.
     interleave_chunks: bool = False
+    max_batch_seqs: int = 0
 
     def add_one_req(self, req: UserMsg) -> None:
         self.pending_list.append(
@@ -278,12 +280,18 @@ class PrefillManager:
         log_new_tokens = 0
         log_cached_tokens = 0
         admitted_items = 0
+        stopped_for_lane_cap = False
         for index, pending_req in enumerate(self.pending_list):
             is_continuation = pending_req.chunked_req is not None
             chunk_limit = None
             if self.interleave_chunks:
                 waiting = len(self.pending_list) - index
-                chunk_limit = max(1, adder.token_budget // waiting)
+                available_lanes = (
+                    max(self.max_batch_seqs - len(reqs), 1)
+                    if self.max_batch_seqs
+                    else waiting
+                )
+                chunk_limit = max(1, adder.token_budget // min(waiting, available_lanes))
             if req := adder.try_add_one(pending_req, chunk_limit=chunk_limit):
                 admitted_items += 1
                 pending_req.chunked_req = None
@@ -301,6 +309,9 @@ class PrefillManager:
                 log_new_tokens += req.extend_len
                 if not is_continuation:
                     log_cached_tokens += req.cache_handle.cached_len
+                if self.max_batch_seqs and len(reqs) >= self.max_batch_seqs:
+                    stopped_for_lane_cap = index + 1 < len(self.pending_list)
+                    break
             else:
                 break  # We cannot add more requests
         if len(reqs) == 0:
@@ -313,7 +324,7 @@ class PrefillManager:
         # forever while a runnable continuation sat behind it.
         self.pending_list = (
             remaining + chunked_list
-            if self.interleave_chunks and not remaining
+            if self.interleave_chunks and stopped_for_lane_cap
             else chunked_list + remaining
         )
         batch = Batch(reqs=reqs, phase="prefill")

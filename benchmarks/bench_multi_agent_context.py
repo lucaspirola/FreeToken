@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -21,7 +22,16 @@ import bench_decode_moe as common
 import bench_long_context as long_context
 
 
-PASSCODES = ("7319041", "8462759", "2951384", "6748203")
+PASSCODES = (
+    "7319041",
+    "8462759",
+    "2951384",
+    "6748203",
+    "9184076",
+    "3526918",
+    "4801735",
+    "7695240",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,6 +52,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prefill-chunk", type=int, default=8192)
     parser.add_argument("--mem-ratio", type=float, default=0.97)
     parser.add_argument("--cache-policy", choices=("lru", "lfu"), default="lfu")
+    parser.add_argument("--moe-pageable-gpu", action="store_true")
+    parser.add_argument("--moe-collect-stats", action="store_true")
+    parser.add_argument("--max-prefill-sequences", type=int)
     parser.add_argument("--server-timeout", type=float, default=1800)
     parser.add_argument(
         "--agent-stagger",
@@ -69,7 +82,7 @@ def synthetic_agent_sample(agent: int) -> tuple[str, str]:
 
 
 def serve_cmd(args: argparse.Namespace, port: int) -> list[str]:
-    return [
+    command = [
         sys.executable,
         "-m",
         "freetoken.cli",
@@ -104,6 +117,37 @@ def serve_cmd(args: argparse.Namespace, port: int) -> list[str]:
         "--kv-grow-step-tokens",
         str(args.kv_grow_step_tokens),
     ]
+    if args.moe_pageable_gpu:
+        command.append("--moe-pageable-gpu")
+    if args.moe_collect_stats:
+        command.append("--moe-collect-stats")
+    if args.max_prefill_sequences is not None:
+        command.extend(("--max-prefill-sequences", str(args.max_prefill_sequences)))
+    return command
+
+
+def _prefill_rates(log_path: str) -> dict[str, float | int | None]:
+    pattern = re.compile(
+        r"input throughput \(token/s\): ([0-9.]+) instant, ([0-9.]+) average"
+    )
+    samples: list[tuple[float, float]] = []
+    with open(log_path, errors="replace") as server_log:
+        for line in server_log:
+            match = pattern.search(line)
+            if match:
+                samples.append((float(match.group(1)), float(match.group(2))))
+    if not samples:
+        return {
+            "prefill_samples": 0,
+            "prefill_instant_tok_s": None,
+            "prefill_average_tok_s": None,
+        }
+    instant, average = samples[-1]
+    return {
+        "prefill_samples": len(samples),
+        "prefill_instant_tok_s": instant,
+        "prefill_average_tok_s": average,
+    }
 
 
 def main() -> int:
@@ -194,9 +238,18 @@ def main() -> int:
         decode_steps = completion - 1
         decode_seconds = stamps[-1] - stamps[0]
         ttft_seconds = stamps[0] - result["t0"]
-        own_found = expected[agent] in result["text"]
+        # The throughput leg deliberately uses ignore_eos=True to obtain an exact decode count.
+        # Judge answer isolation only through the first Qwen end-of-turn marker; text after it is
+        # forced continuation and often invents a new copy of the visible benchmark template.
+        answer_prefix = result["text"].split("<|im_end|>", 1)[0]
+        own_found = expected[agent] in answer_prefix
         foreign_found = any(
-            needle in result["text"] for other, needle in enumerate(expected) if other != agent
+            needle in answer_prefix for other, needle in enumerate(expected) if other != agent
+        )
+        post_eos_foreign_prompt = any(
+            f"Agent {other} orchard record marks amber inactive." in result["text"]
+            for other in range(args.agents)
+            if other != agent
         )
         coherent = own_found and not foreign_found
         passed &= coherent
@@ -205,6 +258,7 @@ def main() -> int:
             "expected": expected[agent],
             "expected_found": own_found,
             "foreign_found": foreign_found,
+            "post_eos_foreign_prompt": post_eos_foreign_prompt,
             "prompt_tokens": int(usage["prompt_tokens"]),
             "decode_tokens": completion,
             "ttft_seconds": ttft_seconds,
@@ -215,7 +269,8 @@ def main() -> int:
         rows.append(row)
         print(
             f"  agent {agent}: ttft={ttft_seconds:.3f}s decode={row['decode_tok_s']:.2f} "
-            f"tok/s own={own_found} foreign={foreign_found} output={result['text']!r}",
+            f"tok/s own={own_found} foreign={foreign_found} "
+            f"post_eos_foreign_prompt={post_eos_foreign_prompt} output={result['text']!r}",
             flush=True,
         )
 
@@ -232,6 +287,28 @@ def main() -> int:
         "agents_result": rows,
         "server_log": log_path,
     }
+    first_decode = min(result["stamps"][0] for result in results)
+    last_decode = max(result["stamps"][-1] for result in results)
+    total_decode_steps = sum(row["decode_tokens"] - 1 for row in rows)
+    summary["aggregate_decode_tok_s"] = total_decode_steps / (
+        last_decode - first_decode
+    )
+    overlap_start = max(result["stamps"][0] for result in results)
+    overlap_end = min(result["stamps"][-1] for result in results)
+    overlap_tokens = sum(
+        max(
+            0,
+            len([stamp for stamp in result["stamps"] if overlap_start <= stamp <= overlap_end])
+            - 1,
+        )
+        for result in results
+    )
+    summary["simultaneous_decode_tok_s"] = (
+        overlap_tokens / (overlap_end - overlap_start)
+        if overlap_tokens and overlap_end > overlap_start
+        else None
+    )
+    summary.update(_prefill_rates(log_path))
     if args.helper_decode is not None:
         main_stamps = results[0]["stamps"]
         helper_done = max(result["stamps"][-1] for result in results[1:])
@@ -257,6 +334,13 @@ def main() -> int:
     print(
         f"[multi] wall={wall_seconds:.3f}s aggregate_prompt="
         f"{summary['aggregate_prompt_tok_s']:.2f} tok/s pass={passed}",
+        flush=True,
+    )
+    print(
+        f"[multi] prefill={summary['prefill_instant_tok_s']} instant / "
+        f"{summary['prefill_average_tok_s']} average tok/s; aggregate decode="
+        f"{summary['aggregate_decode_tok_s']:.2f} tok/s; simultaneous decode="
+        f"{summary['simultaneous_decode_tok_s']} tok/s",
         flush=True,
     )
     if args.json_out:

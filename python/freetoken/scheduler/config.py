@@ -14,6 +14,9 @@ def _get_pid_suffix() -> str:
 @dataclass(frozen=True)
 class SchedulerConfig(EngineConfig):
     max_extend_tokens: int = 8192
+    # Independent prompt lanes per prefill forward. None auto-selects one for growable quantized
+    # GGUF MoE with concurrency; zero explicitly keeps normal aggregate-token batching.
+    max_prefill_seqs: int | None = None
     cache_type: str = "radix"
     offline_mode: bool = False
     decode_log_interval: int = 40

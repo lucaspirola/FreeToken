@@ -172,6 +172,49 @@ def test_interleaved_prefill_gives_each_waiting_agent_a_lane():
     assert [req.uid for req in pm.pending_list] == [1, 2]
 
 
+def test_single_lane_prefill_rotates_long_prompts_without_grouping_them():
+    from freetoken.core import SamplingParams
+    from freetoken.scheduler.utils import PendingReq
+
+    _cm, _tm, _dm, pm = _build_managers(num_pages=128)
+    pm.interleave_chunks = True
+    pm.max_batch_seqs = 1
+    pm.pending_list = [
+        PendingReq(1, torch.arange(24, dtype=torch.int32), SamplingParams(max_tokens=2)),
+        PendingReq(2, torch.arange(24, dtype=torch.int32) + 100, SamplingParams(max_tokens=2)),
+    ]
+
+    first = pm.schedule_next_batch(16)
+    second = pm.schedule_next_batch(16)
+
+    assert first is not None and [(req.uid, req.extend_len) for req in first.reqs] == [(1, 16)]
+    assert second is not None and [(req.uid, req.extend_len) for req in second.reqs] == [(2, 16)]
+    assert [req.uid for req in pm.pending_list] == [1, 2]
+
+
+def test_prefill_sequence_limit_auto_scope():
+    cases = [
+        (None, 65_536, 4, ((12, 12),), 1),
+        (None, 0, 4, ((12, 12),), 0),
+        (None, 65_536, 1, ((12, 12),), 0),
+        (None, 65_536, 4, None, 0),
+        (0, 65_536, 4, ((12, 12),), 0),
+        (2, 65_536, 4, ((12, 12),), 2),
+    ]
+    from types import SimpleNamespace
+
+    from freetoken.scheduler.scheduler import _resolve_max_prefill_seqs
+
+    for explicit, grow_step, max_running, gguf_types, expected in cases:
+        config = SimpleNamespace(
+            max_prefill_seqs=explicit,
+            kv_grow_step_tokens=grow_step,
+            max_running_req=max_running,
+            model_config=SimpleNamespace(gguf_expert_types=gguf_types),
+        )
+        assert _resolve_max_prefill_seqs(config) == expected
+
+
 def test_interleaved_prefill_does_not_queue_blocked_agent_before_active_lane():
     """An agent that cannot reserve KV must not head-of-line block an admitted continuation."""
     from freetoken.core import SamplingParams

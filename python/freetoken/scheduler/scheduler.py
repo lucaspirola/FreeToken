@@ -51,6 +51,16 @@ def _gib(n_bytes: int) -> str:
     return f"{n_bytes / (1 << 30):.2f} GiB"
 
 
+def _resolve_max_prefill_seqs(config: SchedulerConfig) -> int:
+    if config.max_prefill_seqs is not None:
+        return config.max_prefill_seqs
+    return int(
+        config.max_running_req > 1
+        and bool(config.kv_grow_step_tokens)
+        and config.model_config.gguf_expert_types is not None
+    )
+
+
 # For overlap scheduling, we also need to cache some other data to avoid IMA
 class ForwardInput(NamedTuple):
     batch: Batch
@@ -104,12 +114,19 @@ class Scheduler(SchedulerIOMixin):
             page_index_offset=(1 if growable_kv else 0),
         )
         self.decode_manager = DecodeManager(config.page_size)
+        max_prefill_seqs = _resolve_max_prefill_seqs(config)
         self.prefill_manager = PrefillManager(
             self.cache_manager,
             self.table_manager,
             self.decode_manager,
             interleave_chunks=bool(config.kv_grow_step_tokens and config.max_running_req > 1),
+            max_batch_seqs=max_prefill_seqs,
         )
+        if max_prefill_seqs:
+            logger.info_rank0(
+                "Prefill sequence limit: %d (decode remains continuously batched)",
+                max_prefill_seqs,
+            )
 
         # some alias for easy access
         self.finished_reqs: Set[Req] = set()

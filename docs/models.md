@@ -85,10 +85,11 @@ work too.
   VRAM to the new KV segment, preserves all earlier KV at stable addresses, and
   recaptures decode graphs once after the final prefill chunk. Multiple requests
   use independent page-table rows over one shared physical arena; growth follows
-  their aggregate live-page demand. When several long prompts are queued, the
-  growable scheduler divides each 8K aggregate prefill batch into one fair lane per
-  waiting agent; this keeps agents progressing together while retaining the large
-  GGUF/MoE work batch. A 32-step decode burst between helper-prefill
+  their aggregate live-page demand. Growable quantized GGUF MoE serving runs one prompt lane
+  per prefill forward and rotates unfinished long prompts between 8K chunks; on the
+  RTX 5080, grouping independent prompt lanes made expert prefill substantially
+  slower. Pass `--max-prefill-sequences 0` to restore grouped prefill. Decode remains
+  continuously batched across every runnable agent. A 32-step decode burst between helper-prefill
   chunks prevents an established request from being starved. When a request stops,
   unlocked finished prefixes are evicted, surviving request-owned tail pages are
   compacted into low holes, complete VMM segments are decommitted, and the released

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import tempfile
 import threading
@@ -144,6 +145,30 @@ def _stream(
     }
 
 
+def _prefill_rates(log_path: str) -> dict[str, float | int | None]:
+    pattern = re.compile(
+        r"input throughput \(token/s\): ([0-9.]+) instant, ([0-9.]+) average"
+    )
+    samples: list[tuple[float, float]] = []
+    with open(log_path, errors="replace") as server_log:
+        for line in server_log:
+            match = pattern.search(line)
+            if match:
+                samples.append((float(match.group(1)), float(match.group(2))))
+    if not samples:
+        return {
+            "prefill_samples": 0,
+            "prefill_instant_tok_s": None,
+            "prefill_average_tok_s": None,
+        }
+    instant, average = samples[-1]
+    return {
+        "prefill_samples": len(samples),
+        "prefill_instant_tok_s": instant,
+        "prefill_average_tok_s": average,
+    }
+
+
 def main() -> int:
     args = parse_args()
     from freetoken.models.gguf.tokenizer import load_gguf_tokenizer
@@ -241,6 +266,7 @@ def main() -> int:
         "main_max_gap_s": max(gaps) if gaps else None,
         "server_log": log_path,
     }
+    summary.update(_prefill_rates(log_path))
     coherent = (
         summary["main_own"]
         and summary["helper_own"]

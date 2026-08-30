@@ -110,6 +110,15 @@ def parse_args(
             raise argparse.ArgumentTypeError("must be >= 1")
         return n
 
+    def _nonnegative_int(value: str) -> int:
+        try:
+            n = int(value)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError("must be a non-negative integer") from exc
+        if n < 0:
+            raise argparse.ArgumentTypeError("must be >= 0")
+        return n
+
     def _positive_ratio(value: str) -> float:
         try:
             ratio = float(value)
@@ -364,6 +373,17 @@ def parse_args(
         type=_positive_int,
         default=ServerArgs.decode_log_interval,
         help="Print one decode scheduler status line every N decode forwards.",
+    )
+
+    parser.add_argument(
+        "--max-prefill-sequences",
+        type=_nonnegative_int,
+        dest="max_prefill_seqs",
+        default=ServerArgs.max_prefill_seqs,
+        help=(
+            "Maximum independent sequences per prefill forward. Growable quantized GGUF MoE "
+            "auto-uses one with concurrency; 0 forces grouped prefill. Decode is unchanged."
+        ),
     )
 
     parser.add_argument(
