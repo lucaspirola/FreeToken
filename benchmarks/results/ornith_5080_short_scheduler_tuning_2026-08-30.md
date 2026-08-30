@@ -79,6 +79,14 @@ from 58.78 to 60.40 tok/s (+2.8%). A four-agent regression gate still reached th
 full 25-slot tier, produced all four correct answers, and delivered 110.43 tok/s
 simultaneous decode. Teardown restored the original 13 GDN / 4,036 MoE slots.
 
+## Accepted: coalesced intermediate shrink
+
+Intermediate elastic shrink tiers now require two seconds of stable demand. Returning
+to the compact initial tier remains immediate. In a staggered four-agent teardown this
+removed the short-lived 4-to-3 recapture and went directly 4-to-2, restoring 13 GDN /
+4,036 MoE slots without an extra rebuild. The four-agent regression remained coherent
+at 105.65 tok/s simultaneous decode.
+
 ## Rejected screens
 
 - A 20 ms idle admission window successfully placed four requests in the first prefill,

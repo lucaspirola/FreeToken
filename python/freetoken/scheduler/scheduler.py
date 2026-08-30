@@ -46,6 +46,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_ELASTIC_INTERMEDIATE_SHRINK_GRACE_SECONDS = 2.0
+
 Indice2D: TypeAlias = Tuple[torch.Tensor, torch.Tensor]
 
 
@@ -182,6 +184,7 @@ class Scheduler(SchedulerIOMixin):
             config.elastic_initial_requests or config.max_running_req
         )
         self._elastic_resize_pending = False
+        self._elastic_shrink_candidate: tuple[int, float] | None = None
         # Chunked prefill and decode use different kernels, so a truly mixed batch is not yet
         # available. Time-slice a short decode burst between helper-prefill chunks: this bounds
         # an existing agent's stream latency while keeping the large prefill kernels efficient.
@@ -1327,7 +1330,27 @@ class Scheduler(SchedulerIOMixin):
         )
         if target == self._elastic_capacity:
             self._elastic_resize_pending = False
+            self._elastic_shrink_candidate = None
             return
+
+        # Finishing requests are commonly staggered by a second or two. Avoid an
+        # expensive graph/state recapture for every transient intermediate tier;
+        # returning to the compact initial tier remains immediate.
+        if initial < target < self._elastic_capacity:
+            now = time.monotonic()
+            candidate = self._elastic_shrink_candidate
+            if candidate is None or candidate[0] != target:
+                self._elastic_shrink_candidate = (
+                    target,
+                    now + _ELASTIC_INTERMEDIATE_SHRINK_GRACE_SECONDS,
+                )
+                self._elastic_resize_pending = True
+                return
+            if now < candidate[1]:
+                self._elastic_resize_pending = True
+                return
+        else:
+            self._elastic_shrink_candidate = None
 
         pool = self.engine.linear_state_pool
         assert pool is not None
@@ -1358,6 +1381,7 @@ class Scheduler(SchedulerIOMixin):
             self._remap_req_mamba_slots(req, remap)
         self._elastic_capacity = target
         self._elastic_resize_pending = False
+        self._elastic_shrink_candidate = None
         # The exact page-conservation check is idle-only: live requests own pages
         # that are intentionally in neither the free list nor the radix tree.
         # Elastic growth normally happens with active requests, so limit the
