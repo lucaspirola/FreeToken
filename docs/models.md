@@ -145,6 +145,15 @@ work too.
   timeout; cancellation and disconnect reclaim it immediately. Both clients still
   send the complete conversation on each turn—the lease retains computation state,
   not message history. OpenAI `previous_response_id` storage is not emulated.
+  In single-rank growable Hybrid-GDN mode, an idle automatically bound session is
+  checkpointed before its soft GPU lease is released. FreeToken keeps checkpoints in
+  RAM up to `--session-spill-ram-gb` only while `MemAvailable` remains above
+  `--host-ram-reserve-gb`; overflow streams to the bounded `--session-spill-dir` disk
+  tier. A later request restores only when the client-resubmitted token prefix and the
+  exact K/V layout fingerprint match. Mismatch, damage, or capacity pressure discards
+  the checkpoint and performs ordinary prefill, never approximate reuse. Explicit
+  client-named sessions remain hard GPU leases until close/TTL. Set
+  `--session-spill-dir off` to disable the cold tier.
   Closing a helper makes its pages evictable immediately, allowing the growable KV
   arena to decommit unused suffix segments and restore MoE residency.
   Hybrid-GDN serving can also reserve only the normal four-agent recurrent-state and

@@ -41,6 +41,7 @@ from .table import TableManager
 
 if TYPE_CHECKING:
     from freetoken.engine import BatchSamplingArgs, ForwardOutput
+    from .session_spill import SessionSpillRecord
 
 
 logger = init_logger(__name__)
@@ -82,6 +83,8 @@ class SessionLease:
     reclaimable: bool = False
     protected_until: float | None = None
     last_used_at: float = 0.0
+    token_ids: torch.Tensor | None = None
+    spill: SessionSpillRecord | None = None
 
 
 class Scheduler(SchedulerIOMixin):
@@ -192,6 +195,20 @@ class Scheduler(SchedulerIOMixin):
         # Opt-in, client-named conversations. A completed turn leaves a radix handle locked;
         # the lease is released only by explicit close, abort/disconnect, or idle expiry.
         self._sessions: dict[str, SessionLease] = {}
+        from .session_spill import SessionSpillStore
+
+        self._session_spill_store = SessionSpillStore.create_if_supported(
+            self.engine, config
+        )
+        self._session_spill_last_pressure_check = 0.0
+        if self._session_spill_store is not None:
+            logger.info_rank0(
+                "Cold session tier enabled: RAM %.2f GiB, disk %.2f GiB, "
+                "host reserve %.2f GiB",
+                config.session_spill_ram_gb,
+                config.session_spill_disk_gb,
+                config.host_ram_reserve_gb,
+            )
         self.tokenizer = load_tokenizer(config.model_path)
         self.eos_token_ids = load_eos_token_ids(config.model_path, self.tokenizer)
         self.toolcall_anchor_id = None
@@ -456,6 +473,7 @@ class Scheduler(SchedulerIOMixin):
         self._last_data = last_data
         self._expire_sessions()
         self._release_due_soft_sessions()
+        self._enforce_session_host_reserve()
         blocking = not (
             last_data is not None  # don't block if we have a batch to be processed
             or self.prefill_manager.runnable
@@ -515,6 +533,7 @@ class Scheduler(SchedulerIOMixin):
     def normal_loop(self) -> None:
         self._expire_sessions()
         self._release_due_soft_sessions()
+        self._enforce_session_host_reserve()
         blocking = not (
             self.prefill_manager.runnable
             or self.decode_manager.runnable
@@ -569,6 +588,9 @@ class Scheduler(SchedulerIOMixin):
     def shutdown(self) -> None:
         torch.cuda.synchronize(self.device)
         self.sync_all_ranks()
+        spill_store = getattr(self, "_session_spill_store", None)
+        if spill_store is not None:
+            spill_store.shutdown()
         self.engine.shutdown()
 
     def _process_last_data(self, last_data: ForwardData | None) -> None:
@@ -841,6 +863,8 @@ class Scheduler(SchedulerIOMixin):
                 logger.warning_rank0(
                     f"Adjust max_tokens to {max_output_len} for request {msg.uid}."
                 )
+            if msg.session_id is not None:
+                self._restore_cold_session(msg.session_id, msg.input_ids)
             self.prefill_manager.add_one_req(msg)
         elif isinstance(msg, AbortBackendMsg):
             logger.debug_rank0("Aborting request %d", msg.uid)
@@ -962,7 +986,12 @@ class Scheduler(SchedulerIOMixin):
                     req.input_ids, req.cached_len
                 )
                 old_handle = session.handle
+                self._discard_session_spill(session)
                 session.handle = new_handle
+                retained_len = int(getattr(new_handle, "cached_len", req.cached_len))
+                session.token_ids = torch.as_tensor(
+                    req.input_ids[:retained_len], device="cpu", dtype=torch.int32
+                )
                 session.active_uid = None
                 now = time.monotonic()
                 session.expires_at = now + session.ttl_seconds
@@ -987,6 +1016,7 @@ class Scheduler(SchedulerIOMixin):
             return False, None
         if session.handle is not None:
             self.cache_manager.unlock(session.handle)
+        self._discard_session_spill(session)
         if session.active_uid is not None:
             req = self.prefill_manager.abort_req(session.active_uid)
             req = req or self.decode_manager.abort_req(session.active_uid)
@@ -1027,6 +1057,7 @@ class Scheduler(SchedulerIOMixin):
             or session.handle is None
         ):
             return False
+        self._spill_soft_session(session_id, session)
         self.cache_manager.unlock(session.handle)
         session.handle = None
         session.protected_until = None
@@ -1037,6 +1068,110 @@ class Scheduler(SchedulerIOMixin):
             reason,
         )
         return True
+
+    def _discard_session_spill(self, session: SessionLease) -> None:
+        store = getattr(self, "_session_spill_store", None)
+        if store is not None and session.spill is not None:
+            store.discard(session.spill)
+        session.spill = None
+
+    def _enforce_session_host_reserve(self) -> None:
+        store = getattr(self, "_session_spill_store", None)
+        if store is None:
+            return
+        now = time.monotonic()
+        if now - getattr(self, "_session_spill_last_pressure_check", 0.0) < 1.0:
+            return
+        self._session_spill_last_pressure_check = now
+        demoted, dropped = store.enforce_host_reserve()
+        if dropped:
+            for session in self._sessions.values():
+                if session.spill is not None and not session.spill.valid:
+                    session.spill = None
+        if demoted or dropped:
+            logger.warning(
+                "Cold-session host pressure: moved %d checkpoint(s) RAM -> disk, "
+                "dropped %d; %.2f GiB MemAvailable reserve remains mandatory",
+                demoted,
+                dropped,
+                self.config.host_ram_reserve_gb,
+            )
+
+    def _spill_soft_session(self, session_id: str, session: SessionLease) -> None:
+        store = getattr(self, "_session_spill_store", None)
+        handle = session.handle
+        if store is None or handle is None or session.token_ids is None:
+            return
+        node = getattr(handle, "node", None)
+        linear_slot = getattr(node, "mamba_value", None)
+        page_indices = handle.get_matched_indices()
+        if linear_slot is None or len(page_indices) != len(session.token_ids):
+            return
+        self._discard_session_spill(session)
+        record = store.spill(session.token_ids, page_indices, linear_slot)
+        if record is None:
+            logger.warning(
+                "Cold checkpoint for session %s did not fit RAM/disk budgets; "
+                "resume will recompute if its GPU prefix is evicted",
+                session_id,
+            )
+            return
+        session.spill = record
+        logger.info_rank0(
+            "Spilled soft session %s: %d tokens, %s, %.2f GiB",
+            session_id,
+            record.num_pages,
+            record.tier,
+            record.byte_size / (1 << 30),
+        )
+
+    @torch.inference_mode()
+    def _restore_cold_session(self, session_id: str, input_ids: torch.Tensor) -> bool:
+        session = getattr(self, "_sessions", {}).get(session_id)
+        store = getattr(self, "_session_spill_store", None)
+        if session is None or store is None or session.spill is None:
+            return False
+        record = session.spill
+        # The final prompt token must still run through prefill. Never install a checkpoint
+        # that reaches beyond the client's exact reusable prefix.
+        if record.num_pages > max(0, len(input_ids) - 1) or not torch.equal(
+            record.token_ids,
+            input_ids[: record.num_pages].to(device="cpu", dtype=torch.int32),
+        ):
+            self._discard_session_spill(session)
+            logger.info_rank0(
+                "Discarded cold session %s: client token prefix changed", session_id
+            )
+            return False
+
+        cm = self.cache_manager
+        try:
+            missing, allocatable = cm.hybrid_session_restore_geometry(record.token_ids)
+            if missing > allocatable:
+                required = cm.committed_pages + missing - allocatable
+                old_pages, new_pages = self.engine.grow_runtime_kv(required)
+                if new_pages > old_pages:
+                    cm.add_committed_pages(new_pages)
+                    logger.info_rank0(
+                        "KV grew %d -> %d tokens to restore cold session %s",
+                        old_pages,
+                        new_pages,
+                        session_id,
+                    )
+            session.handle = cm.restore_hybrid_session_prefix(record, store)
+            tier, tokens = record.tier, record.num_pages
+            self._discard_session_spill(session)
+            logger.info_rank0(
+                "Restored cold session %s: %d tokens from %s", session_id, tokens, tier
+            )
+            return True
+        except Exception as exc:  # reuse is an optimization, never an admission gate
+            logger.warning(
+                "Cold restore for session %s failed (%r); recomputing", session_id, exc
+            )
+            self._discard_session_spill(session)
+            session.handle = None
+            return False
 
     def _release_due_soft_sessions(self) -> None:
         now = time.monotonic()

@@ -30,6 +30,13 @@ class EngineConfig:
     # grace period, then degrade to ordinary evictable radix state. Explicit client
     # session_id leases remain protected until close/abort/TTL.
     auto_session_grace_seconds: float = 30.0
+    # Idle automatic agent sessions may move their exact KV/GDN checkpoint out of
+    # VRAM. ``auto`` uses a private per-server directory below the FreeToken cache;
+    # None disables the cold tier. RAM is bounded independently and is admitted
+    # only while MemAvailable remains above host_ram_reserve_gb; overflow goes to disk.
+    session_spill_dir: str | None = "auto"
+    session_spill_ram_gb: float = 2.0
+    session_spill_disk_gb: float = 64.0
     attention_backend: str = "auto"
     moe_backend: str = "auto"
     # NVFP4 routed-expert GEMM backend (--nvfp4-backend): auto|marlin|flashinfer|triton.

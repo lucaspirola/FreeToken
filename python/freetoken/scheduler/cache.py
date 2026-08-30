@@ -424,6 +424,106 @@ class CacheManager:
         self.lock(handle)
         return handle
 
+    @torch.inference_mode()
+    def restore_hybrid_session_prefix(self, record, store) -> BaseCacheHandle:
+        """Import an exact cold KV/GDN checkpoint and return it as a locked radix handle.
+
+        The cold tier is intentionally limited to page-size-one HybridRadixCache. Duplicate
+        pages are reconciled by ``insert`` exactly like a normal finished request, so shared
+        prefixes remain canonical and the temporary copies are returned to the allocator.
+        """
+        if not self.is_hybrid or self.page_size != 1:
+            raise RuntimeError("cold session restore requires hybrid radix with page_size=1")
+        from freetoken.kvcache.hybrid_radix_cache import HybridCacheHandle
+
+        tokens = record.token_ids
+        existing = self.prefix_cache.match_prefix(tokens)
+        if existing.cached_len == record.num_pages:
+            handle = HybridCacheHandle(existing.cached_len, existing.node, existing.kv_indices)
+            self.lock(handle)
+            return handle
+
+        # ``match_prefix`` truncates at the deepest live GDN snapshot. Walk the KV tree
+        # directly as well: its tail can still be resident after that snapshot was evicted,
+        # in which case only the missing GDN state (not duplicate KV) needs restoring.
+        kv_node, resident_len = self.prefix_cache._walk(tokens)
+        resident_pages = self.prefix_cache._collect_kv(kv_node)
+        resident_locked = resident_len > 0
+        if resident_locked:
+            self.prefix_cache.inc_lock(kv_node)
+        try:
+            allocated = self._page_to_token(self._allocate(record.num_pages - resident_len))
+        except Exception:
+            if resident_locked:
+                self.prefix_cache.dec_lock(kv_node)
+            raise
+        all_pages = torch.cat((resident_pages, allocated))
+        slot = None
+        inserted = False
+        try:
+            self.ensure_mamba_slots(1)
+            if self.linear_state_pool.num_free_slots < 1:
+                raise RuntimeError("no GDN snapshot slot available for cold session restore")
+            slot = self.linear_state_pool.alloc(1)[0]
+            for chunk, value in store.iter_chunks(record):
+                if chunk.family == "gdn_conv":
+                    self.linear_state_pool.conv_states[:, slot].copy_(value.to(
+                        device=self.device, dtype=self.linear_state_pool.conv_states.dtype))
+                elif chunk.family == "gdn_recurrent":
+                    self.linear_state_pool.recurrent_states[:, slot].copy_(value.to(
+                        device=self.device, dtype=self.linear_state_pool.recurrent_states.dtype))
+                else:
+                    stop = chunk.start + value.shape[0]
+                    if stop <= resident_len:
+                        continue
+                    overlap = max(chunk.start, resident_len)
+                    value = value[overlap - chunk.start :]
+                    store.kv_pool.restore_session_spill_tensor(
+                        chunk.family, chunk.layer, overlap, all_pages, value)
+
+            prefix_len, mamba_exist = self.prefix_cache.insert(tokens, all_pages, slot)
+            inserted = True
+            duplicate = max(0, prefix_len - resident_len)
+            self._free(allocated[:duplicate])
+            if mamba_exist:
+                self.linear_state_pool.free(slot)
+            matched = self.prefix_cache.match_prefix(tokens)
+            if matched.cached_len != record.num_pages:
+                raise RuntimeError(
+                    f"restored session matched {matched.cached_len}/{record.num_pages} tokens"
+                )
+            handle = HybridCacheHandle(matched.cached_len, matched.node, matched.kv_indices)
+            self.lock(handle)
+            if resident_locked:
+                self.prefix_cache.dec_lock(kv_node)
+                resident_locked = False
+            return handle
+        except Exception:
+            if resident_locked:
+                self.prefix_cache.dec_lock(kv_node)
+            if not inserted:
+                self._free(allocated)
+                if slot is not None:
+                    self.linear_state_pool.free(slot)
+            raise
+
+    def hybrid_session_restore_geometry(self, token_ids: torch.Tensor) -> tuple[int, int]:
+        """Return (missing pages, allocatable committed pages) for a protected restore."""
+        if not self.is_hybrid or self.page_size != 1:
+            return len(token_ids), len(self.free_slots)
+        node, resident_len = self.prefix_cache._walk(token_ids)
+        target_evictable = 0
+        cur = node
+        while not cur.is_root():
+            if cur.ref_count == 0:
+                target_evictable += cur.length
+            cur = cur.parent
+        other_evictable = self.prefix_cache.full_evictable_size - target_evictable
+        return (
+            max(0, len(token_ids) - resident_len),
+            len(self.free_slots) + max(0, other_evictable),
+        )
+
     def _free_swa(self, indices: torch.Tensor) -> None:
         """Free the swa-pool slots backing ``indices`` (full-pool slots). Idempotent over the
         0 sentinel, so safe to call on any slots being returned to free_slots."""

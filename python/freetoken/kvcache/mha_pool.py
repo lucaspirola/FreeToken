@@ -325,6 +325,73 @@ class MHAKVCache(QuantizedKVStorageMixin, BaseKVCachePool):
                 2, dst, self._scale_buffer.index_select(2, src)
             )
 
+    def session_spill_fingerprint(self) -> tuple:
+        """Exact storage geometry used to reject incompatible cold checkpoints."""
+        return (
+            "mha-kv-v1",
+            tuple(self._k_buffer.shape[:1] + self._k_buffer.shape[2:]),
+            str(self._k_buffer.dtype),
+            tuple(self._v_buffer.shape[:1] + self._v_buffer.shape[2:]),
+            str(self._v_buffer.dtype),
+            None if self._scale_buffer is None else (
+                tuple(self._scale_buffer.shape[:2] + self._scale_buffer.shape[3:]),
+                str(self._scale_buffer.dtype),
+            ),
+            self._quant_k.name,
+            self._quant_v.name,
+        )
+
+    def session_spill_bytes(self, num_pages: int) -> int:
+        """Payload bytes for ``num_pages`` (dummy page and allocator slack excluded)."""
+        per_page = (
+            self._k_buffer[0, 0].numel() * self._k_buffer.element_size()
+            + self._v_buffer[0, 0].numel() * self._v_buffer.element_size()
+        ) * self._k_buffer.shape[0]
+        if self._scale_buffer is not None:
+            per_page += (
+                self._scale_buffer[0, 0, 0].numel()
+                * self._scale_buffer.element_size()
+                * self._scale_buffer.shape[0]
+                * self._scale_buffer.shape[1]
+            )
+        return int(per_page) * int(num_pages)
+
+    def iter_session_spill_tensors(
+        self, page_indices: torch.Tensor, *, chunk_pages: int = 4096
+    ):
+        """Yield bounded CPU chunks of every physical tensor backing selected pages.
+
+        Indexing arbitrary radix pages creates a temporary gather on CUDA. Chunking caps
+        that temporary and the scheduler's transient host use even for a 1M-token session.
+        """
+        ids = page_indices.to(device=self._device, dtype=torch.long)
+        families = [("k", self._k_buffer), ("v", self._v_buffer)]
+        if self._scale_buffer is not None:
+            families.extend((f"scale{side}", self._scale_buffer[side]) for side in range(2))
+        for family, buffer in families:
+            for layer in range(buffer.shape[0]):
+                slab = buffer[layer]
+                for start in range(0, ids.numel(), chunk_pages):
+                    stop = min(start + chunk_pages, ids.numel())
+                    yield family, layer, start, slab.index_select(0, ids[start:stop]).cpu()
+
+    def restore_session_spill_tensor(
+        self, family: str, layer: int, start: int,
+        destination_pages: torch.Tensor, value: torch.Tensor,
+    ) -> None:
+        """Restore one chunk produced by :meth:`iter_session_spill_tensors`."""
+        stop = start + value.shape[0]
+        dst = destination_pages[start:stop].to(device=self._device, dtype=torch.long)
+        if family == "k":
+            buffer = self._k_buffer[layer]
+        elif family == "v":
+            buffer = self._v_buffer[layer]
+        elif family.startswith("scale") and self._scale_buffer is not None:
+            buffer = self._scale_buffer[int(family[-1]), layer]
+        else:
+            raise ValueError(f"unknown session-spill tensor family {family!r}")
+        buffer.index_copy_(0, dst, value.to(device=self._device, dtype=buffer.dtype))
+
     def rebuild(self, num_pages: int) -> None:
         """Reallocate the KV buffer for ``num_pages`` pages IN PLACE.
 

@@ -57,6 +57,10 @@ parsers all resolve automatically from the checkpoint and the GPU.
 | `--page-size` | 1 | KV page size; DSV4 forces 128, the TRTLLM backend needs 16/32/64, SWA models require 1 |
 | `--cache-type` | radix | `radix` (prefix reuse; SWA/GDN-aware variants picked automatically) or `naive` |
 | `--attention-backend`, `--attn` | auto | `trtllm`/`fi`/`fa`/`triton`/`dsv4_sparse`/`dsa`; `prefill,decode` pair allowed; auto picks per model + GPU |
+| `--session-spill-dir` | auto | Cold storage for idle automatic-agent KV/GDN checkpoints; `off` disables it |
+| `--session-spill-ram-gb` | 2 | RAM-first cold-session budget, additionally bounded by the host reserve |
+| `--session-spill-disk-gb` | 64 | Per-server disk/NVMe cold-session budget |
+| `--host-ram-reserve-gb` | 3 | Minimum `MemAvailable` kept outside expert banks and RAM session checkpoints |
 
 ### MoE offload
 

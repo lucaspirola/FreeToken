@@ -278,6 +278,31 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--session-spill-dir",
+        type=str,
+        default=ServerArgs.session_spill_dir,
+        help=(
+            "Cold storage for idle automatic-agent KV checkpoints. 'auto' uses the "
+            "FreeToken cache directory; 'off' disables spill/restore."
+        ),
+    )
+    parser.add_argument(
+        "--session-spill-ram-gb",
+        type=float,
+        default=ServerArgs.session_spill_ram_gb,
+        help=(
+            "Maximum RAM used by cold session checkpoints. Allocation also preserves "
+            "--host-ram-reserve-gb; overflow uses --session-spill-dir."
+        ),
+    )
+    parser.add_argument(
+        "--session-spill-disk-gb",
+        type=float,
+        default=ServerArgs.session_spill_disk_gb,
+        help="Maximum NVMe/disk bytes used by this server's cold session checkpoints.",
+    )
+
+    parser.add_argument(
         "--max-seq-len-override",
         type=int,
         default=ServerArgs.max_seq_len_override,
@@ -811,6 +836,14 @@ def parse_args(
         parser.error("--auto-session-grace-seconds must be >= 0")
     if kwargs["host_ram_reserve_gb"] < 0:
         parser.error("--host-ram-reserve-gb must be >= 0")
+    if kwargs["session_spill_ram_gb"] < 0:
+        parser.error("--session-spill-ram-gb must be >= 0")
+    if kwargs["session_spill_disk_gb"] < 0:
+        parser.error("--session-spill-disk-gb must be >= 0")
+    if isinstance(kwargs["session_spill_dir"], str) and kwargs[
+        "session_spill_dir"
+    ].lower() in {"off", "none", "disable", "disabled"}:
+        kwargs["session_spill_dir"] = None
 
     # resolve some arguments
     run_shell |= kwargs.pop("shell_mode")
