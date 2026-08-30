@@ -68,6 +68,17 @@ from 79.72 to 91.14 tok/s (+14.3%) and end-to-end aggregate decode from 53.90 to
 when demand returns to two; both gates restored the 4,036-slot idle MoE cache from
 the 3,632-slot burst geometry.
 
+## Accepted: demand-sized elastic capacity
+
+The scheduler now grows Hybrid-GDN state and graphs to the smallest tier that can
+admit live demand instead of jumping directly from the initial tier to the maximum.
+For three Q6/Q8 agents this used 19 rather than 25 physical GDN slots and retained
+3,782 rather than 3,632 MoE slots. Against the exact-size-3 graph baseline,
+simultaneous decode rose from 91.14 to 94.96 tok/s (+4.2%) and aggregate decode
+from 58.78 to 60.40 tok/s (+2.8%). A four-agent regression gate still reached the
+full 25-slot tier, produced all four correct answers, and delivered 110.43 tok/s
+simultaneous decode. Teardown restored the original 13 GDN / 4,036 MoE slots.
+
 ## Rejected screens
 
 - A 20 ms idle admission window successfully placed four requests in the first prefill,

@@ -63,6 +63,11 @@ def _resolve_max_prefill_seqs(config: SchedulerConfig) -> int:
     )
 
 
+def _elastic_target_capacity(initial: int, maximum: int, demand: int) -> int:
+    """Smallest enabled request tier that can admit the current live demand."""
+    return max(initial, min(maximum, demand))
+
+
 # For overlap scheduling, we also need to cache some other data to avoid IMA
 class ForwardInput(NamedTuple):
     batch: Batch
@@ -1317,7 +1322,9 @@ class Scheduler(SchedulerIOMixin):
         if initial is None:
             return
         demand = self._elastic_demand()
-        target = initial if demand <= initial else self.config.max_running_req
+        target = _elastic_target_capacity(
+            initial, self.config.max_running_req, demand
+        )
         if target == self._elastic_capacity:
             self._elastic_resize_pending = False
             return
