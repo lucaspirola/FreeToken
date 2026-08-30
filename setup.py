@@ -70,7 +70,7 @@ setup(
             include_dirs=cuda_include_dirs,
             library_dirs=cuda_library_dirs,
             libraries=["cudart"],
-            extra_compile_args=["-O3", "-std=c++17"],
+            extra_compile_args=["-O3", "-std=c++17", "-pthread"],
         ),
     ],
     cmdclass={"build_ext": BuildExtension.with_options(use_ninja=True)},

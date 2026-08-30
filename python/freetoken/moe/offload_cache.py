@@ -1607,10 +1607,11 @@ class OffloadMoeCache:
             ]
         self._pageable_stage_capacity = capacity
         total = sum(x.numel() * x.element_size() for x in host)
+        gather_threads = next(iter(self._pageable_gather_tasks.values())).threads()
         logger.info(
             f"pageable GPU expert staging ready: capacity={capacity} rows, "
             f"pinned_host={total / 2**20:.1f} MiB, zero-copy scatter, "
-            "CUDA-graph host nodes enabled"
+            f"CPU gather threads={gather_threads}, CUDA-graph host nodes enabled"
         )
 
     def begin_pageable_copy(self, layer_id: int) -> None:

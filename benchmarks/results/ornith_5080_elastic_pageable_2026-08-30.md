@@ -14,6 +14,9 @@ the already completed 262K/1M capacity results remain the long-context reference
   buffer. A `cudaLaunchHostFunc` node gathers only routed misses into 78.8 MiB of
   mapped pinned staging; the fused GPU scatter reads it directly. The side stream is
   overlapped with the independent shared-expert calculation and is graph replayable.
+- Pageable row gathering now uses a persistent four-worker CPU pool (override with
+  `FREETOKEN_PAGEABLE_GATHER_THREADS`). The pool parallelizes the two packed expert
+  banks and routed rows without creating threads in the CUDA callback.
 - Idle decode telemetry ranks layers by measured gather time per step (using miss
   count estimates for presently pinned layers), persists a profile tied to the exact
   GGUF path/size/mtime, and applies it on the next clean start. Live WSL
@@ -28,6 +31,8 @@ the already completed 262K/1M capacity results remain the long-context reference
 | Q4_K_M + INT4, elastic 4→8→4, 4,096 prompt + 128 output | 5,122.26 tok/s | 5,122.26 tok/s | 171.10 tok/s | 8/8 coherent |
 | Q6 placement training run, 4,096 + 160 | 757.06 tok/s | 757.06 tok/s | 84.12 tok/s | 4/4 coherent |
 | Q6 persisted placement applied, same short gate | 819.99 tok/s | 819.99 tok/s | 94.38 tok/s | 4/4 coherent |
+| Q6 parallel pageable gather, 4,096 + 256 | 852.70 tok/s | 852.70 tok/s | 105.00 tok/s | 4/4 coherent |
+| Q6 serial gather control, 4,096 + 256 | 2,206.21 tok/s | 2,206.21 tok/s | 86.21 tok/s | 4/4 coherent |
 
 The Q4 burst changed GDN slots `25 → 49 → 25` and MoE slots
 `5,635 → 4,682 → 5,635`; exact restoration means there is no permanent decode
@@ -35,6 +40,14 @@ residency toll after helper agents stop. The Q6 profile application reduced page
 rows from 8,446 to 7,562 (10.5%) and measured gather time from 4.12 s to 3.66 s while
 improving simultaneous decode by 12.2% in that paired run. The higher 106.37 tok/s
 Q6 result remains the accepted best because short-run host-copy timing is variable.
+In consecutive production-shape gates, four workers improved simultaneous decode
+from 86.21 to 105.00 tok/s (+21.8%) and reduced measured gather time from 4.79 to
+1.61 seconds. Host-budget fluctuation made the serial run use ten pageable layers
+versus nine for the parallel run, so the decode delta is indicative rather than a
+strict paired estimate. Normalized measured gather bandwidth was 16.4 versus
+6.1 GiB/s; the identical-geometry callback microbenchmark measured 36.2 versus
+10.8 GiB/s (3.3x). The serial run's unusually high prefill is unrelated because
+pageable gathering is decode-only.
 
 ## Command shape
 
