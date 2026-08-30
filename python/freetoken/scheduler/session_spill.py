@@ -11,6 +11,7 @@ import os
 import shutil
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -259,16 +260,32 @@ class SessionSpillStore:
     def iter_chunks(self, record: SessionSpillRecord) -> Iterator[tuple[SpillChunk, torch.Tensor]]:
         if not record.valid or record.fingerprint != self.kv_pool.session_spill_fingerprint():
             raise ValueError("stale or incompatible session checkpoint")
-        for chunk in record.chunks:
-            if chunk.value is not None:
+        if record.tier == "ram":
+            for chunk in record.chunks:
+                if chunk.value is None:
+                    raise ValueError("RAM session checkpoint chunk has no payload")
                 yield chunk, chunk.value
-            elif chunk.file is not None:
-                yield (
-                    chunk,
-                    torch.load(chunk.file, map_location="cpu", weights_only=True),
-                )
-            else:
-                raise ValueError("session checkpoint chunk has no payload")
+            return
+
+        disk_chunks = list(record.chunks)
+        if not disk_chunks:
+            return
+
+        def load(chunk: SpillChunk) -> torch.Tensor:
+            if chunk.file is None:
+                raise ValueError("disk session checkpoint chunk has no file")
+            return torch.load(chunk.file, map_location="cpu", weights_only=True)
+
+        # One bounded look-ahead overlaps NVMe/deserialization of chunk N+1 with the
+        # caller's GPU install of chunk N. At most two host chunks are live, preserving
+        # the same fixed-memory streaming contract as the original sequential reader.
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="session-spill") as pool:
+            pending = pool.submit(load, disk_chunks[0])
+            for index, chunk in enumerate(disk_chunks):
+                value = pending.result()
+                if index + 1 < len(disk_chunks):
+                    pending = pool.submit(load, disk_chunks[index + 1])
+                yield chunk, value
 
     def discard(self, record: SessionSpillRecord | None) -> None:
         if record is None or not record.valid:

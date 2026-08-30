@@ -152,7 +152,9 @@ work too.
   tier. A later request restores only when the client-resubmitted token prefix and the
   exact K/V layout fingerprint match. Mismatch, damage, or capacity pressure discards
   the checkpoint and performs ordinary prefill, never approximate reuse. Explicit
-  client-named sessions remain hard GPU leases until close/TTL. Set
+  client-named sessions remain hard GPU leases until close/TTL. Disk restore keeps
+  exactly one bounded chunk in look-ahead, overlapping NVMe/deserialization of the
+  next layer with installation of the current layer. Set
   `--session-spill-dir off` to disable the cold tier.
   Closing a helper makes its pages evictable immediately, allowing the growable KV
   arena to decommit unused suffix segments and restore MoE residency.

@@ -47,12 +47,13 @@ representative prefill (fresh chunk) and extend (cached prefix + new chunk) case
 one or more `--kv-quant` pool formats (`int4`/`q4_0`, `q8_0`, `fp8_e4m3`, `bf16`). Every
 quantized case is checked against the same kernel fed the pool's dequantized values
 before it is timed — the correctness gate `test_ornith_q4_tuned_decode_matches_dequantized_oracle`
-pins at unit scale, exercised here at benchmark scale.
+pins at unit scale, exercised here at benchmark scale. `q8_q6` exercises the
+production asymmetric Q8-key/Q6-value pair.
 
 ```bash
 python benchmarks/bench_ornith_attention.py
 python benchmarks/bench_ornith_attention.py --decode-lengths 8192 32768 131072 200000 \
-    --kv-quant int4 q8_0 --batch-sizes 1 4 16 --json out.jsonl
+    --kv-quant int4 q8_q6 --batch-sizes 1 4 16 --json out.jsonl
 ```
 
 **`bench_long_context.py`** — cold serving-path prefill, retrieval, and coherent-answer
@@ -66,6 +67,11 @@ the latest-chunk and cumulative-average prefill rates. Use short targets for A/B
 tuning and reserve exact maximum-context runs for final correctness/capacity gates.
 Independent cache lanes can be exercised with `--kv-cache-dtype auto
 --kv-cache-dtype-k q8_0 --kv-cache-dtype-v q6_0`.
+The result JSON now includes the final scheduler-reported instant and cumulative-average
+prefill rates in addition to end-to-end TTFT throughput. `--baseline-json` makes the
+last JSON/JSONL row a paired performance control; the three
+`--max-*-regression-pct` options and absolute `--min-*-tok-s` floors turn coherence,
+prefill, and decode into one fail-closed optimization gate.
 
 For host RAM vs PCIe bandwidth and the offload/hybrid backend pick, use `ft bench bw`
 instead — it writes the JSON profile the engine reads.

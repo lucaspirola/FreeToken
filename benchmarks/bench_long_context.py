@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import tempfile
 import threading
@@ -55,6 +56,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--moe-pageable-gpu", action="store_true")
     p.add_argument("--host-ram-reserve-gb", type=float, default=3.0)
     p.add_argument("--json", dest="json_out")
+    p.add_argument(
+        "--baseline-json",
+        help="compare against the last JSON/JSONL row and fail on a speed regression",
+    )
+    p.add_argument("--max-prefill-regression-pct", type=float, default=3.0)
+    p.add_argument("--max-instant-prefill-regression-pct", type=float, default=5.0)
+    p.add_argument("--max-decode-regression-pct", type=float, default=3.0)
+    p.add_argument("--min-prefill-tok-s", type=float)
+    p.add_argument("--min-instant-prefill-tok-s", type=float)
+    p.add_argument("--min-decode-tok-s", type=float)
     # Attributes consumed by common.serve_cmd.
     p.set_defaults(
         backend="offload",
@@ -212,6 +223,109 @@ def stream_completion(
     return {"t0": t0, "stamps": stamps, "text": "".join(pieces), "usage": usage}
 
 
+def prefill_rates(log_path: str) -> dict[str, float | int | None]:
+    """Return the final scheduler-reported chunk and cumulative prefill rates."""
+    pattern = re.compile(
+        r"input throughput \(token/s\): ([0-9.]+) instant, ([0-9.]+) average"
+    )
+    samples: list[tuple[float, float]] = []
+    with open(log_path, errors="replace") as server_log:
+        for line in server_log:
+            if match := pattern.search(line):
+                samples.append((float(match.group(1)), float(match.group(2))))
+    if not samples:
+        return {
+            "prefill_samples": 0,
+            "prefill_instant_tok_s": None,
+            "prefill_average_tok_s": None,
+        }
+    instant, average = samples[-1]
+    return {
+        "prefill_samples": len(samples),
+        "prefill_instant_tok_s": instant,
+        "prefill_average_tok_s": average,
+    }
+
+
+def load_last_json_row(path: str) -> dict:
+    with open(path) as baseline_file:
+        rows = [line for line in baseline_file if line.strip()]
+    if not rows:
+        raise ValueError(f"baseline file is empty: {path}")
+    return json.loads(rows[-1])
+
+
+def acceptance_failures(row: dict, args: argparse.Namespace) -> list[str]:
+    """Apply absolute and paired-baseline performance gates after coherence passes."""
+    failures: list[str] = []
+
+    def metric(data: dict, key: str) -> float | None:
+        value = data.get(key)
+        if value is None and key == "prefill_average_tok_s":
+            value = data.get("prefill_tok_s")
+        return value
+
+    absolute = (
+        ("prefill_average_tok_s", args.min_prefill_tok_s, "average prefill"),
+        (
+            "prefill_instant_tok_s",
+            args.min_instant_prefill_tok_s,
+            "instant prefill",
+        ),
+        ("decode_tok_s", args.min_decode_tok_s, "decode"),
+    )
+    for key, minimum, label in absolute:
+        value = metric(row, key)
+        if minimum is not None and (value is None or value < minimum):
+            failures.append(f"{label} {value!r} is below {minimum:.2f} tok/s")
+
+    if args.baseline_json:
+        baseline = load_last_json_row(args.baseline_json)
+        incompatible = []
+        for key in (
+            "model",
+            "expected",
+            "prompt_tokens",
+            "decode_tokens",
+            "max_context",
+            "kv_cache_dtype",
+            "kv_cache_dtype_k",
+            "kv_cache_dtype_v",
+            "prefill_chunk",
+        ):
+            if key in baseline and key in row and baseline[key] != row[key]:
+                incompatible.append(f"{key}={row[key]!r} vs {baseline[key]!r}")
+        if incompatible:
+            failures.append("incompatible performance baseline: " + ", ".join(incompatible))
+            return failures
+        relative = (
+            (
+                "prefill_average_tok_s",
+                args.max_prefill_regression_pct,
+                "average prefill",
+            ),
+            (
+                "prefill_instant_tok_s",
+                args.max_instant_prefill_regression_pct,
+                "instant prefill",
+            ),
+            ("decode_tok_s", args.max_decode_regression_pct, "decode"),
+        )
+        for key, allowed_pct, label in relative:
+            value, control = metric(row, key), metric(baseline, key)
+            if value is None or control is None or control <= 0:
+                failures.append(f"{label} cannot be compared ({value!r} vs {control!r})")
+                continue
+            floor = control * (1.0 - allowed_pct / 100.0)
+            if value < floor:
+                regression = (1.0 - value / control) * 100.0
+                failures.append(
+                    f"{label} regressed {regression:.2f}% "
+                    f"({value:.2f} vs {control:.2f} tok/s; limit {allowed_pct:.2f}%)"
+                )
+    return failures
+
+
 def main() -> int:
     args = parse_args()
     if args.synthetic_needle:
@@ -303,6 +417,7 @@ def main() -> int:
         "prompt_tokens": prompt_tokens,
         "original_ornith_tokens": original_tokens,
         "target_prompt_tokens": args.target_prompt_tokens,
+        "max_context": args.max_context,
         "decode_tokens": completion,
         "ttft_seconds": ttft_seconds,
         "prefill_tok_s": prompt_tokens / ttft_seconds,
@@ -319,10 +434,20 @@ def main() -> int:
         "output": result["text"],
         "server_log": log_path,
     }
+    row.update(prefill_rates(log_path))
+    failures = acceptance_failures(row, args)
+    if not row["expected_found"]:
+        failures.insert(0, f"expected answer {expected!r} was absent")
+    row["acceptance_failures"] = failures
+    row["accepted"] = not failures
     print("\n==== cold long-context result ====", flush=True)
     print(
         f"  prompt/prefill : {prompt_tokens} tokens in {ttft_seconds:.3f} s "
-        f"({row['prefill_tok_s']:.2f} tok/s)"
+        f"({row['prefill_tok_s']:.2f} tok/s end-to-end)"
+    )
+    print(
+        f"  prefill engine : {row['prefill_instant_tok_s']} instant / "
+        f"{row['prefill_average_tok_s']} average tok/s"
     )
     print(
         f"  decode         : {decode_steps} steps in {decode_seconds:.3f} s "
@@ -331,10 +456,13 @@ def main() -> int:
     print(f"  expected       : {expected!r}, found={row['expected_found']}")
     print(f"  output         : {result['text']!r}")
     print(f"  VRAM           : {row['vram_gib']:.2f} GiB")
+    print(f"  acceptance     : {'PASS' if row['accepted'] else 'FAIL'}")
+    for failure in failures:
+        print(f"    - {failure}")
     if args.json_out:
         with open(args.json_out, "a") as f:
             f.write(json.dumps(row) + "\n")
-    return 0 if row["expected_found"] else 2
+    return 0 if row["accepted"] else 2
 
 
 if __name__ == "__main__":

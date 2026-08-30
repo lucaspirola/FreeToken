@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from unittest.mock import patch
 
 import pytest
@@ -159,4 +160,36 @@ def test_host_pressure_demotes_ram_checkpoint_to_disk(tmp_path, monkeypatch):
     assert record.tier == "disk"
     assert store.ram_bytes == 0 and store.disk_bytes == record.byte_size
     assert all(chunk.value is None and chunk.file is not None for chunk in record.chunks)
+    store.shutdown()
+
+
+def test_disk_restore_prefetches_exactly_one_chunk_ahead(tmp_path, monkeypatch):
+    kv, linear, _manager = _pools()
+    store = SessionSpillStore(
+        kv,
+        linear,
+        directory=str(tmp_path),
+        ram_budget_bytes=0,
+        disk_budget_bytes=1 << 30,
+        host_reserve_bytes=0,
+    )
+    tokens = torch.tensor([1, 2, 3], dtype=torch.int32)
+    record = store.spill(tokens, tokens, linear.alloc(1)[0])
+    assert record is not None and record.tier == "disk" and len(record.chunks) > 2
+
+    loaded: list[object] = []
+    second_started = threading.Event()
+
+    def fake_load(path, **_kwargs):
+        loaded.append(path)
+        if len(loaded) == 2:
+            second_started.set()
+        return torch.tensor([len(loaded)])
+
+    monkeypatch.setattr("freetoken.scheduler.session_spill.torch.load", fake_load)
+    chunks = store.iter_chunks(record)
+    next(chunks)
+    assert second_started.wait(timeout=1.0)
+    assert len(loaded) == 2
+    chunks.close()
     store.shutdown()

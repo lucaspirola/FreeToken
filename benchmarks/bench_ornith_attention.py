@@ -48,10 +48,17 @@ Q_HEADS = 16
 KV_HEADS = 2
 HEAD_DIM = 256
 
-QUANT_CHOICES = ("int4", "q4_0", "q8_0", "fp8_e4m3", "bf16")
+QUANT_CHOICES = ("int4", "q4_0", "q8_0", "q8_q6", "fp8_e4m3", "bf16")
 # CLI spelling -> freetoken.kvcache.quant spec name. "q4_0"/"int4" are the same packed
 # scheme (llama.cpp naming vs the internal one); "bf16" means the unquantized pool.
-_QUANT_ALIAS = {"int4": "int4", "q4_0": "int4", "q8_0": "q8_0", "fp8_e4m3": "fp8_e4m3", "bf16": "auto"}
+_QUANT_ALIAS = {
+    "int4": "int4",
+    "q4_0": "int4",
+    "q8_0": "q8_0",
+    "q8_q6": "q8_q6",
+    "fp8_e4m3": "fp8_e4m3",
+    "bf16": "auto",
+}
 
 OPS = ("decode", "prefill", "extend")
 
@@ -161,7 +168,7 @@ def _make_kv(tokens: int, heads: int, dim: int, device, seed: int):
     return torch.randn(tokens, heads, dim, generator=g, device=device, dtype=torch.bfloat16)
 
 
-def _quantize_pool(spec, k, v):
+def _quantize_pool(k_spec, v_spec, k, v):
     """Store bf16 k/v into a pool of the given quant spec.
 
     Returns ``(k_cache, k_scale, v_cache, v_scale, k_oracle, v_oracle)``. For the
@@ -173,19 +180,23 @@ def _quantize_pool(spec, k, v):
     from freetoken.kernel.triton.kv_quant import store_kv_quant
     from freetoken.kvcache.quant import BLOCK
 
-    if not spec.enabled:
+    if not k_spec.enabled and not v_spec.enabled:
         return k, None, v, None, None, None
+    assert k_spec.enabled and v_spec.enabled
 
     slots, heads, dim = k.shape
-    epb = spec.elements_per_byte
-    kq = torch.zeros(slots, heads, dim // epb, device=k.device, dtype=spec.storage_dtype)
-    vq = torch.zeros_like(kq)
+    kq = torch.zeros(
+        slots, heads, k_spec.storage_dim(dim), device=k.device, dtype=k_spec.storage_dtype
+    )
+    vq = torch.zeros(
+        slots, heads, v_spec.storage_dim(dim), device=k.device, dtype=v_spec.storage_dtype
+    )
     ks = torch.zeros(slots, heads, dim // BLOCK, device=k.device, dtype=torch.float16)
     vs = torch.zeros_like(ks)
     indices = torch.arange(slots, device=k.device, dtype=torch.int32)
-    store_kv_quant(kq, ks, vq, vs, indices, k, v, spec)
-    k_oracle = spec.dequantize(kq.float(), ks).to(torch.bfloat16).reshape(slots, heads, dim)
-    v_oracle = spec.dequantize(vq.float(), vs).to(torch.bfloat16).reshape(slots, heads, dim)
+    store_kv_quant(kq, ks, vq, vs, indices, k, v, k_spec, v_spec)
+    k_oracle = k_spec.dequantize(kq.float(), ks).to(torch.bfloat16).reshape(slots, heads, dim)
+    v_oracle = v_spec.dequantize(vq.float(), vs).to(torch.bfloat16).reshape(slots, heads, dim)
     return kq, ks, vq, vs, k_oracle, v_oracle
 
 
@@ -224,19 +235,28 @@ def run_decode(case: DecodeCase, quant_specs, device, args) -> dict:
         decode_runtime_splits,
     )
 
-    spec = quant_specs[_QUANT_ALIAS[case.quant]]
+    k_spec, v_spec = quant_specs[_QUANT_ALIAS[case.quant]]
     slots = case.ctx_len * case.batch
     k = _make_kv(slots, KV_HEADS, HEAD_DIM, device, args.seed)
     v = _make_kv(slots, KV_HEADS, HEAD_DIM, device, args.seed + 1)
     q = _make_kv(case.batch, Q_HEADS, HEAD_DIM, device, args.seed + 2)
-    k_cache, k_scale, v_cache, v_scale, k_oracle, v_oracle = _quantize_pool(spec, k, v)
-
+    k_cache, k_scale, v_cache, v_scale, k_oracle, v_oracle = _quantize_pool(
+        k_spec, v_spec, k, v
+    )
     indptr = torch.arange(0, slots + 1, case.ctx_len, device=device, dtype=torch.int32)
     indices = torch.arange(slots, device=device, dtype=torch.int32)
     q_pos = torch.full((case.batch,), case.ctx_len - 1, device=device, dtype=torch.int32)
     sm_scale = HEAD_DIM**-0.5
 
-    quant_name = "int4" if spec.enabled and spec.elements_per_byte == 2 else ("quant8" if spec.enabled else None)
+    quant_name = (
+        "q8_q6"
+        if (k_spec.name, v_spec.name) == ("q8_0", "q6_0")
+        else "int4"
+        if k_spec.name == "int4"
+        else "quant8"
+        if k_spec.enabled
+        else None
+    )
     capability = torch.cuda.get_device_capability(device)
     preferred, block_n, num_warps = decode_launch_config(
         quant_name=quant_name, head_dim=HEAD_DIM, num_q_heads=Q_HEADS,
@@ -276,13 +296,16 @@ def run_decode(case: DecodeCase, quant_specs, device, args) -> dict:
         num_kv_heads=KV_HEADS, compute_capability=capability,
     )
     max_abs_err = None
-    if spec.enabled and not args.skip_verify:
+    if k_spec.enabled and not args.skip_verify:
         got = call(k_cache, v_cache, k_scale, v_scale)
         want = call(k_oracle, v_oracle, None, None)
         max_abs_err = _check_oracle(got, want, f"decode quant={case.quant} ctx={case.ctx_len}")
 
     time_ms = _time_ms(lambda: call(k_cache, v_cache, k_scale, v_scale), args.warmup, args.iters)
-    bytes_moved = slots * KV_HEADS * HEAD_DIM * 2 * spec.bytes_per_element(torch.bfloat16)
+    bytes_moved = slots * KV_HEADS * HEAD_DIM * (
+        k_spec.bytes_per_element(torch.bfloat16)
+        + v_spec.bytes_per_element(torch.bfloat16)
+    )
     return {
         "op": "decode", "quant": case.quant, "ctx_len": case.ctx_len, "batch": case.batch,
         "max_kv_splits_ceiling": ceiling, "launch_splits": scratch_splits, "tuned_block_n": block_n,
@@ -296,12 +319,14 @@ def run_prefill(case: PrefillCase, quant_specs, device, args) -> dict:
 
     from freetoken.kernel.triton.attention import paged_attention
 
-    spec = quant_specs[_QUANT_ALIAS[case.quant]]
+    k_spec, v_spec = quant_specs[_QUANT_ALIAS[case.quant]]
     n = case.chunk_len
     k = _make_kv(n, KV_HEADS, HEAD_DIM, device, args.seed)
     v = _make_kv(n, KV_HEADS, HEAD_DIM, device, args.seed + 1)
     q = _make_kv(n, Q_HEADS, HEAD_DIM, device, args.seed + 2)
-    k_cache, k_scale, v_cache, v_scale, k_oracle, v_oracle = _quantize_pool(spec, k, v)
+    k_cache, k_scale, v_cache, v_scale, k_oracle, v_oracle = _quantize_pool(
+        k_spec, v_spec, k, v
+    )
 
     indptr = torch.tensor([0, n], device=device, dtype=torch.int32)
     indices = torch.arange(n, device=device, dtype=torch.int32)
@@ -314,7 +339,7 @@ def run_prefill(case: PrefillCase, quant_specs, device, args) -> dict:
         return paged_attention(q=q, k_cache=k_c, v_cache=v_c, k_scale=k_s, v_scale=v_s, **kw)
 
     max_abs_err = None
-    if spec.enabled and not args.skip_verify:
+    if k_spec.enabled and not args.skip_verify:
         got = call(k_cache, v_cache, k_scale, v_scale)
         want = call(k_oracle, v_oracle, None, None)
         max_abs_err = _check_oracle(got, want, f"prefill quant={case.quant} chunk={case.chunk_len}")
@@ -332,7 +357,7 @@ def run_extend(case: ExtendCase, quant_specs, device, args) -> dict:
 
     from freetoken.kernel.triton.attention import extend_paged_attention
 
-    spec = quant_specs[_QUANT_ALIAS[case.quant]]
+    k_spec, v_spec = quant_specs[_QUANT_ALIAS[case.quant]]
     prefix, chunk = case.prefix_len, case.chunk_len
     total = prefix + chunk
     k = _make_kv(total, KV_HEADS, HEAD_DIM, device, args.seed)
@@ -342,7 +367,9 @@ def run_extend(case: ExtendCase, quant_specs, device, args) -> dict:
     # through in bf16 via k_extend/v_extend, matching how a real extend step supplies
     # this step's freshly-projected K/V alongside the persistent KV cache.
     k_extend, v_extend = k[prefix:], v[prefix:]
-    k_cache, k_scale, v_cache, v_scale, k_oracle, v_oracle = _quantize_pool(spec, k[:prefix], v[:prefix])
+    k_cache, k_scale, v_cache, v_scale, k_oracle, v_oracle = _quantize_pool(
+        k_spec, v_spec, k[:prefix], v[:prefix]
+    )
 
     qo_indptr = torch.tensor([0, chunk], device=device, dtype=torch.int32)
     kv_indptr = torch.tensor([0, prefix], device=device, dtype=torch.int32)
@@ -358,7 +385,7 @@ def run_extend(case: ExtendCase, quant_specs, device, args) -> dict:
         return extend_paged_attention(q=q, k_cache=k_c, v_cache=v_c, k_scale=k_s, v_scale=v_s, **kw)
 
     max_abs_err = None
-    if spec.enabled and not args.skip_verify:
+    if k_spec.enabled and not args.skip_verify:
         got = call(k_cache, v_cache, k_scale, v_scale)
         want = call(k_oracle, v_oracle, None, None)
         max_abs_err = _check_oracle(got, want, f"extend quant={case.quant} prefix={prefix} chunk={chunk}")
@@ -404,12 +431,18 @@ def main(argv: list[str] | None = None) -> int:
 
     import torch
 
-    from freetoken.kvcache.quant import FP8_E4M3, INT4, NONE, Q8_0
+    from freetoken.kvcache.quant import FP8_E4M3, INT4, NONE, Q6_0, Q8_0
 
     assert torch.cuda.is_available(), "CUDA is required"
     torch.cuda.set_device(args.device)
     device = torch.device("cuda")
-    quant_specs = {"int4": INT4, "q8_0": Q8_0, "fp8_e4m3": FP8_E4M3, "auto": NONE}
+    quant_specs = {
+        "int4": (INT4, INT4),
+        "q8_0": (Q8_0, Q8_0),
+        "q8_q6": (Q8_0, Q6_0),
+        "fp8_e4m3": (FP8_E4M3, FP8_E4M3),
+        "auto": (NONE, NONE),
+    }
 
     print(f"gpu {torch.cuda.get_device_name(device)}  geometry q_heads={Q_HEADS} kv_heads={KV_HEADS} "
           f"head_dim={HEAD_DIM} (Ornith)", flush=True)
