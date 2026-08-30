@@ -173,6 +173,14 @@ work too.
   rejected by the guarded 1M preflight. See
   `benchmarks/results/ornith_5080_scheduler_safety_1m_2026-08-30.md` for the full
   safety, session, scheduler, and measurement notes.
+  Q6 deployments may instead opt into independent `--kv-cache-dtype-k q8_0
+  --kv-cache-dtype-v q6_0`. This keeps Q8 keys and packs only values to Q6, reducing
+  the measured 64K physical ceiling from 0.74 to 0.66 GiB and exposing 33 more expert
+  slots. An exact 65,408-prompt + 128-output gate crossed a 32K growth boundary,
+  averaged 515.91 tok/s prefill (693.56 tok/s final chunk), decoded at 47.06 tok/s,
+  and recovered the needle coherently. Isolated Q8/Q8 attention remains faster, so
+  this is a long-context capacity/residency trade rather than the new universal
+  default. See `benchmarks/results/ornith_5080_asymmetric_kv_2026-08-30.md`.
 - Nemotron 3 Super uses its native hybrid Mamba-2 / full-attention / latent-MoE
   architecture. The NVFP4 release needs about 60 GiB of host RAM for expert banks and
   10.3 GiB of resident GPU weights. FreeToken currently serves one concurrent Nemotron

@@ -186,16 +186,34 @@ def _validate_kv_cache_dtype(config, model_config) -> None:
     and the MLA/DSA/DSV4/BSA pools have their own slab layouts. Reject those combinations
     here at config time, rather than letting a wrong-dtype tensor reach a kernel.
     """
-    quant = getattr(config, "kv_quant", None)
-    if quant is None or not quant.enabled:
+    quant_k = getattr(config, "kv_quant_k", getattr(config, "kv_quant", None))
+    quant_v = getattr(config, "kv_quant_v", getattr(config, "kv_quant", None))
+    quants = [q for q in (quant_k, quant_v) if q is not None and q.enabled]
+    if not quants:
         return
+    names = "/".join(q.name if q is not None else "auto" for q in (quant_k, quant_v))
+    if any(q.name == "q6_0" for q in quants) and (quant_k.name, quant_v.name) != (
+        "q8_0",
+        "q6_0",
+    ):
+        raise ValueError(
+            "q6_0 is currently supported only as the value side of the validated "
+            "--kv-cache-dtype-k q8_0 --kv-cache-dtype-v q6_0 pair"
+        )
+    if quant_k != quant_v and (quant_k.name, quant_v.name) != ("q8_0", "q6_0"):
+        raise ValueError(
+            f"independent KV formats {names} are not a validated kernel pair; "
+            "use --kv-cache-dtype-k q8_0 --kv-cache-dtype-v q6_0"
+        )
+    if quant_k != quant_v and model_config.has_swa_attention:
+        raise ValueError("independent Q8-K/Q6-V is currently limited to MHA/full-attention pools")
 
     from freetoken.kvcache.quant import BLOCK
 
     backends = [p.strip() for p in config.attention_backend.split(",")]
     if any(b != "triton" for b in backends):
         raise ValueError(
-            f"--kv-cache-dtype {quant.name} needs the triton attention backend, but the "
+            f"KV cache format {names} needs the triton attention backend, but the "
             f"resolved backend is {config.attention_backend!r}. Pass "
             "--attention-backend triton, or drop --kv-cache-dtype."
         )
@@ -203,15 +221,15 @@ def _validate_kv_cache_dtype(config, model_config) -> None:
     specs = [s for s in model_config.kv_cache_group_specs() if s.num_layers > 0]
     if any(s.mla or s.index_head_dim > 0 for s in specs):
         raise ValueError(
-            f"--kv-cache-dtype {quant.name} does not support MLA/DSA latent KV pools "
+            f"KV cache format {names} does not support MLA/DSA latent KV pools "
             "(their slabs alias K and V and carry an index tier); use --kv-cache-dtype auto."
         )
     bad = [s for s in specs if s.head_dim % BLOCK]
     if bad:
-        names = ", ".join(f"{s.name} (head_dim {s.head_dim})" for s in bad)
+        group_names = ", ".join(f"{s.name} (head_dim {s.head_dim})" for s in bad)
         raise ValueError(
-            f"--kv-cache-dtype {quant.name} needs every head_dim to be a multiple of "
-            f"{BLOCK}, the quantization block; this model has {names}."
+            f"KV cache format {names} needs every head_dim to be a multiple of "
+            f"{BLOCK}, the quantization block; this model has {group_names}."
         )
 
 

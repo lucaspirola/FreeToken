@@ -64,6 +64,8 @@ accept `--moe-pageable-gpu`, `--linear-state-slots`, and
 `--host-ram-reserve-gb` (production default: 3 GiB). Streaming output reports both
 the latest-chunk and cumulative-average prefill rates. Use short targets for A/B
 tuning and reserve exact maximum-context runs for final correctness/capacity gates.
+Independent cache lanes can be exercised with `--kv-cache-dtype auto
+--kv-cache-dtype-k q8_0 --kv-cache-dtype-v q6_0`.
 
 For host RAM vs PCIe bandwidth and the offload/hybrid backend pick, use `ft bench bw`
 instead — it writes the JSON profile the engine reads.

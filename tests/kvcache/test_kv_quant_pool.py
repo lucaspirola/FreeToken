@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from freetoken.kvcache.quant import BLOCK, FP8_E4M3, INT4, NONE, Q8_0
+from freetoken.kvcache.quant import BLOCK, FP8_E4M3, INT4, NONE, Q6_0, Q8_0
 
 from .test_hybrid_swa_kv_cache import _kv_group_specs, _patch_tp
 
@@ -175,6 +175,49 @@ def test_mha_pool_quantizes_and_round_trips(monkeypatch, spec):
     pool.rebuild(32)
     assert pool.k_cache(0).shape[0] == 32
     assert pool.k_scale(0).shape[0] == 32
+
+
+@cuda_only
+@pytest.mark.parametrize("grow_step", [0, 64], ids=["static", "growable"])
+def test_mha_pool_supports_independent_q8_keys_q6_values(monkeypatch, grow_step):
+    from freetoken.distributed.info import DistributedInfo
+    from freetoken.kvcache.mha_pool import MHAKVCache
+
+    monkeypatch.setattr(
+        "freetoken.kvcache.mha_pool.get_tp_info", lambda: DistributedInfo(rank=0, size=1)
+    )
+    pool = MHAKVCache(
+        num_kv_heads=2, num_layers=4, head_dim=256, num_pages=257, page_size=1,
+        dtype=torch.bfloat16, device=torch.device("cuda"), quant_k=Q8_0,
+        quant_v=Q6_0, grow_step_tokens=grow_step,
+    )
+    assert pool.k_cache(0).shape[-1] == 256
+    assert pool.v_cache(0).shape[-1] == 192
+    assert pool.unit_bytes()[0] == 4 * 2 * 256 * (
+        Q8_0.bytes_per_element(torch.bfloat16) + Q6_0.bytes_per_element(torch.bfloat16)
+    )
+
+    k = torch.randn(6, 2, 256, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn_like(k)
+    indices = torch.arange(1, 7, device="cuda", dtype=torch.int32)
+    pool.store_kv(k, v, indices, 0)
+    got_v = Q6_0.dequantize(
+        pool.v_cache(0).view(-1, 2, 192)[indices.long()],
+        pool.v_scale(0).view(-1, 2, 8)[indices.long()],
+    )
+    assert ((got_v - v.float()).norm() / v.float().norm()).item() < 0.03
+
+    if grow_step:
+        before = pool.mapped_bytes_for_pages(pool.committed_pages)
+        pool.commit_pages(128)
+        assert pool.committed_pages == 128
+        assert pool.mapped_bytes_for_pages(128) >= before
+        pool.decommit_pages(64)
+        assert pool.committed_pages == 64
+    else:
+        pool.rebuild(128)
+        assert pool.k_cache(0).shape[0] == 128
+        assert pool.v_cache(0).shape[0] == 128
 
 
 def test_cost_model_prices_the_quantized_pool_below_bf16(monkeypatch):

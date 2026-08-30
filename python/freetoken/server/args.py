@@ -452,6 +452,24 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--kv-cache-dtype-k",
+        type=str,
+        choices=list(KV_CACHE_DTYPES),
+        default=ServerArgs.kv_cache_dtype_k,
+        help="Independent key-cache format; defaults to --kv-cache-dtype.",
+    )
+    parser.add_argument(
+        "--kv-cache-dtype-v",
+        type=str,
+        choices=list(KV_CACHE_DTYPES),
+        default=ServerArgs.kv_cache_dtype_v,
+        help=(
+            "Independent value-cache format; defaults to --kv-cache-dtype. "
+            "The validated asymmetric lane is q8_0 keys with q6_0 values."
+        ),
+    )
+
+    parser.add_argument(
         "--kv-grow-step-tokens",
         type=_positive_int,
         default=None,

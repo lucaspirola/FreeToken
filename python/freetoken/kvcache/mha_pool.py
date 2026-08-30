@@ -36,9 +36,16 @@ class MHAKVCache(QuantizedKVStorageMixin, BaseKVCachePool):
         device: torch.device,
         layer_ids: Sequence[int] | None = None,
         quant: KVQuantSpec = NONE,
+        quant_k: KVQuantSpec | None = None,
+        quant_v: KVQuantSpec | None = None,
         grow_step_tokens: int = 0,
     ) -> None:
-        self._quant = quant
+        self._quant_k = quant if quant_k is None else quant_k
+        self._quant_v = quant if quant_v is None else quant_v
+        self._quant = self._quant_k  # legacy readers; new paths use quant_k/quant_v
+        self._asymmetric = self._quant_k != self._quant_v
+        if self._asymmetric and not (self._quant_k.enabled and self._quant_v.enabled):
+            raise ValueError("asymmetric K/V storage currently requires two quantized formats")
         tp_info = get_tp_info()
         local_kv_heads = div_even(num_kv_heads, tp_info.size, allow_replicate=True)
         self._num_layers = num_layers
@@ -54,7 +61,8 @@ class MHAKVCache(QuantizedKVStorageMixin, BaseKVCachePool):
                 layer_map[global_id] = dense
             self._layer_map = layer_map
         self._compute_dtype = dtype
-        storage_head_dim = head_dim // self._quant.elements_per_byte
+        k_storage_head_dim = self._quant_k.storage_dim(head_dim) if self._quant_k.enabled else head_dim
+        v_storage_head_dim = self._quant_v.storage_dim(head_dim) if self._quant_v.enabled else head_dim
         self._logical_num_pages = num_pages
         self._grow_step_pages = (
             max(1, grow_step_tokens // page_size) if grow_step_tokens else 0
@@ -70,32 +78,72 @@ class MHAKVCache(QuantizedKVStorageMixin, BaseKVCachePool):
         # Each entry is one logical growth boundary plus the exact CUDA VMM mappings created
         # for it. CUDA can only unmap a complete physical mapping, so retaining these records
         # makes shrink an exact reverse of growth even when slab rounding differs by KV dtype.
-        self._growth_segments: list[tuple[int, list[tuple[object, list[tuple[int, int]], int]]]] = []
+        self._growth_segments: list[tuple[int, list[tuple[list, list[tuple[int, int]], int]]]] = []
+        self._vmm_entries: list[list] = []
         self._kv_vmm = None
         self._scale_vmm = None
-        buffer_dtype = self._buffer_dtype(dtype)
-        if self._grow_step_pages:
+        if self._asymmetric and self._grow_step_pages:
+            self._k_buffer, k_vmm, k_geometry = self._allocate_growable(
+                slabs=num_storage_layers,
+                logical_pages=num_pages,
+                committed_pages=self._committed_pages,
+                page_row_elements=page_size * local_kv_heads * k_storage_head_dim,
+                dtype=self._quant_k.storage_dtype,
+                device=device,
+                trailing_shape=(page_size, local_kv_heads, k_storage_head_dim),
+                leading_shape=(num_storage_layers,),
+            )
+            self._v_buffer, v_vmm, v_geometry = self._allocate_growable(
+                slabs=num_storage_layers,
+                logical_pages=num_pages,
+                committed_pages=self._committed_pages,
+                page_row_elements=page_size * local_kv_heads * v_storage_head_dim,
+                dtype=self._quant_v.storage_dtype,
+                device=device,
+                trailing_shape=(page_size, local_kv_heads, v_storage_head_dim),
+                leading_shape=(num_storage_layers,),
+            )
+            self._vmm_entries.extend([[k_vmm, k_geometry], [v_vmm, v_geometry]])
+            self._kv_buffer = None
+            self._kv_vmm = k_vmm
+        elif self._asymmetric:
+            self._k_buffer = torch.empty(
+                (num_storage_layers, num_pages, page_size, local_kv_heads, k_storage_head_dim),
+                device=device,
+                dtype=self._quant_k.storage_dtype,
+            )
+            self._v_buffer = torch.empty(
+                (num_storage_layers, num_pages, page_size, local_kv_heads, v_storage_head_dim),
+                device=device,
+                dtype=self._quant_v.storage_dtype,
+            )
+            self._kv_buffer = None
+        elif self._grow_step_pages:
+            buffer_dtype = self._buffer_dtype(dtype)
             self._kv_buffer, self._kv_vmm, self._kv_vmm_geometry = self._allocate_growable(
                 slabs=2 * num_storage_layers,
                 logical_pages=num_pages,
                 committed_pages=self._committed_pages,
-                page_row_elements=page_size * local_kv_heads * storage_head_dim,
+                page_row_elements=page_size * local_kv_heads * k_storage_head_dim,
                 dtype=buffer_dtype,
                 device=device,
-                trailing_shape=(page_size, local_kv_heads, storage_head_dim),
+                trailing_shape=(page_size, local_kv_heads, k_storage_head_dim),
                 leading_shape=(2, num_storage_layers),
             )
+            self._vmm_entries.append([self._kv_vmm, self._kv_vmm_geometry])
         else:
+            buffer_dtype = self._buffer_dtype(dtype)
             kv_shape = (
-                2, num_storage_layers, num_pages, page_size, local_kv_heads, storage_head_dim
+                2, num_storage_layers, num_pages, page_size, local_kv_heads, k_storage_head_dim
             )
             self._kv_buffer = torch.empty(kv_shape, device=device, dtype=buffer_dtype)
-        self._k_buffer = self._kv_buffer[0]
-        self._v_buffer = self._kv_buffer[1]
+        if not self._asymmetric:
+            self._k_buffer = self._kv_buffer[0]
+            self._v_buffer = self._kv_buffer[1]
         # Scales key off the LOGICAL head_dim: extent D // BLOCK regardless of packing.
         log_shape = (2, num_storage_layers, num_pages, page_size, local_kv_heads, head_dim)
-        if self._grow_step_pages and self._quant.enabled:
-            scale_dim = self._quant.scale_shape(log_shape)[-1]
+        if self._grow_step_pages and self._quant_k.enabled:
+            scale_dim = self._quant_k.scale_shape(log_shape)[-1]
             self._scale_buffer, self._scale_vmm, self._scale_vmm_geometry = self._allocate_growable(
                 slabs=2 * num_storage_layers,
                 logical_pages=num_pages,
@@ -106,12 +154,15 @@ class MHAKVCache(QuantizedKVStorageMixin, BaseKVCachePool):
                 trailing_shape=(page_size, local_kv_heads, scale_dim),
                 leading_shape=(2, num_storage_layers),
             )
+            self._vmm_entries.append([self._scale_vmm, self._scale_vmm_geometry])
         else:
             self._scale_buffer = self._alloc_scales(log_shape, device)
         self._k_scale = self._scale_buffer[0] if self._scale_buffer is not None else None
         self._v_scale = self._scale_buffer[1] if self._scale_buffer is not None else None
         self._device = device
-        self._storage_shape = (num_pages * page_size, local_kv_heads, storage_head_dim)
+        self._storage_shape_k = (num_pages * page_size, local_kv_heads, k_storage_head_dim)
+        self._storage_shape_v = (num_pages * page_size, local_kv_heads, v_storage_head_dim)
+        self._storage_shape = self._storage_shape_k
 
     @staticmethod
     def _allocate_growable(
@@ -153,20 +204,18 @@ class MHAKVCache(QuantizedKVStorageMixin, BaseKVCachePool):
         """Physically committed usable pages (dummy page zero excluded)."""
         return self._committed_pages
 
-    def _mapped_bytes_at(self, usable_pages: int, geometry) -> int:
+    def _mapped_bytes_at(self, usable_pages: int, entry) -> int:
+        allocation, geometry = entry
         slabs, row_bytes, _slab_bytes, _mapped = geometry
-        granularity = self._kv_vmm.granularity
+        granularity = allocation.granularity
         per_slab = ((usable_pages + 1) * row_bytes + granularity - 1) // granularity * granularity
         return slabs * per_slab
 
     def mapped_bytes_for_pages(self, usable_pages: int) -> int:
         if not self.growable:
             kv, _ = self.unit_bytes()
-            return usable_pages * self._kv_buffer.shape[3] * kv
-        total = self._mapped_bytes_at(usable_pages, self._kv_vmm_geometry)
-        if self._scale_vmm is not None:
-            total += self._mapped_bytes_at(usable_pages, self._scale_vmm_geometry)
-        return total
+            return usable_pages * self._k_buffer.shape[2] * kv
+        return sum(self._mapped_bytes_at(usable_pages, entry) for entry in self._vmm_entries)
 
     def commit_pages(self, usable_pages: int) -> None:
         """Commit all layer stripes through ``usable_pages`` without moving their pointers."""
@@ -184,14 +233,10 @@ class MHAKVCache(QuantizedKVStorageMixin, BaseKVCachePool):
                 ((self._committed_pages // self._grow_step_pages) + 1)
                 * self._grow_step_pages,
             )
-            committed: list[tuple[object, list[tuple[int, int]], int]] = []
+            committed: list[tuple[list, list[tuple[int, int]], int]] = []
             try:
-                for allocation, geometry in (
-                    (self._kv_vmm, self._kv_vmm_geometry),
-                    (self._scale_vmm, getattr(self, "_scale_vmm_geometry", None)),
-                ):
-                    if allocation is None:
-                        continue
+                for entry in self._vmm_entries:
+                    allocation, geometry = entry
                     slabs, row_bytes, slab_bytes, old_mapped = geometry
                     granularity = allocation.granularity
                     new_mapped = (
@@ -207,22 +252,18 @@ class MHAKVCache(QuantizedKVStorageMixin, BaseKVCachePool):
                     )
                     if ranges:
                         allocation.commit_ranges(ranges)
-                    committed.append((allocation, ranges, old_mapped))
+                    committed.append((entry, ranges, old_mapped))
             except Exception:
-                for allocation, ranges, _old_mapped in reversed(committed):
+                for entry, ranges, _old_mapped in reversed(committed):
                     if ranges:
-                        allocation.uncommit_ranges(ranges)
+                        entry[0].uncommit_ranges(ranges)
                 raise
 
-            for allocation, _ranges, old_mapped in committed:
-                if allocation is self._kv_vmm:
-                    slabs, row_bytes, slab_bytes, _ = self._kv_vmm_geometry
-                    new_mapped = self._mapped_per_slab(next_boundary, allocation, row_bytes)
-                    self._kv_vmm_geometry = (slabs, row_bytes, slab_bytes, new_mapped)
-                else:
-                    slabs, row_bytes, slab_bytes, _ = self._scale_vmm_geometry
-                    new_mapped = self._mapped_per_slab(next_boundary, allocation, row_bytes)
-                    self._scale_vmm_geometry = (slabs, row_bytes, slab_bytes, new_mapped)
+            for entry, _ranges, _old_mapped in committed:
+                allocation, geometry = entry
+                slabs, row_bytes, slab_bytes, _ = geometry
+                new_mapped = self._mapped_per_slab(next_boundary, allocation, row_bytes)
+                entry[1] = (slabs, row_bytes, slab_bytes, new_mapped)
             self._growth_segments.append((next_boundary, committed))
             self._committed_pages = next_boundary
 
@@ -253,16 +294,12 @@ class MHAKVCache(QuantizedKVStorageMixin, BaseKVCachePool):
 
         while self._growth_segments and self._growth_segments[-1][0] > usable_pages:
             _boundary, committed = self._growth_segments.pop()
-            for allocation, ranges, _old_mapped in reversed(committed):
+            for entry, ranges, _old_mapped in reversed(committed):
                 if ranges:
-                    allocation.uncommit_ranges(ranges)
-            for allocation, _ranges, old_mapped in committed:
-                if allocation is self._kv_vmm:
-                    slabs, row_bytes, slab_bytes, _ = self._kv_vmm_geometry
-                    self._kv_vmm_geometry = (slabs, row_bytes, slab_bytes, old_mapped)
-                else:
-                    slabs, row_bytes, slab_bytes, _ = self._scale_vmm_geometry
-                    self._scale_vmm_geometry = (slabs, row_bytes, slab_bytes, old_mapped)
+                    entry[0].uncommit_ranges(ranges)
+            for entry, _ranges, old_mapped in committed:
+                slabs, row_bytes, slab_bytes, _ = entry[1]
+                entry[1] = (slabs, row_bytes, slab_bytes, old_mapped)
         self._committed_pages = usable_pages
 
     def copy_pages(self, source_pages: torch.Tensor, destination_pages: torch.Tensor) -> None:
@@ -278,7 +315,11 @@ class MHAKVCache(QuantizedKVStorageMixin, BaseKVCachePool):
             return
         src = source_pages.to(device=self._device, dtype=torch.long)
         dst = destination_pages.to(device=self._device, dtype=torch.long)
-        self._kv_buffer.index_copy_(2, dst, self._kv_buffer.index_select(2, src))
+        if self._asymmetric:
+            self._k_buffer.index_copy_(1, dst, self._k_buffer.index_select(1, src))
+            self._v_buffer.index_copy_(1, dst, self._v_buffer.index_select(1, src))
+        else:
+            self._kv_buffer.index_copy_(2, dst, self._kv_buffer.index_select(2, src))
         if self._scale_buffer is not None:
             self._scale_buffer.index_copy_(
                 2, dst, self._scale_buffer.index_select(2, src)
@@ -293,6 +334,30 @@ class MHAKVCache(QuantizedKVStorageMixin, BaseKVCachePool):
         """
         if self.growable:
             raise RuntimeError("growable KV pages are committed in place, not rebuilt")
+        if self._asymmetric:
+            num_storage_layers, _old_pages, page_size, local_kv_heads, k_dim = self._k_buffer.shape
+            v_dim = self._v_buffer.shape[-1]
+            device = self._device
+            self._k_buffer = torch.empty(
+                (num_storage_layers, num_pages, page_size, local_kv_heads, k_dim),
+                device=device, dtype=self._quant_k.storage_dtype,
+            )
+            self._v_buffer = torch.empty(
+                (num_storage_layers, num_pages, page_size, local_kv_heads, v_dim),
+                device=device, dtype=self._quant_v.storage_dtype,
+            )
+            scale_dim = self._quant_k.logical_dim(k_dim) // 32
+            self._scale_buffer = torch.empty(
+                (2, num_storage_layers, num_pages, page_size, local_kv_heads, scale_dim),
+                device=device, dtype=torch.float16,
+            )
+            self._k_scale, self._v_scale = self._scale_buffer[0], self._scale_buffer[1]
+            self._storage_shape_k = (num_pages * page_size, local_kv_heads, k_dim)
+            self._storage_shape_v = (num_pages * page_size, local_kv_heads, v_dim)
+            self._storage_shape = self._storage_shape_k
+            self._logical_num_pages = num_pages
+            self._committed_pages = num_pages - 1
+            return
         _, num_storage_layers, _old_pages, page_size, local_kv_heads, storage_head_dim = self._kv_buffer.shape
         dtype = self._kv_buffer.dtype
         device = self._device
@@ -316,6 +381,8 @@ class MHAKVCache(QuantizedKVStorageMixin, BaseKVCachePool):
         self._k_scale = self._scale_buffer[0] if self._scale_buffer is not None else None
         self._v_scale = self._scale_buffer[1] if self._scale_buffer is not None else None
         self._storage_shape = (num_pages * page_size, local_kv_heads, storage_head_dim)
+        self._storage_shape_k = self._storage_shape
+        self._storage_shape_v = self._storage_shape
         self._logical_num_pages = num_pages
         self._committed_pages = num_pages - 1
 
@@ -342,24 +409,25 @@ class MHAKVCache(QuantizedKVStorageMixin, BaseKVCachePool):
         local_heads = div_even(
             spec.num_kv_heads, config.tp_info.size, allow_replicate=True
         )
-        quant = config.kv_quant
-        storage_dim = spec.head_dim // quant.elements_per_byte
-        payload_dtype = quant.storage_dtype if quant.enabled else config.dtype
-        rows = [
-            config.page_size * local_heads * storage_dim
-            * torch.empty((), dtype=payload_dtype).element_size()
-        ]
-        if quant.enabled:
-            rows.append(
-                config.page_size * local_heads * (spec.head_dim // 32)
-                * torch.empty((), dtype=torch.float16).element_size()
+        quant_k = getattr(config, "kv_quant_k", config.kv_quant)
+        quant_v = getattr(config, "kv_quant_v", config.kv_quant)
+        total = 0
+        for quant in (quant_k, quant_v):
+            storage_dim = quant.storage_dim(spec.head_dim) if quant.enabled else spec.head_dim
+            payload_dtype = quant.storage_dtype if quant.enabled else config.dtype
+            row = config.page_size * local_heads * storage_dim * torch.empty(
+                (), dtype=payload_dtype
+            ).element_size()
+            total += spec.num_layers * (
+                ((usable_pages + 1) * row + granularity - 1) // granularity * granularity
             )
-        slabs = 2 * spec.num_layers
-        return sum(
-            slabs
-            * (((usable_pages + 1) * row + granularity - 1) // granularity * granularity)
-            for row in rows
-        )
+            if quant.enabled:
+                scale_row = config.page_size * local_heads * (spec.head_dim // 32) * 2
+                total += spec.num_layers * (
+                    ((usable_pages + 1) * scale_row + granularity - 1)
+                    // granularity * granularity
+                )
+        return total
 
     def rebuild_from_config(
         self, config, num_pages: int, *, num_swa_pages: int | None = None
@@ -367,12 +435,19 @@ class MHAKVCache(QuantizedKVStorageMixin, BaseKVCachePool):
         self.rebuild(num_pages + 1)  # +1 for the dummy page (matches create_kvcache_pool)
 
     def unit_bytes(self) -> tuple[int, int]:
-        buf = self._kv_buffer
-        tokens = self._logical_num_pages * int(buf.shape[3])
-        total = (
-            2 * int(buf.shape[1]) * self._logical_num_pages
-            * int(buf.shape[3]) * int(buf.shape[4]) * int(buf.shape[5]) * buf.element_size()
-        )
+        tokens = self._logical_num_pages * int(self._k_buffer.shape[2])
+        if self._asymmetric:
+            total = sum(
+                int(buf.shape[0]) * self._logical_num_pages * int(buf.shape[2])
+                * int(buf.shape[3]) * int(buf.shape[4]) * buf.element_size()
+                for buf in (self._k_buffer, self._v_buffer)
+            )
+        else:
+            buf = self._kv_buffer
+            total = (
+                2 * int(buf.shape[1]) * self._logical_num_pages
+                * int(buf.shape[3]) * int(buf.shape[4]) * int(buf.shape[5]) * buf.element_size()
+            )
         if self._scale_buffer is not None:
             scale = self._scale_buffer
             total += (
@@ -412,8 +487,8 @@ class MHAKVCache(QuantizedKVStorageMixin, BaseKVCachePool):
         dense = self._dense(layer_id)
         scale_shape = (self._storage_shape[0], self._storage_shape[1], -1)
         self._store_kv_into(
-            self._k_buffer[dense, : self._logical_num_pages].view(self._storage_shape),
-            self._v_buffer[dense, : self._logical_num_pages].view(self._storage_shape),
+            self._k_buffer[dense, : self._logical_num_pages].view(self._storage_shape_k),
+            self._v_buffer[dense, : self._logical_num_pages].view(self._storage_shape_v),
             None if self._k_scale is None else self._k_scale[dense, : self._logical_num_pages].view(scale_shape),
             None if self._v_scale is None else self._v_scale[dense, : self._logical_num_pages].view(scale_shape),
             out_loc,
@@ -427,7 +502,7 @@ class MHAKVCache(QuantizedKVStorageMixin, BaseKVCachePool):
 
     @property
     def dtype(self) -> torch.dtype:
-        return self._kv_buffer.dtype
+        return self._k_buffer.dtype
 
     @property
     def compute_dtype(self) -> torch.dtype:

@@ -139,6 +139,129 @@ def _store_kv_quant_kernel(
         )
 
 
+@triton.jit
+def _store_one_quant_kernel(
+    src_ptr,  # [tokens, heads, D]
+    dst_ptr,  # [slots, heads, storage_D]
+    scale_ptr,  # [slots, heads, D // BLOCK]
+    indices_ptr,
+    stride_xt,
+    stride_xh,
+    stride_ct,
+    stride_ch,
+    stride_st,
+    stride_sh,
+    BITS: tl.constexpr,
+    MAX_MAG: tl.constexpr,
+    IS_INT: tl.constexpr,
+    BLOCK: tl.constexpr,
+    NBLOCK: tl.constexpr,
+):
+    """Quantize one side of an asymmetric K/V pair.
+
+    The existing fused kernel remains the fast path whenever K and V share a format.
+    Different formats necessarily have different pointer dtypes and physical strides,
+    so compiling one small launch per side keeps Triton's type system honest.
+    """
+    tok = tl.program_id(0)
+    head = tl.program_id(1)
+    slot = tl.load(indices_ptr + tok).to(tl.int64)
+
+    offs = tl.arange(0, NBLOCK)[:, None] * BLOCK + tl.arange(0, BLOCK)[None, :]
+    scale_offs = tl.arange(0, NBLOCK)
+    x = tl.load(src_ptr + tok * stride_xt + head * stride_xh + offs).to(tl.float32)
+
+    abs_x = tl.abs(x)
+    amax = tl.max(abs_x, axis=1)
+    extreme_idx = tl.argmax(abs_x, axis=1, tie_break_left=True)
+    block_idx = tl.arange(0, BLOCK)[None, :]
+    extreme = tl.sum(tl.where(block_idx == extreme_idx[:, None], x, 0.0), axis=1)
+
+    if BITS == 6:
+        initial = tl.where(amax > 0, extreme / -32.0, 1.0)
+        q = tl.minimum(
+            tl.maximum(tl.floor(tl.math.div_rn(x, initial[:, None]) + 32.5), 0.0),
+            63.0,
+        )
+        signed = q - 32.0
+        weights = x * x
+        sumqx = tl.sum(weights * signed * x, axis=1)
+        sumq2 = tl.sum(weights * signed * signed, axis=1)
+        scale = tl.where(sumq2 > 0, sumqx / sumq2, initial)
+        scale = scale.to(scale_ptr.dtype.element_ty).to(tl.float32)
+        # Cache-native contiguous planes: D/2 adjacent low-nibble pairs followed by
+        # D/4 adjacent upper-two-bit quads. This avoids divides in attention loads.
+        q = q.to(tl.uint8).reshape(NBLOCK * BLOCK)
+        even, odd = tl.split(q.reshape(NBLOCK * BLOCK // 2, 2))
+        low = (even & 15) | ((odd & 15) << 4)
+        left, right = tl.split(q.reshape(NBLOCK * BLOCK // 4, 2, 2))
+        q0, q2 = tl.split(left)
+        q1, q3 = tl.split(right)
+        high = (
+            ((q0 >> 4) & 3)
+            | (((q1 >> 4) & 3) << 2)
+            | (((q2 >> 4) & 3) << 4)
+            | (((q3 >> 4) & 3) << 6)
+        )
+        low_offs = tl.arange(0, NBLOCK * BLOCK // 2)
+        high_offs = tl.arange(0, NBLOCK * BLOCK // 4)
+        tl.store(dst_ptr + slot * stride_ct + head * stride_ch + low_offs, low)
+        tl.store(
+            dst_ptr + slot * stride_ct + head * stride_ch
+            + NBLOCK * BLOCK // 2 + high_offs,
+            high,
+        )
+        tl.store(scale_ptr + slot * stride_st + head * stride_sh + scale_offs, scale)
+        return
+
+    if BITS == 4:
+        scale = tl.where(amax > 0, extreme / -8.0, 1.0)
+        scale = scale.to(scale_ptr.dtype.element_ty).to(tl.float32)
+        q = tl.minimum(
+            tl.maximum(tl.floor(tl.math.div_rn(x, scale[:, None]) + 8.5), 0.0), 15.0
+        ).to(tl.uint8)
+        even, odd = tl.split(q.reshape(NBLOCK, BLOCK // 2, 2))
+        packed = even | (odd << 4)
+        byte_offs = scale_offs[:, None] * (BLOCK // 2) + tl.arange(0, BLOCK // 2)[None, :]
+        tl.store(dst_ptr + slot * stride_ct + head * stride_ch + byte_offs, packed)
+    else:
+        scale = tl.where(amax > 0, amax / MAX_MAG, 1.0)
+        scale = scale.to(scale_ptr.dtype.element_ty).to(tl.float32)
+        q = tl.math.div_rn(x, scale[:, None])
+        if IS_INT:
+            q = tl.where(q >= 0, tl.floor(q + 0.5), tl.ceil(q - 0.5))
+            q = tl.minimum(tl.maximum(q, -MAX_MAG), MAX_MAG)
+        else:
+            q = round_e4m3(tl.minimum(tl.maximum(q, -MAX_MAG), MAX_MAG))
+        tl.store(dst_ptr + slot * stride_ct + head * stride_ch + offs, q.to(dst_ptr.dtype.element_ty))
+    tl.store(scale_ptr + slot * stride_st + head * stride_sh + scale_offs, scale)
+
+
+def _store_one_quant(cache, scale, indices, source, spec) -> None:
+    from freetoken.kvcache.quant import BLOCK
+
+    tokens, heads, head_dim = source.shape
+    assert cache.shape[1:] == (heads, spec.storage_dim(head_dim))
+    _store_one_quant_kernel[(tokens, heads)](
+        source,
+        cache,
+        scale,
+        indices,
+        source.stride(0),
+        source.stride(1),
+        cache.stride(0),
+        cache.stride(1),
+        scale.stride(0),
+        scale.stride(1),
+        BITS=spec.bits,
+        MAX_MAG=spec.max_magnitude,
+        IS_INT=spec.is_integer,
+        BLOCK=BLOCK,
+        NBLOCK=head_dim // BLOCK,
+        num_warps=4,
+    )
+
+
 def store_kv_quant(
     k_cache: torch.Tensor,
     k_scale: torch.Tensor,
@@ -148,6 +271,7 @@ def store_kv_quant(
     k: torch.Tensor,
     v: torch.Tensor,
     spec,
+    v_spec=None,
 ) -> None:
     """Quantize ``k``/``v`` ``[tokens, heads, D]`` into the pool slots ``indices``.
 
@@ -157,13 +281,20 @@ def store_kv_quant(
     """
     from freetoken.kvcache.quant import BLOCK
 
+    v_spec = spec if v_spec is None else v_spec
     num_tokens, num_heads, head_dim = k.shape
     if num_tokens == 0:
         return
     assert head_dim % BLOCK == 0, f"head_dim {head_dim} not a multiple of {BLOCK}"
-    assert k_cache.shape[1:] == (num_heads, head_dim // spec.elements_per_byte), (
+    if v_spec != spec or spec.bits == 6:
+        _store_one_quant(k_cache, k_scale, indices, k, spec)
+        _store_one_quant(v_cache, v_scale, indices, v, v_spec)
+        return
+
+    assert spec.bits in (4, 8), "symmetric q6 uses the asymmetric-capable store path"
+    assert k_cache.shape[1:] == (num_heads, spec.storage_dim(head_dim)), (
         f"packed cache geometry {tuple(k_cache.shape[1:])} != "
-        f"{(num_heads, head_dim // spec.elements_per_byte)}"
+        f"{(num_heads, spec.storage_dim(head_dim))}"
     )
     _store_kv_quant_kernel[(num_tokens, num_heads)](
         k,

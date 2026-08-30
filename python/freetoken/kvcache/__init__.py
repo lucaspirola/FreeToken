@@ -107,6 +107,8 @@ def create_kv_pool(config, num_pages: int, device: torch.device, dtype: torch.dt
         device=device,
         dtype=dtype,
         quant=getattr(config, "kv_quant", None),
+        quant_k=getattr(config, "kv_quant_k", None),
+        quant_v=getattr(config, "kv_quant_v", None),
         grow_step_tokens=getattr(config, "kv_grow_step_tokens", 0),
     )
 
@@ -119,12 +121,18 @@ def create_kvcache_pool(
     device: torch.device,
     num_swa_tokens: int | None = None,
     quant=None,
+    quant_k=None,
+    quant_v=None,
     grow_step_tokens: int = 0,
 ) -> BaseKVCachePool:
     from .quant import NONE
 
     quant = quant if quant is not None else NONE
+    quant_k = quant if quant_k is None else quant_k
+    quant_v = quant if quant_v is None else quant_v
     if model_config.has_swa_attention:
+        if quant_k != quant_v:
+            raise ValueError("independent K/V cache formats are not implemented for hybrid SWA pools")
         from .hybrid_swa_pool import HybridSWAKVCache
 
         return HybridSWAKVCache(
@@ -216,6 +224,8 @@ def create_kvcache_pool(
         dtype=dtype,
         layer_ids=layer_ids,
         quant=quant,
+        quant_k=quant_k,
+        quant_v=quant_v,
         grow_step_tokens=grow_step_tokens,
     )
 

@@ -44,6 +44,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--rope-yarn-factor", type=float)
     p.add_argument("--rope-yarn-original-context", type=int)
     p.add_argument("--kv-cache-dtype", required=True)
+    p.add_argument("--kv-cache-dtype-k")
+    p.add_argument("--kv-cache-dtype-v")
     p.add_argument("--prefill-chunk", type=int, default=8192)
     p.add_argument("--mem-ratio", type=float, default=0.97)
     p.add_argument("--kv-grow-step-tokens", type=int)
@@ -234,6 +236,12 @@ def main() -> int:
     origin = f"http://127.0.0.1:{port}"
     fd, log_path = tempfile.mkstemp(prefix="bench-long-offload-", suffix=".log")
     cmd = common.serve_cmd(args, "offload", port)
+    if args.kv_cache_dtype_k is not None:
+        cmd += ["--kv-cache-dtype-k", args.kv_cache_dtype_k]
+    if args.kv_cache_dtype_v is not None:
+        cmd += ["--kv-cache-dtype-v", args.kv_cache_dtype_v]
+    if args.kv_cache_dtype_k is not None or args.kv_cache_dtype_v is not None:
+        cmd += ["--attention-backend", "triton"]
     if args.rope_yarn_factor is not None:
         cmd += ["--rope-yarn-factor", str(args.rope_yarn_factor)]
     if args.rope_yarn_original_context is not None:
@@ -252,7 +260,9 @@ def main() -> int:
         f"[long] prompt tokens: original={original_tokens}, trimmed={trimmed_tokens}, "
         f"target={args.target_prompt_tokens}\n"
         f"[long] context={args.max_context} decode={args.decode} "
-        f"kv={args.kv_cache_dtype} chunk={args.prefill_chunk} ratio={args.mem_ratio}\n"
+        f"kv={args.kv_cache_dtype} k={args.kv_cache_dtype_k or 'inherit'} "
+        f"v={args.kv_cache_dtype_v or 'inherit'} chunk={args.prefill_chunk} "
+        f"ratio={args.mem_ratio}\n"
         f"[long] server log: {log_path}",
         flush=True,
     )
@@ -300,6 +310,8 @@ def main() -> int:
         "ms_per_decode_token": decode_seconds / decode_steps * 1000,
         "vram_gib": stats.get("vram_bytes", 0) / 2**30,
         "kv_cache_dtype": args.kv_cache_dtype,
+        "kv_cache_dtype_k": args.kv_cache_dtype_k,
+        "kv_cache_dtype_v": args.kv_cache_dtype_v,
         "prefill_chunk": args.prefill_chunk,
         "memory_ratio": args.mem_ratio,
         "kv_grow_step_tokens": args.kv_grow_step_tokens,

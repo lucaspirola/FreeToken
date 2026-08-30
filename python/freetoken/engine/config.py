@@ -116,6 +116,11 @@ class EngineConfig:
     # fp8_e4m3 store 8 bits, while int4/q4_0 use GGML Q4_0 with two values per byte.
     # Every quantized scheme carries a per-block scale. Resolved by the pools and cost model.
     kv_cache_dtype: str = "auto"
+    # Optional independent formats. When omitted each inherits kv_cache_dtype. This is
+    # useful because keys are more quality-sensitive than values; Q8-K/Q6-V saves
+    # bandwidth and VRAM without forcing keys below eight bits.
+    kv_cache_dtype_k: str | None = None
+    kv_cache_dtype_v: str | None = None
     # Reserve the full KV virtual range but physically commit it in chunks, shrinking the
     # GPU expert cache at each boundary. Zero keeps the conventional eager allocation.
     kv_grow_step_tokens: int = 0
@@ -125,6 +130,18 @@ class EngineConfig:
         from freetoken.kvcache.quant import resolve_kv_quant
 
         return resolve_kv_quant(self.kv_cache_dtype)
+
+    @cached_property
+    def kv_quant_k(self):
+        from freetoken.kvcache.quant import resolve_kv_quant
+
+        return resolve_kv_quant(self.kv_cache_dtype_k or self.kv_cache_dtype)
+
+    @cached_property
+    def kv_quant_v(self):
+        from freetoken.kvcache.quant import resolve_kv_quant
+
+        return resolve_kv_quant(self.kv_cache_dtype_v or self.kv_cache_dtype)
 
     @cached_property
     def hf_config(self):

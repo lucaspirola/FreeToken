@@ -32,6 +32,18 @@ def decode_launch_config(
     keep the conservative fallback.
     """
     if (
+        quant_name == "q8_q6"
+        and head_dim == 256
+        and num_q_heads == 16
+        and num_kv_heads == 2
+        and compute_capability is not None
+        and compute_capability >= (12, 0)
+    ):
+        # Mixed formats increase register pressure. At 262K on RTX 5080, 32-token
+        # tiles / 8 warps cut the Q6-value attention toll by 25% versus Q8's 64/4
+        # launch (0.492 vs 0.655 ms per layer); 128 splits regressed.
+        return 64, 32, 8
+    if (
         quant_name == "int4"
         and head_dim == 256
         and num_q_heads == 16
@@ -105,10 +117,9 @@ def _load_kv(
     mask,
     scale_mask,
     out_dtype: tl.constexpr,
-    QUANT: tl.constexpr,
+    FORMAT: tl.constexpr,
     QBLOCK: tl.constexpr,
     D_ON_ROWS: tl.constexpr,
-    EPB: tl.constexpr,
     PACKED_PRESCALE: tl.constexpr,
 ):
     """Load a K or V tile, dequantizing it when the pool stores quantized values.
@@ -118,11 +129,8 @@ def _load_kv(
     per block, loaded once and broadcast across the block rather than re-read per
     element.
 
-    ``base`` is kept separate from ``elem`` because packed storage halves the byte
-    extent of ``elem`` only: with ``EPB`` (elements-per-byte) == 2 the within-head
-    element index maps to ``elem // EPB`` bytes, and the slot/head strides in ``base``
-    are *byte* counts that must not be divided. The element's parity (``elem``'s low bit)
-    selects the low or high nibble.
+    ``base`` is kept separate from ``elem`` because packed storage changes only the
+    within-head addressing; slot/head strides in ``base`` are already byte counts.
 
     ``D_ON_ROWS`` says which way the tile is laid out: the dot-product kernels want K as
     ``[D, N]`` and V as ``[N, D]``, and the block axis has to be expanded along whichever
@@ -132,7 +140,63 @@ def _load_kv(
     cannot be folded in after the dot -- the tile is dequantized into ``out_dtype`` (the
     query's dtype) and fed to the tensor cores like the bf16 path does.
     """
-    if QUANT and EPB == 2:
+    if FORMAT == 3:
+        # Cache-native Q6 planes: D/2 adjacent low-nibble pairs, then D/4 adjacent
+        # upper-two-bit quads. Load every payload byte once and unpack in registers.
+        if D_ON_ROWS:
+            q6_nb: tl.constexpr = scale_offsets.shape[0]
+            q6_n: tl.constexpr = scale_offsets.shape[1]
+            q6_d: tl.constexpr = q6_nb * QBLOCK
+            low_elem = tl.arange(0, q6_d // 2)[:, None]
+            high_elem = q6_d // 2 + tl.arange(0, q6_d // 4)[:, None]
+            low_mask = tl.broadcast_to(
+                scale_mask[:, None, :], (q6_nb, QBLOCK // 2, q6_n)
+            ).reshape(q6_d // 2, q6_n)
+            high_mask = tl.broadcast_to(
+                scale_mask[:, None, :], (q6_nb, QBLOCK // 4, q6_n)
+            ).reshape(q6_d // 4, q6_n)
+        else:
+            q6_n: tl.constexpr = scale_offsets.shape[0]
+            q6_nb: tl.constexpr = scale_offsets.shape[1]
+            q6_d: tl.constexpr = q6_nb * QBLOCK
+            low_elem = tl.arange(0, q6_d // 2)[None, :]
+            high_elem = q6_d // 2 + tl.arange(0, q6_d // 4)[None, :]
+            low_mask = tl.broadcast_to(
+                scale_mask[:, :, None], (q6_n, q6_nb, QBLOCK // 2)
+            ).reshape(q6_n, q6_d // 2)
+            high_mask = tl.broadcast_to(
+                scale_mask[:, :, None], (q6_n, q6_nb, QBLOCK // 4)
+            ).reshape(q6_n, q6_d // 4)
+        low = tl.load(ptr + base + low_elem, mask=low_mask, other=0)
+        high = tl.load(ptr + base + high_elem, mask=high_mask, other=0)
+        if D_ON_ROWS:
+            lower = tl.interleave((low & 15).trans(), (low >> 4).trans()).trans()
+            high_t = high.trans()
+            planes = tl.broadcast_to(
+                high_t[:, :, None], (q6_n, q6_d // 4, 4)
+            )
+            lane = tl.arange(0, 4)[None, None, :]
+            upper = ((planes >> (lane * 2)) & 3).reshape(q6_n, q6_d).trans()
+        else:
+            lower = tl.interleave(low & 15, low >> 4)
+            planes = tl.broadcast_to(
+                high[:, :, None], (q6_n, q6_d // 4, 4)
+            )
+            lane = tl.arange(0, 4)[None, None, :]
+            upper = ((planes >> (lane * 2)) & 3).reshape(q6_n, q6_d)
+        vals = ((lower | (upper << 4)).to(tl.float32) - 32.0)
+        scale = tl.load(scale_ptr + scale_offsets, mask=scale_mask, other=0.0)
+        if D_ON_ROWS:
+            wide = tl.broadcast_to(
+                scale[:, None, :], (q6_nb, QBLOCK, q6_n)
+            ).reshape(q6_d, q6_n)
+        else:
+            wide = tl.broadcast_to(
+                scale[:, :, None], (q6_n, q6_nb, QBLOCK)
+            ).reshape(q6_n, q6_d)
+        return (vals * wide.to(tl.float32)).to(out_dtype)
+
+    if FORMAT == 2:
         # Nibble-packed GGML Q4_0: uint8 byte per element pair; low nibble = even
         # element, high nibble = odd element, and value = (nibble - 8) * signed scale.
         # Build a byte-sized tile and interleave its nibbles after the load.  The old
@@ -141,18 +205,18 @@ def _load_kv(
         if D_ON_ROWS:
             nb_p: tl.constexpr = scale_offsets.shape[0]
             n_p: tl.constexpr = scale_offsets.shape[1]
-            packed_d: tl.constexpr = nb_p * QBLOCK // EPB
+            packed_d: tl.constexpr = nb_p * QBLOCK // 2
             packed_elem = tl.arange(0, packed_d)[:, None]
             packed_mask = tl.broadcast_to(
-                scale_mask[:, None, :], (nb_p, QBLOCK // EPB, n_p)
+                scale_mask[:, None, :], (nb_p, QBLOCK // 2, n_p)
             ).reshape(packed_d, n_p)
         else:
             n_p: tl.constexpr = scale_offsets.shape[0]
             nb_p: tl.constexpr = scale_offsets.shape[1]
-            packed_d: tl.constexpr = nb_p * QBLOCK // EPB
+            packed_d: tl.constexpr = nb_p * QBLOCK // 2
             packed_elem = tl.arange(0, packed_d)[None, :]
             packed_mask = tl.broadcast_to(
-                scale_mask[:, :, None], (n_p, nb_p, QBLOCK // EPB)
+                scale_mask[:, :, None], (n_p, nb_p, QBLOCK // 2)
             ).reshape(n_p, packed_d)
         packed = tl.load(ptr + base + packed_elem, mask=packed_mask, other=0)
         # Triton 3.6 lowers the integer bit operations directly; unlike modulo and
@@ -166,14 +230,14 @@ def _load_kv(
             # extend is register-bound and uses the post-interleave form below.
             if D_ON_ROWS:
                 packed_scale = tl.broadcast_to(
-                    scale[:, None, :], (nb_p, QBLOCK // EPB, n_p)
+                    scale[:, None, :], (nb_p, QBLOCK // 2, n_p)
                 ).reshape(packed_d, n_p)
                 lo = (lo - 8.0) * packed_scale
                 hi = (hi - 8.0) * packed_scale
                 vals = tl.interleave(lo.trans(), hi.trans()).trans()
             else:
                 packed_scale = tl.broadcast_to(
-                    scale[:, :, None], (n_p, nb_p, QBLOCK // EPB)
+                    scale[:, :, None], (n_p, nb_p, QBLOCK // 2)
                 ).reshape(n_p, packed_d)
                 lo = (lo - 8.0) * packed_scale
                 hi = (hi - 8.0) * packed_scale
@@ -208,7 +272,7 @@ def _load_kv(
         return (vals * wide.to(tl.float32)).to(out_dtype)
 
     vals = tl.load(ptr + base + elem, mask=mask, other=0.0)
-    if QUANT:
+    if FORMAT != 0:
         scale = tl.load(scale_ptr + scale_offsets, mask=scale_mask, other=0.0)
         if D_ON_ROWS:
             nb: tl.constexpr = scale.shape[0]
@@ -288,9 +352,9 @@ def _paged_attention_kernel(
     BLOCK_N: tl.constexpr,
     SLIDING_WINDOW: tl.constexpr,
     HAS_SINKS: tl.constexpr,
-    QUANT: tl.constexpr,
+    K_FORMAT: tl.constexpr,
+    V_FORMAT: tl.constexpr,
     QBLOCK: tl.constexpr,
-    EPB: tl.constexpr,
 ):
     q_tok = tl.program_id(0)
     q_head = tl.program_id(1)
@@ -344,10 +408,9 @@ def _paged_attention_kernel(
                 kv_mask,
                 kv_scale_mask,
                 tl.float32,
-                QUANT,
+                K_FORMAT,
                 QBLOCK,
                 False,
-                EPB,
                 True,
             ).to(tl.float32)
             scores = tl.sum(q[None, :] * k, axis=1) * sm_scale
@@ -368,10 +431,9 @@ def _paged_attention_kernel(
                 kv_mask,
                 kv_scale_mask,
                 tl.float32,
-                QUANT,
+                V_FORMAT,
                 QBLOCK,
                 False,
-                EPB,
                 True,
             ).to(tl.float32)
             acc = acc * alpha + tl.sum(p[:, None] * v, axis=0)
@@ -427,9 +489,9 @@ def _decode_grouped_stage1_kernel(
     D: tl.constexpr,
     DV: tl.constexpr,
     SLIDING_WINDOW: tl.constexpr,
-    QUANT: tl.constexpr,
+    K_FORMAT: tl.constexpr,
+    V_FORMAT: tl.constexpr,
     QBLOCK: tl.constexpr,
-    EPB: tl.constexpr,
     KV_SPLITS: tl.constexpr,
     Q8_NATIVE_QK: tl.constexpr,
 ):
@@ -482,7 +544,7 @@ def _decode_grouped_stage1_kernel(
 
     if split_end > split_start:
         q = tl.load(q_ptr + q_offsets, mask=mask_h[:, None] & mask_d[None, :], other=0.0)
-        if not QUANT:
+        if K_FORMAT == 0:
             # Unquantized: match the cache's dtype as before. Quantized: the cache is
             # int8/fp8 and casting q into it would destroy the query -- the dequantized
             # K/V tiles are produced in q's dtype instead.
@@ -548,10 +610,9 @@ def _decode_grouped_stage1_kernel(
                     mask_n[None, :] & mask_d[:, None],
                     mask_n[None, :] & mask_nb[:, None],
                     q.dtype,
-                    QUANT,
+                    K_FORMAT,
                     QBLOCK,
                     True,
-                    EPB,
                     True,
                 )
                 scores = tl.dot(q, k) * sm_scale
@@ -566,10 +627,9 @@ def _decode_grouped_stage1_kernel(
                 mask_n[:, None] & mask_dv[None, :],
                 mask_n[:, None] & mask_nbv[None, :],
                 q.dtype,
-                QUANT,
+                V_FORMAT,
                 QBLOCK,
                 False,
-                EPB,
                 True,
             )
 
@@ -676,39 +736,55 @@ def _decode_stage2_kernel(
     )
 
 
-def _kv_scale_args(k_cache, v_cache, k_scale, v_scale, epb: int = 1):
-    """Scale tensors + strides + the QUANT/QBLOCK/EPB constexprs for a kernel launch.
+def _cache_format(cache, scale, head_dim: int) -> int:
+    """Infer the compile-time storage format from logical and physical geometry.
+
+    0=unquantized, 1=byte-per-value quantized, 2=Q4_0, 3=Q6_0.
+    """
+    if scale is None:
+        assert cache.shape[-1] == head_dim
+        return 0
+    if cache.shape[-1] == head_dim:
+        return 1
+    if cache.shape[-1] * 2 == head_dim:
+        return 2
+    if cache.shape[-1] * 4 == head_dim * 3:
+        return 3
+    raise AssertionError(
+        f"KV storage dim {cache.shape[-1]} is incompatible with logical head_dim {head_dim}"
+    )
+
+
+def _kv_scale_args(k_cache, v_cache, k_scale, v_scale, head_dim: int):
+    """Scale pointers, strides and independent K/V format ids for a kernel launch.
 
     Unquantized pools pass ``k_scale=None``; the kernels then never touch the scale
-    pointers, so the KV buffers themselves stand in and ``QUANT=False`` compiles the
+    pointer, so the KV buffer itself stands in and ``FORMAT=0`` compiles dequant away.
     dequant away entirely -- the bf16 path emits the same code it did before.
 
-    ``epb`` (elements-per-byte) is 1 for 8-bit element-shaped storage and 2 for packed
-    int4, whose slab's last dim is D // epb. Callers infer it from
-    ``head_dim // k_cache.shape[-1]`` when quantized (== 1 unquantized, since there the
-    slab is element-shaped in the compute dtype). Everything below (``head_dim``,
-    ``BLOCK_D``, ``offs_d``, scales) stays in LOGICAL element space; only ``_load_kv``'s
-    byte addressing divides by ``epb``.
+    K and V may differ: this is what permits Q8 keys with Q6 values without padding the
+    value slab back to eight bits.
     """
-    if k_scale is None:
-        assert v_scale is None, "k_scale and v_scale must be given together"
-        return (k_cache, v_cache, 0, 0, 0, 0, False, 1, epb)
-    assert v_scale is not None, "k_scale and v_scale must be given together"
-    assert k_scale.dim() == v_scale.dim() == 3, "scales are [slots, heads, D // block]"
-    block = k_cache.shape[-1] * epb // k_scale.shape[-1]
-    assert k_cache.shape[-1] * epb == block * k_scale.shape[-1], (
-        f"head_dim {k_cache.shape[-1] * epb} is not a whole number of {k_scale.shape[-1]} blocks"
-    )
+    k_format = _cache_format(k_cache, k_scale, head_dim)
+    v_format = _cache_format(v_cache, v_scale, head_dim)
+    scales = [s for s in (k_scale, v_scale) if s is not None]
+    block = 1
+    if scales:
+        assert all(s.dim() == 3 for s in scales), "scales are [slots, heads, D // block]"
+        block = head_dim // scales[0].shape[-1]
+        assert all(s.shape[-1] * block == head_dim for s in scales)
+    ks = k_cache if k_scale is None else k_scale
+    vs = v_cache if v_scale is None else v_scale
     return (
-        k_scale,
-        v_scale,
-        k_scale.stride(0),
-        k_scale.stride(1),
-        v_scale.stride(0),
-        v_scale.stride(1),
-        True,
+        ks,
+        vs,
+        0 if k_scale is None else k_scale.stride(0),
+        0 if k_scale is None else k_scale.stride(1),
+        0 if v_scale is None else v_scale.stride(0),
+        0 if v_scale is None else v_scale.stride(1),
+        k_format,
+        v_format,
         block,
-        epb,
     )
 
 
@@ -735,14 +811,12 @@ def decode_paged_attention(
     assert q.is_cuda and k_cache.is_cuda and v_cache.is_cuda
     assert q.dim() == 3 and k_cache.dim() == 3 and v_cache.dim() == 3
     batch, num_q_heads, head_dim = q.shape
-    epb = head_dim // k_cache.shape[-1]
-    ks, vs, s_kss, s_ksh, s_vss, s_vsh, quant, qblock, epb = _kv_scale_args(
-        k_cache, v_cache, k_scale, v_scale, epb
+    ks, vs, s_kss, s_ksh, s_vss, s_vsh, k_format, v_format, qblock = _kv_scale_args(
+        k_cache, v_cache, k_scale, v_scale, head_dim
     )
     num_kv_heads = k_cache.shape[1]
     assert batch == indptr.numel() - 1
     assert v_cache.shape[1] == num_kv_heads
-    assert k_cache.shape[-1] * epb == head_dim and v_cache.shape[-1] * epb == head_dim
     assert num_q_heads % num_kv_heads == 0
     assert attn_logits.shape[0] >= batch
     assert attn_logits.shape[1] >= num_q_heads
@@ -760,12 +834,16 @@ def decode_paged_attention(
     o = out if out is not None else torch.empty_like(q)
     sinks_arg = sinks if sinks is not None else q
     group = num_q_heads // num_kv_heads
-    quant_name = "int4" if quant and epb == 2 else ("quant8" if quant else None)
+    quant_name = (
+        "q8_q6" if (k_format, v_format) == (1, 3)
+        else "int4" if k_format == 2
+        else "quant8" if k_format == 1
+        else None
+    )
     capability = torch.cuda.get_device_capability(q.device)
     q8_native_qk = (
         _Q8_NATIVE_QK
-        and quant
-        and epb == 1
+        and k_format == 1
         and k_cache.dtype == torch.int8
         and capability == (8, 9)
         and qblock == 32
@@ -843,9 +921,9 @@ def decode_paged_attention(
         D=head_dim,
         DV=head_dim,
         SLIDING_WINDOW=sliding_window or 0,
-        QUANT=quant,
+        K_FORMAT=k_format,
+        V_FORMAT=v_format,
         QBLOCK=qblock,
-        EPB=epb,
         KV_SPLITS=launch_splits,
         Q8_NATIVE_QK=q8_native_qk,
         num_warps=num_warps,
@@ -914,9 +992,9 @@ def _extend_attention_kernel(
     BLOCK_N: tl.constexpr,
     SLIDING_WINDOW: tl.constexpr,
     HAS_SINKS: tl.constexpr,
-    QUANT: tl.constexpr,
+    K_FORMAT: tl.constexpr,
+    V_FORMAT: tl.constexpr,
     QBLOCK: tl.constexpr,
-    EPB: tl.constexpr,
 ):
     seq_id = tl.program_id(0)
     q_head = tl.program_id(1)
@@ -981,10 +1059,9 @@ def _extend_attention_kernel(
                 mask_n[None, :] & mask_d[:, None],
                 mask_n[None, :] & mask_nb[:, None],
                 q.dtype,
-                QUANT,
+                K_FORMAT,
                 QBLOCK,
                 True,
-                EPB,
                 False,
             )
             scores = tl.dot(q.to(k.dtype), k) * sm_scale
@@ -1005,10 +1082,9 @@ def _extend_attention_kernel(
                 mask_n[:, None] & mask_dv[None, :],
                 mask_n[:, None] & mask_nbv[None, :],
                 q.dtype,
-                QUANT,
+                V_FORMAT,
                 QBLOCK,
                 False,
-                EPB,
                 False,
             )
             acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v)
@@ -1066,9 +1142,9 @@ def _extend_attention_split_kernel(
     BLOCK_N: tl.constexpr,
     SLIDING_WINDOW: tl.constexpr,
     HAS_SINKS: tl.constexpr,
-    QUANT: tl.constexpr,
+    K_FORMAT: tl.constexpr,
+    V_FORMAT: tl.constexpr,
     QBLOCK: tl.constexpr,
-    EPB: tl.constexpr,
 ):
     seq_id = tl.program_id(0)
     q_head = tl.program_id(1)
@@ -1135,10 +1211,9 @@ def _extend_attention_split_kernel(
                 mask_n[None, :] & mask_d[:, None],
                 mask_n[None, :] & mask_nb[:, None],
                 q.dtype,
-                QUANT,
+                K_FORMAT,
                 QBLOCK,
                 True,
-                EPB,
                 False,
             )
             scores = tl.dot(q.to(k.dtype), k) * sm_scale
@@ -1159,10 +1234,9 @@ def _extend_attention_split_kernel(
                 mask_n[:, None] & mask_dv[None, :],
                 mask_n[:, None] & mask_nbv[None, :],
                 q.dtype,
-                QUANT,
+                V_FORMAT,
                 QBLOCK,
                 False,
-                EPB,
                 False,
             )
             acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v)
@@ -1249,15 +1323,13 @@ def extend_paged_attention(
     assert q.is_cuda and k_cache.is_cuda and v_cache.is_cuda
     assert q.dim() == 3 and k_cache.dim() == 3 and v_cache.dim() == 3
     num_q_tokens, num_q_heads, head_dim = q.shape
-    epb = head_dim // k_cache.shape[-1]
-    ks, vs, s_kss, s_ksh, s_vss, s_vsh, quant, qblock, epb = _kv_scale_args(
-        k_cache, v_cache, k_scale, v_scale, epb
+    ks, vs, s_kss, s_ksh, s_vss, s_vsh, k_format, v_format, qblock = _kv_scale_args(
+        k_cache, v_cache, k_scale, v_scale, head_dim
     )
     num_kv_heads = k_cache.shape[1]
     assert qo_indptr.numel() == kv_indptr.numel()
     assert prefix_lens.numel() == qo_indptr.numel() - 1
     assert v_cache.shape[1] == num_kv_heads
-    assert k_cache.shape[-1] * epb == head_dim and v_cache.shape[-1] * epb == head_dim
     assert num_q_heads % num_kv_heads == 0
     if sinks is not None:
         assert sinks.is_cuda
@@ -1332,9 +1404,9 @@ def extend_paged_attention(
             BLOCK_N=block_n,
             SLIDING_WINDOW=sliding_window or 0,
             HAS_SINKS=sinks is not None,
-            QUANT=quant,
+            K_FORMAT=k_format,
+            V_FORMAT=v_format,
             QBLOCK=qblock,
-            EPB=epb,
             num_warps=num_warps,
             num_stages=num_stages,
         )
@@ -1373,9 +1445,9 @@ def extend_paged_attention(
         BLOCK_N=block_n,
         SLIDING_WINDOW=sliding_window or 0,
         HAS_SINKS=sinks is not None,
-        QUANT=quant,
+        K_FORMAT=k_format,
+        V_FORMAT=v_format,
         QBLOCK=qblock,
-        EPB=epb,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -1408,13 +1480,11 @@ def paged_attention(
     assert q.is_cuda and k_cache.is_cuda and v_cache.is_cuda
     assert q.dim() == 3 and k_cache.dim() == 3 and v_cache.dim() == 3
     num_tokens, num_q_heads, head_dim = q.shape
-    epb = head_dim // k_cache.shape[-1]
-    ks, vs, s_kss, s_ksh, s_vss, s_vsh, quant, qblock, epb = _kv_scale_args(
-        k_cache, v_cache, k_scale, v_scale, epb
+    ks, vs, s_kss, s_ksh, s_vss, s_vsh, k_format, v_format, qblock = _kv_scale_args(
+        k_cache, v_cache, k_scale, v_scale, head_dim
     )
     num_kv_heads = k_cache.shape[1]
     assert v_cache.shape[1] == num_kv_heads
-    assert k_cache.shape[-1] * epb == head_dim and v_cache.shape[-1] * epb == head_dim
     assert num_q_heads % num_kv_heads == 0
     if sinks is not None:
         assert sinks.is_cuda
@@ -1457,9 +1527,9 @@ def paged_attention(
         BLOCK_N=block_n,
         SLIDING_WINDOW=sliding_window or 0,
         HAS_SINKS=sinks is not None,
-        QUANT=quant,
+        K_FORMAT=k_format,
+        V_FORMAT=v_format,
         QBLOCK=qblock,
-        EPB=epb,
         num_warps=8 if head_dim >= 256 else 4,
         num_stages=2,
     )

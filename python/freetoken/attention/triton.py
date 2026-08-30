@@ -168,22 +168,20 @@ class TritonAttentionBackend(BaseAttnBackend):
         k_raw = self.kvcache.k_cache(layer_id)
         v_raw = self.kvcache.v_cache(layer_id)
         kv_heads = k_raw.shape[-2]
-        quant = getattr(self.kvcache, "quant", None)
-        epb = 1 if quant is None or not quant.enabled else quant.elements_per_byte
-        # The slab's last dim is the STORAGE head dim -- it halves for packed int4. The
-        # kernels get logical element space (head_dim, offs_d, scales) plus the EPB
-        # constexpr, and only the loads divide by it.
+        quant_k = getattr(self.kvcache, "quant_k", getattr(self.kvcache, "quant", None))
+        quant_v = getattr(self.kvcache, "quant_v", getattr(self.kvcache, "quant", None))
         head_dim = q.shape[-1]
-        assert k_raw.shape[-1] == head_dim // epb and v_raw.shape[-1] == head_dim // epb, (
-            f"packed KV slab {k_raw.shape[-1]} != logical head_dim {head_dim} / epb {epb}"
-        )
-        k_cache = k_raw.view(-1, kv_heads, head_dim // epb)
-        v_cache = v_raw.view(-1, kv_heads, head_dim // epb)
+        k_storage_dim = quant_k.storage_dim(head_dim) if quant_k and quant_k.enabled else head_dim
+        v_storage_dim = quant_v.storage_dim(head_dim) if quant_v and quant_v.enabled else head_dim
+        assert k_raw.shape[-1] == k_storage_dim and v_raw.shape[-1] == v_storage_dim
+        k_cache = k_raw.view(-1, kv_heads, k_storage_dim)
+        v_cache = v_raw.view(-1, kv_heads, v_storage_dim)
         # A quantized pool hands its per-block scales alongside the slabs; an unquantized
         # one has none, and the kernels compile their bf16 path unchanged.
         k_scale = v_scale = None
-        if quant is not None and quant.enabled:
+        if quant_k is not None and quant_k.enabled:
             k_scale = self.kvcache.k_scale(layer_id).view(-1, kv_heads, head_dim // QBLOCK)
+        if quant_v is not None and quant_v.enabled:
             v_scale = self.kvcache.v_scale(layer_id).view(-1, kv_heads, head_dim // QBLOCK)
 
         spec = attn_spec or AttentionSpec()

@@ -29,6 +29,14 @@ class QuantizedKVStorageMixin:
     def quant(self) -> KVQuantSpec:
         return self._quant
 
+    @property
+    def quant_k(self) -> KVQuantSpec:
+        return getattr(self, "_quant_k", self._quant)
+
+    @property
+    def quant_v(self) -> KVQuantSpec:
+        return getattr(self, "_quant_v", self._quant)
+
     def _buffer_dtype(self, compute_dtype: torch.dtype) -> torch.dtype:
         """Element dtype for a K/V slab under the active scheme."""
         return self._quant.storage_dtype if self._quant.enabled else compute_dtype
@@ -45,7 +53,7 @@ class QuantizedKVStorageMixin:
         the unpacked (element-counted) geometry: the scale extent is D // BLOCK regardless
         of how the slab packs its elements.
         """
-        if not self._quant.enabled:
+        if not self.quant_k.enabled and not self.quant_v.enabled:
             return None
         return torch.empty(
             self._quant.scale_shape(kv_shape), device=device, dtype=SCALE_DTYPE
@@ -71,7 +79,8 @@ class QuantizedKVStorageMixin:
         from freetoken.kernel.triton.kv_quant import store_kv_quant
 
         heads, storage_head_dim = k_cache.shape[-2:]
-        head_dim = storage_head_dim * self._quant.elements_per_byte
+        head_dim = self.quant_k.logical_dim(storage_head_dim)
+        assert self.quant_v.logical_dim(v_cache.shape[-1]) == head_dim
         store_kv_quant(
             k_cache,
             k_scale,
@@ -80,7 +89,8 @@ class QuantizedKVStorageMixin:
             indices,
             k.view(-1, heads, head_dim),
             v.view(-1, heads, head_dim),
-            self._quant,
+            self.quant_k,
+            self.quant_v,
         )
 
 

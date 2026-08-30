@@ -35,16 +35,15 @@ class KVQuantSpec:
     unquantized pool, in which case the pool allocates in the compute dtype and no
     scale tensor exists.
 
-    ``elements_per_byte`` is 1 for the 8-bit schemes (allocation is element-shaped) and
-    2 for int4 (torch has no int4 dtype, so the slab is ``uint8`` with two 4-bit
-    elements packed per byte and the last dim halves).
+    ``bits`` is the payload width. torch has no sub-byte integer dtypes, so formats
+    below eight bits use a byte slab whose last dimension is ``D * bits // 8``.
     """
 
     name: str
     storage_dtype: torch.dtype | None
     # Max-abs of a block maps to this magnitude in the storage dtype.
     max_magnitude: float
-    elements_per_byte: int = 1
+    bits: int = 8
 
     @property
     def enabled(self) -> bool:
@@ -57,8 +56,20 @@ class KVQuantSpec:
 
     @property
     def packed(self) -> bool:
-        """True when the slab packs several elements per byte (int4)."""
-        return self.elements_per_byte > 1
+        """True when the slab packs sub-byte integer values."""
+        return self.bits < 8
+
+    @property
+    def elements_per_byte(self) -> int:
+        """Compatibility helper for the byte-aligned q8/q4 formats.
+
+        Q6 uses three bytes per four values and therefore has no integral
+        elements-per-byte ratio. New code should use :meth:`storage_dim` and
+        :meth:`logical_dim`; asking for this legacy ratio on q6 is an error.
+        """
+        if 8 % self.bits:
+            raise ValueError(f"{self.name} has a fractional elements-per-byte ratio")
+        return 8 // self.bits
 
     def bytes_per_element(self, compute_dtype: torch.dtype) -> float:
         """Storage bytes per K/V element, scales amortized over the block.
@@ -68,16 +79,30 @@ class KVQuantSpec:
         """
         if not self.enabled:
             return float(compute_dtype.itemsize)
-        return 1.0 / self.elements_per_byte + SCALE_DTYPE.itemsize / BLOCK
+        return self.bits / 8.0 + SCALE_DTYPE.itemsize / BLOCK
+
+    def storage_dim(self, logical_dim: int) -> int:
+        """Physical bytes required for one logical head."""
+        payload_bits = logical_dim * self.bits
+        if payload_bits % 8:
+            raise ValueError(
+                f"head_dim {logical_dim} does not produce whole bytes for {self.name}"
+            )
+        return payload_bits // 8
+
+    def logical_dim(self, storage_dim: int) -> int:
+        """Logical elements represented by a physical byte extent."""
+        payload_bits = storage_dim * 8
+        if payload_bits % self.bits:
+            raise ValueError(
+                f"storage dim {storage_dim} does not represent whole {self.name} values"
+            )
+        return payload_bits // self.bits
 
     def storage_shape(self, shape: tuple[int, ...]) -> tuple[int, ...]:
         """Element-storage slab shape for a logical KV shape (last dim halves when packed)."""
         if self.packed:
-            if shape[-1] % self.elements_per_byte:
-                raise ValueError(
-                    f"head_dim {shape[-1]} is not a multiple of {self.elements_per_byte}"
-                )
-            return (*shape[:-1], shape[-1] // self.elements_per_byte)
+            return (*shape[:-1], self.storage_dim(shape[-1]))
         return shape
 
     def scale_shape(self, shape: tuple[int, ...]) -> tuple[int, ...]:
@@ -102,7 +127,7 @@ class KVQuantSpec:
         """
         assert self.enabled, "quantize() on an unquantized spec"
         blocks = x.float().unflatten(-1, (x.shape[-1] // BLOCK, BLOCK))
-        if self.packed:
+        if self.bits == 4:
             # Match GGML Q4_0. The signed value with the greatest magnitude selects a
             # possibly-negative scale; codes 0..15 then represent (code - 8) * scale.
             # This uses all 16 nibble values and preserves the block's largest-magnitude
@@ -117,6 +142,35 @@ class KVQuantSpec:
             even = q[..., 0::2]
             odd = q[..., 1::2]
             return even | (odd << 4), scales
+
+        if self.bits == 6:
+            # Use GGML Q6_0's quantizer with a cache-native plane layout: all adjacent
+            # low-nibble pairs first, then all adjacent upper-two-bit quads. Keeping
+            # each plane contiguous lets attention unpack it without integer divides.
+            abs_blocks = blocks.abs()
+            extreme = blocks.gather(
+                -1, abs_blocks.argmax(dim=-1, keepdim=True)
+            ).squeeze(-1)
+            initial = torch.where(extreme != 0, extreme / -32.0, torch.ones_like(extreme))
+            codes = torch.floor(blocks / initial.unsqueeze(-1) + 32.5).clamp_(0, 63)
+
+            # GGML Q6_0 refines the scale after selecting codes. Preserve that useful
+            # quality detail; codes stay fixed and only the stored delta changes.
+            signed = codes - 32.0
+            weights = blocks.square()
+            sumqx = (weights * signed * blocks).sum(dim=-1)
+            sumq2 = (weights * signed.square()).sum(dim=-1)
+            scales = torch.where(sumq2 > 0, sumqx / sumq2, initial).to(SCALE_DTYPE)
+
+            codes = codes.flatten(-2).to(torch.uint8)
+            lo = (codes[..., 0::2] & 0x0F) | ((codes[..., 1::2] & 0x0F) << 4)
+            hi = (
+                ((codes[..., 0::4] >> 4) & 0x03)
+                | (((codes[..., 1::4] >> 4) & 0x03) << 2)
+                | (((codes[..., 2::4] >> 4) & 0x03) << 4)
+                | (((codes[..., 3::4] >> 4) & 0x03) << 6)
+            )
+            return torch.cat((lo, hi), dim=-1), scales
 
         amax = blocks.abs().amax(dim=-1)
         scales = torch.where(amax > 0, amax / self.max_magnitude, torch.ones_like(amax))
@@ -134,17 +188,30 @@ class KVQuantSpec:
     def dequantize(self, q: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
         """Inverse of :meth:`quantize`, in float32 (logical element shape)."""
         assert self.enabled, "dequantize() on an unquantized spec"
-        if self.packed:
-            logical_d = q.shape[-1] * self.elements_per_byte
+        if self.bits == 4:
+            logical_d = self.logical_dim(q.shape[-1])
             nblock = logical_d // BLOCK
             # Each block of BLOCK elements occupies BLOCK // elements_per_byte bytes;
             # split each byte's low (even element) and high (odd) nibbles. Operate on
             # the integer codes (the caller may pass the packed tensor already floated).
             codes = q.to(torch.uint8)
-            blocks = codes.unflatten(-1, (nblock, BLOCK // self.elements_per_byte))
+            blocks = codes.unflatten(-1, (nblock, BLOCK // 2))
             values = torch.stack([blocks & 0x0F, blocks >> 4], dim=-1)
             values = values.reshape(*blocks.shape[:-1], BLOCK).float()
             values = values - 8.0
+        elif self.bits == 6:
+            logical_d = self.logical_dim(q.shape[-1])
+            nblock = logical_d // BLOCK
+            payload = q.to(torch.uint8)
+            lo, hi = payload[..., : logical_d // 2], payload[..., logical_d // 2 :]
+            lower = torch.stack((lo & 0x0F, lo >> 4), dim=-1).flatten(-2)
+            upper = torch.stack(
+                (hi & 0x03, (hi >> 2) & 0x03, (hi >> 4) & 0x03, hi >> 6),
+                dim=-1,
+            ).flatten(-2)
+            values = (lower | (upper << 4)).float().unflatten(
+                -1, (nblock, BLOCK)
+            ) - 32.0
         else:
             values = q.float().unflatten(-1, (q.shape[-1] // BLOCK, BLOCK))
         return (values * scales.float().unsqueeze(-1)).flatten(-2)
@@ -157,11 +224,12 @@ FP8_E4M3 = KVQuantSpec(name="fp8_e4m3", storage_dtype=torch.float8_e4m3fn, max_m
 # GGML Q4_0, two values per byte: a block's signed extreme selects a scale and all
 # 16 codes represent [-8, 7] times that (possibly negative) scale.
 INT4 = KVQuantSpec(
-    name="int4", storage_dtype=torch.uint8, max_magnitude=8.0, elements_per_byte=2
+    name="int4", storage_dtype=torch.uint8, max_magnitude=8.0, bits=4
 )
+Q6_0 = KVQuantSpec(name="q6_0", storage_dtype=torch.uint8, max_magnitude=32.0, bits=6)
 NONE = KVQuantSpec(name="auto", storage_dtype=None, max_magnitude=0.0)
 
-_BY_NAME = {spec.name: spec for spec in (NONE, Q8_0, FP8_E4M3, INT4)}
+_BY_NAME = {spec.name: spec for spec in (NONE, Q8_0, FP8_E4M3, INT4, Q6_0)}
 _BY_NAME["q4_0"] = INT4
 KV_CACHE_DTYPES = tuple(_BY_NAME)
 
@@ -186,6 +254,7 @@ __all__ = [
     "Q8_0",
     "FP8_E4M3",
     "INT4",
+    "Q6_0",
     "NONE",
     "resolve_kv_quant",
 ]

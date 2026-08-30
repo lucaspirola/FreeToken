@@ -28,14 +28,22 @@ def spec_kv_bytes_per_token(spec, config) -> int:
     dtype. This number, times every token of every layer, is what frees VRAM for experts.
     The index slab stays bf16: it is never quantized.
     """
-    bytes_per_elem = _kv_bytes_per_element(config)
-    per_token = (
-        (1 if spec.mla else 2)  # MLA latent groups store one slab (V aliases K)
-        * spec.head_dim
+    if spec.mla:
+        bytes_per_pair = _kv_bytes_per_element(config)
+    else:
+        quant_k = getattr(config, "kv_quant_k", getattr(config, "kv_quant", None))
+        quant_v = getattr(config, "kv_quant_v", getattr(config, "kv_quant", None))
+        bytes_per_pair = sum(
+            q.bytes_per_element(config.dtype) if q is not None and q.enabled
+            else float(config.dtype.itemsize)
+            for q in (quant_k, quant_v)
+        )
+    per_side_elements = (
+        spec.head_dim
         * div_even(spec.num_kv_heads, config.tp_info.size, allow_replicate=True)
         * spec.num_layers
     )
-    return int(per_token * bytes_per_elem) + spec.index_head_dim * spec.num_index_layers * 2
+    return int(per_side_elements * bytes_per_pair) + spec.index_head_dim * spec.num_index_layers * 2
 
 
 def _kv_bytes_per_element(config) -> float:
