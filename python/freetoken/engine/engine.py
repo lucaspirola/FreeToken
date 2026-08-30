@@ -1885,6 +1885,19 @@ def _auto_pageable_gpu_layers(
             "layer on the direct pinned RAM -> GPU path"
         )
         return frozenset()
+    # Once at least one layer is pageable, decode also owns a bounded pinned
+    # gather arena. Charge it to the same resident-RAM budget so increasing the
+    # on-request agent ceiling cannot silently eat into host_ram_reserve_gb.
+    top_k = int(getattr(config.model_config, "num_experts_per_tok", 0) or 0)
+    max_requests = int(getattr(config, "max_running_req", 1) or 1)
+    stage_bytes = 0
+    if top_k:
+        stage_rows = 1 << max(0, (max_requests * top_k - 1).bit_length())
+        row_bytes = math.ceil(
+            bank_bytes / (num_moe_layers * config.model_config.num_experts)
+        )
+        stage_bytes = stage_rows * row_bytes
+        budget = max(0, budget - stage_bytes)
     n = min(num_moe_layers, math.ceil(num_moe_layers * (1 - budget / bank_bytes)))
     policy = "head+tail"
     ids: frozenset[int]
@@ -1923,7 +1936,8 @@ def _auto_pageable_gpu_layers(
         policy = "persisted measured-time-cost"
     logger.info_rank0(
         f"--moe-pageable-gpu: banks {bank_bytes / 2**30:.2f} GiB > pin budget "
-        f"{budget / 2**30:.2f} GiB effective resident budget; {n} MoE "
+        f"{budget / 2**30:.2f} GiB effective bank budget after "
+        f"{stage_bytes / 2**20:.1f} MiB staging; {n} MoE "
         f"layers use pageable staging ({policy}) "
         f"and GPU compute ({sorted(ids)})"
     )

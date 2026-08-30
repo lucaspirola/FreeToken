@@ -655,6 +655,43 @@ def test_offload_cache_rebuild_resizes_and_preserves_sources():
     assert torch.all(cache.id_of_slot == -1)
 
 
+def test_offload_cache_rebuild_refreshes_pageable_graph_descriptors():
+    from freetoken.moe.host_banks import HostResidency
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    _init_tp()
+    cache = OffloadMoeCache(
+        num_layers=1,
+        num_experts=4,
+        cache_size=6,
+        device=torch.device("cpu"),
+    )
+    cache.pageable_gpu = True
+    cache.set_bank_sources(
+        {
+            "gate_up": [torch.randn(4, 32, 8)],
+            "down": [torch.randn(4, 8, 16)],
+        },
+        [HostResidency.PAGEABLE.value],
+    )
+    cache._pageable_stage_capacity = 8
+    cache._pageable_stage_src_indices = torch.arange(6, dtype=torch.int32)
+    reset_calls = []
+
+    class _GatherTask:
+        def reset_stats(self):
+            reset_calls.append(True)
+
+    cache._pageable_gather_tasks = {0: _GatherTask()}
+
+    cache.rebuild(10)
+
+    assert cache.evict_slots.shape == (10,)
+    assert cache.src_indices.shape == (10,)
+    assert cache._pageable_stage_src_indices.tolist() == list(range(10))
+    assert reset_calls == [True]
+
+
 def test_offload_cache_rebuild_disables_prefill_overlap_when_too_small():
     from freetoken.moe.offload_cache import OffloadMoeCache
 

@@ -17,6 +17,12 @@ the already completed 262K/1M capacity results remain the long-context reference
 - Pageable row gathering now uses a persistent four-worker CPU pool (override with
   `FREETOKEN_PAGEABLE_GATHER_THREADS`). The pool parallelizes the two packed expert
   banks and routed rows without creating threads in the CUDA callback.
+- Pageable staging is now charged to the same resident-host budget as the expert
+  banks (157.5 MiB at an eight-agent Q6 ceiling), so the configured 3 GiB host-RAM
+  reserve remains intact instead of being reduced implicitly by wider admission.
+- Elastic MoE rebuilds refresh the pageable scatter's cache-sized identity index.
+  This fixes Q6 graph recapture across 4→8→4, while retaining the existing bounded
+  staging arena and resetting its telemetry to the same epoch as the GPU counters.
 - Idle decode telemetry ranks layers by measured gather time per step (using miss
   count estimates for presently pinned layers), persists a profile tied to the exact
   GGUF path/size/mtime, and applies it on the next clean start. Live WSL
@@ -33,6 +39,8 @@ the already completed 262K/1M capacity results remain the long-context reference
 | Q6 persisted placement applied, same short gate | 819.99 tok/s | 819.99 tok/s | 94.38 tok/s | 4/4 coherent |
 | Q6 parallel pageable gather, 4,096 + 256 | 852.70 tok/s | 852.70 tok/s | 105.00 tok/s | 4/4 coherent |
 | Q6 serial gather control, 4,096 + 256 | 2,206.21 tok/s | 2,206.21 tok/s | 86.21 tok/s | 4/4 coherent |
+| Q6/Q8 elastic 4→8→4, 4,096 + 128 | 2,113.14 tok/s | 2,113.14 tok/s | 126.62 tok/s | 8/8 coherent |
+| Q4/INT4 elastic 4→8→4, 4,096 + 128 | 5,042.52 tok/s | 5,042.52 tok/s | 229.47 tok/s | 8/8 coherent |
 
 The Q4 burst changed GDN slots `25 → 49 → 25` and MoE slots
 `5,635 → 4,682 → 5,635`; exact restoration means there is no permanent decode
@@ -49,6 +57,22 @@ strict paired estimate. Normalized measured gather bandwidth was 16.4 versus
 10.8 GiB/s (3.3x). The serial run's unusually high prefill is unrelated because
 pageable gathering is decode-only.
 
+The Q6 elastic run used ten pageable layers and restored GDN slots `49 → 25` and
+MoE slots `3,033 → 3,736` after the burst. Its 126.62 tok/s simultaneous decode is
+18.5% above the same-day four-agent 106.82 tok/s control, with no permanent
+small-batch residency toll. Expansion still has a visible one-time pause because
+several GiB of MoE cache must be rebuilt to fund the extra recurrent state; elastic
+eight-agent mode is therefore a throughput option, not a latency-free admission.
+
+## Rejected measured hot-row tier
+
+A 512 MiB pinned tier selected the most frequent individual experts from the saved
+LFU profile, trading one fully pinned layer for 208 hot rows spread over ten pageable
+layers. It passed all four coherence/isolation checks and reduced staged traffic from
+14.66 to 14.28 GiB, but simultaneous decode fell from 106.82 to 101.79 tok/s and
+prefill fell from 2,374.64 to 1,400.67 tok/s. The implementation was removed rather
+than retaining a losing default or dormant complexity.
+
 ## Command shape
 
 Q4 elastic production shape:
@@ -61,12 +85,13 @@ ft serve --model /path/to/Ornith-1.5-35B-Q4_K_M.gguf \
   --kv-grow-step-tokens 65536 --host-ram-reserve-gb 3
 ```
 
-Q6 pageable/profile shape:
+Q6 pageable/profile shape (four resident lanes, optional burst to eight):
 
 ```bash
 ft serve --model /path/to/Ornith-1.5-35B-Q6_K.gguf \
   --moe-backend offload --moe-cache-auto --moe-pageable-gpu \
-  --moe-collect-stats --max-running-requests 4 \
+  --moe-collect-stats --max-running-requests 8 \
+  --elastic-initial-requests 4 \
   --num-tokens 262144 --kv-cache-dtype q8_0 \
   --kv-grow-step-tokens 131072 --host-ram-reserve-gb 3
 ```

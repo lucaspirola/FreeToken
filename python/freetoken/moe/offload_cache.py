@@ -867,6 +867,19 @@ class OffloadMoeCache:
             self.prefill_overlap = False
         if self.prefill_overlap and not self._size_class_enabled:
             self._init_prefill_overlap_buffers()
+        # The pageable scatter's identity source-index vector is cache-sized.
+        # Refresh only that vector after evict_slots/src_indices adopt the new
+        # geometry. The bounded host staging, source pointers, and gather tasks
+        # depend on max batch/expert rows rather than cache size, so rebuilding
+        # their large pinned arenas here would add pure elastic-admission churn.
+        if self.pageable_gpu and self._pageable_stage_capacity:
+            self._pageable_stage_src_indices = torch.arange(
+                self.evict_slots.numel(), dtype=torch.int32, device=self.device
+            )
+        # Keep native pageable-callback telemetry on the same post-rebuild epoch
+        # as the device-side LRU counters reset above. The gather tasks survive a
+        # narrow descriptor refresh, so their host counters must be reset explicitly.
+        self.reset_stats()
 
     def set_alphas(
         self, gate_up_alpha: torch.Tensor | None, down_alpha: torch.Tensor | None

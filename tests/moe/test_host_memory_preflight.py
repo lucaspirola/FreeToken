@@ -113,6 +113,34 @@ def test_pageable_split_uses_post_weight_memavailable(monkeypatch):
     assert engine._auto_pageable_gpu_layers(config, 2) == frozenset({0})
 
 
+def test_pageable_split_charges_staging_to_host_reserve(monkeypatch):
+    import freetoken.engine.engine as engine
+    import freetoken.moe.expert_banks as expert_banks
+
+    model_config = _gguf_config(14)
+    model_config.num_experts_per_tok = 1
+    banks = expert_banks.bank_bytes_estimate(model_config)
+    assert banks is not None
+    raw_budget = banks // 2 + banks // 16
+    config = SimpleNamespace(
+        model_path="/not-ftw",
+        model_config=model_config,
+        host_ram_reserve_gb=4.0,
+        max_running_req=1,
+    )
+    monkeypatch.setattr(engine, "_pin_budget_bytes", lambda: raw_budget)
+    monkeypatch.setattr(
+        expert_banks,
+        "_host_meminfo_bytes",
+        lambda: {"MemAvailable": raw_budget + (4 << 30)},
+    )
+
+    # One staged expert row is 1/8 of the two-layer bank. Without charging
+    # staging, one layer would appear to fit; with the 4 GiB reserve honored,
+    # both tiny test layers must remain pageable.
+    assert engine._auto_pageable_gpu_layers(config, 2) == frozenset({0, 1})
+
+
 def test_ornith_q6_pageable_split_uses_profiled_low_miss_layers(monkeypatch):
     import freetoken.engine.engine as engine
     import freetoken.moe.expert_banks as expert_banks
