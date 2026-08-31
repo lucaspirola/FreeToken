@@ -83,6 +83,36 @@ def row_bytes(numel: int, ggml_type: int) -> int:
     return numel // block * type_size
 
 
+def expert_bank_geometry(config) -> tuple[int, int] | None:
+    """Uniform (gate_up, down) slot strides of the mixed-GGUF expert banks.
+
+    Mirrors what the per-model GGUF expert loaders allocate: every MoE layer's
+    bank is a flat ``[num_experts, stride]`` uint8 slot so all layers share one
+    bank shape and the ggml MoE kernels read the leading payload via
+    ``expert_stride_bytes``. The stride is the per-expert payload of the LARGEST
+    layer (max over the config's per-layer ``gguf_expert_types``), 64-byte
+    aligned:
+
+        gu   = align(max_layers  2*I * row_bytes(H, gu_type))
+        down = align(max_layers  H   * row_bytes(I, dn_type))
+
+    ``None`` when the config carries no GGUF expert geometry, an unknown or
+    malformed quant type -- callers then skip pre-load sizing instead of guessing.
+    """
+    types = getattr(config, "gguf_expert_types", None)
+    hidden = getattr(config, "hidden_size", None)
+    inter = getattr(config, "moe_intermediate_size", None)
+    if not types or not hidden or not inter:
+        return None
+    try:
+        gu = max(2 * inter * row_bytes(hidden, t) for t, _ in types)
+        down = max(hidden * row_bytes(inter, t) for _, t in types)
+    except (KeyError, ValueError, AssertionError):
+        return None
+    align = lambda n: (n + 63) // 64 * 64
+    return align(gu), align(down)
+
+
 def _f16_scales(raw: torch.Tensor, lo: int, hi: int) -> torch.Tensor:
     """Reinterpret bytes ``[lo:hi]`` (2 per block) of each block row as fp16 -> fp32 [N,1]."""
     return raw[:, lo:hi].contiguous().view(torch.float16).to(torch.float32)
@@ -227,6 +257,7 @@ __all__ = [
     "GGML_NAME",
     "BLOCK_SHAPE",
     "row_bytes",
+    "expert_bank_geometry",
     "dequant_q4_0",
     "dequant_q6_k", "dequant_q4_k", "dequant_q5_k", "dequant_iq2_xxs", "dequant_iq3_xxs", "dequant_iq1_s", "dequant_iq4_xs",
     "dequantize",
