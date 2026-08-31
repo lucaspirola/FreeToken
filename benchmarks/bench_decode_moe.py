@@ -85,6 +85,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"local jsonl instead of downloading {AIME_REPO}; default $FREETOKEN_AIME25_JSONL",
     )
     p.add_argument("--problem", type=int, default=0, help="0-based AIME problem index")
+    p.add_argument(
+        "--warm-problem",
+        type=int,
+        default=None,
+        help="optional different 0-based problem used only to warm the expert cache",
+    )
     p.add_argument("--decode", type=int, default=256, help="decode tokens to measure (D)")
     p.add_argument(
         "--cache",
@@ -368,6 +374,11 @@ def stream_generate(origin: str, model_id: str, problem: str, sampling: dict,
 
 def run_one(args: argparse.Namespace, backend: str) -> dict:
     problem, answer = load_problem(args.aime, args.problem)
+    warm_problem = (
+        load_problem(args.aime, args.warm_problem)[0]
+        if args.warm_problem is not None
+        else problem
+    )
     sampling, sampling_src = resolve_sampling(args.model, args.greedy)
     port = free_port()
     origin = f"http://127.0.0.1:{port}"
@@ -399,9 +410,16 @@ def run_one(args: argparse.Namespace, backend: str) -> dict:
             print(f"[bench] model_id={model_id}", flush=True)
             print(f"[bench] AIME25 #{args.problem} (answer {answer})", flush=True)
 
-            # Warm the expert cache to a steady-state decode working set.
-            stream_generate(origin, model_id, problem, sampling, args)
+            # Warm the expert cache to a steady-state decode working set.  A distinct
+            # problem is useful for checking that a stickier policy does not only win
+            # by replaying the exact same routing trace.
+            stream_generate(origin, model_id, warm_problem, sampling, args)
             r = stream_generate(origin, model_id, problem, sampling, args)
+            # Let the scheduler cross its idle boundary before teardown.  Diagnostic
+            # CUDA-event and MoE miss summaries are emitted from run_when_idle();
+            # terminating immediately after the final SSE chunk can otherwise lose
+            # the measurement for the request whose throughput we report.
+            time.sleep(1.0)
             stats = get_json(f"{origin}/v1/stats")
         finally:
             stop_server(proc)

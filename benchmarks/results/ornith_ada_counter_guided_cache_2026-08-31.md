@@ -72,6 +72,29 @@ KV, and the dequantized-output oracle. The retained 8-warps/2-stage launch won e
 | 8 / 1 | 367.016 ms | 1376.316 ms | 352.285 ms | 1317.452 ms |
 | 4 / 1 | 253.101 ms | 1024.165 ms | 280.974 ms | 1061.059 ms |
 
+## Rejected: changing the LFU decay interval
+
+The decode benchmark now supports `--warm-problem` so a candidate cache policy
+can be measured after a different routing trace, rather than only after replaying
+the exact measured prompt. It also waits for one scheduler idle boundary before
+teardown so the GPU-event and MoE miss summaries correspond to the reported
+second request.
+
+Q6_K / Q8_0, greedy decode 256, 32K pool, output hash `2c795ba5a29e` in every run:
+
+| LFU decay | repeated prompt tok/s | repeated GPU ms | switched prompt tok/s | switched GPU ms |
+|---:|---:|---:|---:|---:|
+| 128 | 46.47 | 20.691 | 42.29 | 22.896 |
+| **256 (retained)** | **47.35** | **20.387** | **41.49** | **23.452** |
+| 512 | 47.80 | 20.117 | 39.45 | 24.592 |
+
+The 512-step candidate helps an identical repeated route by about 1%, but loses
+4.9% after a prompt switch. The 128-step candidate gains 1.9% on the switch but
+loses 1.9% on the repeated route. Q4_K_M / INT4 was effectively neutral between
+256 and 512 (61.30 versus 61.26 tok/s, same `71b637b727f6` hash). The existing
+256-step aging therefore remains the balanced production policy; no serving-path
+change from this sweep was retained.
+
 ## Validation
 
 - 59 relevant mixed-GGUF/offload/cache tests passed.
