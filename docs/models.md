@@ -89,6 +89,13 @@ work too.
   1,536 tokens agreed. Explicit `--max-prefill-sequences` values still override the
   automatic policy. See
   `benchmarks/results/ornith_ada_multi_agent_scheduler_2026-08-31.md`.
+  Elastic agent graphs and recurrent state are also live-validated on sm_89 for
+  both production pairs: starting at two agents, four-way demand expands exact
+  graph/state capacity to four and teardown shrinks directly back to two while
+  restoring the surrendered MoE slots. On this 103 GiB WSL host, even Q6's expert
+  banks fit the CUDA pin budget, so `--moe-pageable-gpu` correctly selects no
+  pageable layers; the RTX 5080 low-RAM placement profile should not be enabled.
+  See `benchmarks/results/ornith_ada_elastic_multiagent_2026-08-31.md`.
 - On Blackwell (sm_120, e.g. RTX 5080 16 GB) the same command serves the **full
   262,144-token window**: `--attention-backend triton --max-seq-len-override 262144
   --num-tokens 262144 --kv-cache-dtype q4_0 --max-running-requests 1
