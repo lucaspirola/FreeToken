@@ -96,6 +96,14 @@ work too.
   banks fit the CUDA pin budget, so `--moe-pageable-gpu` correctly selects no
   pageable layers; the RTX 5080 low-RAM placement profile should not be enabled.
   See `benchmarks/results/ornith_ada_elastic_multiagent_2026-08-31.md`.
+  Final cold full-context gates also pass with the production growable layouts.
+  At 262K, Q4_K_M/INT4 reaches 357.06 tok/s prefill and 28.76 tok/s full-tail
+  decode; Q6_K/Q8_0 reaches 404.05 and 22.92 tok/s. Q6_K/Q8_0 additionally passes
+  a 524K YaRN-2x gate after three 128K live KV commits, at 222.01 tok/s prefill
+  and 15.34 tok/s decode. All three runs recover the exact long-range needle and
+  leave 0.66 GiB free after final graph capture. Use 64K growth for Q4/INT4 and
+  128K for Q6/Q8 on this host; see
+  `benchmarks/results/ornith_ada_final_long_context_2026-08-31.md`.
 - On Blackwell (sm_120, e.g. RTX 5080 16 GB) the same command serves the **full
   262,144-token window**: `--attention-backend triton --max-seq-len-override 262144
   --num-tokens 262144 --kv-cache-dtype q4_0 --max-running-requests 1
