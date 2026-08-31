@@ -70,7 +70,12 @@ work too.
   272--16384 tokens. Larger dense chunks return to transient dequant+cuBLAS, which is
   faster on this 70 W GPU. In a cold, identical 96,026-token server A/B, TTFT fell from
   176.91 s (`FREETOKEN_GGUF_DISABLE_MMA=1`) to 125.26 s (29.2% lower, 1.41x faster).
-  `int4` remains an alias for `q4_0`.
+  `int4` remains an alias for `q4_0`. The independently quantized Q8-K/Q6-V and
+  Q6-K/Q5-V tiers are also architecture-tuned on sm_89: the conservative eight-split
+  fallback left long batch-one attention under-parallelized, while measured 32-split
+  Q8/Q6 and 64-split Q6/Q5 launches reduce an isolated near-262K full-attention layer
+  by 58.6% and 60.3%, respectively. Both passed live Q6_K 32K needle and growable-KV
+  gates; see `benchmarks/results/ornith_ada_asymmetric_kv_2026-08-31.md`.
 - On Blackwell (sm_120, e.g. RTX 5080 16 GB) the same command serves the **full
   262,144-token window**: `--attention-backend triton --max-seq-len-override 262144
   --num-tokens 262144 --kv-cache-dtype q4_0 --max-running-requests 1
