@@ -76,6 +76,13 @@ work too.
   Q8/Q6 and 64-split Q6/Q5 launches reduce an isolated near-262K full-attention layer
   by 58.6% and 60.3%, respectively. Both passed live Q6_K 32K needle and growable-KV
   gates; see `benchmarks/results/ornith_ada_asymmetric_kv_2026-08-31.md`.
+  The automatic growable-GGUF prefill policy is also measured separately on Ada:
+  fresh prompts of at most 1,536 templated tokens may share one prefill forward,
+  while larger prompts stay serialized. Four-way Q4/INT4 tests favored grouping at
+  1,024 and 1,536 tokens but serialization at 2,048 and 4,096; the Q6/Q8 control at
+  1,536 tokens agreed. Explicit `--max-prefill-sequences` values still override the
+  automatic policy. See
+  `benchmarks/results/ornith_ada_multi_agent_scheduler_2026-08-31.md`.
 - On Blackwell (sm_120, e.g. RTX 5080 16 GB) the same command serves the **full
   262,144-token window**: `--attention-backend triton --max-seq-len-override 262144
   --num-tokens 262144 --kv-cache-dtype q4_0 --max-running-requests 1

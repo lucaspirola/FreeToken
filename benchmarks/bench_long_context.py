@@ -116,24 +116,45 @@ def _needle_token_index(ids: list[int], needle_ids: list[int]) -> int:
 
 
 def trim_filler(
-    tokenizer, text: str, expected: str, target: int
+    tokenizer,
+    text: str,
+    expected: str,
+    target: int,
+    *,
+    protected_prefix_tokens: int = 512,
+    protected_needle_context_tokens: int = 512,
+    protected_tail_tokens: int = 2048,
 ) -> tuple[str, int, int]:
     """Remove only unprotected token spans, preserving needle and question."""
     ids = tokenizer.encode(text, add_special_tokens=False)
     original = len(ids)
     if original <= target:
         return text, original, original
-    if target < 4096:
-        raise ValueError("target prompt must leave at least 4096 tokens for protected regions")
+    minimum_target = (
+        protected_prefix_tokens
+        + 2 * protected_needle_context_tokens
+        + protected_tail_tokens
+    )
+    if target < minimum_target:
+        raise ValueError(
+            f"target prompt must leave at least {minimum_target} tokens for "
+            "protected regions"
+        )
 
     needle_ids = tokenizer.encode(expected, add_special_tokens=False)
     needle = _needle_token_index(ids, needle_ids)
     # Protect the instruction, generous context around the needle, and the final
     # question. Remove from the largest filler gaps first, keeping source order.
     protected = [
-        (0, min(512, original)),
-        (max(0, needle - 512), min(original, needle + len(needle_ids) + 512)),
-        (max(0, original - 2048), original),
+        (0, min(protected_prefix_tokens, original)),
+        (
+            max(0, needle - protected_needle_context_tokens),
+            min(
+                original,
+                needle + len(needle_ids) + protected_needle_context_tokens,
+            ),
+        ),
+        (max(0, original - protected_tail_tokens), original),
     ]
     protected.sort()
     merged: list[tuple[int, int]] = []

@@ -65,6 +65,20 @@ def _resolve_max_prefill_seqs(config: SchedulerConfig) -> int:
     )
 
 
+def _auto_small_prompt_group_tokens(
+    config: SchedulerConfig,
+    max_prefill_seqs: int,
+    compute_capability: tuple[int, int],
+) -> int:
+    """Return the measured short-prompt grouping crossover for this GPU."""
+    if config.max_prefill_seqs is not None or max_prefill_seqs != 1:
+        return 0
+    # Four-way Ornith measurements put Ada's crossover between 1,536 and
+    # 2,048 tokens for both Q4_K_M/INT4 and Q6_K/Q8_0.  Keep the imported
+    # Blackwell crossover unchanged rather than extrapolating across GPUs.
+    return 1536 if compute_capability == (8, 9) else 1280
+
+
 def _elastic_target_capacity(initial: int, maximum: int, demand: int) -> int:
     """Smallest enabled request tier that can admit the current live demand."""
     return max(initial, min(maximum, demand))
@@ -138,6 +152,7 @@ class Scheduler(SchedulerIOMixin):
         )
         self.decode_manager = DecodeManager(config.page_size)
         max_prefill_seqs = _resolve_max_prefill_seqs(config)
+        compute_capability = torch.cuda.get_device_capability(self.device)
         self.prefill_manager = PrefillManager(
             self.cache_manager,
             self.table_manager,
@@ -146,10 +161,10 @@ class Scheduler(SchedulerIOMixin):
                 config.kv_grow_step_tokens and config.max_running_req > 1
             ),
             max_batch_seqs=max_prefill_seqs,
-            small_prompt_group_tokens=(
-                1280
-                if config.max_prefill_seqs is None and max_prefill_seqs == 1
-                else 0
+            small_prompt_group_tokens=_auto_small_prompt_group_tokens(
+                config,
+                max_prefill_seqs,
+                compute_capability,
             ),
         )
         if max_prefill_seqs:
