@@ -137,6 +137,19 @@ The narrower block lost 0.5% and was removed. Any meaningful remap improvement
 must therefore reduce the global victim-selection work rather than merely retune
 the existing Triton launch width.
 
+## Confirmed: the Ada expert-copy launch saturates PCIe
+
+Nsight Compute measured the exact two-bank Q6 cold-copy node with eight missing
+experts. The retained `1024 threads x 16 blocks/bank` launch completed in 1.61 ms,
+read mapped host memory at 14.94 GB/s over PCIe, reached 65.42% occupancy, and
+spilled no local memory. This is above the earlier application-level 12.8 GB/s
+estimate and leaves no credible bandwidth win from widening the gather grid.
+
+At the measured second-request miss rate (0.7403 expert/layer), the implied Q6
+expert traffic remains a material decode cost, but it can only be reduced by a
+better hit rate/cache representation or hidden under independent computation.
+The transfer kernel itself is retained unchanged.
+
 ## Validation
 
 - 59 relevant mixed-GGUF/offload/cache tests passed.
