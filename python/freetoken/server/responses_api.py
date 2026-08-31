@@ -233,6 +233,7 @@ def convert_responses_to_genspec(
     default_max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     reasoning_parser: str | None = None,
 ) -> GenSpec:
+    _, response_to_wire = _tool_name_maps(req.tools)
     # Collect every system/developer text — the top-level `instructions` PLUS any
     # system/developer-role input items (codex sends both: a system prompt as `instructions`
     # and a `developer` permissions message) — into ONE leading system message. Strict chat
@@ -248,7 +249,7 @@ def convert_responses_to_genspec(
         other.append({"role": "user", "content": req.input})
     else:
         for item in req.input:
-            for m in _convert_input_item(item):
+            for m in _convert_input_item(item, response_to_wire):
                 if m.get("role") == "system":
                     system_texts.append(m.get("content") or "")
                 else:
@@ -298,7 +299,10 @@ def convert_responses_to_genspec(
     )
 
 
-def _convert_input_item(item: dict[str, Any]) -> list[dict[str, Any]]:
+def _convert_input_item(
+    item: dict[str, Any],
+    response_to_wire: dict[tuple[str | None, str], str] | None = None,
+) -> list[dict[str, Any]]:
     itype = item.get("type", "message")
     if itype == "message" or ("role" in item and "type" not in item):
         # codex sends a "developer" role (Responses instructions). Chat templates only
@@ -308,6 +312,11 @@ def _convert_input_item(item: dict[str, Any]) -> list[dict[str, Any]]:
             role = "system"
         return [{"role": role, "content": _input_text(item.get("content"))}]
     if itype == "function_call":
+        namespace = item.get("namespace")
+        if namespace == "functions":
+            namespace = None
+        name = item.get("name", "")
+        wire_name = (response_to_wire or {}).get((namespace, name), name)
         return [
             {
                 "role": "assistant",
@@ -316,7 +325,7 @@ def _convert_input_item(item: dict[str, Any]) -> list[dict[str, Any]]:
                         "id": item.get("call_id") or item.get("id") or f"call_{uuid.uuid4().hex[:8]}",
                         "type": "function",
                         "function": {
-                            "name": item.get("name", ""),
+                            "name": wire_name,
                             "arguments": item.get("arguments", "") or "",
                         },
                     }
@@ -399,25 +408,77 @@ def _stringify(value: Any) -> str:
     return str(value)
 
 
+def _tool_name_maps(
+    tools: list[dict[str, Any]] | None,
+) -> tuple[dict[str, tuple[str | None, str]], dict[tuple[str | None, str], str]]:
+    """Map Codex Responses namespaces onto flat chat-template function names.
+
+    Current Codex groups even MCP and collaboration functions in ``namespace``
+    tools.  Local chat templates only understand flat function tools, while the
+    Responses result must restore ``namespace`` for Codex's router.  Preserve a
+    short member name when it is globally unique; qualify only collisions.
+    """
+    members: list[tuple[str | None, str]] = []
+    for tool in tools or []:
+        if tool.get("type") in (None, "function"):
+            fn = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+            members.append((None, fn.get("name", "")))
+        elif tool.get("type") == "namespace":
+            namespace = tool.get("name")
+            namespace = None if namespace in (None, "", "functions") else str(namespace)
+            for member in tool.get("tools") or []:
+                if isinstance(member, dict) and member.get("type") in (None, "function"):
+                    members.append((namespace, member.get("name", "")))
+
+    counts: dict[str, int] = {}
+    for _, name in members:
+        counts[name] = counts.get(name, 0) + 1
+
+    wire_to_response: dict[str, tuple[str | None, str]] = {}
+    response_to_wire: dict[tuple[str | None, str], str] = {}
+    for namespace, name in members:
+        wire_name = name if counts.get(name) == 1 else f"{namespace or 'functions'}__{name}"
+        wire_to_response[wire_name] = (namespace, name)
+        response_to_wire[(namespace, name)] = wire_name
+    return wire_to_response, response_to_wire
+
+
+def _response_tool_name(
+    wire_name: str, tools: list[dict[str, Any]] | None
+) -> tuple[str | None, str]:
+    return _tool_name_maps(tools)[0].get(wire_name, (None, wire_name))
+
+
 def _convert_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
     if not tools:
         return None
     converted: list[dict[str, Any]] = []
-    for tool in tools:
-        if tool.get("type") not in (None, "function"):
-            # Built-in tools (web_search, code_interpreter, ...) are unsupported; skip.
-            continue
-        fn = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+    _, response_to_wire = _tool_name_maps(tools)
+
+    def append_function(fn: dict[str, Any], namespace: str | None) -> None:
+        name = fn.get("name", "")
         converted.append(
             {
                 "type": "function",
                 "function": {
-                    "name": fn.get("name", ""),
+                    "name": response_to_wire.get((namespace, name), name),
                     "description": fn.get("description"),
                     "parameters": fn.get("parameters") or {"type": "object"},
                 },
             }
         )
+
+    for tool in tools:
+        if tool.get("type") in (None, "function"):
+            fn = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+            append_function(fn, None)
+        elif tool.get("type") == "namespace":
+            namespace = tool.get("name")
+            namespace = None if namespace in (None, "", "functions") else str(namespace)
+            for member in tool.get("tools") or []:
+                if isinstance(member, dict) and member.get("type") in (None, "function"):
+                    append_function(member, namespace)
+        # Built-in tools (web_search, code_interpreter, custom, ...) remain unsupported.
     return converted or None
 
 
@@ -454,12 +515,14 @@ def build_responses_response(
             )
         )
     for call in result.tool_calls:
+        namespace, name = _response_tool_name(call.name or "", req.tools)
         output.append(
             ResponseFunctionToolCall(
                 type="function_call",
                 id=f"fc_{uuid.uuid4().hex}",
                 call_id=f"call_{uuid.uuid4().hex[:24]}",
-                name=call.name or "",
+                name=name,
+                namespace=namespace,
                 arguments=call.parameters or "",
                 status="completed",
             )
@@ -590,7 +653,8 @@ async def responses_stream_generator(
             )))
             done_item = ResponseFunctionToolCall(
                 type="function_call", id=item_id, call_id=current["call_id"],
-                name=current["name"], arguments=args, status="completed",
+                name=current["name"], namespace=current["namespace"],
+                arguments=args, status="completed",
             )
         frames.append(_sse(ResponseOutputItemDoneEvent(
             type="response.output_item.done", sequence_number=seq.next(),
@@ -604,18 +668,20 @@ async def responses_stream_generator(
     def open_function_call(name: str, ordinal: int | None) -> list[str]:
         nonlocal current
         frames = close_current()
+        namespace, response_name = _response_tool_name(name, req.tools)
         item_id = f"fc_{uuid.uuid4().hex}"
         call_id = f"call_{uuid.uuid4().hex[:24]}"
         current = {
             "kind": "function_call", "id": item_id,
-            "call_id": call_id, "name": name, "args": "", "ordinal": ordinal,
+            "call_id": call_id, "name": response_name, "namespace": namespace,
+            "args": "", "ordinal": ordinal,
         }
         frames.append(_sse(ResponseOutputItemAddedEvent(
             type="response.output_item.added", sequence_number=seq.next(),
             output_index=output_index,
             item=ResponseFunctionToolCall(
                 type="function_call", id=item_id, call_id=call_id,
-                name=name, arguments="", status="in_progress",
+                name=response_name, namespace=namespace, arguments="", status="in_progress",
             ),
         )))
         return frames
