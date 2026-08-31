@@ -52,6 +52,31 @@ For these single-session runs, eliminating every gap outside the measured GPU st
 would cap scheduler-only gains at roughly 4%. Q6's 10.45% warm expert miss rate is
 the larger remaining cost.
 
+## Accepted: two-warp Q6 gate/up MMVQ on Ada
+
+Nsight Compute attached to the spawned scheduler after GPU performance-counter
+access was enabled. Ornith's Q6 routed+shared gate/up MMVQ measured 88.22 us per
+layer, 80.86% DRAM throughput, 58.83% compute throughput, and 47.03% achieved
+occupancy with the old one-warp block. Four gate/up warps had already lost on
+Ada; the previously untested two-warp midpoint was retained.
+
+Paired 32K Q6_K / Q8_0 runs (two runs per launch) gave:
+
+| Gate/up warps | Mean decode | Mean GPU step | Greedy SHA1 |
+|---:|---:|---:|---|
+| 1 | 47.65 tok/s | 20.342 ms | `2c795ba5a29e` |
+| **2 (retained on sm_89)** | **47.87 tok/s** | **20.246 ms** | `2c795ba5a29e` |
+
+That is a repeatable but deliberately modest +0.47% decode / -0.47% GPU-step
+change. Q4_K_M / INT4 was neutral-to-positive (61.30 to 61.33 tok/s; 15.724 to
+15.696 ms GPU step) and retained `71b637b727f6`. Ada therefore uses two gate/up
+warps and the previously selected four down warps for both formats. The process
+start overrides remain available for future hardware A/B checks.
+
+The profiler's analogous suggestion for dense Q6 MMVQ was rejected at model
+level: grouping 1/2/4 output rows produced 47.55/47.53/47.31 tok/s. The temporary
+dense dispatch was removed.
+
 ## Rejected: format-specific shared-MMVQ warp dispatch
 
 Isolated kernels favored Q4 gate/up at four warps and down at one warp, but two

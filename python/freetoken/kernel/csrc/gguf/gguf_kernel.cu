@@ -1081,7 +1081,9 @@ torch::Tensor ggml_moe_shared_a8_vec(
     int64_t tokens,
     int64_t expert_stride_bytes,
     bool broadcast,
-    bool multiwarp) {
+    int64_t warps) {
+  TORCH_CHECK(warps == 1 || warps == 2 || warps == 4,
+              "shared GGUF MMVQ warps must be 1, 2, or 4");
   TORCH_CHECK(type == 12 || type == 14, "shared GGUF fusion supports Q4_K/Q6_K");
   TORCH_CHECK(W.is_cuda() && W_shared.is_cuda() && X.is_cuda() && routed_ids.is_cuda());
   TORCH_CHECK(W.dtype() == torch::kUInt8 && W_shared.dtype() == torch::kUInt8);
@@ -1105,9 +1107,15 @@ torch::Tensor ggml_moe_shared_a8_vec(
     quantize_row_q8_1_cuda<scalar_t>(
         (scalar_t*)X.data_ptr(), (void*)quant_X.data_ptr(), col, activation_rows, stream);
     if (type == 12) {
-      if (multiwarp) {
+      if (warps == 4) {
         moe_vec_with_shared_cuda<scalar_t, QK_K, QI4_K, block_q4_K,
             VDR_Q4_K_Q8_1_MMVQ, vec_dot_q4_K_q8_1, 4>(
+            W.data_ptr(), W_shared.data_ptr(), quant_X.data_ptr(),
+            (scalar_t*)Y.data_ptr(), (int*)routed_ids.data_ptr(), routed_top_k,
+            tokens, col, row, quant_X.stride(0), expert_stride_bytes, broadcast, stream);
+      } else if (warps == 2) {
+        moe_vec_with_shared_cuda<scalar_t, QK_K, QI4_K, block_q4_K,
+            VDR_Q4_K_Q8_1_MMVQ, vec_dot_q4_K_q8_1, 2>(
             W.data_ptr(), W_shared.data_ptr(), quant_X.data_ptr(),
             (scalar_t*)Y.data_ptr(), (int*)routed_ids.data_ptr(), routed_top_k,
             tokens, col, row, quant_X.stride(0), expert_stride_bytes, broadcast, stream);
@@ -1119,9 +1127,15 @@ torch::Tensor ggml_moe_shared_a8_vec(
             tokens, col, row, quant_X.stride(0), expert_stride_bytes, broadcast, stream);
       }
     } else {
-      if (multiwarp) {
+      if (warps == 4) {
         moe_vec_with_shared_cuda<scalar_t, QK_K, QI6_K, block_q6_K,
             VDR_Q6_K_Q8_1_MMVQ, vec_dot_q6_K_q8_1, 4>(
+            W.data_ptr(), W_shared.data_ptr(), quant_X.data_ptr(),
+            (scalar_t*)Y.data_ptr(), (int*)routed_ids.data_ptr(), routed_top_k,
+            tokens, col, row, quant_X.stride(0), expert_stride_bytes, broadcast, stream);
+      } else if (warps == 2) {
+        moe_vec_with_shared_cuda<scalar_t, QK_K, QI6_K, block_q6_K,
+            VDR_Q6_K_Q8_1_MMVQ, vec_dot_q6_K_q8_1, 2>(
             W.data_ptr(), W_shared.data_ptr(), quant_X.data_ptr(),
             (scalar_t*)Y.data_ptr(), (int*)routed_ids.data_ptr(), routed_top_k,
             tokens, col, row, quant_X.stride(0), expert_stride_bytes, broadcast, stream);
@@ -1147,7 +1161,9 @@ torch::Tensor ggml_moe_shared_silu_down_a8_vec(
     int64_t row,
     int64_t tokens,
     int64_t expert_stride_bytes,
-    bool multiwarp) {
+    int64_t warps) {
+  TORCH_CHECK(warps == 1 || warps == 2 || warps == 4,
+              "shared GGUF MMVQ warps must be 1, 2, or 4");
   TORCH_CHECK(type == 12 || type == 14, "shared GGUF fusion supports Q4_K/Q6_K");
   TORCH_CHECK(GateUp.is_cuda() && W.is_cuda() && W_shared.is_cuda() && routed_ids.is_cuda());
   TORCH_CHECK(GateUp.dim() == 2 && GateUp.is_contiguous() && GateUp.size(1) % 2 == 0);
@@ -1172,9 +1188,15 @@ torch::Tensor ggml_moe_shared_silu_down_a8_vec(
     quantize_silu_row_q8_1_cuda<scalar_t>(
         (scalar_t*)GateUp.data_ptr(), quant_X.data_ptr(), col, activation_rows, stream);
     if (type == 12) {
-      if (multiwarp) {
+      if (warps == 4) {
         moe_vec_with_shared_cuda<scalar_t, QK_K, QI4_K, block_q4_K,
             VDR_Q4_K_Q8_1_MMVQ, vec_dot_q4_K_q8_1, 4>(
+            W.data_ptr(), W_shared.data_ptr(), quant_X.data_ptr(),
+            (scalar_t*)Y.data_ptr(), (int*)routed_ids.data_ptr(), routed_top_k,
+            tokens, col, row, quant_X.stride(0), expert_stride_bytes, false, stream);
+      } else if (warps == 2) {
+        moe_vec_with_shared_cuda<scalar_t, QK_K, QI4_K, block_q4_K,
+            VDR_Q4_K_Q8_1_MMVQ, vec_dot_q4_K_q8_1, 2>(
             W.data_ptr(), W_shared.data_ptr(), quant_X.data_ptr(),
             (scalar_t*)Y.data_ptr(), (int*)routed_ids.data_ptr(), routed_top_k,
             tokens, col, row, quant_X.stride(0), expert_stride_bytes, false, stream);
@@ -1186,9 +1208,15 @@ torch::Tensor ggml_moe_shared_silu_down_a8_vec(
             tokens, col, row, quant_X.stride(0), expert_stride_bytes, false, stream);
       }
     } else {
-      if (multiwarp) {
+      if (warps == 4) {
         moe_vec_with_shared_cuda<scalar_t, QK_K, QI6_K, block_q6_K,
             VDR_Q6_K_Q8_1_MMVQ, vec_dot_q6_K_q8_1, 4>(
+            W.data_ptr(), W_shared.data_ptr(), quant_X.data_ptr(),
+            (scalar_t*)Y.data_ptr(), (int*)routed_ids.data_ptr(), routed_top_k,
+            tokens, col, row, quant_X.stride(0), expert_stride_bytes, false, stream);
+      } else if (warps == 2) {
+        moe_vec_with_shared_cuda<scalar_t, QK_K, QI6_K, block_q6_K,
+            VDR_Q6_K_Q8_1_MMVQ, vec_dot_q6_K_q8_1, 2>(
             W.data_ptr(), W_shared.data_ptr(), quant_X.data_ptr(),
             (scalar_t*)Y.data_ptr(), (int*)routed_ids.data_ptr(), routed_top_k,
             tokens, col, row, quant_X.stride(0), expert_stride_bytes, false, stream);

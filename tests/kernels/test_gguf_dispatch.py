@@ -85,7 +85,7 @@ def test_mma_moe_token_range(qtype, capability, expected):
 @pytest.mark.parametrize(
     "capability,gate_up,expected",
     [
-        ((8, 9), True, False),
+        ((8, 9), True, True),
         ((8, 9), False, True),
         ((9, 0), False, False),
         ((12, 0), True, True),
@@ -94,6 +94,27 @@ def test_mma_moe_token_range(qtype, capability, expected):
 )
 def test_shared_vec_multiwarp(capability, gate_up, expected):
     assert kernel_gguf.shared_vec_multiwarp(capability, gate_up=gate_up) is expected
+
+
+@pytest.mark.parametrize(
+    "capability,gate_up,expected",
+    [
+        ((8, 9), True, 2),
+        ((8, 9), False, 4),
+        ((9, 0), True, 1),
+        ((12, 0), True, 4),
+    ],
+)
+def test_shared_vec_warps(capability, gate_up, expected):
+    assert kernel_gguf.shared_vec_warps(capability, gate_up=gate_up) == expected
+
+
+def test_shared_vec_warps_override(monkeypatch):
+    monkeypatch.setenv("FREETOKEN_GGUF_SHARED_GATE_WARPS", "2")
+    assert kernel_gguf.shared_vec_warps((8, 9), gate_up=True) == 2
+    monkeypatch.setenv("FREETOKEN_GGUF_SHARED_GATE_WARPS", "3")
+    with pytest.raises(ValueError, match="must be 1, 2, or 4"):
+        kernel_gguf.shared_vec_warps((8, 9), gate_up=True)
 
 
 @pytest.fixture
