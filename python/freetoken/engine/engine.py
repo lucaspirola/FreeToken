@@ -49,6 +49,25 @@ from freetoken.kvcache.linear_state_pool import (
 logger = init_logger(__name__)
 
 
+def _resolve_auto_prefill_chunk(
+    config: EngineConfig, compute_capability: tuple[int, int]
+) -> int:
+    """Resolve measured CLI prefill defaults without overriding explicit values."""
+    requested = int(config.max_extend_tokens)
+    if not getattr(config, "auto_prefill_chunk", False):
+        return requested
+    architecture = config.hf_config.architectures[0]
+    is_qwen35_gguf_moe = (
+        architecture == "Qwen3_5MoeGGUFForConditionalGeneration"
+        and config.model_config.gguf_expert_types is not None
+    )
+    # On the 70 W RTX 2000 Ada, Ornith's 8K expert prefill is both slower and
+    # larger than 4K. Keep the 5080/global 8K default for every other target.
+    if compute_capability == (8, 9) and is_qwen35_gguf_moe:
+        return min(requested, 4096)
+    return requested
+
+
 def _require_offload_cache_size(cache_size: int, num_experts: int) -> None:
     """The offload MoE cache needs at least one slot per expert per layer. A too-small size
     (e.g. a bare offload run with moe_cache_size unset and auto disabled) must fail loudly."""
@@ -391,6 +410,19 @@ class Engine:
 
         self.device = torch.device(f"cuda:{config.tp_info.rank}")
         torch.cuda.set_device(self.device)
+        requested_prefill_chunk = config.max_extend_tokens
+        resolved_prefill_chunk = _resolve_auto_prefill_chunk(
+            config, torch.cuda.get_device_capability(self.device)
+        )
+        if resolved_prefill_chunk != requested_prefill_chunk:
+            object.__setattr__(config, "max_extend_tokens", resolved_prefill_chunk)
+            logger.info_rank0(
+                "Auto prefill chunk: %d -> %d tokens for %s on sm_%d%d",
+                requested_prefill_chunk,
+                resolved_prefill_chunk,
+                config.hf_config.architectures[0],
+                *torch.cuda.get_device_capability(self.device),
+            )
         torch.manual_seed(42)
         self.stream = torch.cuda.Stream()
         torch.cuda.set_stream(self.stream)

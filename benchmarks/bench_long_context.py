@@ -47,7 +47,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--kv-cache-dtype", required=True)
     p.add_argument("--kv-cache-dtype-k")
     p.add_argument("--kv-cache-dtype-v")
-    p.add_argument("--prefill-chunk", type=int, default=8192)
+    p.add_argument(
+        "--prefill-chunk",
+        type=int,
+        help="explicit prefill chunk; omit to exercise the server's hardware-tuned default",
+    )
     p.add_argument("--mem-ratio", type=float, default=0.97)
     p.add_argument("--kv-grow-step-tokens", type=int)
     p.add_argument("--linear-state-slots", type=int)
@@ -396,7 +400,7 @@ def main() -> int:
         f"target={args.target_prompt_tokens}\n"
         f"[long] context={args.max_context} decode={args.decode} "
         f"kv={args.kv_cache_dtype} k={args.kv_cache_dtype_k or 'inherit'} "
-        f"v={args.kv_cache_dtype_v or 'inherit'} chunk={args.prefill_chunk} "
+        f"v={args.kv_cache_dtype_v or 'inherit'} chunk={args.prefill_chunk or 'auto'} "
         f"ratio={args.mem_ratio}\n"
         f"[long] server log: {log_path}",
         flush=True,

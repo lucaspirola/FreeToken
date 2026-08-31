@@ -50,13 +50,19 @@ work too.
   floor: `--max-running-requests 1 --max-seq-len-override 200000 --num-tokens 200000
   --kv-cache-dtype int4 --moe-cache-size 256 --disable-moe-prefill-overlap
   --swa-full-tokens-ratio 0.006 --memory-ratio 0.95`.
-- For Ornith Q4_K_M at 200K on a 16 GB GPU, use one request, Q4_0 KV, 5,000
-  expert slots, and the default 8K prefill chunks: `--max-running-requests 1
+- For Ornith Q4_K_M at 200K on a 16 GB GPU, use one request, Q4_0 KV, and 5,000
+  expert slots: `--max-running-requests 1
   --max-seq-len-override 200000 --num-tokens 200000 --kv-cache-dtype q4_0
-  --moe-backend offload --moe-cache-size 5000 --max-prefill-length 8192
-  --memory-ratio 0.95`. On the RTX 2000 Ada/WSL test host, cold 32K TTFT was
-  51.1 s at 8K chunks versus 54.6 s at 16K; `--moe-prefill-hit-d2d` was slower
-  on this stack and should remain disabled. Install the optional SGLang kernel
+  --moe-backend offload --moe-cache-size 5000 --memory-ratio 0.95`. When the
+  prefill size is omitted, sm_89 Qwen3.5-MoE GGUF now auto-selects 4K chunks;
+  explicit values remain authoritative and other GPUs retain 8K. On the RTX 2000
+  Ada/WSL test host, an identical cold 32K Q4/INT4 gate rose from 556.76 tok/s
+  end-to-end at 8K to 1,336.02 tok/s at 4K, while Q6/Q8 rose from 427.90 to
+  1,251.40 tok/s on a cold 16K gate. Both recovered the exact needle and decode
+  speed was unchanged. The 4K working set also used about 0.9 GiB less peak VRAM.
+  See `benchmarks/results/ornith_ada_prefill_chunk_2026-08-31.md`.
+  `--moe-prefill-hit-d2d` was slower on this stack and should remain disabled.
+  Install the optional SGLang kernel
   (`freetoken[sgl]`) for faster expert-route alignment. FreeToken's Q4_0 path matches
   llama.cpp's block quantizer and is validated with normal answers, OpenAI tool calls,
   and a 55.6K-token Claude Code Bash-tool round trip. The sm_89 attention tuning reduces
