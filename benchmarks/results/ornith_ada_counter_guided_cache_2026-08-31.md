@@ -166,6 +166,22 @@ rounding-dependent routing cost more than the overlap hid:
 The experiment was removed in full. The fused path remains both faster and more
 numerically stable for the routing trajectory.
 
+## Rejected: compute Q6 misses directly from mapped host memory
+
+An exact-projection screen compared Q6_K MMVQ over a mapped pinned-host pointer
+against the same kernel over VRAM, rotating across 16 experts to exceed L2. Direct
+host access was latency-limited despite its coalesced weight layout:
+
+| Projection | Mapped host | VRAM | Host slowdown |
+|---|---:|---:|---:|
+| gate/up, 2048 -> 1024 | 1.2276 ms | 0.2134 ms | 5.75x |
+| down, 512 -> 2048 | 0.6622 ms | 0.0737 ms | 8.98x |
+
+Using the counter-measured 0.2013 ms/expert gather cost, direct mapped-host MMVQ
+would take 1.8898 ms/expert versus 0.4884 ms for gather plus both VRAM MMVQs
+(3.87x slower). The temporary pointer kernel and microbenchmark were removed;
+FreeToken must continue staging misses into VRAM before expert calculation.
+
 ## Validation
 
 - 59 relevant mixed-GGUF/offload/cache tests passed.
