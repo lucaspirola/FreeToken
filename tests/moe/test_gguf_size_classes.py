@@ -16,7 +16,7 @@ def _sources():
     return {"gate_up": gate, "down": down}
 
 
-def test_mixed_gguf_uses_compact_decode_classes_and_explicit_prefill_buffers():
+def test_mixed_gguf_borrows_largest_decode_class_for_prefill_buffers():
     cache = OffloadMoeCache(
         num_layers=4,
         num_experts=2,
@@ -29,16 +29,18 @@ def test_mixed_gguf_uses_compact_decode_classes_and_explicit_prefill_buffers():
     cache.set_bank_sources(sources)
 
     assert cache._size_class_enabled
-    assert cache._class_ranges == [(0, 4), (4, 8)]
-    assert cache._lru_size == 8  # remaining four requested rows are 2E prefill buffers
+    assert cache._class_ranges == [(0, 4), (4, 12)]
+    assert cache._lru_size == 12
     small = cache.bank_views(layer_id=0)
     large = cache.bank_views(layer_id=2)
     assert [tuple(t.shape) for t in small] == [(4, 16), (4, 8)]
-    assert [tuple(t.shape) for t in large] == [(4, 16), (4, 12)]
+    assert [tuple(t.shape) for t in large] == [(8, 16), (8, 12)]
     assert [tuple(t.shape) for t in cache.prefill_bank_buffers] == [
         (2, 2, 16),
         (2, 2, 12),
     ]
+    assert cache.prefill_bank_buffers[0].data_ptr() == large[0].data_ptr()
+    assert cache.prefill_bank_buffers[1].data_ptr() == large[1].data_ptr()
 
     # Each class rewrites global ownership into local tensor rows.
     ids0 = torch.tensor([[0, 1]], dtype=torch.int32)
@@ -51,8 +53,13 @@ def test_mixed_gguf_uses_compact_decode_classes_and_explicit_prefill_buffers():
     assert cache.slot_for_id[2, :2].tolist() == [4, 5]
     assert cache.evict_slots[:2].tolist() == [0, 1]
 
-    # Overlap buffers accept the compact layer and preserve its real prefix.
+    # A prefill using buffer zero invalidates only the borrowed owners in the
+    # largest class; compact-class rows remain resident.
     cache.prefetch_prefill_layer(0)
+    assert cache.slot_for_id[0, :2].tolist() == [0, 1]
+    assert cache.slot_for_id[2, :2].tolist() == [-1, -1]
+
+    # Overlap buffers accept the compact layer and preserve its real prefix.
     views = cache.wait_prefill_layer(0)
     assert torch.equal(views[0], sources["gate_up"][0])
     assert torch.equal(views[1][:, :8], sources["down"][0])

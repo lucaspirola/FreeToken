@@ -265,6 +265,7 @@ class Scheduler(SchedulerIOMixin):
             decode_log_interval=config.decode_log_interval,
         )
         self._last_moe_stats_calls = 0
+        self._gpu_batch_profile: dict[str, dict[str, float | int | None]] = {}
         self._pageable_cost_history: dict[int, float] = {}
         self._pageable_trial: tuple[int, int] | None = None
         self._pageable_rejected: set[tuple[int, int]] = set()
@@ -275,6 +276,26 @@ class Scheduler(SchedulerIOMixin):
 
     def run_when_idle(self) -> None:
         """Called when the scheduler is idle to perform background tasks."""
+        if self.config.moe_collect_stats and self._gpu_batch_profile:
+            for phase, stats in sorted(self._gpu_batch_profile.items()):
+                batches = int(stats["batches"])
+                first = float(stats["first_host"])
+                last = float(stats["last_host"])
+                span_ms = max((last - first) * 1e3, 1e-6)
+                gpu_ms = float(stats["gpu_ms"])
+                enqueue_ms = float(stats["enqueue_ms"])
+                logger.info_rank0(
+                    "GPU batch profile (%s): batches=%d, gpu_step=%.3f ms/batch, "
+                    "wall_span=%.3f ms/batch, stream_coverage=%.1f%%, "
+                    "cpu_enqueue=%.3f ms/batch",
+                    phase,
+                    batches,
+                    gpu_ms / batches,
+                    span_ms / batches,
+                    100.0 * gpu_ms / span_ms,
+                    enqueue_ms / batches,
+                )
+            self._gpu_batch_profile.clear()
         moe = self.engine.moe_offload_cache
         if self.config.moe_collect_stats and moe is not None:
             stats = moe.decode_miss_stats()
@@ -282,6 +303,14 @@ class Scheduler(SchedulerIOMixin):
             if calls > self._last_moe_stats_calls:
                 logger.info_rank0("MoE decode miss stats: %s", stats)
                 per_layer = moe.decode_miss_stats_per_layer()["per_layer"]
+                highest_miss = sorted(
+                    per_layer,
+                    key=lambda row: (row["missing_per_step"], row["miss_rate"]),
+                    reverse=True,
+                )[:8]
+                logger.info_rank0(
+                    "MoE highest-miss layers (top 8): %s", highest_miss
+                )
                 pageable = [row for row in per_layer if row["pageable_stage_calls"]]
                 if pageable:
                     hottest = sorted(
@@ -628,6 +657,28 @@ class Scheduler(SchedulerIOMixin):
 
         batch, (_, next_tokens_cpu, copy_done) = last_data[0].batch, last_data[1]
         copy_done.synchronize()
+        gpu_started = getattr(batch, "_profile_gpu_started", None)
+        if gpu_started is not None:
+            now = time.perf_counter()
+            phase = batch.phase
+            stats = self._gpu_batch_profile.setdefault(
+                phase,
+                {
+                    "batches": 0,
+                    "gpu_ms": 0.0,
+                    "enqueue_ms": 0.0,
+                    "first_host": getattr(batch, "_profile_host_started"),
+                    "last_host": now,
+                },
+            )
+            stats["batches"] = int(stats["batches"]) + 1
+            stats["gpu_ms"] = float(stats["gpu_ms"]) + gpu_started.elapsed_time(
+                copy_done
+            )
+            stats["enqueue_ms"] = float(stats["enqueue_ms"]) + float(
+                getattr(batch, "_profile_enqueue_ms", 0.0)
+            )
+            stats["last_host"] = now
         # Several low-level drain tests intentionally invoke this method with a
         # minimal scheduler-shaped stub. Runtime schedulers always expose the
         # observer; keeping it optional here preserves that narrow test seam.
@@ -1801,11 +1852,21 @@ class Scheduler(SchedulerIOMixin):
 
     def _forward(self, forward_input: ForwardInput) -> ForwardOutput:
         batch, sample_args, input_mapping, output_mapping = forward_input
+        profile = self.config.moe_collect_stats
+        if profile:
+            batch._profile_host_started = time.perf_counter()
+            batch._profile_gpu_started = torch.cuda.Event(enable_timing=True)
+            batch._profile_gpu_started.record(self.engine.stream)
+            enqueue_started = time.perf_counter()
         batch.input_ids = self.token_pool[input_mapping]
         if self.toolcall_anchor_id is not None and not batch.is_prefill:
             self.cache_manager.snapshot_toolcall_anchor(batch.reqs)
         forward_output = self.engine.forward_batch(batch, sample_args)
         self.token_pool[output_mapping] = forward_output.next_tokens_gpu
+        if profile:
+            batch._profile_enqueue_ms = (
+                time.perf_counter() - enqueue_started
+            ) * 1e3
         self.decode_manager.filter_reqs(forward_input.batch.reqs)
         return forward_output
 

@@ -250,6 +250,7 @@ class OffloadMoeCache:
         self._layer_cache_class: list[int] = [0] * self.num_layers
         self._class_ranges: list[tuple[int, int]] = [(0, self.cache_size)]
         self._class_bank_caches: list[dict[str, torch.Tensor]] = []
+        self._prefill_borrow_class: int | None = None
         self._lru_size = self.cache_size
         # per-layer host residency: the GPU movement paths require "pinned"; LOCKED/PAGEABLE layers decode on the CPU executor and prefill via copy_missing's pageable branch
         # _unpinned_layers is the derived id set the hot paths test against
@@ -463,6 +464,7 @@ class OffloadMoeCache:
         self._lru_size = self.cache_size
         self._class_ranges = [(0, self.cache_size)]
         self._class_bank_caches = []
+        self._prefill_borrow_class = None
         self._variable_bank_rows.clear()
         self._bank_cache_shapes.clear()
         self.bank_sources.clear()
@@ -514,11 +516,10 @@ class OffloadMoeCache:
     ) -> None:
         """Allocate compact per-signature GGUF decode pools.
 
-        ``cache_size`` retains its public meaning: with prefill overlap, two
-        expert layers' worth of rows are reserved for the explicit double
-        buffer and the remainder is split across decode classes. This is the
-        same 2E region the legacy cache temporarily borrowed, but it no longer
-        dictates the Q6 stride of every Q4 slot.
+        ``cache_size`` retains its public meaning: the non-prefill portion is
+        split across decode classes and, with overlap, the largest class receives
+        another two expert layers' worth of rows. Those 2E rows are borrowed as
+        the double buffer during prefill and remain ordinary decode slots otherwise.
         """
         self._size_class_enabled = True
         self._variable_bank_rows = set(self.bank_schema)
@@ -546,6 +547,18 @@ class OffloadMoeCache:
         ]
         for i in range(usable - sum(capacities)):
             capacities[i % len(capacities)] += 1
+        # The explicit mixed-size prefill buffers have the largest signature. Borrow
+        # those same bytes as extra decode rows for that class between prefills, just
+        # like the uniform cache already borrows its first 2E rows. This changes no
+        # allocation size: the old standalone 2E buffer becomes 2E additional rows in
+        # the largest class, and prefill invalidates their LRU owners before reuse.
+        self._prefill_borrow_class = (
+            max(range(len(unique)), key=lambda i: sum(unique[i]))
+            if self.prefill_overlap
+            else None
+        )
+        if self._prefill_borrow_class is not None:
+            capacities[self._prefill_borrow_class] += reserve
         self._class_ranges = []
         begin = 0
         for capacity in capacities:
@@ -576,17 +589,9 @@ class OffloadMoeCache:
             max(sig[i] for sig in unique) for i in range(len(self.bank_schema))
         )
         compact = sum(capacities[c] * sum(unique[c]) for c in range(len(unique)))
-        if self.prefill_overlap:
-            compact += (
-                2
-                * self.num_experts
-                * sum(
-                    max(sig[i] for sig in unique) for i in range(len(self.bank_schema))
-                )
-            )
         logger.info(
-            "mixed-GGUF size-class cache ACTIVE: classes=%s, decode_slots=%d, "
-            "prefill_slots=%d, saved=%.1f MiB",
+            "mixed-GGUF size-class cache ACTIVE: classes=%s, decode_slots=%d "
+            "(including %d borrowed prefill slots), saved=%.1f MiB",
             [(unique[i], capacities[i]) for i in range(len(unique))],
             self._lru_size,
             reserve,
@@ -1025,21 +1030,18 @@ class OffloadMoeCache:
         self._prefill_buffer_released = [True, True]
         self._prefill_buffer_has_release_event = [False, False]
         if self._size_class_enabled:
-            # Explicit max-row buffers: compact decode classes cannot expose one
-            # uniform first-2E slab. Their memory is charged by reserving 2E from
-            # the requested logical cache size in _set_gguf_size_class_sources.
-            self.prefill_bank_buffers = []
-            for name in self.bank_schema:
-                per_layer = self.bank_sources[name]
-                max_layer = max(
-                    per_layer, key=lambda source: math.prod(source.shape[1:])
+            # The largest decode class owns the legacy-width rows required by every
+            # layer. Its first 2E rows double as the two prefill buffers; decode may
+            # occupy them between prefills, and _invalidate_prefill_buffer evicts those
+            # owners before a layer copy overwrites the bytes.
+            assert self._prefill_borrow_class is not None
+            caches = self._class_bank_caches[self._prefill_borrow_class]
+            self.prefill_bank_buffers = [
+                caches[name][: 2 * self.num_experts].view(
+                    2, self.num_experts, *caches[name].shape[1:]
                 )
-                buffer = self._alloc_device_bank_cache(
-                    (2, self.num_experts, *max_layer.shape[1:]),
-                    max_layer.dtype,
-                )
-                self.prefill_bank_buffers.append(buffer)
-                self.bank_caches[f"{name}.prefill"] = buffer
+                for name in self.bank_schema
+            ]
         else:
             # The double buffers borrow the slot cache's first 2 * num_experts slots
             # (one full expert layer per buffer), one view per registered bank.
@@ -1071,8 +1073,11 @@ class OffloadMoeCache:
 
     def _invalidate_prefill_buffer(self, buffer_id: int) -> None:
         if self._size_class_enabled:
-            return  # explicit buffers do not alias the decode LRU
-        slot_start = buffer_id * self.num_experts
+            assert self._prefill_borrow_class is not None
+            class_begin, _ = self._class_ranges[self._prefill_borrow_class]
+            slot_start = class_begin + buffer_id * self.num_experts
+        else:
+            slot_start = buffer_id * self.num_experts
         slot_end = slot_start + self.num_experts
         old_ids = self.id_of_slot[slot_start:slot_end]
         self.slot_for_id.view(-1)[old_ids[old_ids >= 0].long()] = -1

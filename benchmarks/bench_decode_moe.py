@@ -143,6 +143,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="pass --moe-prefill-hit-d2d to the server (off by default, matching the server default)",
     )
+    p.add_argument(
+        "--moe-collect-stats",
+        action="store_true",
+        help="collect graph-safe expert miss counters and print the idle summary",
+    )
     p.add_argument("--json", dest="json_out", default=None, help="append the result rows here")
     return p.parse_args(argv)
 
@@ -245,6 +250,8 @@ def serve_cmd(args: argparse.Namespace, backend: str, port: int) -> list[str]:
         cmd += ["--max-prefill-length", str(args.prefill_chunk)]
     if args.prefill_hit_d2d:
         cmd.append("--moe-prefill-hit-d2d")
+    if args.moe_collect_stats:
+        cmd.append("--moe-collect-stats")
     if args.cache > 0:
         cmd += ["--moe-cache-size", str(args.cache)]
     elif args.cache_rate is not None:
