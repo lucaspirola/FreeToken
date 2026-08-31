@@ -63,6 +63,25 @@ Every Q6 commit saw 1.99 GiB live free, committed 1.33 GiB, and retained the
 0.25 GiB guard. Prefill resumed normally after each expert-cache rebuild. Final
 batch-one graph capture left 0.66 GiB free in all three gates.
 
+## Rejected 96K Q8 growth step
+
+A paired cold 200,000-token Q6_K/Q8_0 screen compared a 98,304-token growth
+increment with the retained 131,072-token increment. Both used the 262,144-token
+ceiling, automatic 4K chunks, 0.97 memory ratio, the same synthetic needle, and
+128 forced output tokens.
+
+| Growth step | Rebuilds | Initial / intermediate / final expert slots | Cold prefill | Engine average | Final chunk | Full-tail decode | Result |
+|---:|---:|---|---:|---:|---:|---:|---|
+| 98,304 | 2 | 4,423 / 3,896 / 3,620 | 497.88 tok/s | 495.91 tok/s | 232.43 tok/s | 24.65 tok/s | PASS |
+| 131,072 | 1 | 4,277 / -- / 3,620 | **499.44 tok/s** | **497.39 tok/s** | **269.66 tok/s** | 24.51 tok/s | PASS |
+
+The 96K layout retained 276 additional experts from 131K through 192K, but the
+extra rebuild erased that benefit. Overall prefill differed by only 0.3%, decode
+by 0.6%, and both runs produced the identical output hash. The final 96K chunk,
+immediately after its second expert-cache rebuild, was 13.8% slower than the 128K
+control. The 96K candidate is therefore rejected: 128K remains the Q8_0 default
+on Ada.
+
 ## Commands
 
 ~~~bash
