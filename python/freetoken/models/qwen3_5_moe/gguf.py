@@ -412,14 +412,11 @@ def convert_qwen3_5_to_gguf(model, config: ModelConfig) -> None:
 
 
 def _expert_bank_geometry(config: ModelConfig) -> tuple[int, int]:
-    from freetoken.models.gguf.dequant import row_bytes
+    from freetoken.models.gguf.dequant import expert_bank_geometry
 
-    assert config.gguf_expert_types
-    h, inter = config.hidden_size, config.moe_intermediate_size
-    gu = max(2 * inter * row_bytes(h, t) for t, _ in config.gguf_expert_types)
-    down = max(h * row_bytes(inter, t) for _, t in config.gguf_expert_types)
-    align = lambda n: (n + 63) // 64 * 64
-    return align(gu), align(down)
+    geom = expert_bank_geometry(config)
+    assert geom is not None, "qwen35moe expert banks need gguf_expert_types"
+    return geom
 
 
 def load_gguf_expert_sources(

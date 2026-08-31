@@ -422,17 +422,11 @@ def convert_laguna_to_gguf(model, config: ModelConfig) -> None:
 
 def _expert_bank_geometry(config: ModelConfig):
     """Uniform flat-slot strides across MoE layers: max payload bytes, 64B aligned."""
-    from freetoken.models.gguf.dequant import row_bytes
+    from freetoken.models.gguf.dequant import expert_bank_geometry
 
-    assert config.gguf_expert_types, "laguna expert banks need gguf_expert_types"
-    H, I = config.hidden_size, config.moe_intermediate_size
-    gu_pay = {gu: 2 * I * row_bytes(H, gu) for gu, _ in config.gguf_expert_types}
-    dn_pay = {dn: H * row_bytes(I, dn) for _, dn in config.gguf_expert_types}
-
-    def align(n: int) -> int:
-        return (n + 63) // 64 * 64
-
-    return align(max(gu_pay.values())), align(max(dn_pay.values()))
+    geom = expert_bank_geometry(config)
+    assert geom is not None, "laguna expert banks need gguf_expert_types"
+    return geom
 
 
 def load_gguf_expert_sources(

@@ -486,6 +486,18 @@ def bank_bytes_estimate(model_config) -> int | None:
                 + projection_bytes(dn, hidden, inter)
                 for gu, dn in types
             )
+    if fmt == "gguf":
+        # Mixed-type GGUF route (qwen35moe / laguna GGUF): per-layer quant types,
+        # flat [E, stride] uint8 slots sized by the LARGEST per-expert payload
+        # (see expert_bank_geometry). Same uniform geometry the loaders allocate.
+        from freetoken.models.gguf.dequant import expert_bank_geometry
+
+        geom = expert_bank_geometry(model_config)
+        if not geom or not experts:
+            return None
+        gu_stride, down_stride = geom
+        num_layers = len(model_config.gguf_expert_types or ())
+        return num_layers * experts * (gu_stride + down_stride)
     if per_expert is None or not all((layers, experts, hidden, inter)):
         return None
     if fmt == "nvfp4" and not getattr(model_config, "expert_gated", True):
