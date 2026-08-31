@@ -120,6 +120,23 @@ loses 1.9% on the repeated route. Q4_K_M / INT4 was effectively neutral between
 256-step aging therefore remains the balanced production policy; no serving-path
 change from this sweep was retained.
 
+## Rejected: narrowing the LFU remap launch
+
+Nsight Compute measured the cold-miss `_ensure_experts_sized_kernel` at 24.83 us
+for Q6's 4,720-slot cache. The single-CTA reduction used 256 threads, 171
+registers/thread, 16.64% achieved occupancy, and no local-memory spills. A paired
+full-model screen checked whether halving the launch width would reduce the
+single-wave overhead:
+
+| Remap warps | Decode | GPU step | Warm miss rate | Greedy SHA1 |
+|---:|---:|---:|---:|---|
+| 4 | 49.50 tok/s | 19.563 ms | 9.2533% | `f133a27bc01c` |
+| **8 (retained)** | **49.74 tok/s** | **19.489 ms** | 9.2533% | `f133a27bc01c` |
+
+The narrower block lost 0.5% and was removed. Any meaningful remap improvement
+must therefore reduce the global victim-selection work rather than merely retune
+the existing Triton launch width.
+
 ## Validation
 
 - 59 relevant mixed-GGUF/offload/cache tests passed.
