@@ -150,6 +150,22 @@ expert traffic remains a material decode cost, but it can only be reduced by a
 better hit rate/cache representation or hidden under independent computation.
 The transfer kernel itself is retained unchanged.
 
+## Rejected: overlap expert copies with the shared expert
+
+A CUDA-graph-safe fork/join candidate moved routed-expert copies to the prefill
+side stream while the compute stream evaluated Ornith's independent shared expert.
+This required splitting the existing two-launch routed+shared MMVQ fusion. The
+candidate remained coherent, but the extra activation quantization, kernels, and
+rounding-dependent routing cost more than the overlap hid:
+
+| Path | Decode | GPU step | Second-request miss rate | Output |
+|---|---:|---:|---:|---|
+| **Fused routed+shared (retained)** | **49.74 tok/s** | **19.489 ms** | 9.2533% | coherent |
+| Split shared / overlapped copy | 47.29 tok/s | 20.456 ms | 10.4036% | coherent |
+
+The experiment was removed in full. The fused path remains both faster and more
+numerically stable for the routing trajectory.
+
 ## Validation
 
 - 59 relevant mixed-GGUF/offload/cache tests passed.
