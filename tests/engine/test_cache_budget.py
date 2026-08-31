@@ -202,6 +202,31 @@ def test_auto_prefill_chunk_preserves_explicit_or_non_ornith_values():
     assert _resolve_auto_prefill_chunk(config, (8, 9)) == 6144
 
 
+def test_ada_q6_ornith_enables_two_token_lfu_recency():
+    from freetoken.engine.engine import _ornith_ada_q6_lfu_recency_tokens
+
+    q6 = SimpleNamespace(
+        model_type="qwen3_5_moe",
+        num_layers=40,
+        num_experts=256,
+        hidden_size=2048,
+        moe_intermediate_size=512,
+        gguf_expert_types=((14, 14), (14, 14)),
+    )
+    assert _ornith_ada_q6_lfu_recency_tokens(q6, (8, 9)) == 2
+    assert _ornith_ada_q6_lfu_recency_tokens(q6, (12, 0)) == 0
+
+    q4 = SimpleNamespace(
+        model_type="qwen3_5_moe",
+        num_layers=40,
+        num_experts=256,
+        hidden_size=2048,
+        moe_intermediate_size=512,
+        gguf_expert_types=((12, 12), (12, 12)),
+    )
+    assert _ornith_ada_q6_lfu_recency_tokens(q4, (8, 9)) == 0
+
+
 def _dsv4_adjust_cfg(**over):
     # A DSV4 _adjust_config stub mirroring the real checkpoint (ds_fp4 experts, dsv4_sparse
     # attention, offload MoE backend).

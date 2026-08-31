@@ -84,6 +84,31 @@ model-level candidates averaged 59.36 tok/s versus the fresh 59.17 tok/s control
 (+0.31%, within host variance). Both retained `71b637b727f6`; the dispatch change
 was removed.
 
+## Accepted: two-token recency bonus for Q6 aging LFU
+
+Pure LFU makes every extra historical hit dominate recency. A bounded hybrid now
+adds one frequency point to resident experts used within the prior two decode
+tokens, after which the normal LFU frequency and LRU tie-breaker apply. One-, two-,
+and four-token windows were screened; two tokens produced the lowest miss rate.
+
+The default is deliberately limited to the uniform-Q6 Ornith geometry on sm_89.
+Q4, other GGUF mixtures, architectures, and GPUs retain pure aging LFU. Process
+environment overrides remain available for controlled experiments.
+
+Q6_K / Q8_0, 32K pool, greedy AIME decode256, adjacent control/candidate runs:
+
+| Warm route | Policy | Measured-request miss rate | Decode | GPU step | Greedy SHA1 |
+|---|---|---:|---:|---:|---|
+| repeated prompt | pure LFU | 6.4485% | 49.47 tok/s | 19.511 ms | `f133a27bc01c` |
+| repeated prompt | **LFU + 2-token bonus** | **6.4142%** | **49.62 tok/s** | **19.479 ms** | `f133a27bc01c` |
+| different prompt | pure LFU | 10.4412% | 43.35 tok/s | 22.256 ms | `f133a27bc01c` |
+| different prompt | **LFU + 2-token bonus** | **10.1471%** | **43.99 tok/s** | **22.041 ms** | `f133a27bc01c` |
+
+The production auto-dispatch, with no environment override, reproduced the
+candidate state at 49.92 tok/s, 19.457 ms GPU step, and 9.1989% cumulative miss
+rate. The gain is small on a repeated route (+0.3%) but grows to +1.5% after a
+prompt switch, where the cache needs to adapt while preserving recent reuse.
+
 ## Rejected: Ada extend-attention launch changes
 
 All cases used Ornith's exact 16Q/2KV/D256 geometry, a 4K new chunk, INT4 and Q8_0

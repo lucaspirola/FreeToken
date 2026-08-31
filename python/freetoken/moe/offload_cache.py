@@ -146,6 +146,10 @@ class OffloadMoeCache:
     # pcie_bw / cpu_bw ratio so the PCIe fetch and the CPU overflow GEMV take equal
     # time (perfect overlap): fetched : cpu = pcie : cpu - pcie.
     hybrid_fetch_fraction: float = 0.0
+    # Optional short-reuse bonus layered on aging LFU. The engine enables the
+    # measured two-token window only for Q6_K Ornith on Ada; zero keeps pure LFU.
+    lfu_recency_tokens: int = 0
+    lfu_recency_bonus: int = 1
 
     def __post_init__(self) -> None:
         policy_ids = {"lru": 0, "lfu": 1}

@@ -68,6 +68,25 @@ def _resolve_auto_prefill_chunk(
     return requested
 
 
+def _ornith_ada_q6_lfu_recency_tokens(
+    model_config, compute_capability: tuple[int, int]
+) -> int:
+    """Measured LFU/LRU blend for the uniform Q6_K Ornith checkpoint on Ada."""
+    types = getattr(model_config, "gguf_expert_types", None) or ()
+    if (
+        compute_capability == (8, 9)
+        and getattr(model_config, "model_type", None) == "qwen3_5_moe"
+        and getattr(model_config, "num_layers", None) == 40
+        and getattr(model_config, "num_experts", None) == 256
+        and getattr(model_config, "hidden_size", None) == 2048
+        and getattr(model_config, "moe_intermediate_size", None) == 512
+        and types
+        and all(pair == (14, 14) for pair in types)  # GGML Q6_K
+    ):
+        return 2
+    return 0
+
+
 def _require_offload_cache_size(cache_size: int, num_experts: int) -> None:
     """The offload MoE cache needs at least one slot per expert per layer. A too-small size
     (e.g. a bare offload run with moe_cache_size unset and auto disabled) must fail loudly."""
@@ -840,6 +859,13 @@ class Engine:
             cache.gguf_expert_types = config.model_config.gguf_expert_types
             cache.expert_hidden_size = config.model_config.hidden_size
             cache.expert_intermediate_size = config.model_config.moe_intermediate_size
+            cache.lfu_recency_tokens = _ornith_ada_q6_lfu_recency_tokens(
+                config.model_config, torch.cuda.get_device_capability(self.device)
+            )
+            if cache.cache_policy_id == 1 and cache.lfu_recency_tokens:
+                logger.info_rank0(
+                    "Ada Q6 expert cache: applying a two-token recency bonus to aging LFU"
+                )
             cache.pageable_gpu = config.moe_pageable_gpu
             cache.direct_device_banks = bool(config.kv_grow_step_tokens)
             # before set_bank_sources: the residency validation and the copy plan's skip of non-pinned layers key on the CPU-layer set
