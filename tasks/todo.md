@@ -10,7 +10,7 @@ Full plan: tasks/nemotron35-plan.md
 
 ## Phase 2 — kernels
 - [x] T0 flashinfer SSU probe (usable)
-- [ ] 2A1 layout/metadata/wiring  - [ ] 2A2 SSD prefill  - [ ] 2A3 decode SSU + gated norm
+- [ ] 2A1 layout/metadata/wiring  - [x] 2A2 SSD prefill (kernels validated)  - [ ] 2A3 decode SSU + gated norm
 - [ ] 2B1 b12x relu2  - [ ] 2B3 dense NVFP4 tuning
 - [ ] 2A4 integrate  - [ ] 2B2 triton fallback tuning  - [ ] 2B4 cache sizing study  - [ ] 1M multi-session spill gate
 

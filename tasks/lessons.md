@@ -41,3 +41,7 @@
   (64K/8 chunks exact, 128K/16 corrupted digits, 128K/32 collapse) and is
   identical under q8_0, fp8_e4m3 and bf16 KV -- so chunk-size sweeps, not KV
   dtype sweeps, are the discriminator for long-context regressions on hybrids.
+- GPU measurements are only valid with the GPU exclusive: wrap every server /
+  benchmark / timing run in `scripts/gpu_lock.sh`; overlap only CPU work.
+- Implementer subagents run with `isolation: worktree` and hand back a diff;
+  never on the shared tree.

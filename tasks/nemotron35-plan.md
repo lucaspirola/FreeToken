@@ -160,7 +160,7 @@ ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   --max-running-requests 16 --elastic-initial-requests 4 --kv-grow-step-tokens 65536 \
   --num-tokens 262144 --max-seq-len-override 131072 --kv-cache-dtype q8_0 \
   --attention-backend triton --moe-backend offload --moe-pageable-gpu --moe-cache-auto \
-  --memory-ratio 0.90 --max-prefill-length 8192 --host-ram-reserve-gb 3 --enable-cache-report
+  --memory-ratio 0.90 --max-prefill-length 4096 --host-ram-reserve-gb 3 --enable-cache-report
 ```
 User decision (2026-09-03): KV cache is FP8 (`fp8_e4m3`, FreeToken block scales; checkpoint k_scale/v_scale ignored). Quantized KV requires `--attention-backend triton`; bf16 KV + FlashInfer is the fallback (KV is
 only +0.75 GiB at 262K). Try `FREETOKEN_PIN_BUDGET_GB` ≥ 17 to drop `--moe-pageable-gpu` and
@@ -314,7 +314,11 @@ fallback loses prefix reuse for that call); JSON mode is probabilistic without c
 
 ---
 
-## Phase 4 — MTP speculative decoding (time-boxed, behind a flag)
+## Phase 4 — MTP speculative decoding (behind a flag; START ONLY IF the 2B4 study shows headroom)
+
+Go/no-go BEFORE any Phase 4 work: from 2B4's per-step expert-miss telemetry, estimate the verify
+step cost with up to 6(k+1) experts per MoE layer touched. If the projected decode gain at bs=1 is
+< 1.25× on the offload path, Phase 4 is skipped and the flag is not built.
 
 Flag `--speculative-mtp-tokens N` (`EngineConfig.spec_mtp_tokens`, default 0). Off = byte-identical
 state dict, cache geometry, and graph path (asserted by test).
@@ -351,6 +355,14 @@ amplifying PCIe fetches.
 
 ---
 
+## Process rules (2026-09-04)
+- GPU work runs one job at a time via `scripts/gpu_lock.sh`; CPU-only agents may overlap.
+- Implementer subagents use `isolation: worktree`.
+- Standing gates after any Mamba/prefill change: chunked-vs-single-pass equality test (GPU unit
+  test) and a 32,768-token synthetic needle with `--max-prefill-length 4096`.
+- Default `--max-prefill-length 4096` until the SSD kernels are wired in, then re-measure.
+- Nemotron docs live in `docs/nemotron.md` (split out of models.md once 2B1/3E land).
+
 ## Verification summary
 - Unit: `uv run pytest tests/models tests/engine tests/server tests/moe tests/kernels tests/kvcache
   tests/scheduler -m "not slow"`; ruff; `git diff --check`.
@@ -375,7 +387,7 @@ User decision (2026-09-04): 1M profile runs ONE resident session; all other sess
 served in sequence via spill/restore. The 16-way profile remains for short-context Switchyard traffic.
 Gate (after Phase 2 kernels, before Phase 4): 1M profile `--max-seq-len-override 1048576
 --num-tokens 1048576 --kv-cache-dtype fp8_e4m3 --attention-backend triton --kv-grow-step-tokens
-131072 --max-running-requests 1 --session-spill-ram-gb 12
+131072 --max-running-requests 1 --linear-state-slots <minimum accepted> --session-spill-ram-gb 12
 --session-spill-dir <nvme>`; three sessions grown to ~1M each with disjoint needles, one spilled
 and restored, all coherent; record prefill/decode tok/s and spill/restore times.
 KV dtype: Phase 1 A/B (2026-09-04) chose q8_0 — fp8_e4m3 flipped first tokens on cached-prefix reuse 3/6 runs; equal VRAM and reasoning score. See benchmarks/results/nemotron35_lightning_5080_2026-09-04.md.
