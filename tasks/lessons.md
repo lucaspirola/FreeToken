@@ -45,3 +45,6 @@
   benchmark / timing run in `scripts/gpu_lock.sh`; overlap only CPU work.
 - Implementer subagents run with `isolation: worktree` and hand back a diff;
   never on the shared tree.
+- Never `git commit -a` / `git add -A` while subagents are editing: it sweeps their
+  in-progress work into an unrelated commit (happened at 78ba6d7, rewritten). Always
+  `git add` explicit paths owned by the finished task.

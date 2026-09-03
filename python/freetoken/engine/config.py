@@ -31,17 +31,27 @@ class EngineConfig:
     # In growable multi-agent mode, tune the prefill/decode time slices from measured
     # forward durations. The controller is active only while both phases are runnable.
     adaptive_scheduler: bool = True
-    # Automatic Claude Code/Codex sessions protect their completed prefix for this
-    # grace period, then degrade to ordinary evictable radix state. Explicit client
-    # session_id leases remain protected until close/abort/TTL.
-    auto_session_grace_seconds: float = 30.0
+    # Safety-net timer for automatic Claude Code/Codex sessions: after this many idle
+    # seconds a completed prefix MAY be released, but only while another request is
+    # queued or the pools are exhausted. 0 (default) disables the timer -- a resident
+    # session is checkpointed on demand, when an admission actually fails. Explicit
+    # client session_id leases remain protected until close/abort/TTL.
+    auto_session_grace_seconds: float = 0.0
     # Idle automatic agent sessions may move their exact KV/GDN checkpoint out of
-    # VRAM. ``auto`` uses a private per-server directory below the FreeToken cache;
-    # None disables the cold tier. RAM is bounded independently and is admitted
-    # only while MemAvailable remains above host_ram_reserve_gb; overflow goes to disk.
+    # VRAM. ``auto`` uses a stable directory below the FreeToken cache; None disables
+    # the cold tier. RAM is bounded independently and is admitted only while
+    # MemAvailable remains above host_ram_reserve_gb; overflow goes to disk.
     session_spill_dir: str | None = "auto"
     session_spill_ram_gb: float = 2.0
     session_spill_disk_gb: float = 64.0
+    # Total retained checkpoint bytes (RAM + disk). A spill that would exceed it evicts
+    # least-recently-used checkpoints instead of refusing; checkpoint lifetime is
+    # therefore bounded by capacity and age, not by the session's lease TTL.
+    session_spill_limit_gb: float = 50.0
+    # Keep disk checkpoints across restarts (each carries a manifest with the model id,
+    # K/V layout fingerprint and prompt-prefix hash; startup adopts the matching ones and
+    # deletes the rest). False restores the old wipe-on-exit behavior.
+    session_spill_persist: bool = True
     attention_backend: str = "auto"
     moe_backend: str = "auto"
     # NVFP4 routed-expert GEMM backend (--nvfp4-backend): auto|marlin|flashinfer|triton.

@@ -216,10 +216,12 @@ class Scheduler(SchedulerIOMixin):
         self._session_spill_last_pressure_check = 0.0
         if self._session_spill_store is not None:
             logger.info_rank0(
-                "Cold session tier enabled: RAM %.2f GiB, disk %.2f GiB, "
-                "host reserve %.2f GiB",
+                "Cold session tier enabled: RAM %.2f GiB, disk %.2f GiB, retained "
+                "%.2f GiB total (%s), host reserve %.2f GiB",
                 config.session_spill_ram_gb,
                 config.session_spill_disk_gb,
+                config.session_spill_limit_gb,
+                "persistent" if config.session_spill_persist else "wiped on exit",
                 config.host_ram_reserve_gb,
             )
         self.tokenizer = load_tokenizer(config.model_path)
@@ -495,7 +497,7 @@ class Scheduler(SchedulerIOMixin):
             or self._pending_rebuild
             is not None  # a queued rebuild to drain toward + execute
             or getattr(self, "_growable_shrink_pending", False)
-            or bool(getattr(self, "_sessions", {}))
+            or self._sessions_need_service()
         )
         messages = self.receive_msg(blocking=blocking)
         if not messages and not blocking and self._only_idle_sessions(last_data):
@@ -553,7 +555,7 @@ class Scheduler(SchedulerIOMixin):
             or self.decode_manager.runnable
             or self._pending_rebuild is not None  # a queued rebuild to execute at idle
             or getattr(self, "_growable_shrink_pending", False)
-            or bool(getattr(self, "_sessions", {}))
+            or self._sessions_need_service()
         )
         messages = self.receive_msg(blocking=blocking)
         if not messages and not blocking and self._only_idle_sessions(None):
@@ -889,7 +891,8 @@ class Scheduler(SchedulerIOMixin):
                 tombstones = self._abort_tombstones = {}
             tombstones[msg.uid] = None
             if msg.session_id is not None:
-                self._close_session(msg.session_id)
+                # A disconnect ends the lease; the checkpoint stays for a reconnect.
+                self._close_session(msg.session_id, discard_state=False)
             # Unknown aborts normally consume their tombstone when the cross-worker UserMsg
             # catches up. Bound hostile/no-followup abort traffic without affecting realistic
             # in-flight concurrency.
@@ -1010,12 +1013,19 @@ class Scheduler(SchedulerIOMixin):
                 )
                 session.active_uid = None
                 now = time.monotonic()
-                session.expires_at = now + session.ttl_seconds
+                # A reclaimable lease that still holds GPU state does NOT age out: its
+                # residency ends on demand (an admission that needs the space), never on a
+                # clock. The idle TTL starts only once the state has been checkpointed --
+                # from then on it bounds the empty lease object, not the computation.
+                session.expires_at = (
+                    None if session.reclaimable else now + session.ttl_seconds
+                )
                 session.last_used_at = now
+                grace = max(0.0, float(self.config.auto_session_grace_seconds))
+                # Grace 0 (the default) means "resident until something needs the slot":
+                # the timer is a safety net, not the normal release path.
                 session.protected_until = (
-                    now + max(0.0, float(self.config.auto_session_grace_seconds))
-                    if session.reclaimable
-                    else None
+                    now + grace if session.reclaimable and grace > 0 else None
                 )
                 if old_handle is not None:
                     self.cache_manager.unlock(old_handle)
@@ -1026,13 +1036,26 @@ class Scheduler(SchedulerIOMixin):
         if getattr(getattr(self, "config", None), "elastic_initial_requests", None):
             self._elastic_resize_pending = True
 
-    def _close_session(self, session_id: str) -> tuple[bool, int | None]:
+    def _close_session(
+        self, session_id: str, *, discard_state: bool = True
+    ) -> tuple[bool, int | None]:
+        """Release a lease. ``discard_state`` also destroys its cold checkpoint.
+
+        Only an explicit client DELETE discards. Idle expiry and disconnect end the lease
+        but keep any existing checkpoint under the spill store's own capacity/age policy,
+        so a later request with the same prefix restores it instead of recomputing. Closing
+        never *creates* a checkpoint: spilling is demand-driven, and a cancel/disconnect
+        must not pay a full device-to-host copy.
+        """
         session = getattr(self, "_sessions", {}).pop(session_id, None)
         if session is None:
             return False, None
         if session.handle is not None:
             self.cache_manager.unlock(session.handle)
-        self._discard_session_spill(session)
+        if discard_state:
+            self._discard_session_spill(session)
+        else:
+            session.spill = None  # the store keeps it, keyed by session id
         if session.active_uid is not None:
             req = self.prefill_manager.abort_req(session.active_uid)
             req = req or self.decode_manager.abort_req(session.active_uid)
@@ -1059,10 +1082,12 @@ class Scheduler(SchedulerIOMixin):
             if lease.active_uid is None
             and lease.expires_at is not None
             and lease.expires_at <= now
+            # Resident automatic sessions are demand-evicted, never time-evicted.
+            and not (lease.reclaimable and lease.handle is not None)
         ]
         for sid in expired:
             logger.info_rank0("Session %s expired after idle timeout", sid)
-            self._close_session(sid)
+            self._close_session(sid, discard_state=False)
 
     def _release_soft_session_handle(self, session_id: str, reason: str) -> bool:
         session = getattr(self, "_sessions", {}).get(session_id)
@@ -1077,6 +1102,9 @@ class Scheduler(SchedulerIOMixin):
         self.cache_manager.unlock(session.handle)
         session.handle = None
         session.protected_until = None
+        # The lease no longer pins GPU state, so the idle TTL may now reap the identity.
+        # Its checkpoint outlives it under the spill store's capacity/age policy.
+        session.expires_at = time.monotonic() + session.ttl_seconds
         self._growable_shrink_pending = True
         logger.info_rank0(
             "Released soft session %s KV protection (%s); cached prefix is now evictable",
@@ -1124,7 +1152,7 @@ class Scheduler(SchedulerIOMixin):
         if linear_slot is None or len(page_indices) != len(session.token_ids):
             return
         self._discard_session_spill(session)
-        record = store.spill(session.token_ids, page_indices, linear_slot)
+        record = store.spill(session_id, session.token_ids, page_indices, linear_slot)
         if record is None:
             logger.warning(
                 "Cold checkpoint for session %s did not fit RAM/disk budgets; "
@@ -1145,9 +1173,15 @@ class Scheduler(SchedulerIOMixin):
     def _restore_cold_session(self, session_id: str, input_ids: torch.Tensor) -> bool:
         session = getattr(self, "_sessions", {}).get(session_id)
         store = getattr(self, "_session_spill_store", None)
-        if session is None or store is None or session.spill is None:
+        if session is None or store is None:
             return False
-        record = session.spill
+        # The store is the owner: a checkpoint outlives its lease (idle expiry, disconnect,
+        # or a server restart), so look it up by id rather than through the lease object.
+        record = session.spill or store.get(session_id)
+        if record is None:
+            return False
+        session.spill = record
+        store.touch(record)
         # The final prompt token must still run through prefill. Never install a checkpoint
         # that reaches beyond the client's exact reusable prefix.
         if record.num_pages > max(0, len(input_ids) - 1) or not torch.equal(
@@ -1189,7 +1223,35 @@ class Scheduler(SchedulerIOMixin):
             session.handle = None
             return False
 
+    def _session_resource_pressure(self) -> bool:
+        """True when the live pools cannot seat anything without reclaiming a lease."""
+        cm = getattr(self, "cache_manager", None)
+        if cm is None:
+            return False
+        try:
+            if getattr(cm, "is_hybrid", False) and cm.mamba_available_size < 3:
+                return True
+            return cm.available_size <= 0
+        except Exception:  # pressure probing must never break the loop
+            return False
+
     def _release_due_soft_sessions(self) -> None:
+        """Safety net only: a resident session is never spilled while nobody needs it.
+
+        ``--auto-session-grace-seconds 0`` (the default) disables the timer entirely; with a
+        timer configured, an expired grace still releases only under real demand -- a queued
+        request or exhausted pools. Admission failure is the normal trigger
+        (:meth:`_reclaim_for_blocked_prefill`).
+        """
+        config = getattr(self, "config", None)
+        grace = max(0.0, float(getattr(config, "auto_session_grace_seconds", 0.0) or 0.0))
+        if grace <= 0:
+            return
+        if not (
+            getattr(getattr(self, "prefill_manager", None), "runnable", False)
+            or self._session_resource_pressure()
+        ):
+            return
         now = time.monotonic()
         due = [
             sid
@@ -1203,44 +1265,76 @@ class Scheduler(SchedulerIOMixin):
         for sid in due:
             self._release_soft_session_handle(sid, "grace expired")
 
-    def _reclaim_soft_sessions_for_admission(self, msg: UserMsg) -> None:
+    def _reclaim_soft_sessions_for_admission(self, msg: UserMsg) -> bool:
         """Release oldest idle automatic leases only when they block this admission."""
-        cm = self.cache_manager
-        try:
-            from .utils import PendingReq
+        from .utils import PendingReq
 
-            pending = PendingReq(msg.uid, msg.input_ids, msg.sampling_params)
-            cached_len = cm.match_req(pending).cuda_handle.cached_len
-        except (
-            Exception
-        ):  # matching is repeated by admission; stay conservative on failure
-            cached_len = 0
-        needed = (
-            max(0, len(msg.input_ids) - cached_len) + msg.sampling_params.max_tokens
+        pending = PendingReq(msg.uid, msg.input_ids, msg.sampling_params)
+        return self._reclaim_soft_sessions_for_pending(
+            pending, getattr(msg, "session_id", None)
         )
 
-        def pressured() -> bool:
-            kv_short = needed > cm.available_size
-            state_short = cm.is_hybrid and cm.mamba_available_size < 3
-            return kv_short or state_short
-
-        if not pressured():
-            return
+    def _reclaim_soft_sessions_for_pending(self, pending, session_id: str | None) -> bool:
+        """Checkpoint the least-recently-used idle soft leases blocking ``pending``."""
         candidates = sorted(
             (
                 (lease.last_used_at, sid)
                 for sid, lease in getattr(self, "_sessions", {}).items()
-                if sid != msg.session_id
+                if sid != session_id
                 and lease.reclaimable
                 and lease.active_uid is None
                 and lease.handle is not None
             ),
             key=lambda item: item[0],
         )
+        if not candidates:  # cheap gate: skip the prefix match when nothing can be freed
+            return False
+        cm = self.cache_manager
+        try:
+            cached_len = cm.match_req(pending).cuda_handle.cached_len
+        except (
+            Exception
+        ):  # matching is repeated by admission; stay conservative on failure
+            cached_len = 0
+        needed = max(0, pending.input_len - cached_len) + pending.output_len
+
+        def pressured() -> bool:
+            kv_short = needed > cm.available_size
+            state_short = cm.is_hybrid and cm.mamba_available_size < 3
+            return kv_short or state_short
+
+        released = False
         for _last_used, sid in candidates:
             if not pressured():
                 break
-            self._release_soft_session_handle(sid, "admission pressure")
+            released |= self._release_soft_session_handle(sid, "admission pressure")
+        return released
+
+    def _reclaim_for_blocked_prefill(self) -> bool:
+        """A queued request just failed admission: free the oldest idle session slot.
+
+        This is the demand signal that replaces the idle grace timer. A session that was
+        mid-turn when its competitor arrived becomes a candidate the instant its turn ends,
+        so the queued request is admitted on the next scheduler iteration.
+        """
+        for pending in getattr(self.prefill_manager, "pending_list", ()):
+            if pending.chunked_req is not None:
+                continue  # a continuation already owns its resources
+            return self._reclaim_soft_sessions_for_pending(pending, pending.session_id)
+        return False
+
+    def _sessions_need_service(self) -> bool:
+        """True while a lease deadline or a live checkpoint still needs periodic polling.
+
+        A resident automatic session has no deadline (it is released on demand), so it must
+        not keep the receive loop spinning: without this the scheduler would poll at 100 Hz
+        for the whole life of an idle conversation.
+        """
+        for lease in getattr(self, "_sessions", {}).values():
+            if lease.expires_at is not None or lease.protected_until is not None:
+                return True
+        store = getattr(self, "_session_spill_store", None)
+        return bool(store is not None and store.num_records)
 
     def _only_idle_sessions(self, last_data: ForwardData | None) -> bool:
         return (
@@ -1681,12 +1775,16 @@ class Scheduler(SchedulerIOMixin):
                 batch = self.prefill_manager.schedule_next_batch(
                     self._adaptive_prefill_budget()
                 )
+                if batch is None and self.prefill_manager.runnable:
+                    self._reclaim_for_blocked_prefill()
                 self._growable_decode_steps = 0
         else:
             batch = self.prefill_manager.schedule_next_batch(self.prefill_budget)
             if batch is not None:
                 self._growable_decode_steps = 0
             else:
+                if self.prefill_manager.runnable:
+                    self._reclaim_for_blocked_prefill()
                 batch = self.decode_manager.schedule_next_batch()
         if batch is None:
             return None

@@ -1,22 +1,37 @@
 """Bounded cold storage for reclaimable agent-session inference state.
 
-The cache is deliberately process-local.  A checkpoint is useful only while the exact
-model, quantized KV layout, and radix-cache generation remain alive; server restart files
-are therefore cleaned with their owning :class:`SessionSpillStore` and never trusted.
+A checkpoint is useful only while the exact model and quantized KV layout stay the same,
+so every record carries a manifest with the model id, the K/V layout fingerprint, and the
+sha256 of its prompt prefix.  Records live in deterministic, session-keyed directories under
+a stable root: a restarted server adopts the ones whose manifest still matches the live pool
+and deletes everything else (which also collects directories leaked by a crash).
+
+Retention is by capacity and age, never by lease lifetime: a spill that would exceed the
+total byte cap (or the filesystem guard) evicts least-recently-used checkpoints until it
+fits, and only a single record larger than the whole cap is refused.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import shutil
-import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
 import torch
+
+from freetoken.utils import init_logger
+
+logger = init_logger(__name__)
+
+MANIFEST_NAME = "manifest.json"
+TOKENS_NAME = "tokens.pt"
+MANIFEST_VERSION = 1
 
 
 @dataclass
@@ -37,7 +52,11 @@ class SessionSpillRecord:
     tier: str
     chunks: list[SpillChunk]
     valid: bool = True
+    session_id: str = ""
+    # Wall-clock so that ages survive a restart; ``last_used_at`` is the LRU key.
     created_at: float = 0.0
+    last_used_at: float = 0.0
+    directory: Path | None = field(default=None)
 
 
 def _mem_available_bytes() -> int:
@@ -60,6 +79,31 @@ def _auto_root() -> Path:
     return base / "freetoken" / "session-spill"
 
 
+def _jsonable(value):
+    """Canonical JSON form of a fingerprint tuple (tuples and lists compare equal)."""
+    if isinstance(value, (tuple, list)):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _is_ours(entry: Path) -> bool:
+    """Only entries this store's layouts can produce are eligible for startup GC."""
+    name = entry.name
+    if entry.is_dir():
+        # Current layout: sha256(session id). Legacy layout: one mkdtemp root per server.
+        return (len(name) == 64 and all(c in "0123456789abcdef" for c in name)) or (
+            name.startswith("server-") or name.startswith("checkpoint-")
+        )
+    return entry.suffix in {".pt", ".tmp", ".json"}
+
+
+def _prefix_hash(token_ids: torch.Tensor) -> str:
+    tokens = token_ids.detach().to(device="cpu", dtype=torch.int32).contiguous()
+    return hashlib.sha256(tokens.numpy().tobytes()).hexdigest()
+
+
 class SessionSpillStore:
     """RAM-first, disk-overflow checkpoint store with hard per-process budgets."""
 
@@ -72,19 +116,33 @@ class SessionSpillStore:
         ram_budget_bytes: int,
         disk_budget_bytes: int,
         host_reserve_bytes: int,
+        limit_bytes: int | None = None,
+        persist: bool = True,
+        model_id: str = "",
     ) -> None:
         self.kv_pool = kv_pool
         self.linear_state_pool = linear_state_pool
         self.ram_budget_bytes = max(0, int(ram_budget_bytes))
         self.disk_budget_bytes = max(0, int(disk_budget_bytes))
         self.host_reserve_bytes = max(0, int(host_reserve_bytes))
+        # Total RAM+disk retention cap. ``None`` keeps the per-tier budgets as the only bound.
+        self.limit_bytes = (
+            self.ram_budget_bytes + self.disk_budget_bytes
+            if limit_bytes is None
+            else max(0, int(limit_bytes))
+        )
+        self.persist = bool(persist)
+        self.model_id = str(model_id)
         self.ram_bytes = 0
         self.disk_bytes = 0
         self._records: list[SessionSpillRecord] = []
+        self._by_session: dict[str, SessionSpillRecord] = {}
         base = _auto_root() if directory == "auto" else Path(directory).expanduser()
         base.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self.root = Path(tempfile.mkdtemp(prefix="server-", dir=base))
-        self.root.chmod(0o700)
+        # Stable, non-random root: checkpoints are addressable across restarts, and the
+        # startup scan below is what reclaims anything a crash left behind.
+        self.root = base
+        self._adopt_root()
 
     @classmethod
     def create_if_supported(cls, engine, config) -> SessionSpillStore | None:
@@ -107,7 +165,15 @@ class SessionSpillStore:
             ram_budget_bytes=int(config.session_spill_ram_gb * (1 << 30)),
             disk_budget_bytes=int(config.session_spill_disk_gb * (1 << 30)),
             host_reserve_bytes=int(config.host_ram_reserve_gb * (1 << 30)),
+            limit_bytes=int(config.session_spill_limit_gb * (1 << 30)),
+            persist=bool(getattr(config, "session_spill_persist", True)),
+            model_id=str(getattr(config, "model_path", "")),
         )
+
+    # ------------------------------------------------------------------ layout
+
+    def _record_dir(self, session_id: str) -> Path:
+        return self.root / hashlib.sha256(session_id.encode("utf-8")).hexdigest()
 
     def _payload_bytes(self, num_pages: int, token_ids: torch.Tensor) -> int:
         return (
@@ -116,22 +182,202 @@ class SessionSpillStore:
             + token_ids.numel() * 4
         )
 
+    # ------------------------------------------------------------- persistence
+
+    def _write_manifest(self, record: SessionSpillRecord) -> None:
+        directory = record.directory
+        if directory is None or record.tier != "disk":
+            return
+        manifest = {
+            "version": MANIFEST_VERSION,
+            "session_id": record.session_id,
+            "model_id": self.model_id,
+            "prefix_sha256": _prefix_hash(record.token_ids),
+            "num_tokens": int(record.token_ids.numel()),
+            "num_pages": int(record.num_pages),
+            "byte_size": int(record.byte_size),
+            "fingerprint": _jsonable(record.fingerprint),
+            "created_at": record.created_at,
+            "last_used_at": record.last_used_at,
+            "chunks": [
+                [chunk.family, chunk.layer, chunk.start, chunk.file.name]
+                for chunk in record.chunks
+                if chunk.file is not None
+            ],
+        }
+        path = directory / MANIFEST_NAME
+        tmp = directory / (MANIFEST_NAME + ".tmp")
+        tmp.write_text(json.dumps(manifest), encoding="utf-8")
+        tmp.chmod(0o600)
+        tmp.replace(path)
+
+    def _load_record(self, directory: Path) -> SessionSpillRecord | None:
+        """Rebuild one on-disk record, or return None when it must be deleted."""
+        try:
+            manifest = json.loads((directory / MANIFEST_NAME).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(manifest, dict) or manifest.get("version") != MANIFEST_VERSION:
+            return None
+        session_id = manifest.get("session_id")
+        if not isinstance(session_id, str) or self._record_dir(session_id) != directory:
+            return None
+        if manifest.get("model_id") != self.model_id:
+            return None
+        live = self.kv_pool.session_spill_fingerprint()
+        if manifest.get("fingerprint") != _jsonable(live):
+            return None
+        try:
+            tokens = torch.load(directory / TOKENS_NAME, map_location="cpu", weights_only=True)
+        except Exception:
+            return None
+        if not isinstance(tokens, torch.Tensor) or tokens.dtype != torch.int32:
+            return None
+        if tokens.numel() != manifest.get("num_tokens"):
+            return None
+        if _prefix_hash(tokens) != manifest.get("prefix_sha256"):
+            return None
+        chunks: list[SpillChunk] = []
+        for entry in manifest.get("chunks", ()):
+            try:
+                family, layer, start, name = entry
+                path = directory / str(name)
+            except (TypeError, ValueError):
+                return None
+            if path.parent != directory or not path.is_file():
+                return None
+            chunks.append(SpillChunk(str(family), int(layer), int(start), file=path))
+        if not chunks:
+            return None
+        return SessionSpillRecord(
+            token_ids=tokens,
+            num_pages=int(manifest.get("num_pages", 0)),
+            byte_size=int(manifest.get("byte_size", 0)),
+            fingerprint=live,
+            tier="disk",
+            chunks=chunks,
+            session_id=session_id,
+            created_at=float(manifest.get("created_at", 0.0)),
+            last_used_at=float(manifest.get("last_used_at", 0.0)),
+            directory=directory,
+        )
+
+    def _adopt_root(self) -> None:
+        """Adopt still-valid checkpoints under the root; delete stale or foreign ones."""
+        adopted = deleted = 0
+        try:
+            entries = sorted(self.root.iterdir())
+        except OSError:
+            return
+        for entry in entries:
+            record = None
+            if self.persist and entry.is_dir():
+                try:
+                    record = self._load_record(entry)
+                except Exception:  # a corrupt record is never an admission gate
+                    record = None
+            if record is None:
+                if not _is_ours(entry):
+                    # Never delete something this store could not have written: a spill
+                    # directory the operator shares with other content stays intact.
+                    logger.warning(
+                        "Ignoring unrecognized entry %s in the session spill root", entry
+                    )
+                    continue
+                if entry.is_dir():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink(missing_ok=True)
+                deleted += 1
+                continue
+            self._track(record)
+            adopted += 1
+        while (self.ram_bytes + self.disk_bytes) > self.limit_bytes and self._evict_one_lru():
+            pass
+        if adopted or deleted:
+            logger.info_rank0(
+                "Session spill root %s: adopted %d checkpoint(s), removed %d stale entr(ies)",
+                self.root,
+                adopted,
+                deleted,
+            )
+
+    # -------------------------------------------------------------- accounting
+
+    def _track(self, record: SessionSpillRecord) -> None:
+        self.discard(self._by_session.get(record.session_id))
+        self._records.append(record)
+        if record.session_id:
+            self._by_session[record.session_id] = record
+        if record.tier == "ram":
+            self.ram_bytes += record.byte_size
+        else:
+            self.disk_bytes += record.byte_size
+
+    @property
+    def num_records(self) -> int:
+        return len(self._records)
+
+    def get(self, session_id: str) -> SessionSpillRecord | None:
+        """Find a checkpoint by session id, even after its lease object is gone."""
+        record = self._by_session.get(session_id)
+        return record if record is not None and record.valid else None
+
+    def touch(self, record: SessionSpillRecord | None) -> None:
+        if record is None or not record.valid:
+            return
+        record.last_used_at = time.time()
+        try:
+            self._write_manifest(record)
+        except OSError:
+            pass
+
+    def _evict_one_lru(self, exclude_session: str | None = None) -> bool:
+        candidates = [
+            record
+            for record in self._records
+            if record.valid and record.session_id != exclude_session
+        ]
+        if not candidates:
+            return False
+        victim = min(candidates, key=lambda record: (record.last_used_at, record.created_at))
+        logger.info_rank0(
+            "Evicting cold session checkpoint %s (%.2f GiB, %s) to stay inside the "
+            "session spill cap",
+            victim.session_id,
+            victim.byte_size / (1 << 30),
+            victim.tier,
+        )
+        self.discard(victim)
+        return True
+
     def _choose_tier(self, byte_size: int) -> str | None:
         # The extra 256 MiB covers one bounded D2H gather and Python/torch metadata.
         ram_headroom = _mem_available_bytes() - self.host_reserve_bytes - (256 << 20)
         if byte_size <= self.ram_budget_bytes - self.ram_bytes and byte_size <= ram_headroom:
             return "ram"
-        try:
-            free_disk = shutil.disk_usage(self.root).free
-        except OSError:
-            free_disk = 0
-        if byte_size <= self.disk_budget_bytes - self.disk_bytes and byte_size + (1 << 30) <= free_disk:
+        if self._disk_has_room(byte_size):
             return "disk"
         return None
+
+    def _reserve_tier(self, byte_size: int, session_id: str) -> str | None:
+        """Pick a tier for ``byte_size``, evicting least-recently-used records to fit."""
+        if byte_size > self.limit_bytes:
+            return None  # a single record larger than the whole cap is refused
+        while True:
+            if self.ram_bytes + self.disk_bytes + byte_size <= self.limit_bytes:
+                tier = self._choose_tier(byte_size)
+                if tier is not None:
+                    return tier
+            if not self._evict_one_lru(session_id):
+                return None
+
+    # ------------------------------------------------------------------ spill
 
     @torch.inference_mode()
     def spill(
         self,
+        session_id: str,
         token_ids: torch.Tensor,
         page_indices: torch.Tensor,
         linear_slot: int,
@@ -139,10 +385,14 @@ class SessionSpillStore:
         tokens = token_ids.detach().to(device="cpu", dtype=torch.int32).clone()
         num_pages = int(page_indices.numel())
         byte_size = self._payload_bytes(num_pages, tokens)
-        tier = self._choose_tier(byte_size)
+        # Drop any previous checkpoint for this session first: its directory is the same
+        # deterministic path this spill is about to write.
+        self.discard(self.get(session_id))
+        tier = self._reserve_tier(byte_size, session_id)
         if tier is None:
             return None
 
+        now = time.time()
         chunks: list[SpillChunk] = []
         record = SessionSpillRecord(
             token_ids=tokens,
@@ -151,7 +401,9 @@ class SessionSpillStore:
             fingerprint=self.kv_pool.session_spill_fingerprint(),
             tier=tier,
             chunks=chunks,
-            created_at=time.monotonic(),
+            session_id=session_id,
+            created_at=now,
+            last_used_at=now,
         )
         target = None
         try:
@@ -161,8 +413,10 @@ class SessionSpillStore:
                 torch.cuda.synchronize(page_indices.device)
             sources = self.kv_pool.iter_session_spill_tensors(page_indices, chunk_pages=16_384)
             if tier == "disk":
-                target = Path(tempfile.mkdtemp(prefix="checkpoint-", dir=self.root))
-                target.chmod(0o700)
+                target = self._prepare_dir(session_id)
+                record.directory = target
+                torch.save(tokens, target / TOKENS_NAME)
+                (target / TOKENS_NAME).chmod(0o600)
             for ordinal, (family, layer, start, value) in enumerate(sources):
                 value = value.contiguous()
                 if tier == "ram":
@@ -191,17 +445,22 @@ class SessionSpillStore:
                     torch.save(value, path)
                     path.chmod(0o600)
                     chunks.append(SpillChunk(family, -1, 0, file=path))
+            if tier == "disk":
+                self._write_manifest(record)
         except Exception:
             if target is not None:
                 shutil.rmtree(target, ignore_errors=True)
             return None
 
-        if tier == "ram":
-            self.ram_bytes += byte_size
-        else:
-            self.disk_bytes += byte_size
-        self._records.append(record)
+        self._track(record)
         return record
+
+    def _prepare_dir(self, session_id: str) -> Path:
+        target = self._record_dir(session_id)
+        shutil.rmtree(target, ignore_errors=True)
+        target.mkdir(mode=0o700, parents=True)
+        target.chmod(0o700)
+        return target
 
     def _disk_has_room(self, byte_size: int) -> bool:
         try:
@@ -213,10 +472,11 @@ class SessionSpillStore:
     def _demote_to_disk(self, record: SessionSpillRecord) -> bool:
         if not record.valid or record.tier != "ram" or not self._disk_has_room(record.byte_size):
             return False
-        target = Path(tempfile.mkdtemp(prefix="checkpoint-", dir=self.root))
-        target.chmod(0o700)
+        target = self._prepare_dir(record.session_id)
         replacements: list[Path] = []
         try:
+            torch.save(record.token_ids, target / TOKENS_NAME)
+            (target / TOKENS_NAME).chmod(0o600)
             for ordinal, chunk in enumerate(record.chunks):
                 if chunk.value is None:
                     raise ValueError("RAM checkpoint chunk has no tensor")
@@ -231,8 +491,13 @@ class SessionSpillStore:
             chunk.value = None
             chunk.file = path
         record.tier = "disk"
+        record.directory = target
         self.ram_bytes = max(0, self.ram_bytes - record.byte_size)
         self.disk_bytes += record.byte_size
+        try:
+            self._write_manifest(record)
+        except OSError:
+            pass
         return True
 
     def enforce_host_reserve(self) -> tuple[int, int]:
@@ -292,23 +557,44 @@ class SessionSpillStore:
             return
         record.valid = False
         self._records = [candidate for candidate in self._records if candidate is not record]
+        if self._by_session.get(record.session_id) is record:
+            self._by_session.pop(record.session_id, None)
         if record.tier == "ram":
             self.ram_bytes = max(0, self.ram_bytes - record.byte_size)
         else:
             self.disk_bytes = max(0, self.disk_bytes - record.byte_size)
             parents = {chunk.file.parent for chunk in record.chunks if chunk.file is not None}
+            if record.directory is not None:
+                parents.add(record.directory)
             for parent in parents:
                 shutil.rmtree(parent, ignore_errors=True)
         record.chunks.clear()
 
     def shutdown(self) -> None:
-        for record in self._records:
-            record.valid = False
-            record.chunks.clear()
-        self._records.clear()
-        shutil.rmtree(self.root, ignore_errors=True)
-        self.ram_bytes = 0
-        self.disk_bytes = 0
+        """Persisting shutdown only flushes manifests; the root survives for the next run."""
+        if not self.persist:
+            for record in list(self._records):
+                self.discard(record)
+            self._records.clear()
+            self._by_session.clear()
+            self.ram_bytes = 0
+            self.disk_bytes = 0
+            return
+        for record in list(self._records):
+            if record.tier == "ram":
+                # RAM payloads die with the process; move what still fits so the next
+                # run can adopt them, and drop the rest.
+                try:
+                    demoted = self._demote_to_disk(record)
+                except Exception:
+                    demoted = False
+                if not demoted:
+                    self.discard(record)
+                    continue
+            try:
+                self._write_manifest(record)
+            except OSError:
+                pass
 
 
 __all__ = ["SessionSpillRecord", "SessionSpillStore", "SpillChunk"]

@@ -89,7 +89,7 @@ def test_cold_session_round_trip_is_byte_exact_and_reclaims_gpu_pages(tmp_path, 
     }
     manager.prefix_cache.insert(tokens, pages, slot)
     handle = manager.retain_prefix(tokens, len(tokens))
-    record = store.spill(tokens, pages, slot)
+    record = store.spill("agent-a", tokens, pages, slot)
     assert record is not None and record.tier == tier
 
     manager.unlock(handle)
@@ -127,7 +127,7 @@ def test_changed_client_prefix_is_not_eligible_for_restore(tmp_path):
     source = torch.tensor([1, 2, 3], dtype=torch.int64)
     pages = torch.tensor([1, 2, 3], dtype=torch.int32)
     slot = linear.alloc(1)[0]
-    record = store.spill(source, pages, slot)
+    record = store.spill("agent-a", source, pages, slot)
     source[-1] = 99
     assert record is not None
     assert torch.equal(record.token_ids, torch.tensor([1, 2, 3], dtype=torch.int32))
@@ -149,7 +149,7 @@ def test_host_pressure_demotes_ram_checkpoint_to_disk(tmp_path, monkeypatch):
         lambda: 8 << 30,
     )
     tokens = torch.tensor([1, 2, 3], dtype=torch.int32)
-    record = store.spill(tokens, tokens, linear.alloc(1)[0])
+    record = store.spill("agent-a", tokens, tokens, linear.alloc(1)[0])
     assert record is not None and record.tier == "ram"
 
     monkeypatch.setattr(
@@ -174,7 +174,7 @@ def test_disk_restore_prefetches_exactly_one_chunk_ahead(tmp_path, monkeypatch):
         host_reserve_bytes=0,
     )
     tokens = torch.tensor([1, 2, 3], dtype=torch.int32)
-    record = store.spill(tokens, tokens, linear.alloc(1)[0])
+    record = store.spill("agent-a", tokens, tokens, linear.alloc(1)[0])
     assert record is not None and record.tier == "disk" and len(record.chunks) > 2
 
     loaded: list[object] = []
@@ -192,4 +192,154 @@ def test_disk_restore_prefetches_exactly_one_chunk_ahead(tmp_path, monkeypatch):
     assert second_started.wait(timeout=1.0)
     assert len(loaded) == 2
     chunks.close()
+    store.shutdown()
+
+
+def _store(tmp_path, **overrides):
+    kwargs = dict(
+        directory=str(tmp_path),
+        ram_budget_bytes=0,
+        disk_budget_bytes=1 << 30,
+        host_reserve_bytes=0,
+        limit_bytes=1 << 30,
+        persist=True,
+        model_id="model-a",
+    )
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_restart_adopts_matching_checkpoint_and_restores_it(tmp_path):
+    kv, linear, manager = _pools()
+    store = SessionSpillStore(kv, linear, **_store(tmp_path))
+    tokens = torch.tensor([21, 22, 23, 24, 25], dtype=torch.int32)
+    pages = manager._page_to_token(manager._allocate(len(tokens)))
+    slot = linear.alloc(1)[0]
+    torch.manual_seed(11)
+    kv._k_buffer[:, pages] = torch.randint(-128, 127, kv._k_buffer[:, pages].shape, dtype=torch.int8)
+    linear.recurrent_states[:, slot] = torch.randn_like(linear.recurrent_states[:, slot])
+    expected_k = kv._k_buffer[:, pages].clone()
+    expected_recurrent = linear.recurrent_states[:, slot].clone()
+
+    manager.prefix_cache.insert(tokens, pages, slot)
+    handle = manager.retain_prefix(tokens, len(tokens))
+    record = store.spill("agent-restart", tokens, pages, slot)
+    assert record is not None and record.tier == "disk"
+    manifest = record.directory / "manifest.json"
+    assert manifest.is_file() and (manifest.stat().st_mode & 0o777) == 0o600
+    store.shutdown()  # a persisting shutdown flushes manifests and keeps the root
+
+    manager.unlock(handle)
+    assert manager.evict_all_unlocked_prefixes() == len(tokens)
+
+    # Simulated restart: a brand-new store over the same root and the same live pool.
+    revived = SessionSpillStore(kv, linear, **_store(tmp_path))
+    adopted = revived.get("agent-restart")
+    assert adopted is not None
+    assert torch.equal(adopted.token_ids, tokens)
+    assert adopted.num_pages == len(tokens)
+
+    restored = manager.restore_hybrid_session_prefix(adopted, revived)
+    restored_pages = restored.get_matched_indices().long()
+    assert restored.cached_len == len(tokens)
+    assert torch.equal(kv._k_buffer[:, restored_pages], expected_k)
+    assert torch.equal(linear.recurrent_states[:, restored.node.mamba_value], expected_recurrent)
+    manager.unlock(restored)
+    revived.shutdown()
+
+
+def test_restart_deletes_foreign_or_incompatible_checkpoints(tmp_path):
+    kv, linear, _manager = _pools()
+    store = SessionSpillStore(kv, linear, **_store(tmp_path))
+    tokens = torch.tensor([1, 2, 3], dtype=torch.int32)
+    record = store.spill("agent-stale", tokens, tokens, linear.alloc(1)[0])
+    assert record is not None
+    directory = record.directory
+    store.shutdown()
+    assert directory.is_dir()
+
+    class _OtherLayout:
+        def __getattr__(self, name):
+            return getattr(kv, name)
+
+        def session_spill_fingerprint(self):
+            return ("mha-kv-v1", "different-layout")
+
+    revived = SessionSpillStore(_OtherLayout(), linear, **_store(tmp_path))
+    assert revived.get("agent-stale") is None
+    assert not directory.exists()
+    assert revived.disk_bytes == 0
+
+
+def test_restart_rejects_checkpoints_written_by_another_model(tmp_path):
+    kv, linear, _manager = _pools()
+    store = SessionSpillStore(kv, linear, **_store(tmp_path))
+    tokens = torch.tensor([4, 5, 6], dtype=torch.int32)
+    record = store.spill("agent-other-model", tokens, tokens, linear.alloc(1)[0])
+    assert record is not None
+    store.shutdown()
+
+    revived = SessionSpillStore(kv, linear, **_store(tmp_path, model_id="model-b"))
+    assert revived.get("agent-other-model") is None
+    assert list(tmp_path.iterdir()) == []
+    revived.shutdown()
+
+
+def test_non_persistent_store_wipes_checkpoints_on_exit(tmp_path):
+    kv, linear, _manager = _pools()
+    store = SessionSpillStore(kv, linear, **_store(tmp_path, persist=False))
+    tokens = torch.tensor([7, 8, 9], dtype=torch.int32)
+    record = store.spill("agent-ephemeral", tokens, tokens, linear.alloc(1)[0])
+    assert record is not None and record.directory.is_dir()
+    store.shutdown()
+    assert not record.directory.exists()
+    assert store.get("agent-ephemeral") is None
+
+
+def test_startup_collects_leaked_and_unreadable_directories(tmp_path):
+    kv, linear, _manager = _pools()
+    leaked = tmp_path / "server-abc123"
+    leaked.mkdir()
+    (leaked / "checkpoint-1").mkdir()
+    (tmp_path / "stray.pt").write_bytes(b"junk")
+    (tmp_path / "operator-notes.txt").write_text("not ours", encoding="utf-8")
+    torn = tmp_path / ("0" * 64)
+    torn.mkdir()
+    (torn / "manifest.json").write_text("{not json", encoding="utf-8")
+
+    store = SessionSpillStore(kv, linear, **_store(tmp_path))
+    # Everything this store's layouts can produce is collected; foreign content is not.
+    assert [p.name for p in tmp_path.iterdir()] == ["operator-notes.txt"]
+    assert store.disk_bytes == 0
+    store.shutdown()
+
+
+def test_capacity_cap_evicts_least_recently_used_checkpoint(tmp_path):
+    kv, linear, _manager = _pools()
+    tokens = torch.tensor([1, 2, 3], dtype=torch.int32)
+    probe = SessionSpillStore(kv, linear, **_store(tmp_path))
+    one = probe._payload_bytes(3, tokens)
+    probe.shutdown()
+
+    store = SessionSpillStore(kv, linear, **_store(tmp_path, limit_bytes=2 * one + 16))
+    first = store.spill("agent-1", tokens, tokens, linear.alloc(1)[0])
+    second = store.spill("agent-2", tokens, tokens, linear.alloc(1)[0])
+    assert first is not None and second is not None
+    store.touch(first)  # last use, not spill time, is what orders the eviction
+
+    third = store.spill("agent-3", tokens, tokens, linear.alloc(1)[0])
+    assert third is not None
+    assert store.get("agent-2") is None and not second.valid
+    assert {r.session_id for r in store._records} == {"agent-1", "agent-3"}
+    assert store.ram_bytes + store.disk_bytes <= store.limit_bytes
+    store.shutdown()
+
+
+def test_record_larger_than_the_whole_cap_is_refused(tmp_path):
+    kv, linear, _manager = _pools()
+    tokens = torch.tensor([1, 2, 3], dtype=torch.int32)
+    store = SessionSpillStore(kv, linear, **_store(tmp_path, limit_bytes=1024))
+    resident = store.spill("agent-big", tokens, tokens, linear.alloc(1)[0])
+    assert resident is None
+    assert store._records == [] and list(tmp_path.iterdir()) == []
     store.shutdown()

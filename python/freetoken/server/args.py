@@ -297,9 +297,11 @@ def parse_args(
         type=float,
         default=ServerArgs.auto_session_grace_seconds,
         help=(
-            "Seconds an idle automatically detected Claude Code/Codex session keeps "
-            "its KV prefix protected before it becomes pressure-evictable. Explicit "
-            "session_id leases are unaffected."
+            "Safety-net timer (seconds) after which an idle automatically detected "
+            "Claude Code/Codex session may be checkpointed and released -- and even "
+            "then only while another request is queued or the pools are full. 0 "
+            "(default) disables it: sessions stay resident until an admission needs "
+            "the space. Explicit session_id leases are unaffected."
         ),
     )
 
@@ -327,6 +329,33 @@ def parse_args(
         default=ServerArgs.session_spill_disk_gb,
         help="Maximum NVMe/disk bytes used by this server's cold session checkpoints.",
     )
+    parser.add_argument(
+        "--session-spill-limit-gb",
+        type=float,
+        default=ServerArgs.session_spill_limit_gb,
+        help=(
+            "Total retained cold-checkpoint bytes across RAM and disk. A spill that "
+            "would exceed it evicts least-recently-used checkpoints; only a single "
+            "checkpoint larger than the whole cap is refused."
+        ),
+    )
+    parser.add_argument(
+        "--session-spill-persist",
+        dest="session_spill_persist",
+        action="store_true",
+        help=(
+            "Keep cold session checkpoints across restarts (default). Startup adopts "
+            "the ones whose manifest matches this model and K/V layout and deletes "
+            "everything else in the spill directory."
+        ),
+    )
+    parser.add_argument(
+        "--no-session-spill-persist",
+        dest="session_spill_persist",
+        action="store_false",
+        help="Wipe cold session checkpoints on exit instead of keeping them.",
+    )
+    parser.set_defaults(session_spill_persist=ServerArgs.session_spill_persist)
 
     parser.add_argument(
         "--max-seq-len-override",
@@ -915,6 +944,8 @@ def parse_args(
         parser.error("--session-spill-ram-gb must be >= 0")
     if kwargs["session_spill_disk_gb"] < 0:
         parser.error("--session-spill-disk-gb must be >= 0")
+    if kwargs["session_spill_limit_gb"] < 0:
+        parser.error("--session-spill-limit-gb must be >= 0")
     if isinstance(kwargs["session_spill_dir"], str) and kwargs[
         "session_spill_dir"
     ].lower() in {"off", "none", "disable", "disabled"}:

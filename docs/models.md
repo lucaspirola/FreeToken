@@ -148,16 +148,40 @@ work too.
   concurrent use of one id returns `session ... is busy`. `DELETE
   /v1/sessions/{session_id}` is a scheduler barrier and returns `closed` only after
   the lease is released (or `not_found`); a stream disconnect/abort also closes it,
-  and an inactive lease expires after its TTL. Because neither agent protocol sends
-  a normal process-exit event, a cleanly idle auto-bound session is reclaimed at that
-  timeout; cancellation and disconnect reclaim it immediately. Both clients still
+  and an inactive explicit lease expires after its TTL. An automatically bound
+  (reclaimable) lease is the exception: while it still holds GPU state it has no idle
+  deadline at all, because neither agent protocol sends a process-exit event and idle
+  time is not evidence that a conversation is over. It is released on demand instead
+  (see below); its TTL starts only once that release has checkpointed it, and then
+  bounds the empty identity, not the computation. Both clients still
   send the complete conversation on each turn—the lease retains computation state,
   not message history. OpenAI `previous_response_id` storage is not emulated.
   In single-rank growable Hybrid-GDN mode, an idle automatically bound session is
-  checkpointed before its soft GPU lease is released. FreeToken keeps checkpoints in
-  RAM up to `--session-spill-ram-gb` only while `MemAvailable` remains above
-  `--host-ram-reserve-gb`; overflow streams to the bounded `--session-spill-dir` disk
-  tier. A later request restores only when the client-resubmitted token prefix and the
+  checkpointed **on demand**: its KV + recurrent state stay in VRAM until another
+  request actually fails admission for KV pages or state slots, at which point the
+  least-recently-used idle auto-bound lease is checkpointed and the queued request is
+  admitted on the next scheduler iteration. A session that was mid-turn when the
+  competitor arrived becomes a candidate the moment its turn ends. Nothing is spilled
+  while the queue is empty; `--auto-session-grace-seconds` (default 0 = off) only adds
+  a safety-net timer that still fires under demand or memory pressure.
+  FreeToken keeps checkpoints in RAM up to `--session-spill-ram-gb` only while
+  `MemAvailable` remains above `--host-ram-reserve-gb`; overflow streams to the
+  bounded `--session-spill-dir` disk tier. Checkpoint lifetime is decoupled from the
+  lease: `--session-spill-limit-gb` (default 50, RAM + disk) bounds the store, a spill
+  that would exceed it (or the filesystem guard) evicts least-recently-used
+  checkpoints rather than failing, and only a single checkpoint larger than the whole
+  cap is refused. An idle auto-bound session therefore stays resident however long it
+  idles, and a later request that needs the space is what checkpoints it. Lease expiry
+  and client disconnect release the lease but keep any existing checkpoint (closing
+  never creates one -- a cancel must not pay a device-to-host copy), so the next
+  request with the same id and prefix restores it; `DELETE /v1/sessions/{id}` discards
+  it. Each disk checkpoint carries a manifest (session id, prompt-prefix sha256, page
+  count, K/V layout fingerprint, model id, timestamps, byte size) in a session-keyed
+  directory under a stable root, so a
+  restarted server adopts the records that still match its model and pool and deletes
+  everything else -- which is also what collects directories left behind by a crash.
+  `--no-session-spill-persist` restores the old wipe-on-exit behavior.
+  A later request restores only when the client-resubmitted token prefix and the
   exact K/V layout fingerprint match. Mismatch, damage, or capacity pressure discards
   the checkpoint and performs ordinary prefill, never approximate reuse. Explicit
   client-named sessions remain hard GPU leases until close/TTL. Disk restore keeps
