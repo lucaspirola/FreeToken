@@ -1,4 +1,4 @@
-"""Triton Mamba-2 SSD (state-space duality) prefill kernels.
+"""Triton Mamba-2 SSD (state-space duality) prefill and decode kernels.
 
 Vendored from vLLM's ``vllm/model_executor/layers/mamba/ops/ssd_*.py`` -- the
 sequence-aligned varlen chunk variant that takes ``cu_seqlens`` /
@@ -23,19 +23,31 @@ config survives process restarts; ``do_not_specialize`` on every stride that
 scales with the chunk count so a new prompt length never recompiles;
 fp32 ``dA_cumsum`` / states / ``CB`` accumulation with bf16 x/B/C loads.
 
-The kernels themselves only write freshly allocated outputs -- the recurrent
-pool scatter lives in :func:`mamba2_prefill`, which keeps them autotune-safe
-(an autotuner re-runs a kernel many times; an in-place state update would be
-applied many times).
+The prefill kernels themselves only write freshly allocated outputs -- the
+recurrent pool scatter lives in :func:`mamba2_prefill`, which keeps them
+autotune-safe (an autotuner re-runs a kernel many times; an in-place state
+update would be applied many times).
+
+Decode (`selective_state_update.py`, task 2A3) is the single-token twin:
+:func:`mamba2_decode` updates the pool in place at `indices` and is CUDA-graph
+capturable once :func:`warm_mamba2_decode` has built the kernel. It is *not*
+autotuned, for the same in-place reason. :func:`mamba2_gated_rmsnorm`
+(`gated_norm.py`) is the gated group RMSNorm that follows the scan.
 """
 
 from __future__ import annotations
 
 import torch
 
+from freetoken.kernel.triton.mamba2.gated_norm import mamba2_gated_rmsnorm
 from freetoken.kernel.triton.mamba2.metadata import (
     Mamba2Metadata,
     build_mamba2_metadata,
+)
+from freetoken.kernel.triton.mamba2.selective_state_update import (
+    mamba2_decode,
+    resolve_decode_backend,
+    warm_mamba2_decode,
 )
 from freetoken.kernel.triton.mamba2.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
@@ -44,8 +56,12 @@ from freetoken.kernel.triton.mamba2.ssd_combined import (
 __all__ = [
     "Mamba2Metadata",
     "build_mamba2_metadata",
+    "mamba2_decode",
+    "mamba2_gated_rmsnorm",
     "mamba2_prefill",
     "mamba_chunk_scan_combined_varlen",
+    "resolve_decode_backend",
+    "warm_mamba2_decode",
 ]
 
 
