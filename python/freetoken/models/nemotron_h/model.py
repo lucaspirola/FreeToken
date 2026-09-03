@@ -27,10 +27,17 @@ if TYPE_CHECKING:
 
 
 def _linear(args: "NemotronHArgs", name: str, in_f: int, out_f: int):
-    if args.module_quant(name) == "fp8_pertensor":
+    quant = args.module_quant(name)
+    if quant == "fp8_pertensor":
         from freetoken.kernel.triton.fp8_pertensor_linear import Fp8PerTensorLinear
 
         return Fp8PerTensorLinear(in_f, out_f, has_bias=False)
+    if quant == "nvfp4":
+        # Dense NVFP4 (shared experts): served native W4A16 instead of dequantized to
+        # bf16 at load, which costs ~1.6 GiB of resident weights on Lightning.
+        from freetoken.kernel.triton.nvfp4_linear import Nvfp4DenseLinear
+
+        return Nvfp4DenseLinear(in_f, out_f, has_bias=False)
     return LinearReplicated(in_f, out_f, has_bias=False)
 
 
@@ -68,6 +75,10 @@ class NemotronHMamba2Mixer(BaseOP):
         self.intermediate_size = args.mamba_intermediate_size
         self.conv_dim = self.intermediate_size + 2 * self.n_groups * self.state_size
         self.chunk_size = args.chunk_size
+        # HF clamps the discretized timestep to [time_step_min, inf) in the chunk scan.
+        # Prefill only: neither HF's single-step reference nor the flashinfer decode
+        # kernel clamps, so leaving decode unclamped keeps parity with both.
+        self.dt_limit = (args.time_step_min, float("inf"))
         prefix = f"backbone.layers.{layer_id}.mixer"
         self.in_proj = _linear(
             args, f"{prefix}.in_proj", config.hidden_size,
@@ -107,7 +118,7 @@ class NemotronHMamba2Mixer(BaseOP):
             x.unsqueeze(0), dt.unsqueeze(0), -torch.exp(self.A_log.float()),
             B.unsqueeze(0), C.unsqueeze(0), chunk_size=self.chunk_size,
             D=self.D, dt_bias=self.dt_bias, initial_states=initial.unsqueeze(0),
-            dt_softplus=True, return_final_states=True,
+            dt_softplus=True, dt_limit=self.dt_limit, return_final_states=True,
         )
 
     def _prefill_scan(self, x, dt, B, C, fla, pool) -> torch.Tensor:
@@ -266,18 +277,26 @@ class NemotronHMoE(BaseOP):
         args = config.nemotron_h_args
         assert args is not None
         self.gate = _NemotronRouter(config.hidden_size, config.num_experts)
-        self.fc1_latent_proj = _linear(
-            args, f"backbone.layers.{layer_id}.mixer.fc1_latent_proj",
-            config.hidden_size, args.moe_latent_size,
-        )
+        # Nemotron-3-Super runs its experts in a narrower latent space (fc1/fc2 project
+        # in and out); Nemotron-3.5-Lightning has ``moe_latent_size: null`` and routes
+        # the residual stream straight through, so the projections must not exist at all
+        # (they would demand checkpoint tensors that are not there).
+        self.has_latent = args.moe_latent_size is not None
+        if self.has_latent:
+            self.fc1_latent_proj = _linear(
+                args, f"backbone.layers.{layer_id}.mixer.fc1_latent_proj",
+                config.hidden_size, args.moe_latent_size,
+            )
         self.experts = make_moe_layer(
-            config, layer_id=bank_id, activation="relu2", renormalize=False,
-            hidden_size=args.moe_latent_size, intermediate_size=config.moe_intermediate_size,
+            config, layer_id=bank_id, activation=config.hidden_act, renormalize=False,
+            hidden_size=config.expert_hidden_size,
+            intermediate_size=config.moe_intermediate_size,
         )
-        self.fc2_latent_proj = _linear(
-            args, f"backbone.layers.{layer_id}.mixer.fc2_latent_proj",
-            args.moe_latent_size, config.hidden_size,
-        )
+        if self.has_latent:
+            self.fc2_latent_proj = _linear(
+                args, f"backbone.layers.{layer_id}.mixer.fc2_latent_proj",
+                args.moe_latent_size, config.hidden_size,
+            )
         self.shared_experts = NemotronHMLP(
             config, layer_id, "shared_experts", args.shared_intermediate_size
         )
@@ -290,9 +309,11 @@ class NemotronHMoE(BaseOP):
         weights = scores.gather(1, ids)
         weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-20)
         weights = (weights * self.scale).float()
-        latent = self.fc1_latent_proj.forward(x)
+        latent = self.fc1_latent_proj.forward(x) if self.has_latent else x
         routed = self.experts.routed_forward(latent, weights, ids.to(torch.int32)).to(x.dtype)
-        return self.fc2_latent_proj.forward(routed) + self.shared_experts.forward(x)
+        if self.has_latent:
+            routed = self.fc2_latent_proj.forward(routed)
+        return routed + self.shared_experts.forward(x)
 
 
 class NemotronHBlock(BaseOP):
@@ -333,11 +354,23 @@ class NemotronHBackbone(BaseOP):
 class NemotronHForCausalLM(BaseLLMModel):
     def __init__(self, config: "ModelConfig"):
         self.backbone = NemotronHBackbone(config)
-        self.lm_head = ParallelLMHead(
-            config.vocab_size, config.hidden_size,
-            tie_word_embeddings=config.tie_word_embeddings,
-            tied_embedding=self.backbone.embeddings if config.tie_word_embeddings else None,
-        )
+        if getattr(config, "lm_head_quant", "none") == "nvfp4":
+            # The checkpoint stores the (untied) lm_head as NVFP4: keep it native (W4A16)
+            # rather than dequantizing ~0.7 GiB of bf16 for the largest decode GEMV.
+            from freetoken.kernel.triton.nvfp4_linear import Nvfp4LMHead
+
+            assert not config.tie_word_embeddings, "NVFP4 lm_head assumes untied embeddings"
+            self.lm_head = Nvfp4LMHead(
+                num_embeddings=config.vocab_size, embedding_dim=config.hidden_size
+            )
+        else:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size, config.hidden_size,
+                tie_word_embeddings=config.tie_word_embeddings,
+                tied_embedding=(
+                    self.backbone.embeddings if config.tie_word_embeddings else None
+                ),
+            )
         super().__init__()
 
     def forward(self) -> torch.Tensor:

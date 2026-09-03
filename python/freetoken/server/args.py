@@ -157,9 +157,20 @@ def parse_args(
             return "muse_glimmer"
         if "gemma4" in marker:
             return "gemma4"
-        # Nemotron-3 Super ships the Qwen3-Coder XML tool grammar
-        # (<tool_call><function=...><parameter=...>) in its chat template.
-        if any(tag in marker for tag in ("nemotron-3", "nemotron_3", "nemotronh")):
+        # Nemotron-3 Super and Nemotron-3.5 Lightning both ship the Qwen3-Coder XML
+        # tool grammar (<tool_call><function=...><parameter=...>) in their chat
+        # template. "nemotron_h" is the shared config model_type.
+        if any(
+            tag in marker
+            for tag in (
+                "nemotron-3",
+                "nemotron_3",
+                "nemotron-3.5",
+                "nemotron_3.5",
+                "nemotronh",
+                "nemotron_h",
+            )
+        ):
             return "qwen3_coder"
         if (
             "qwen3_5" in marker
@@ -198,8 +209,19 @@ def parse_args(
         marker = " ".join(candidates).lower()
         if "gpt_oss" in marker or "gpt-oss" in marker or "gptoss" in marker:
             return "gpt_oss"
-        # Nemotron-3 Super's generation prompt opens an implicit <think> block.
-        if any(tag in marker for tag in ("nemotron-3", "nemotron_3", "nemotronh")):
+        # Nemotron-3 Super's and Nemotron-3.5 Lightning's generation prompts open an
+        # implicit <think> block.
+        if any(
+            tag in marker
+            for tag in (
+                "nemotron-3",
+                "nemotron_3",
+                "nemotron-3.5",
+                "nemotron_3.5",
+                "nemotronh",
+                "nemotron_h",
+            )
+        ):
             return "qwen3"
         if "deepseek" in marker and any(
             tag in marker for tag in ("v4", "deepseek_v4", "v3.2", "v32")

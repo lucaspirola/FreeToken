@@ -806,7 +806,13 @@ class Engine:
             # Per-layer mixed GGUF geometry is also consumed by Laguna's split
             # Q4_0/BF16 CPU executor when WSL cannot pin every expert layer.
             cache.gguf_expert_types = config.model_config.gguf_expert_types
-            cache.expert_hidden_size = config.model_config.hidden_size
+            # Latent-MoE models (Nemotron-3 Super) route experts on a narrower
+            # projection than the residual stream; expert_hidden_size is None
+            # everywhere else and falls back to the model hidden size.
+            cache.expert_hidden_size = (
+                getattr(config.model_config, "expert_hidden_size", None)
+                or config.model_config.hidden_size
+            )
             cache.expert_intermediate_size = config.model_config.moe_intermediate_size
             cache.pageable_gpu = config.moe_pageable_gpu
             cache.direct_device_banks = bool(config.kv_grow_step_tokens)
@@ -2323,6 +2329,22 @@ def _adjust_config(config: EngineConfig):
         raise ValueError(
             "--moe-pageable-gpu requires --moe-backend offload; it is an "
             "all-GPU-compute alternative to CPU/hybrid decode"
+        )
+
+    if (
+        is_moe
+        and config.nvfp4_backend == "marlin"
+        and getattr(model_config, "expert_gated", True) is False
+    ):
+        # Marlin's fused MoE entry assumes a gated [2I, H] gate_up bank and a silu
+        # epilogue (moe/nvfp4_backends.py). Nemotron-3.5's ReLU^2 experts are ungated
+        # (up+down only, [I, H]), so the bank shapes never line up. Reject here rather
+        # than inside the kernel wrapper, after the whole checkpoint is resident.
+        raise ValueError(
+            "--nvfp4-backend marlin requires gated (SwiGLU-shaped) routed experts; "
+            f"{getattr(model_config, 'model_type', 'this model')!r} uses ungated "
+            f"{getattr(model_config, 'hidden_act', None)!r} experts -- use "
+            "--nvfp4-backend triton (or auto)."
         )
 
     if is_moe:

@@ -44,8 +44,10 @@ class AotModel:
     ``kv_groups`` holds ``(num_kv_heads, head_dim)`` per paged-KV attention
     group (hybrid-SWA models have two); empty means the model bypasses the
     store kernel. ``expert_formats`` are ``_BANK_SCHEMAS`` keys this checkpoint
-    is served with; empty for dense models. ``aliases`` are sibling checkpoints
-    with identical shapes that this entry also covers.
+    is served with; empty for dense models. ``expert_gated`` is False for
+    ungated experts (Nemotron-3.5's ReLU^2 up+down pair), whose first bank is
+    ``[I, H]`` rather than the gated ``[2I, H]``. ``aliases`` are sibling
+    checkpoints with identical shapes that this entry also covers.
     """
 
     name: str
@@ -55,6 +57,7 @@ class AotModel:
     top_k: int | None = None
     moe_intermediate_size: int | None = None
     expert_formats: tuple[str, ...] = ()
+    expert_gated: bool = True
     embed_indexing: bool = True
     aliases: tuple[str, ...] = ()
     # Further register.py keys this entry's checkpoints load under (text-only /
@@ -63,14 +66,24 @@ class AotModel:
     arch_aliases: tuple[str, ...] = ()
 
 
-def expert_bank_row_bytes(fmt: str, hidden_size: int, moe_intermediate_size: int) -> dict[str, int]:
+def expert_bank_row_bytes(
+    fmt: str,
+    hidden_size: int,
+    moe_intermediate_size: int,
+    *,
+    gated: bool = True,
+) -> dict[str, int]:
     """Per-expert row bytes for each offload bank a format registers.
 
     Bank names and layouts follow moe/offload_cache.py ``_BANK_SCHEMAS`` and the
     per-format loaders cited inline; every value must stay a multiple of 16 for
     the fused multi-bank copy to engage.
+
+    ``gated=False`` (Nemotron-3.5's ungated ReLU^2 experts) drops the gate half of
+    the first bank: its rows are ``I``, not ``2I``.
     """
     H, I = hidden_size, moe_intermediate_size
+    G = 2 * I if gated else I  # rows of the gate_up (or bare up) bank
     if fmt == "bf16":
         # models/loader.py stream_moe_expert_sources: gate_up [E, 2I, H], down [E, H, I], bf16
         return {"gate_up": 2 * I * H * 2, "down": H * I * 2}
@@ -91,13 +104,13 @@ def expert_bank_row_bytes(fmt: str, hidden_size: int, moe_intermediate_size: int
         # per-row globals; marlin/b12x repacks are byte-identical with the globals
         # folded into GPU-resident alphas (moe/nvfp4_backends.py), so no global banks.
         banks = {
-            "gate_up_packed": 2 * I * (H // 2),
-            "gate_up_scale": 2 * I * (H // 16),
+            "gate_up_packed": G * (H // 2),
+            "gate_up_scale": G * (H // 16),
             "down_packed": H * (I // 2),
             "down_scale": H * (I // 16),
         }
         if fmt == "nvfp4":
-            banks["gate_up_global"] = 2 * I * 2
+            banks["gate_up_global"] = G * 2
             banks["down_global"] = H * 2
         return banks
     if fmt == "mxfp4_triton":
@@ -286,6 +299,22 @@ SUPPORTED_MODELS: tuple[AotModel, ...] = (
         arch_aliases=("MiniMaxM3SparseForCausalLM",),
     ),
     AotModel(
+        # Hybrid Mamba-2 / full-attention / MoE. Only the 6 full-attention layers
+        # hold paged KV (2 kv heads x 128); the 23 Mamba-2 layers keep recurrent
+        # state outside the KV pool. Routed experts are ungated ReLU^2 NVFP4
+        # (up+down only), which locks the expert GEMM to the Triton kernels in
+        # Phase 1 -- the banks keep the native "nvfp4" layout, so the marlin/b12x
+        # repack variants have no entry here.
+        name="nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+        architecture="NemotronHForCausalLM",
+        hidden_size=2688,
+        kv_groups=((2, 128),),
+        top_k=6,
+        moe_intermediate_size=1856,
+        expert_formats=("nvfp4",),
+        expert_gated=False,
+    ),
+    AotModel(
         name="deepseek-ai/DeepSeek-V4-Flash",
         architecture="DeepseekV4ForCausalLM",
         hidden_size=4096,
@@ -372,7 +401,12 @@ def fast_index_copy_feature_sizes(model: AotModel) -> set[int]:
     for fmt in model.expert_formats:
         assert model.moe_intermediate_size is not None
         sizes.update(
-            expert_bank_row_bytes(fmt, model.hidden_size, model.moe_intermediate_size).values()
+            expert_bank_row_bytes(
+                fmt,
+                model.hidden_size,
+                model.moe_intermediate_size,
+                gated=model.expert_gated,
+            ).values()
         )
     return sizes
 

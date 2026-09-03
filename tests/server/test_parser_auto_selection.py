@@ -93,6 +93,34 @@ def test_qwen3_5_is_not_shadowed_by_the_generic_qwen_branch():
     assert _inferred("Qwen3MoeForCausalLM")[0] == "qwen25"
 
 
+def test_nemotron_3_5_lightning_resolves_the_nemotron_parsers():
+    """Lightning ships the same ChatML + Qwen3-Coder XML tool grammar as Nemotron-3 Super
+    and opens an implicit ``<think>`` block, so both cascades must reach the nemotron arm
+    from the checkpoint directory name, the ``nemotron_h`` model_type, or the arch."""
+    config = _Config(
+        {
+            "architectures": ["NemotronHForCausalLM"],
+            "model_type": "nemotron_h",
+            "torch_dtype": "bfloat16",
+        }
+    )
+    path = "/x/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"
+    with patch("freetoken.utils.cached_load_hf_config", lambda _path: config):
+        args, _ = parse_args(["--model", path])
+    assert args.tool_call_parser == "qwen3_coder"
+    assert args.reasoning_parser == "qwen3"
+
+
+def test_nemotron_h_model_type_alone_reaches_the_nemotron_arm():
+    """A checkpoint directory that says nothing (the ANON_PATH regime) must still resolve
+    off ``model_type``: the config.json marker is the only one always present."""
+    config = _Config({"model_type": "nemotron_h", "torch_dtype": "bfloat16"})
+    with patch("freetoken.utils.cached_load_hf_config", lambda _path: config):
+        args, _ = parse_args(["--model", ANON_PATH])
+    assert args.tool_call_parser == "qwen3_coder"
+    assert args.reasoning_parser == "qwen3"
+
+
 def test_an_explicit_choice_beats_inference():
     config = _Config({"architectures": ["DeepseekV4ForCausalLM"], "torch_dtype": "bfloat16"})
     with patch("freetoken.utils.cached_load_hf_config", lambda _path: config):

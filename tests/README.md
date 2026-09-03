@@ -52,6 +52,7 @@ checkpoint is set:
 | `FREETOKEN_TEST_MEM_RATIO` | `e2e/test_aime.py` — offload-mode memory_ratio (default `0.9`) |
 | `FREETOKEN_REBUILD_TEST_MODEL` | `e2e/test_cache_rebuild.py` — a SMALL local model dir; boots a real server (falls back to `FREETOKEN_TEST_MODEL`) |
 | `FREETOKEN_GEMMA4_GGUF_GLOB` | `models/test_gemma4_gguf_rope.py` — glob matching a local gemma-4 GGUF file |
+| `FREETOKEN_NEMOTRON_LIGHTNING_PATH` | `models/test_nemotron_h.py` — local Nemotron-3.5-Lightning-30B-A3B-NVFP4 dir (GPU weight parity) |
 
 `test_aime.py` takes its sampling protocol from the checkpoint's own
 `generation_config.json` (pass@N at the recommended temperature, or a single greedy

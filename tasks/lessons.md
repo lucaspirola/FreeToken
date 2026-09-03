@@ -17,3 +17,10 @@
   (FREETOKEN_GGUF_DISABLE_MMA=1), with a path-proof mechanism decided BEFORE
   the run; in-server INFO logging is swallowed by the log handler, so proof
   must be external (JIT cache touch, wall-time signature).
+
+## 2026-09-03 (Nemotron 3.5 Lightning, parallel subagents)
+- Subagents must never `git stash` / checkout while siblings edit the tree; get a
+  clean-main baseline from a `git worktree` instead. Say so explicitly in every
+  parallel-agent prompt.
+- Host facts change between sessions (RAM, swap, GPU holders); re-run
+  benchmarks/preflight_nemotron_host.py before trusting plan numbers.

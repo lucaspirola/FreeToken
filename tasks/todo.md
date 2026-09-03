@@ -1,3 +1,26 @@
+# Nemotron 3.5 Lightning 30B-A3B-NVFP4 on RTX 5080 (Switchyard) — 2026-09-03
+
+Full plan: tasks/nemotron35-plan.md
+
+## Phase 1 — bring-up
+- [ ] 1A model package (config/model/weight + tests)
+- [ ] 1B engine/CLI/AOT/docs/preflight
+- [ ] 1C parity script + gates (parity, batch invariance, prefix cache, elastic ramp, needle, tool call, AIME)
+- [ ] Focused tests + ruff + commit
+
+## Phase 2 — kernels
+- [ ] T0 flashinfer SSU probe on sm_120
+- [ ] 2A1 layout/metadata/wiring  - [ ] 2A2 SSD prefill  - [ ] 2A3 decode SSU + gated norm
+- [ ] 2B1 b12x relu2  - [ ] 2B3 dense NVFP4 tuning
+- [ ] 2A4 integrate  - [ ] 2B2 triton fallback tuning  - [ ] 2B4 cache sizing study
+
+## Phase 3 — Switchyard
+- [ ] 3A wire/errors  - [ ] 3B JSON mode  - [ ] 3C sessions+parsers  - [ ] 3D profile + e2e soak
+
+## Phase 4 — MTP (time-boxed, flagged)
+- [ ] 1 mtp.py  - [ ] 2 sampler  - [ ] 3 mamba verify  - [ ] 4 scheduler  - [ ] 5 engine  - [ ] 6 gate
+
+---
 # Ornith RTX 5080 full-context optimization
 
 ## Phase 3 (2026-08-29): post-Ada SM120 revalidation

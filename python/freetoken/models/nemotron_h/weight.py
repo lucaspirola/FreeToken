@@ -49,6 +49,22 @@ def _dequant_nvfp4(weight, scale, global_scale):
     return _dequant_nvfp4_weight(weight, scale, global_scale)
 
 
+def _native_nvfp4(f, base: str):
+    """The three buffers ``Nvfp4DenseLinear`` / ``Nvfp4LMHead`` load: packed uint8
+    ``weight`` [O, IN//2], fp8-e4m3 block ``weight_scale`` [O, IN//16], and the fp16
+    per-output-row ``weight_global`` (the checkpoint's scalar ``weight_scale_2``
+    broadcast). Same layout the routed-expert banks use, so the dense NVFP4 matrices
+    (shared experts, lm_head) never have to be expanded to bf16."""
+    from freetoken.models.qwen3_5_moe.weight import _nvfp4_parts
+
+    w, scale, glob = _nvfp4_parts(f, base)
+    return [
+        (base + ".weight", w),
+        (base + ".weight_scale", scale),
+        (base + ".weight_global", glob),
+    ]
+
+
 def _skip(name: str) -> bool:
     return (
         name.startswith("mtp.")
@@ -70,6 +86,7 @@ def iter_weights(
         raise NotImplementedError("Nemotron-H currently supports TP=1 only")
 
     config = parse_config(cached_load_hf_config(model_path))
+    args = config.nemotron_h_args
     qkv: dict[str, dict[str, torch.Tensor]] = {}
 
     for file in tqdm(
@@ -89,6 +106,9 @@ def iter_weights(
                     scale_name = base + ".weight_scale"
                     global_name = base + ".weight_scale_2"
                     if global_name in keys:
+                        if args.module_quant(base) == "nvfp4":
+                            yield from _native_nvfp4(f, base)
+                            continue
                         tensor = _dequant_nvfp4(
                             tensor, f.get_tensor(scale_name), f.get_tensor(global_name)
                         )
