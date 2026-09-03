@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from functools import cached_property
 from typing import TYPE_CHECKING, List
@@ -11,6 +12,10 @@ from freetoken.utils import cached_load_hf_config
 
 if TYPE_CHECKING:
     from freetoken.models import ModelConfig
+
+# transformers writes an unbounded tokenizer window as VERY_LARGE_INTEGER (int(1e30)).
+# Anything at or above this is a "no limit" sentinel, not a served ceiling.
+_TOKENIZER_MAX_LEN_SENTINEL = int(1e20)
 
 
 @dataclass(frozen=True)
@@ -206,11 +211,56 @@ class EngineConfig:
         )
         return replace(config, rotary_config=rotary, attention_groups=groups)
 
+    @cached_property
+    def tokenizer_model_max_length(self) -> int | None:
+        """``model_max_length`` from ``tokenizer_config.json``, or None.
+
+        Checkpoints whose positional geometry is far larger than the window the
+        tokenizer (and therefore the publisher) actually supports would otherwise
+        advertise the geometry: Nemotron-3.5 Lightning carries
+        ``max_position_embeddings`` 1,048,576 against a tokenizer
+        ``model_max_length`` of 262,144. Transformers writes "unbounded" as a huge
+        sentinel (``VERY_LARGE_INTEGER``, int(1e30)), which is not a real limit and
+        is ignored here, as are absent/malformed values.
+        """
+        import json
+        import os
+
+        if os.path.isdir(self.model_path):
+            path = os.path.join(self.model_path, "tokenizer_config.json")
+            if not os.path.isfile(path):
+                return None
+        elif os.path.exists(self.model_path):
+            return None  # a bare .gguf file carries its own metadata
+        else:
+            try:
+                from huggingface_hub import hf_hub_download
+
+                path = hf_hub_download(
+                    repo_id=self.model_path, filename="tokenizer_config.json"
+                )
+            except Exception:
+                return None
+        try:
+            with open(path, encoding="utf-8") as f:
+                value = json.load(f).get("model_max_length")
+        except Exception:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if not math.isfinite(value) or value < 1 or value >= _TOKENIZER_MAX_LEN_SENTINEL:
+            return None
+        return int(value)
+
     @property
     def max_seq_len(self) -> int:
         if self.max_seq_len_override is not None:
             return self.max_seq_len_override
-        return self.model_config.rotary_config.max_position
+        max_position = self.model_config.rotary_config.max_position
+        limit = self.tokenizer_model_max_length
+        if limit is not None and limit < max_position:
+            return limit
+        return max_position
 
     @property
     def max_forward_len(self) -> int:

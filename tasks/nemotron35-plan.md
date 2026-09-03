@@ -371,9 +371,11 @@ PCIe ≈ 100 ms/token — not viable). Instead rely on what exists and validate 
   Mamba state to RAM then NVMe and restores exactly on the next turn (validated on Ornith only).
 - KV per 1M session ≈ 3 GB at fp8 + 47 MiB Mamba state → 2–3 concurrently decoding 1M sessions
   on the 5080; ~4 spilled sessions fit in the remaining host RAM (40 GB − 16.5 GB banks − process).
+User decision (2026-09-04): 1M profile runs ONE resident session; all other sessions queue and are
+served in sequence via spill/restore. The 16-way profile remains for short-context Switchyard traffic.
 Gate (after Phase 2 kernels, before Phase 4): 1M profile `--max-seq-len-override 1048576
 --num-tokens 1048576 --kv-cache-dtype fp8_e4m3 --attention-backend triton --kv-grow-step-tokens
-131072 --max-running-requests 3 --elastic-initial-requests 1 --session-spill-ram-gb 12
+131072 --max-running-requests 1 --session-spill-ram-gb 12
 --session-spill-dir <nvme>`; three sessions grown to ~1M each with disjoint needles, one spilled
 and restored, all coherent; record prefill/decode tok/s and spill/restore times.
 KV dtype: Phase 1 A/B (2026-09-04) chose q8_0 — fp8_e4m3 flipped first tokens on cached-prefix reuse 3/6 runs; equal VRAM and reasoning score. See benchmarks/results/nemotron35_lightning_5080_2026-09-04.md.
