@@ -23,6 +23,12 @@ import triton.language as tl
 from freetoken.kernel.triton.autotune_cache import autotune_cache_kwargs
 from freetoken.kernel.triton.mamba2.ssd_chunk_state import fast_exp
 
+# `tl.dot` defaults to TF32 (10 mantissa bits) for fp32 inputs, which leaves the
+# fp32 path at ~4e-4 RMS-relative against an fp64 gold -- fp16 grade, not fp32.
+# Triton ignores `input_precision` for fp16/bf16 operands, so asking for "ieee"
+# costs the bf16 hot path nothing and makes the fp32 path fp32-exact (~1e-6).
+DOT_PRECISION = tl.constexpr("ieee")
+
 # Two shared-memory consumers per program:
 #   (a) the single C @ prev_states dot: (BLOCK_M*DSTATE + DSTATE*BLOCK_N) * 2 B
 #   (b) the pipelined CB @ x loop:      (BLOCK_M*BLOCK_K + BLOCK_K*BLOCK_N) * 2 B * stages
@@ -225,7 +231,7 @@ def _chunk_scan_fwd_kernel(
             )
             prev_states = prev_states.to(C_ptr.dtype.element_ty)
 
-        acc = tl.dot(C, prev_states) * scale_m[:, None]
+        acc = tl.dot(C, prev_states, input_precision=DOT_PRECISION) * scale_m[:, None]
 
     else:
         prev_states_ptrs = (
@@ -252,7 +258,7 @@ def _chunk_scan_fwd_kernel(
                     other=0.0,
                 )
                 prev_states = prev_states.to(C_ptr.dtype.element_ty)
-            acc += tl.dot(C, prev_states)
+            acc += tl.dot(C, prev_states, input_precision=DOT_PRECISION)
             C_ptrs += BLOCK_SIZE_K
             prev_states_ptrs += BLOCK_SIZE_K
         acc *= scale_m[:, None]
@@ -294,7 +300,7 @@ def _chunk_scan_fwd_kernel(
             mask=(offs_k[:, None] < chunk_size_limit - k) & (offs_n[None, :] < hdim),
             other=0.0,
         )
-        acc += tl.dot(cb, x)
+        acc += tl.dot(cb, x, input_precision=DOT_PRECISION)
         cb_ptrs += BLOCK_SIZE_K * stride_cb_csize_k
         x_ptrs += BLOCK_SIZE_K * stride_x_seqlen
         dt_ptrs += BLOCK_SIZE_K * stride_dt_csize

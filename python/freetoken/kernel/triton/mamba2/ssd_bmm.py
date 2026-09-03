@@ -20,6 +20,12 @@ import triton.language as tl
 
 from freetoken.kernel.triton.autotune_cache import autotune_cache_kwargs
 
+# `tl.dot` defaults to TF32 (10 mantissa bits) for fp32 inputs, which leaves the
+# fp32 path at ~4e-4 RMS-relative against an fp64 gold -- fp16 grade, not fp32.
+# Triton ignores `input_precision` for fp16/bf16 operands, so asking for "ieee"
+# costs the bf16 hot path nothing and makes the fp32 path fp32-exact (~1e-6).
+DOT_PRECISION = tl.constexpr("ieee")
+
 # smem ~= (BLOCK_M*BLOCK_K + BLOCK_K*BLOCK_N) * 2 B * num_stages. The output tile
 # is (chunk_size x chunk_size) = 128x128, so BLOCK_N 256 buys nothing and the
 # vLLM (128,256,64,s3) config would need 144 KB. Retained set, all <= 64 KB:
@@ -138,7 +144,7 @@ def _bmm_chunk_fwd_kernel(
             & (offs_n[None, :] < chunk_size_limit),
             other=0.0,
         ).to(dot_dtype)
-        acc += tl.dot(a, b)
+        acc += tl.dot(a, b, input_precision=DOT_PRECISION)
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
 

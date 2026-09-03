@@ -174,13 +174,18 @@ def run_case(label: str, lens: list[int], args) -> dict:
     meta = build_mamba2_metadata(cu, CHUNK, device=device)
     pool = torch.zeros(len(lens), H, P, N, device=device, dtype=torch.float32)
     indices = torch.arange(len(lens), dtype=torch.int32, device=device)
+    # Every call is a fresh prefill: without this the scan scatters its final
+    # states into the pool and the *next* call picks them up as initial states,
+    # so a repeated `call()` would drift away from the cold torch reference.
+    has_init = torch.zeros(len(lens), dtype=torch.bool, device=device)
     out = torch.empty_like(x)
 
     def call():
         mamba2_prefill(
             x, dt, B, C,
             A=A, D=D, dt_bias=dt_bias, meta=meta, cu_seqlens=cu_seqlens,
-            state_source=pool, indices=indices, out=out,
+            state_source=pool, indices=indices, has_initial_state=has_init,
+            out=out,
         )
 
     call()  # trigger autotune before measuring memory

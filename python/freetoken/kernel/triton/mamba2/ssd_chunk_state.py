@@ -27,6 +27,12 @@ import triton.language as tl
 
 from freetoken.kernel.triton.autotune_cache import autotune_cache_kwargs
 
+# `tl.dot` defaults to TF32 (10 mantissa bits) for fp32 inputs, which leaves the
+# fp32 path at ~4e-4 RMS-relative against an fp64 gold -- fp16 grade, not fp32.
+# Triton ignores `input_precision` for fp16/bf16 operands, so asking for "ieee"
+# costs the bf16 hot path nothing and makes the fp32 path fp32-exact (~1e-6).
+DOT_PRECISION = tl.constexpr("ieee")
+
 
 @triton.jit
 def fast_exp(x):
@@ -298,7 +304,7 @@ def _chunk_state_fwd_kernel(
         scale = fast_exp(tl.minimum(dA_cs_last - dA_cs_k, 0.0)) * dt_k
         b *= scale[:, None]
         b = b.to(x_ptr.dtype.element_ty)
-        acc += tl.dot(x, b)
+        acc += tl.dot(x, b, input_precision=DOT_PRECISION)
 
         x_ptrs += BLOCK_SIZE_K * stride_x_seqlen
         b_ptrs += BLOCK_SIZE_K * stride_b_seqlen

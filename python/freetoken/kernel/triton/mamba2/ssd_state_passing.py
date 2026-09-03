@@ -35,9 +35,13 @@ _STATE_PASSING_CONFIGS = [
 ]
 
 
+# `states_ptr` may alias `out_ptr` (see `inplace` below), and the recurrence is
+# not idempotent -- `restore_value` makes the autotuner put the input back
+# between trial launches so the winning config is still picked on clean data.
 @triton.autotune(
     configs=_STATE_PASSING_CONFIGS,
     key=["dim"],
+    restore_value=["states_ptr"],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["stride_dA_cs_head"])
@@ -122,14 +126,27 @@ def _state_passing_fwd(
     last_chunk_indices,
     initial_states=None,
     out_dtype=None,
+    inplace=False,
 ):
-    """Inter-chunk recurrence. states: (nchunks, nheads, dim) -> same shape."""
+    """Inter-chunk recurrence. states: (nchunks, nheads, dim) -> same shape.
+
+    With ``inplace`` the result overwrites ``states`` instead of allocating a
+    second ``[nchunks, nheads, dim]`` buffer -- 512 MB at 32K tokens in the
+    Nemotron geometry, which is the difference between a 1.0 GB and a 0.7 GB
+    transient footprint. Each program owns one ``(dim block, sequence, head)``
+    slice and walks its chunks in order, loading chunk ``c`` before storing
+    chunk ``c``, so the aliasing is safe; the autotuner is handled by
+    ``restore_value`` above.
+    """
     nchunks, nheads, dim = states.shape
     chunk_size = dA_cumsum.shape[-1]
     batch = last_chunk_indices.shape[0]
     assert dA_cumsum.shape == (nheads, nchunks, chunk_size)
     out_dtype = states.dtype if out_dtype is None else out_dtype
-    out = torch.empty((nchunks, nheads, dim), device=states.device, dtype=out_dtype)
+    if inplace and out_dtype == states.dtype:
+        out = states
+    else:
+        out = torch.empty((nchunks, nheads, dim), device=states.device, dtype=out_dtype)
 
     initial_states_strides = (
         (initial_states.stride(0), initial_states.stride(1), initial_states.stride(2))

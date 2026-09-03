@@ -121,6 +121,9 @@ def _mamba_chunk_scan_combined_fwd(
             else None
         ),
         out_dtype=state_dtype if state_dtype is not None else C.dtype,
+        # `states` is dead after this call, so let the recurrence overwrite it
+        # rather than doubling the chunk-state footprint.
+        inplace=True,
     )
     states = states.view(nchunks, nheads, headdim, dstate)
 

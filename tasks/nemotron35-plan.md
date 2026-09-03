@@ -379,3 +379,33 @@ Gate (after Phase 2 kernels, before Phase 4): 1M profile `--max-seq-len-override
 --session-spill-dir <nvme>`; three sessions grown to ~1M each with disjoint needles, one spilled
 and restored, all coherent; record prefill/decode tok/s and spill/restore times.
 KV dtype: Phase 1 A/B (2026-09-04) chose q8_0 — fp8_e4m3 flipped first tokens on cached-prefix reuse 3/6 runs; equal VRAM and reasoning score. See benchmarks/results/nemotron35_lightning_5080_2026-09-04.md.
+
+## Addendum 2026-09-04 — task 3E session residency policy (DECIDED 2026-09-04)
+
+1M profile: `--max-running-requests 1`; other sessions queue and are served in sequence.
+- **No spill while the queue is empty.** The resident session's KV + Mamba state stays in VRAM
+  until another session's request needs the slot; only then is it checkpointed (on demand, not on
+  an idle timer). TTL-based release must not evict a resident session that nobody is waiting on.
+- **Bounded checkpoint store with age-based eviction.** A byte cap (e.g. `--session-spill-limit-gb
+  50`, RAM + NVMe tiers combined or per tier) and eviction of the oldest checkpoints first when the
+  cap is reached. Deleted sessions fall back to ordinary prefill on their next request.
+Audit (HEAD 584f17c): auto sessions are checkpointed 30 s after turn end regardless of demand
+(`scheduler.py:1192 _release_due_soft_sessions`, `auto_session_grace_seconds`); admission-time
+reclaim (`scheduler.py:1206`) runs once and skips a mid-turn session, so a queued request waits for
+the timer; TTL (300 s) closes the session AND destroys its checkpoint (`_close_session`,
+`_discard_session_spill`); disk tier 64 GiB cap refuses instead of evicting, no age order, no
+on-disk key, rmtree on shutdown, leaked `server-*` dirs after a crash; explicit `session_id`
+leases are never spilled; all header-derived ids are reclaimable.
+Decided scope (all three):
+1. Spill on demand only: no timer release while nothing is waiting; when an admission fails for
+   lack of KV/state slots, reclaim the oldest idle reclaimable lease (re-run at the
+   admission-failure point, not only at message receipt). Keep the grace timer only as a very long
+   safety (configurable, default off/∞).
+2. Retention by capacity + age: checkpoint lifetime decoupled from lease TTL. `--session-spill-limit-gb`
+   (default 50) total across RAM+disk; evict oldest-by-last-use first when the cap or the filesystem
+   guard is hit instead of refusing. TTL closes the lease but keeps the checkpoint; a later request
+   with the exact prefix restores it.
+3. Survive restart: checkpoints keyed on disk by session id + prompt-prefix hash + K/V layout
+   fingerprint (manifest JSON next to chunks); startup scans the spill root, adopts valid records,
+   deletes stale/foreign ones; shutdown no longer rmtrees. Restore still requires exact prefix +
+   fingerprint match.
