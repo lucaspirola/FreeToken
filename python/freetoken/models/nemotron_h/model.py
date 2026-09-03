@@ -110,9 +110,12 @@ class NemotronHMamba2Mixer(BaseOP):
         ).transpose(0, 1)
 
     def _scan(self, x, dt, B, C, initial):
-        # Transformers' implementation has a pure-Torch chunk fallback when mamba_ssm is
-        # absent. It is the reference recurrence and avoids an O(sequence) Python loop.
-        from transformers.models.nemotron_h.modeling_nemotron_h import mamba2_chunk_scan
+        # The reference recurrence (transformers' pure-Torch chunk fallback, used when
+        # mamba_ssm is absent), with its four broadcast-and-sum contractions written as
+        # einsums. Same math to fp32 roundoff; 4.2 MiB/token of rank-6 temporaries
+        # becomes 0.22 MiB/token, which is what makes a >1K-token prefill chunk fit in
+        # 16 GB. See models/nemotron_h/chunk_scan.py.
+        from .chunk_scan import mamba2_chunk_scan
 
         return mamba2_chunk_scan(
             x.unsqueeze(0), dt.unsqueeze(0), -torch.exp(self.A_log.float()),

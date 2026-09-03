@@ -1,7 +1,10 @@
 """Per-layer numerical parity between FreeToken's Nemotron-H layers and HuggingFace.
 
 For each requested layer this builds two implementations of the *same* block from the
-*same* checkpoint tensors and feeds them one identical random hidden-state batch:
+*same* checkpoint tensors and feeds them one identical
+in-distribution hidden-state batch -- real embedding rows through the block's own input
+RMSNorm, so the checkpoint's static FP8 activation scales stay inside their calibrated
+range:
 
   reference   ``transformers.models.nemotron_h.modeling_nemotron_h`` modules with every
               quantized matrix expanded to bf16 (FP8: ``weight * weight_scale``; NVFP4:
@@ -370,13 +373,26 @@ def freetoken_config(config, *, moe_backend: str):
     return dataclasses.replace(parse_config(config), moe_backend=moe_backend)
 
 
-def random_hidden(tokens: int, hidden: int, seed: int, device: torch.device) -> torch.Tensor:
+def layer_input(
+    checkpoint: Checkpoint, hf_cfg, layer: int, tokens: int, seed: int, device: torch.device
+) -> torch.Tensor:
+    """A realistic input batch for ``layer``: real embedding rows, real input RMSNorm.
+
+    The checkpoint's FP8 mixer projections carry *static* modelopt activation scales
+    (``input_scale``), calibrated on real text. Feeding synthetic ``randn`` hidden states
+    pushes the gated-norm output ~9x past ``out_proj``'s calibrated amax, and the
+    resulting clipping shows up as a ~0.97 cosine that is an artifact of the probe, not
+    of either implementation. Sampling real ``backbone.embeddings`` rows and applying the
+    block's own input norm keeps every activation inside its calibrated range.
+    """
     generator = torch.Generator(device="cpu").manual_seed(seed)
-    return (
-        torch.randn(tokens, hidden, generator=generator, dtype=torch.float32).to(
-            device=device, dtype=torch.bfloat16
-        )
-    )
+    embeddings = checkpoint.get("backbone.embeddings.weight")
+    ids = torch.randint(0, embeddings.shape[0], (tokens,), generator=generator)
+    states = embeddings.index_select(0, ids).to(device=device, dtype=torch.float32)
+    eps = hf_cfg.layer_norm_epsilon
+    states = states * torch.rsqrt(states.square().mean(-1, keepdim=True) + eps)
+    weight = checkpoint.get(f"backbone.layers.{layer}.norm.weight", device).float()
+    return (states * weight).to(torch.bfloat16)
 
 
 def run_mamba_layer(
@@ -654,7 +670,7 @@ def main(argv: list[str] | None = None) -> int:
     for layer in parse_layers(args.layers):
         kind = kinds[layer]
         runner = LAYER_RUNNERS[kind]
-        hidden = random_hidden(args.tokens, ft_cfg.hidden_size, args.seed + layer, device)
+        hidden = layer_input(checkpoint, config, layer, args.tokens, args.seed + layer, device)
         print(f"[parity] layer {layer} ({kind}) ...", flush=True)
         extra = {"bank_device": bank_device} if kind == "moe" else {}
         result = runner(checkpoint, config, ft_cfg, layer, hidden, device, **extra)

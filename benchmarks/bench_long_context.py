@@ -326,6 +326,22 @@ def acceptance_failures(row: dict, args: argparse.Namespace) -> list[str]:
     return failures
 
 
+def load_tokenizer(model: str):
+    """The tokenizer for a GGUF file or a HuggingFace checkpoint directory.
+
+    Only ``encode``/``decode`` are used (to trim the filler in token space), and both
+    backends expose the same signatures, so a safetensors checkpoint like Nemotron-3.5
+    works here without a GGUF conversion.
+    """
+    if os.path.isdir(model):
+        from transformers import AutoTokenizer
+
+        return AutoTokenizer.from_pretrained(model)
+    from freetoken.models.gguf.tokenizer import load_gguf_tokenizer
+
+    return load_gguf_tokenizer(model)
+
+
 def main() -> int:
     args = parse_args()
     if args.synthetic_needle:
@@ -334,9 +350,7 @@ def main() -> int:
     else:
         question, expected = load_row(args.ruler, args.sample)
         workload = f"{args.ruler} sample={args.sample}"
-    from freetoken.models.gguf.tokenizer import load_gguf_tokenizer
-
-    tokenizer = load_gguf_tokenizer(args.model)
+    tokenizer = load_tokenizer(args.model)
     prompt, original_tokens, trimmed_tokens = trim_filler(
         tokenizer, question, expected, args.target_prompt_tokens
     )

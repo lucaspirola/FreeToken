@@ -162,7 +162,7 @@ ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   --attention-backend triton --moe-backend offload --moe-pageable-gpu --moe-cache-auto \
   --memory-ratio 0.90 --max-prefill-length 8192 --host-ram-reserve-gb 3 --enable-cache-report
 ```
-Quantized KV requires `--attention-backend triton`; bf16 KV + FlashInfer is the fallback (KV is
+User decision (2026-09-03): KV cache is FP8 (`fp8_e4m3`, FreeToken block scales; checkpoint k_scale/v_scale ignored). Quantized KV requires `--attention-backend triton`; bf16 KV + FlashInfer is the fallback (KV is
 only +0.75 GiB at 262K). Try `FREETOKEN_PIN_BUDGET_GB` ≥ 17 to drop `--moe-pageable-gpu` and
 regain decode graphs; measure both.
 
@@ -360,3 +360,20 @@ amplifying PCIe fetches.
   before/after (bs=1 ≥ 2× Phase 1), 8K TTFT ≤ 2 s, AIME A/B with `FREETOKEN_MAMBA2_REF=1`.
 - Phase 3: contract checks + Switchyard soak scenarios at concurrency 16 + Claude Code/Codex smoke.
 - Phase 4: greedy equivalence, acceptance histogram, tok/s gate.
+
+## Addendum 2026-09-03 — parallel 1M sessions (user goal)
+
+Model: many long-lived agent sessions, each up to 1M tokens, few decoding at any instant.
+No live host-KV tier for active sequences (every decode step reads the whole KV; 3 GB/step over
+PCIe ≈ 100 ms/token — not viable). Instead rely on what exists and validate it for Nemotron:
+- Growable KV (VMM segments, `--kv-grow-step-tokens`) funds KV from the expert cache as sessions grow.
+- Session spill (`--session-spill-ram-gb`, `--session-spill-dir`) checkpoints idle sessions' KV +
+  Mamba state to RAM then NVMe and restores exactly on the next turn (validated on Ornith only).
+- KV per 1M session ≈ 3 GB at fp8 + 47 MiB Mamba state → 2–3 concurrently decoding 1M sessions
+  on the 5080; ~4 spilled sessions fit in the remaining host RAM (40 GB − 16.5 GB banks − process).
+Gate (after Phase 2 kernels, before Phase 4): 1M profile `--max-seq-len-override 1048576
+--num-tokens 1048576 --kv-cache-dtype fp8_e4m3 --attention-backend triton --kv-grow-step-tokens
+131072 --max-running-requests 3 --elastic-initial-requests 1 --session-spill-ram-gb 12
+--session-spill-dir <nvme>`; three sessions grown to ~1M each with disjoint needles, one spilled
+and restored, all coherent; record prefill/decode tok/s and spill/restore times.
+KV dtype: Phase 1 A/B (2026-09-04) chose q8_0 — fp8_e4m3 flipped first tokens on cached-prefix reuse 3/6 runs; equal VRAM and reasoning score. See benchmarks/results/nemotron35_lightning_5080_2026-09-04.md.

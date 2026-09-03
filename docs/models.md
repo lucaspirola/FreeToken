@@ -273,7 +273,7 @@ work too.
   ```
   ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
     --max-running-requests 16 --elastic-initial-requests 4 --kv-grow-step-tokens 65536 \
-    --num-tokens 262144 --max-seq-len-override 131072 --kv-cache-dtype fp8_e4m3 \
+    --num-tokens 262144 --max-seq-len-override 131072 --kv-cache-dtype q8_0 \
     --attention-backend triton --moe-backend offload --moe-pageable-gpu --moe-cache-auto \
     --memory-ratio 0.90 --max-prefill-length 8192 --host-ram-reserve-gb 3 --enable-cache-report
   ```

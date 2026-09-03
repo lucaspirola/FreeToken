@@ -42,6 +42,10 @@ at::ScalarType parse_dtype(const std::string& name) {
   if (name == "float16") return at::kHalf;
   if (name == "bfloat16") return at::kBFloat16;
   if (name == "float32") return at::kFloat;
+  // NVFP4 expert banks carry an fp8 per-group scale tensor; the MoE device bank cache
+  // is VMM-backed whenever elastic capacity is on, so the mapping needs this dtype.
+  if (name == "float8_e4m3fn") return at::kFloat8_e4m3fn;
+  if (name == "float8_e5m2") return at::kFloat8_e5m2;
   throw std::invalid_argument("unsupported VMM tensor dtype: " + name);
 }
 

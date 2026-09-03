@@ -12,7 +12,7 @@ Full plan: tasks/nemotron35-plan.md
 - [ ] T0 flashinfer SSU probe on sm_120
 - [ ] 2A1 layout/metadata/wiring  - [ ] 2A2 SSD prefill  - [ ] 2A3 decode SSU + gated norm
 - [ ] 2B1 b12x relu2  - [ ] 2B3 dense NVFP4 tuning
-- [ ] 2A4 integrate  - [ ] 2B2 triton fallback tuning  - [ ] 2B4 cache sizing study
+- [ ] 2A4 integrate  - [ ] 2B2 triton fallback tuning  - [ ] 2B4 cache sizing study  - [ ] 1M multi-session spill gate
 
 ## Phase 3 — Switchyard
 - [ ] 3A wire/errors  - [ ] 3B JSON mode  - [ ] 3C sessions+parsers  - [ ] 3D profile + e2e soak
