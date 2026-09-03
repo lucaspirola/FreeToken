@@ -20,11 +20,13 @@ from .api_models import (
     ModelList,
     ToolChoiceObject,
 )
+from .client_sessions import chat_session_id
 from .function_call_parser import ToolCallItem
 from .request_logger import log_request
 from .generation import (
     ContentDelta,
     GenDone,
+    GenEvent,
     GenerationError,
     GenSpec,
     ReasoningDelta,
@@ -90,14 +92,20 @@ def chat_request_to_genspec(
     model_sampling: dict[str, Any],
     *,
     map_developer_role: bool = True,
+    force_nonempty_content: bool = False,
 ) -> GenSpec:
-    """OpenAI ChatCompletionRequest -> GenSpec (the OpenAI 'to_sampling_params')."""
+    """OpenAI ChatCompletionRequest -> GenSpec (the OpenAI 'to_sampling_params').
+
+    ``force_nonempty_content`` is the server default (--force-nonempty-content);
+    the request can override it per call through ``chat_template_kwargs``.
+    """
     from .model_meta import effort_toggle_kwargs
 
     ctk = req.chat_template_kwargs
     thinking_type = _thinking_type(req)
     if req.reasoning_effort or thinking_type:
         ctk = effort_toggle_kwargs(req.reasoning_effort, ctk, thinking_type=thinking_type)
+    ctk, force_nonempty = _force_nonempty_content(ctk, force_nonempty_content)
     wire_messages = [m.model_dump(exclude_none=True) for m in req.messages]
     if map_developer_role:
         wire_messages = _map_developer_role(wire_messages)
@@ -117,7 +125,30 @@ def chat_request_to_genspec(
         parser_tools=(_all_tool_dicts(req.tools) if _should_parse_tools(req) else None),
         session_id=req.session_id,
         session_ttl_seconds=req.session_ttl_seconds,
+        force_nonempty_content=force_nonempty,
     )
+
+
+def _force_nonempty_content(
+    ctk: dict[str, Any] | None, server_default: bool
+) -> tuple[dict[str, Any] | None, bool]:
+    """Split ``force_nonempty_content`` out of the template kwargs.
+
+    It is a FreeToken serving knob, not a template variable: Jinja renders with
+    ``**chat_template_kwargs`` and an unknown name either raises or silently
+    changes what the model sees, so it must never reach the template. Precedence:
+    an explicit request value wins; otherwise a thinking-OFF turn enables it (the
+    template pre-closes the think block, so a model that still writes only a
+    thought would answer with an empty message), else the server default.
+    """
+    if not ctk:
+        return ctk, server_default
+    if "force_nonempty_content" not in ctk:
+        thinking_off = ctk.get("enable_thinking") is False
+        return ctk, True if thinking_off else server_default
+    ctk = dict(ctk)
+    requested = ctk.pop("force_nonempty_content")
+    return ctk, bool(requested)
 
 
 def _all_tool_dicts(tools) -> list[dict[str, Any]]:
@@ -235,10 +266,23 @@ async def handle_chat_completion(
 
     try:
         spec = chat_request_to_genspec(
-            req, model_sampling, map_developer_role=not _harmony_chat_template(state)
+            req,
+            model_sampling,
+            map_developer_role=not _harmony_chat_template(state),
+            force_nonempty_content=getattr(state.config, "force_nonempty_content", False),
         )
     except ValueError as exc:
         return create_error_response(str(exc))
+
+    # Bind the turn to a KV session lease before submit. An id FreeToken inferred
+    # from the client's own conversation headers is reclaimable (the client never
+    # learned to close it); an explicit session_id stays the client's to own.
+    explicit_session = req.session_id is not None
+    spec.session_id = chat_session_id(req, request)
+    spec.session_reclaimable = spec.session_id is not None and not explicit_session
+    session_headers = (
+        {"X-FreeToken-Session-Id": spec.session_id} if spec.session_id is not None else None
+    )
 
     # Both paths preflight: the stream path because an error after the headers go
     # out can only ride in-stream, the non-stream path because a context overflow
@@ -258,7 +302,9 @@ async def handle_chat_completion(
                 if spec.session_id is not None
                 else state.stream_with_cancellation(chunks, request, uid)
             )
-        return StreamingResponse(chunks, media_type="text/event-stream")
+        return StreamingResponse(
+            chunks, media_type="text/event-stream", headers=session_headers
+        )
 
     try:
         result = await generate_full(uid, spec, state, source="/v1/chat/completions")
@@ -266,14 +312,23 @@ async def handle_chat_completion(
         await state.abort_user(uid, session_id=spec.session_id)
         raise
     except GenerationError as exc:
-        return create_error_response(str(exc), code=exc.code)
+        if not _auto_session_busy(exc, spec):
+            return create_error_response(str(exc), code=exc.code)
+        uid = await _resubmit_unbound(spec, state)
+        try:
+            result = await generate_full(uid, spec, state, source="/v1/chat/completions")
+        except asyncio.CancelledError:
+            await state.abort_user(uid)
+            raise
+        except GenerationError as retry_exc:
+            return create_error_response(str(retry_exc), code=retry_exc.code)
     message: dict[str, Any] = {"role": "assistant", "content": result.content}
     if result.reasoning:
         message["reasoning_content"] = result.reasoning
     if result.tool_calls:
         message["tool_calls"] = _tool_calls_to_openai(result.tool_calls)
 
-    return {
+    payload = {
         "id": f"chatcmpl-{uid}",
         "object": "chat.completion",
         "created": int(time.time()),
@@ -292,6 +347,62 @@ async def handle_chat_completion(
             result.reasoning_tokens,
         ),
     }
+    # A plain dict when there is no header to carry (FastAPI serializes it to the
+    # same JSONResponse); the session id has to ride on the response itself, which
+    # is the one thing a returned dict cannot express.
+    if session_headers is None:
+        return payload
+    return JSONResponse(content=payload, headers=session_headers)
+
+
+#: The scheduler's rejection when a session lease is already serving a turn
+#: (``scheduler.py``: ``f"session {id!r} is busy"``).
+_SESSION_BUSY_PREFIX = "session "
+_SESSION_BUSY_SUFFIX = " is busy"
+
+
+def _auto_session_busy(exc: GenerationError, spec: GenSpec) -> bool:
+    """Whether ``exc`` is the scheduler refusing a session id FreeToken bound itself.
+
+    Sessions serialize their turns, and Switchyard legitimately runs a
+    judge/classifier call on the same conversation as the turn it is judging — so
+    an id inferred from conversation headers can collide with an in-flight one.
+    The request must still be served (unbound, losing only that call's prefix
+    reuse) rather than failing on affinity the client never asked for. An explicit
+    ``session_id`` keeps the error: serialization is exactly what it requested.
+    """
+    if not spec.session_reclaimable or spec.session_id is None:
+        return False
+    message = str(exc)
+    return message.startswith(_SESSION_BUSY_PREFIX) and message.endswith(_SESSION_BUSY_SUFFIX)
+
+
+async def _resubmit_unbound(spec: GenSpec, state: Any) -> int:
+    """Resubmit ``spec`` once with no session lease. Mutates the spec, so a second
+    busy reply is impossible (``_auto_session_busy`` is False without a session)."""
+    spec.session_id = None
+    spec.session_reclaimable = False
+    return await submit_generation(spec, state)
+
+
+async def _open_chat_events(
+    uid: int, spec: GenSpec, state: Any
+) -> tuple[AsyncIterator[GenEvent], Any, bool, GenerationError | None]:
+    """Open the event stream and pull its FIRST event, returning
+    ``(events, first_event, have_first, error)``.
+
+    A scheduler-side failure (context overflow, a template the worker rejects, a
+    busy session) must be the first SSE event on the wire: Switchyard reads event
+    0 to decide whether to retarget, and a role chunk ahead of it reads as a
+    successful stream that then goes silent.
+    """
+    events = generate_events(uid, spec, state, source="/v1/chat/completions")
+    try:
+        return events, await events.__anext__(), True, None
+    except StopAsyncIteration:
+        return events, None, False, None
+    except GenerationError as exc:
+        return events, None, False, exc
 
 
 async def stream_chat_completion_chunks(
@@ -310,22 +421,21 @@ async def stream_chat_completion_chunks(
     reasoning_tokens = 0
     tool_calls_sent = 0
     open_tool: dict[str, Any] | None = None
-    events = generate_events(uid, spec, state, source="/v1/chat/completions")
 
-    # Pull the FIRST event before the role chunk. A scheduler-side failure (context
-    # overflow, a template the worker rejects) must be the first SSE event on the
-    # wire: Switchyard reads event 0 to decide whether to retarget, and a role
-    # chunk ahead of it reads as a successful stream that then goes silent.
-    first_event: Any = None
-    have_first = False
-    try:
-        first_event = await events.__anext__()
-        have_first = True
-    except StopAsyncIteration:
-        pass
-    except GenerationError as exc:
+    events, first_event, have_first, error = await _open_chat_events(uid, spec, state)
+    if error is not None and _auto_session_busy(error, spec):
+        # The auto-bound lease is serving another turn of the same conversation.
+        # Resubmit unbound rather than failing the request. (The cancellation
+        # wrapper this generator runs under was bound to the pre-fallback uid; a
+        # disconnect after a fallback therefore aborts that one — the fallback
+        # request finishes on its own.)
+        uid = await _resubmit_unbound(spec, state)
+        events, first_event, have_first, error = await _open_chat_events(uid, spec, state)
+    if error is not None:
         yield _sse(
-            {"error": {"message": str(exc), "type": "invalid_request_error", "code": exc.code}}
+            {"error": {
+                "message": str(error), "type": "invalid_request_error", "code": error.code,
+            }}
         )
         yield b"data: [DONE]\n\n"
         return

@@ -108,7 +108,7 @@ def test_nemotron_3_5_lightning_resolves_the_nemotron_parsers():
     with patch("freetoken.utils.cached_load_hf_config", lambda _path: config):
         args, _ = parse_args(["--model", path])
     assert args.tool_call_parser == "qwen3_coder"
-    assert args.reasoning_parser == "qwen3"
+    assert args.reasoning_parser == "nemotron_v3"
 
 
 def test_nemotron_h_model_type_alone_reaches_the_nemotron_arm():
@@ -118,7 +118,7 @@ def test_nemotron_h_model_type_alone_reaches_the_nemotron_arm():
     with patch("freetoken.utils.cached_load_hf_config", lambda _path: config):
         args, _ = parse_args(["--model", ANON_PATH])
     assert args.tool_call_parser == "qwen3_coder"
-    assert args.reasoning_parser == "qwen3"
+    assert args.reasoning_parser == "nemotron_v3"
 
 
 def test_an_explicit_choice_beats_inference():
@@ -143,3 +143,27 @@ def test_swa_full_tokens_ratio_cli_surface():
 def test_swa_full_tokens_ratio_rejects_invalid_values(ratio):
     with pytest.raises(SystemExit):
         parse_args(["--model", ANON_PATH, "--swa-full-tokens-ratio", ratio])
+
+
+def _args(*extra: str):
+    config = _Config({"architectures": ["LlamaForCausalLM"], "torch_dtype": "bfloat16"})
+    with patch("freetoken.utils.cached_load_hf_config", lambda _path: config):
+        args, _ = parse_args(["--model", ANON_PATH, *extra])
+    return args
+
+
+def test_context_preflight_is_on_unless_it_is_turned_off():
+    """The preflight is what turns an over-length prompt into a 400
+    `context_length_exceeded` before it costs a queue slot; the flag is the escape
+    hatch for operators unwilling to pay the extra encode per request."""
+    assert _args().context_preflight is True
+    assert _args("--no-context-preflight").context_preflight is False
+
+
+def test_force_nonempty_content_is_off_unless_it_is_turned_on():
+    assert _args().force_nonempty_content is False
+    assert _args("--force-nonempty-content").force_nonempty_content is True
+
+
+def test_nemotron_v3_is_a_pinnable_reasoning_parser():
+    assert _args("--reasoning-parser", "nemotron_v3").reasoning_parser == "nemotron_v3"

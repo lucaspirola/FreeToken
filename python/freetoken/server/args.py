@@ -36,6 +36,10 @@ class ServerArgs(SchedulerConfig):
     # prompt_tokens_details.cached_tokens, Anthropic cache_read_input_tokens, Responses
     # input_tokens_details.cached_tokens). Mirrors sglang's --enable-cache-report.
     enable_cache_report: bool = False
+    # Answer with the model's own reasoning when a turn produces reasoning but no visible
+    # content and no tool call (--force-nonempty-content). Per request, a chat template
+    # kwarg of the same name overrides it; thinking-off turns default to on.
+    force_nonempty_content: bool = False
     # Comma-separated CORS allow-list for browser/webview clients (e.g. the desktop
     # app). Empty string disables CORS headers entirely; "*" allows any origin.
     cors_origins: str = "tauri://localhost,http://tauri.localhost,http://localhost:1420"
@@ -222,7 +226,7 @@ def parse_args(
                 "nemotron_h",
             )
         ):
-            return "qwen3"
+            return "nemotron_v3"
         if "deepseek" in marker and any(
             tag in marker for tag in ("v4", "deepseek_v4", "v3.2", "v32")
         ):
@@ -643,13 +647,14 @@ def parse_args(
         default="auto",
         choices=[
             "auto", "off", "deepseekv32", "gpt_oss", "qwen3", "glm",
-            "minimax", "minimax_m3", "muse_glimmer", "gemma4",
+            "minimax", "minimax_m3", "muse_glimmer", "gemma4", "nemotron_v3",
         ],
         help=(
             "Reasoning parser that splits chain-of-thought into reasoning_content "
             "for OpenAI responses. 'auto' selects per model family (gpt-oss Harmony, "
-            "<think> for qwen3/glm/minimax, <mm:think> for minimax-m3, ATEM to=self "
-            "channels for muse-glimmer, gemma thought, dsv4); 'off' disables it."
+            "<think> for qwen3/glm/minimax, <think> + <tool_call> escape for "
+            "nemotron-3.x, <mm:think> for minimax-m3, ATEM to=self channels for "
+            "muse-glimmer, gemma thought, dsv4); 'off' disables it."
         ),
     )
 
@@ -861,6 +866,31 @@ def parse_args(
         help=(
             "Comma-separated CORS allow-list for browser/webview clients "
             "(default: local Tauri/Vite dev origins). '' disables, '*' allows any."
+        ),
+    )
+
+    parser.add_argument(
+        "--no-context-preflight",
+        dest="context_preflight",
+        action="store_false",
+        help=(
+            "Skip the frontend tokenization that answers an over-length prompt with a 400 "
+            "context_length_exceeded before it costs a queue slot. The chat template is still "
+            "rendered and the scheduler still enforces the window; drop the preflight when the "
+            "extra encode per request is not worth paying."
+        ),
+    )
+    parser.set_defaults(context_preflight=True)
+
+    parser.add_argument(
+        "--force-nonempty-content",
+        action="store_true",
+        default=ServerArgs.force_nonempty_content,
+        help=(
+            "When a turn ends with reasoning but no visible content and no tool call, answer "
+            "with the reasoning text instead of an empty message. Off by default; a request's "
+            "chat_template_kwargs.force_nonempty_content overrides it either way, and a "
+            "thinking-off turn enables it on its own."
         ),
     )
 

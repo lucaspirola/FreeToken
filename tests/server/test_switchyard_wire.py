@@ -9,6 +9,7 @@ that surface. See tasks/nemotron35-plan.md, "Switchyard contract".
 
 from __future__ import annotations
 
+import json
 import pathlib
 from types import SimpleNamespace
 
@@ -385,8 +386,12 @@ def test_every_optional_switchyard_field_is_accepted():
 
     state = FakeState([UserReply(uid=42, incremental_output="ok", finished=True)])
     response = run(handle_chat_completion(req, request=None, state=state, model_sampling={}))
-    assert not isinstance(response, JSONResponse), response
-    assert response["choices"][0]["message"]["content"] == "ok"
+    # prompt_cache_key is a session-affinity hint: the turn is bound to a lease and
+    # the response carries the resolved id, so this answer is a JSONResponse (a
+    # 200 with a header, not the JSONResponse an error would return).
+    assert isinstance(response, JSONResponse) and response.status_code == 200, response
+    assert response.headers["X-FreeToken-Session-Id"] == state.sent.session_id
+    assert json.loads(response.body)["choices"][0]["message"]["content"] == "ok"
 
 
 def test_positive_top_logprobs_is_rejected():

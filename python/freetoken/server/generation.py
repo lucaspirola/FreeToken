@@ -149,6 +149,13 @@ class GenSpec:
     session_id: str | None = None
     session_ttl_seconds: float | None = None
     session_reclaimable: bool = False
+    #: Answer with the reasoning text when the turn produced reasoning but no
+    #: visible content and no tool call. Set by the adapter from the request's
+    #: ``chat_template_kwargs.force_nonempty_content`` / the server flag; a
+    #: thinking-off turn defaults it on, because a model whose think block was
+    #: pre-closed by the template and that still writes only a thought would
+    #: otherwise answer with an empty message.
+    force_nonempty_content: bool = False
 
     @property
     def parse_tools(self) -> bool:
@@ -437,10 +444,13 @@ def _make_reasoning_parser(spec: GenSpec, state: Any) -> ReasoningParser | None:
     reasoning parser configured. ``force_reasoning`` matches the encode-side
     thinking mode so chat-mode content is never mislabeled as reasoning."""
     parser_name = getattr(state.config, "reasoning_parser", None)
-    if parser_name == "qwen3":
+    if parser_name in ("qwen3", "nemotron_v3"):
         # The qwen3 chat template opens an implicit <think> (thinking on) unless
         # enable_thinking is explicitly false, so the model emits only the closing
         # </think>. Mirror that default here, else the chain-of-thought leaks into content.
+        # Nemotron-3.x is the same contract: `enable_thinking` defaults true and ends the
+        # generation prompt with "<think>\n"; false pre-closes it with "<think></think>",
+        # so the completion is pure content.
         force_reasoning = (spec.chat_template_kwargs or {}).get("enable_thinking") is not False
     elif parser_name == "glm":
         # GLM's template honors enable_thinking (default on) even with tools; the
@@ -639,6 +649,28 @@ async def generate_full(
 
 
 async def _generate_events_impl(uid: int, spec: GenSpec, state: Any) -> AsyncIterator[GenEvent]:
+    """``_generate_events_core`` plus the ``force_nonempty_content`` swap: a turn
+    that streamed reasoning but no visible content and no tool call emits one
+    trailing content delta carrying the reasoning text, just before the terminal
+    ``GenDone``. The non-streaming path does the same thing in one shot."""
+    reasoning: list[str] = []
+    content_seen = False
+    tool_seen = False
+    async for ev in _generate_events_core(uid, spec, state):
+        if isinstance(ev, ReasoningDelta):
+            reasoning.append(ev.text)
+        elif isinstance(ev, ContentDelta):
+            content_seen = content_seen or bool(ev.text.strip())
+        elif isinstance(ev, (ToolCallStart, ToolCallArgsDelta, ToolCallsDelta)):
+            tool_seen = True
+        elif isinstance(ev, GenDone):
+            text = "".join(reasoning).strip()
+            if spec.force_nonempty_content and text and not content_seen and not tool_seen:
+                yield ContentDelta(text)
+        yield ev
+
+
+async def _generate_events_core(uid: int, spec: GenSpec, state: Any) -> AsyncIterator[GenEvent]:
     """Protocol-neutral streaming generation. Yields semantic events (reasoning /
     content / tool-call deltas) terminated by exactly one GenDone. Produces no wire
     format — the OpenAI/Anthropic/Responses streamers format these into their own.
@@ -880,9 +912,16 @@ async def _generate_full_impl(uid: int, spec: GenSpec, state: Any) -> GenResult:
             finish_reason = "tool_calls"
 
     specials = _leaked_special_tokens(state)
+    reasoning = strip_special_tokens(reasoning_text, specials).strip()
+    content = strip_special_tokens(content_text, specials)
+    if spec.force_nonempty_content and not content.strip() and not tool_calls and reasoning:
+        # The turn produced a thought and nothing else. A client that renders only
+        # `content` (Switchyard's judge/classifier targets read nothing else) would
+        # show an empty answer, so the thought becomes the answer.
+        content = reasoning
     return GenResult(
-        reasoning=strip_special_tokens(reasoning_text, specials).strip(),
-        content=strip_special_tokens(content_text, specials),
+        reasoning=reasoning,
+        content=content,
         tool_calls=tool_calls,
         finish_reason=finish_reason,
         prompt_tokens=prompt_tokens,

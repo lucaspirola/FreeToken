@@ -131,7 +131,14 @@ work too.
   Code and Codex receive persistent KV leases automatically: FreeToken binds
   Claude's `X-Claude-Code-Session-Id` (plus its child-agent id) and Codex's stable
   `prompt_cache_key`/thread headers to separate internal session ids. No client
-  patch or custom request field is required. Other clients can opt in by sending
+  patch or custom request field is required. On `/v1/chat/completions` the
+  conversation id is read, in precedence order, from the request's `session_id`,
+  then `X-Switchyard-Session-Id`, `X-Claude-Code-Session-Id`, `X-Codex-Session-Id`,
+  the OpenAI `prompt_cache_key` field, and finally `Session-Id` or `X-Session-Id`;
+  `X-Switchyard-Agent-Id` and `X-Claude-Code-Agent-Id` split a sub-agent onto its
+  own lease. An inferred id is reclaimable, and a `session ... is busy` collision
+  on one (a judge call sharing the turn's conversation) is retried once without a
+  lease rather than failed. Other clients can opt in by sending
   the same `session_id` (and optional `session_ttl_seconds`, default 300) on each
   full-conversation request to `/v1/chat/completions`, `/v1/completions`,
   `/v1/messages`, or `/v1/responses`. The resolved id is returned as

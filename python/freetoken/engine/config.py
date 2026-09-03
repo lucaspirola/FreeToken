@@ -137,6 +137,11 @@ class EngineConfig:
     # Reserve the full KV virtual range but physically commit it in chunks, shrinking the
     # GPU expert cache at each boundary. Zero keeps the conventional eager allocation.
     kv_grow_step_tokens: int = 0
+    # Tokenize each prompt frontend-side so an over-length one is answered with a 400
+    # context_length_exceeded before it costs a queue slot (--no-context-preflight opts
+    # out; FREETOKEN_CONTEXT_PREFLIGHT overrides both). The scheduler enforces the window
+    # regardless -- this only decides where the client learns about it.
+    context_preflight: bool = True
 
     @cached_property
     def kv_quant(self):

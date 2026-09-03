@@ -5,6 +5,7 @@ import json
 from types import SimpleNamespace
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from freetoken.message import TokenizeMsg, UserReply
 from freetoken.server.openai_api import (
@@ -676,3 +677,174 @@ def test_minimax_http_non_stream_forces_implicit_reasoning_without_request_knob(
     message = response["choices"][0]["message"]
     assert message["reasoning_content"] == "private thought"
     assert message["content"] == "visible answer"
+
+
+# ------------------------------------------------------------ session binding
+class SessionFakeState(FakeState):
+    """A FakeState that hands out a fresh uid per submit and answers each uid from
+    its own reply script -- what a session-busy fallback (submit, rejected,
+    resubmit) needs and the single-uid FakeState cannot express."""
+
+    def __init__(self, scripts: list[list[UserReply]], **kwargs) -> None:
+        super().__init__([], **kwargs)
+        self.scripts = scripts
+        self.messages: list[TokenizeMsg] = []
+        self.uid = 0
+
+    def new_user(self) -> int:
+        self.uid += 1
+        return self.uid
+
+    async def send_one(self, msg):
+        self.messages.append(msg)
+        self.sent = msg
+
+    async def wait_for_ack(self, uid: int):
+        for reply in self.scripts[uid - 1]:
+            yield reply
+
+    async def stream_with_cancellation(self, generator, request, uid, session_id=None):
+        async for chunk in generator:
+            yield chunk
+
+
+class FakeRequest:
+    """Just the header bag handle_chat_completion reads off a Request."""
+
+    def __init__(self, **headers: str) -> None:
+        self.headers = {k.replace("_", "-").lower(): v for k, v in headers.items()}
+
+
+def _busy(uid: int) -> UserReply:
+    return UserReply(
+        uid=uid, incremental_output="", finished=True, error="session 'auto:x' is busy"
+    )
+
+
+def _ok(uid: int, text: str = "hi") -> UserReply:
+    return UserReply(uid=uid, incremental_output=text, finished=True)
+
+
+def test_chat_binds_a_session_from_the_client_headers_and_echoes_it():
+    state = SessionFakeState([[_ok(1)]])
+    request = FakeRequest(x_switchyard_session_id="conv-1")
+
+    response = run(handle_chat_completion(chat_request(tools=None), request, state, {}))
+
+    bound = state.messages[0].session_id
+    assert bound is not None and bound.startswith("auto:switchyard:")
+    assert state.messages[0].session_reclaimable is True  # inferred -> reclaimable
+    assert isinstance(response, JSONResponse)
+    assert response.headers["X-FreeToken-Session-Id"] == bound
+    assert json.loads(response.body)["choices"][0]["message"]["content"] == "hi"
+
+
+def test_an_explicit_session_id_is_not_reclaimable():
+    state = SessionFakeState([[_ok(1)]])
+    req = chat_request(tools=None, session_id="client-owned")
+
+    response = run(handle_chat_completion(req, FakeRequest(), state, {}))
+
+    assert state.messages[0].session_id == "client-owned"
+    assert state.messages[0].session_reclaimable is False
+    assert response.headers["X-FreeToken-Session-Id"] == "client-owned"
+
+
+def test_an_unidentifiable_request_binds_no_session_and_keeps_the_plain_body():
+    state = SessionFakeState([[_ok(1)]])
+
+    response = run(handle_chat_completion(chat_request(tools=None), FakeRequest(), state, {}))
+
+    assert state.messages[0].session_id is None
+    assert not isinstance(response, JSONResponse)
+    assert response["choices"][0]["message"]["content"] == "hi"
+
+
+def test_stream_response_carries_the_session_header():
+    state = SessionFakeState([[_ok(1)]])
+    req = chat_request(tools=None, stream=True)
+
+    response = run(handle_chat_completion(req, FakeRequest(x_codex_session_id="c"), state, {}))
+
+    assert response.headers["X-FreeToken-Session-Id"] == state.messages[0].session_id
+
+
+def test_a_busy_auto_session_is_retried_once_without_the_lease():
+    """Switchyard runs a judge call on the conversation it is judging, so an
+    inferred lease can be busy through no fault of the client's."""
+    state = SessionFakeState([[_busy(1)], [_ok(2, "served anyway")]])
+
+    response = run(
+        handle_chat_completion(
+            chat_request(tools=None), FakeRequest(x_switchyard_session_id="conv-1"), state, {}
+        )
+    )
+
+    assert [m.session_id is None for m in state.messages] == [False, True]
+    assert [m.session_reclaimable for m in state.messages] == [True, False]
+    assert json.loads(response.body)["choices"][0]["message"]["content"] == "served anyway"
+
+
+def test_a_busy_explicit_session_stays_an_error():
+    """The client asked for that lease by name; serialization is the contract."""
+    state = SessionFakeState([[_busy(1)]])
+    req = chat_request(tools=None, session_id="client-owned")
+
+    response = run(handle_chat_completion(req, FakeRequest(), state, {}))
+
+    assert len(state.messages) == 1
+    assert response.status_code == 400
+    assert "is busy" in json.loads(response.body)["error"]["message"]
+
+
+def test_a_second_failure_after_the_fallback_is_not_retried_again():
+    state = SessionFakeState([[_busy(1)], [_busy(2)]])
+
+    response = run(
+        handle_chat_completion(
+            chat_request(tools=None), FakeRequest(x_switchyard_session_id="conv-1"), state, {}
+        )
+    )
+
+    assert len(state.messages) == 2
+    assert response.status_code == 400
+
+
+def test_a_busy_auto_session_is_retried_on_the_stream_path_too():
+    state = SessionFakeState([[_busy(1)], [_ok(2, "served anyway")]])
+    state.uid = 1  # uid 1 is the submit this test makes by hand
+    req = chat_request(tools=None, stream=True)
+    spec = chat_request_to_genspec(req, {})
+    spec.session_id = "auto:switchyard:deadbeef"
+    spec.session_reclaimable = True
+
+    async def collect():
+        return [chunk async for chunk in stream_chat_completion_chunks(1, req, state, spec)]
+
+    events = parse_sse(run(collect()))
+    assert not any(isinstance(e, dict) and "error" in e for e in events), events
+    text = "".join(
+        (e["choices"][0]["delta"].get("content") or "")
+        for e in events
+        if isinstance(e, dict) and e.get("choices")
+    )
+    assert text == "served anyway"
+    assert state.messages[-1].session_id is None
+
+
+def test_a_non_busy_stream_failure_is_still_the_first_sse_event():
+    state = SessionFakeState(
+        [[UserReply(uid=1, incremental_output="", finished=True,
+                    error="too long", error_code="context_length_exceeded")]]
+    )
+    req = chat_request(tools=None, stream=True)
+    spec = chat_request_to_genspec(req, {})
+    spec.session_id = "auto:switchyard:deadbeef"
+    spec.session_reclaimable = True
+
+    async def collect():
+        return [chunk async for chunk in stream_chat_completion_chunks(1, req, state, spec)]
+
+    events = parse_sse(run(collect()))
+    assert len(state.messages) == 0  # nothing resubmitted
+    assert events[0]["error"]["code"] == "context_length_exceeded"

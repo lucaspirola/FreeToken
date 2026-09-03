@@ -422,6 +422,31 @@ class ThinkReasoningParser(BaseReasoningParser):
         )
 
 
+class NemotronV3ReasoningParser(ThinkReasoningParser):
+    """Reasoning parser for Nemotron-3 / Nemotron-3.5 (``<think>`` + Qwen3-Coder XML tools).
+
+    Same think tags as qwen3, plus the ``<tool_call>`` escape hatch: Nemotron's
+    generation prompt pre-opens ``<think>\n`` (thinking on) and the model is
+    expected to close it before calling a tool, but a turn that skips ``</think>``
+    and runs straight into ``<tool_call>`` must still produce a tool call rather
+    than fold the whole block into ``reasoning_content`` -- the qwen3_coder
+    detector never sees text the reasoning parser kept. The base class ends
+    reasoning at the marker and hands the block to content (dsv4 precedent); a
+    later ``</think>`` still wins, so a quoted ``<tool_call>`` inside the thought
+    stays reasoning.
+    """
+
+    def __init__(self, force_reasoning: bool = False, stream_reasoning: bool = True) -> None:
+        BaseReasoningParser.__init__(
+            self,
+            think_start_token=THINK_START_TOKEN,
+            think_end_token=THINK_END_TOKEN,
+            force_reasoning=force_reasoning,
+            stream_reasoning=stream_reasoning,
+            tool_start_token="<tool_call>",
+        )
+
+
 class MiniMaxM3ReasoningParser(BaseReasoningParser):
     """Reasoning parser for MiniMax-M3's ``<mm:think>...</mm:think>`` protocol.
 
@@ -889,6 +914,7 @@ class ReasoningParser:
         "qwen3": ThinkReasoningParser,
         "glm": ThinkReasoningParser,
         "minimax": ThinkReasoningParser,
+        "nemotron_v3": NemotronV3ReasoningParser,
         "minimax_m3": MiniMaxM3ReasoningParser,
         "muse_glimmer": MuseGlimmerReasoningParser,
         "gemma4": GemmaThoughtReasoningParser,
