@@ -17,6 +17,11 @@ class Function(BaseModel):
     name: str
     description: str | None = None
     parameters: dict[str, Any] | None = None
+    # OpenAI's structured-outputs flag. Typed so it round-trips instead of landing in
+    # `extra`, but stripped before the chat template sees the tool (no template reads
+    # it, and a stray key changes the rendered catalog byte-for-byte, which would
+    # break prefix-cache reuse for clients that send it inconsistently).
+    strict: bool | None = None
 
 
 class Tool(BaseModel):
@@ -90,6 +95,13 @@ class ChatCompletionRequest(BaseModel):
     function_call: Any | None = None
     logit_bias: dict[str, float] | None = None
     response_format: dict[str, Any] | None = None
+    # Accepted-and-ignored OpenAI fields Switchyard sends. Typed (not swallowed by
+    # extra="allow") so they are visible to the handler: `prompt_cache_key` is a
+    # session-affinity hint (bound to a KV session by the sessions layer),
+    # `top_logprobs` is rejected only when > 0 since logprobs are unsupported.
+    prompt_cache_key: str | None = None
+    user: str | None = None
+    top_logprobs: int | None = None
     # FreeToken extension: protect this conversation's completed KV until the next turn,
     # explicit close, disconnect/abort, or idle expiry.
     session_id: str | None = None
@@ -97,6 +109,9 @@ class ChatCompletionRequest(BaseModel):
 
     @model_validator(mode="after")
     def _sync_max_completion_tokens(self) -> "ChatCompletionRequest":
+        # `max_completion_tokens` wins when a client sends both: it is the current
+        # spelling and `max_tokens` is the deprecated alias (Switchyard only ever
+        # sends the former).
         if self.max_completion_tokens is not None:
             self.max_tokens = self.max_completion_tokens
         return self
@@ -124,11 +139,14 @@ class CompletionRequest(BaseModel):
     suffix: str | None = None
     logit_bias: dict[str, float] | None = None
     response_format: dict[str, Any] | None = None
+    prompt_cache_key: str | None = None
+    user: str | None = None
     session_id: str | None = None
     session_ttl_seconds: float | None = None
 
     @model_validator(mode="after")
     def _sync_max_completion_tokens(self) -> "CompletionRequest":
+        # See ChatCompletionRequest._sync_max_completion_tokens.
         if self.max_completion_tokens is not None:
             self.max_tokens = self.max_completion_tokens
         return self

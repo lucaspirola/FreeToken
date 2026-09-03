@@ -125,6 +125,16 @@ class BaseReasoningParser:
         self._buffer = ""
         self._stripped_think_start = False
 
+    @property
+    def in_reasoning(self) -> bool:
+        """Whether the streaming parser is currently inside a reasoning block.
+        Read between chunks to attribute an ack's tokens to
+        ``usage.completion_tokens_details.reasoning_tokens``. Subclasses that keep
+        their own channel state (the Harmony parser) leave this at
+        ``force_reasoning``; callers pair it with "this chunk produced reasoning
+        text" so those families are still attributed."""
+        return self._in_reasoning
+
     def detect_and_parse(self, text: str) -> ReasoningParseResult:
         """One-shot parse of a complete completion."""
         in_reasoning = self._in_reasoning or self.think_start_token in text
@@ -901,6 +911,11 @@ class ReasoningParser:
         """Return ``(reasoning_text, normal_text)`` for a complete completion."""
         result = self.detector.detect_and_parse(full_text)
         return result.reasoning_text, result.normal_text
+
+    @property
+    def in_reasoning(self) -> bool:
+        """See ``BaseReasoningParser.in_reasoning``."""
+        return self.detector.in_reasoning
 
     def parse_stream_chunk(self, chunk_text: str) -> Tuple[str, str]:
         """Return ``(reasoning_delta, normal_delta)`` for one streaming chunk."""

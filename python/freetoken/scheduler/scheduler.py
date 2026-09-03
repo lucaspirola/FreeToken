@@ -856,10 +856,12 @@ class Scheduler(SchedulerIOMixin):
                             uid=msg.uid,
                             # "prompt is too long: N tokens > M" is the phrasing Claude Code and
                             # OpenClaw match on; the Anthropic wire has no error code to read.
+                            # "maximum context length" is OpenAI's phrasing, which Switchyard and
+                            # the OpenAI SDKs match on — both spellings ride in the one message.
                             error=(
                                 f"prompt is too long: {input_len} tokens > {max_seq_len} maximum "
-                                f"(prompt + generation); shorten the prompt or increase the KV "
-                                f"cache budget"
+                                f"(this model's maximum context length, prompt + generation); "
+                                f"shorten the prompt or increase the KV cache budget"
                             ),
                             # OpenAI's standard class for this, for clients that read a code.
                             code="context_length_exceeded",

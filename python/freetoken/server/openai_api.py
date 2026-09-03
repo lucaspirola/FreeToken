@@ -33,7 +33,8 @@ from .generation import (
     ToolCallStart,
     generate_events,
     generate_full,
-    prerender_error,
+    preflight_error,
+    preflight_text_error,
     render_messages,
     resolve_sampling,
     submit_generation,
@@ -55,9 +56,40 @@ def _thinking_type(req: Any) -> str | None:
 
 
 
+#: Roles a non-Harmony chat template can be expected to render. `developer` is
+#: gpt-oss/Harmony's own role name (OpenAI renamed `system` there); every other
+#: family's template either raises on it or drops the turn silently, which is
+#: worse — the instructions vanish. Map it onto `system` for those templates.
+_DEVELOPER_ROLE = "developer"
+
+
+def _harmony_chat_template(state: Any) -> bool:
+    """Whether the served model's chat template speaks Harmony (gpt-oss), which has
+    a real `developer` role. Read off the configured parsers first (args.py picks
+    `gpt_oss` for both from the model marker) and the model path as a fallback."""
+    config = getattr(state, "config", None)
+    for attr in ("reasoning_parser", "tool_call_parser"):
+        value = getattr(config, attr, None)
+        if isinstance(value, str) and value.replace("-", "_") == "gpt_oss":
+            return True
+    path = str(getattr(config, "model_path", "") or "").lower()
+    return "gpt-oss" in path or "gpt_oss" in path or "gptoss" in path
+
+
+def _map_developer_role(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out = []
+    for message in messages:
+        if message.get("role") == _DEVELOPER_ROLE:
+            message = {**message, "role": "system"}
+        out.append(message)
+    return out
+
+
 def chat_request_to_genspec(
     req: ChatCompletionRequest,
     model_sampling: dict[str, Any],
+    *,
+    map_developer_role: bool = True,
 ) -> GenSpec:
     """OpenAI ChatCompletionRequest -> GenSpec (the OpenAI 'to_sampling_params')."""
     from .model_meta import effort_toggle_kwargs
@@ -66,8 +98,11 @@ def chat_request_to_genspec(
     thinking_type = _thinking_type(req)
     if req.reasoning_effort or thinking_type:
         ctk = effort_toggle_kwargs(req.reasoning_effort, ctk, thinking_type=thinking_type)
+    wire_messages = [m.model_dump(exclude_none=True) for m in req.messages]
+    if map_developer_role:
+        wire_messages = _map_developer_role(wire_messages)
     return GenSpec(
-        messages=render_messages([m.model_dump(exclude_none=True) for m in req.messages]),
+        messages=render_messages(wire_messages),
         sampling_params=resolve_sampling(
             temperature=req.temperature,
             top_k=req.top_k,
@@ -86,7 +121,18 @@ def chat_request_to_genspec(
 
 
 def _all_tool_dicts(tools) -> list[dict[str, Any]]:
-    return [t.model_dump(exclude_none=True) for t in (tools or [])]
+    return [_tool_dict(t) for t in (tools or [])]
+
+
+def _tool_dict(tool) -> dict[str, Any]:
+    """A tool as the template and the tool-call parser see it: OpenAI's
+    structured-outputs `strict` flag is dropped (nothing downstream reads it, and
+    leaving it in would change the rendered catalog for clients that send it)."""
+    dumped = tool.model_dump(exclude_none=True)
+    function = dumped.get("function")
+    if isinstance(function, dict):
+        function.pop("strict", None)
+    return dumped
 
 
 def _maintenance_gate(state: Any) -> JSONResponse | None:
@@ -163,6 +209,13 @@ async def handle_chat_completion(
         )
     if req.n != 1:
         return create_error_response("Only n=1 is supported", param="n")
+    # Switchyard forwards top_logprobs verbatim; 0 (or absent) asks for nothing, so
+    # only a positive value is a request we cannot serve.
+    if req.top_logprobs is not None and req.top_logprobs > 0:
+        return create_error_response(
+            "logprobs are not supported; omit top_logprobs or send 0",
+            param="top_logprobs",
+        )
     # Case/whitespace and the "off" disable synonym stay accepted here because
     # effort_toggle_kwargs normalizes and honors them downstream.
     effort = req.reasoning_effort.strip().lower() if isinstance(req.reasoning_effort, str) else None
@@ -181,16 +234,19 @@ async def handle_chat_completion(
             )
 
     try:
-        spec = chat_request_to_genspec(req, model_sampling)
+        spec = chat_request_to_genspec(
+            req, model_sampling, map_developer_role=not _harmony_chat_template(state)
+        )
     except ValueError as exc:
         return create_error_response(str(exc))
 
-    if req.stream:
-        # Non-stream requests already surface render failures as a clean 400
-        # through GenerationError; only the stream path needs the pre-check.
-        err = await prerender_error(spec, state)
-        if err is not None:
-            return create_error_response(str(err), code=err.code)
+    # Both paths preflight: the stream path because an error after the headers go
+    # out can only ride in-stream, the non-stream path because a context overflow
+    # answered here never costs a queue slot and reads identically to the
+    # scheduler's own rejection.
+    err = await preflight_error(spec, state)
+    if err is not None:
+        return create_error_response(str(err), code=err.code)
 
     uid = await submit_generation(spec, state)
 
@@ -233,6 +289,7 @@ async def handle_chat_completion(
             result.prompt_tokens,
             result.completion_tokens,
             _reported_cached(state, result.cached_tokens),
+            result.reasoning_tokens,
         ),
     }
 
@@ -246,6 +303,33 @@ async def stream_chat_completion_chunks(
     """Format generate_events() into the OpenAI chat.completion.chunk SSE stream."""
     if spec is None:
         spec = chat_request_to_genspec(req, {})
+
+    prompt_tokens = 0
+    completion_tokens = 0
+    cached_tokens = 0
+    reasoning_tokens = 0
+    tool_calls_sent = 0
+    open_tool: dict[str, Any] | None = None
+    events = generate_events(uid, spec, state, source="/v1/chat/completions")
+
+    # Pull the FIRST event before the role chunk. A scheduler-side failure (context
+    # overflow, a template the worker rejects) must be the first SSE event on the
+    # wire: Switchyard reads event 0 to decide whether to retarget, and a role
+    # chunk ahead of it reads as a successful stream that then goes silent.
+    first_event: Any = None
+    have_first = False
+    try:
+        first_event = await events.__anext__()
+        have_first = True
+    except StopAsyncIteration:
+        pass
+    except GenerationError as exc:
+        yield _sse(
+            {"error": {"message": str(exc), "type": "invalid_request_error", "code": exc.code}}
+        )
+        yield b"data: [DONE]\n\n"
+        return
+
     yield _sse(
         _chat_chunk(
             req,
@@ -254,24 +338,23 @@ async def stream_chat_completion_chunks(
         )
     )
 
-    prompt_tokens = 0
-    completion_tokens = 0
-    cached_tokens = 0
-    tool_calls_sent = 0
-    open_tool: dict[str, Any] | None = None
-    events = generate_events(uid, spec, state, source="/v1/chat/completions")
     while True:
-        try:
-            ev = await events.__anext__()
-        except StopAsyncIteration:
-            break
-        except GenerationError as exc:
-            # Request failed before producing output — emit an error chunk + [DONE] so the
-            # client gets a terminal signal instead of a stalled stream.
-            yield _sse(
-                {"error": {"message": str(exc), "type": "invalid_request_error", "code": exc.code}}
-            )
-            break
+        if have_first:
+            ev, have_first = first_event, False
+        else:
+            try:
+                ev = await events.__anext__()
+            except StopAsyncIteration:
+                break
+            except GenerationError as exc:
+                # Request failed mid-stream — emit an error chunk + [DONE] so the
+                # client gets a terminal signal instead of a stalled stream.
+                yield _sse(
+                    {"error": {
+                        "message": str(exc), "type": "invalid_request_error", "code": exc.code,
+                    }}
+                )
+                break
         if isinstance(ev, ReasoningDelta):
             yield _sse(
                 _chat_chunk(
@@ -366,6 +449,7 @@ async def stream_chat_completion_chunks(
             prompt_tokens = ev.prompt_tokens
             completion_tokens = ev.completion_tokens
             cached_tokens = ev.cached_tokens
+            reasoning_tokens = ev.reasoning_tokens
             yield _sse(_chat_chunk(req, uid, [{"delta": {}, "index": 0, "finish_reason": ev.finish_reason}]))
 
     if req.stream_options and req.stream_options.include_usage:
@@ -377,7 +461,8 @@ async def stream_chat_completion_chunks(
                 "model": req.model,
                 "choices": [],
                 "usage": _usage(
-                    prompt_tokens, completion_tokens, _reported_cached(state, cached_tokens)
+                    prompt_tokens, completion_tokens, _reported_cached(state, cached_tokens),
+                    reasoning_tokens,
                 ),
             }
         )
@@ -401,6 +486,12 @@ async def handle_completion(
 
     prompts = [req.prompt] if isinstance(req.prompt, str) else req.prompt
     assert isinstance(prompts, list)
+    # Same overflow contract as chat: a 400 with `context_length_exceeded` before a
+    # queue slot (and, on the stream path, before the response headers commit).
+    for prompt in prompts:
+        err = await preflight_text_error(prompt, state)
+        if err is not None:
+            return create_error_response(str(err), code=err.code)
     if req.stream:
         if len(prompts) != 1:
             return create_error_response("Streaming completions only support a single text prompt")
@@ -443,7 +534,9 @@ async def handle_completion(
         try:
             async for ack in state.wait_for_ack(uid):
                 if getattr(ack, "error", None):
-                    return create_error_response(ack.error)
+                    return create_error_response(
+                        ack.error, code=getattr(ack, "error_code", None)
+                    )
                 prompt_tokens += ack.prompt_tokens_delta
                 completion_tokens += ack.completion_tokens_delta
                 cached_tokens += ack.cached_tokens
@@ -473,7 +566,13 @@ async def stream_completion_chunks(uid: int, req: CompletionRequest, state: Any)
     finish_reason = "stop"
     async for ack in state.wait_for_ack(uid):
         if getattr(ack, "error", None):
-            yield _sse({"error": {"message": ack.error, "type": "invalid_request_error", "code": None}})
+            # Carry the stable class (context_length_exceeded) so a router reading
+            # error.code sees the same thing here as on the chat stream.
+            yield _sse({"error": {
+                "message": ack.error,
+                "type": "invalid_request_error",
+                "code": getattr(ack, "error_code", None),
+            }})
             yield b"data: [DONE]\n\n"
             return
         prompt_tokens += ack.prompt_tokens_delta
@@ -569,7 +668,7 @@ def _tools_for_template(req: ChatCompletionRequest) -> list[dict[str, Any]] | No
         selected = req.tool_choice.function.name
         tools = [tool for tool in tools if tool.function.name == selected]
 
-    return [tool.model_dump(exclude_none=True) for tool in tools]
+    return [_tool_dict(tool) for tool in tools]
 
 
 def _should_parse_tools(req: ChatCompletionRequest) -> bool:
@@ -637,7 +736,12 @@ def _reported_cached(state: Any, cached_tokens: int) -> int:
     return cached_tokens if getattr(state.config, "enable_cache_report", False) else 0
 
 
-def _usage(prompt_tokens: int, completion_tokens: int, cached_tokens: int = 0) -> dict[str, Any]:
+def _usage(
+    prompt_tokens: int,
+    completion_tokens: int,
+    cached_tokens: int = 0,
+    reasoning_tokens: int = 0,
+) -> dict[str, Any]:
     usage: dict[str, Any] = {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
@@ -647,6 +751,10 @@ def _usage(prompt_tokens: int, completion_tokens: int, cached_tokens: int = 0) -
     # disabled report and a 0-token hit serialize identically.
     if cached_tokens > 0:
         usage["prompt_tokens_details"] = {"cached_tokens": cached_tokens}
+    # Same rule for the reasoning half (Switchyard treats an absent details object
+    # as zero), so a non-reasoning model's usage is byte-identical to before.
+    if reasoning_tokens > 0:
+        usage["completion_tokens_details"] = {"reasoning_tokens": reasoning_tokens}
     return usage
 
 

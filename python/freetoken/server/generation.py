@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -111,6 +112,10 @@ class GenDone:
     completion_tokens: int
     matched_stop: str | None = None
     cached_tokens: int = 0
+    #: Completion tokens produced while the reasoning parser was inside a reasoning
+    #: block (OpenAI's ``usage.completion_tokens_details.reasoning_tokens``). 0 when
+    #: no reasoning parser is configured.
+    reasoning_tokens: int = 0
 
 
 GenEvent = ReasoningDelta | ContentDelta | ToolCallStart | ToolCallArgsDelta | ToolCallsDelta | GenDone
@@ -126,6 +131,8 @@ class GenResult:
     completion_tokens: int
     matched_stop: str | None = None
     cached_tokens: int = 0
+    #: See ``GenDone.reasoning_tokens``.
+    reasoning_tokens: int = 0
 
 
 @dataclass
@@ -313,34 +320,116 @@ async def count_prompt_tokens(
     return int(input_ids.numel())
 
 
-async def prerender_error(spec: GenSpec, state: Any) -> GenerationError | None:
-    """Render ``spec``'s prompt frontend-side, returning the failure a streaming
-    adapter should surface as an HTTP 400 *before* committing an SSE stream —
-    once headers go out, a template rejection can only ride in-stream, where
-    some agents show nothing but "empty response". Render only; the worker
-    still renders and encodes authoritatively. Best-effort: a state without a
-    frontend tokenizer, or one that fails to *initialize*, skips validation
-    rather than blocking the generation path.
+CONTEXT_LENGTH_EXCEEDED = "context_length_exceeded"
+"""OpenAI's stable error class for a prompt that does not fit the context window.
+Switchyard routes on this code (``error.code``): without it a route falls through
+instead of retargeting, so every overflow path — preflight, scheduler, stream and
+non-stream — must carry it."""
+
+
+def context_overflow_message(prompt_tokens: int, max_seq_len: int) -> str:
+    """The single phrasing every overflow surface uses. Contains BOTH "maximum
+    context length" (what OpenAI clients and Switchyard match on) and "prompt is
+    too long" (what Claude Code / OpenClaw match on), so no client has to read a
+    code it does not know about."""
+    return (
+        f"This model's maximum context length is {max_seq_len} tokens, but the "
+        f"prompt is too long: {prompt_tokens} tokens (prompt + generation budget). "
+        f"Shorten the prompt or increase the KV cache budget."
+    )
+
+
+def context_preflight_enabled(state: Any) -> bool:
+    """Whether the preflight tokenizes (and length-checks) as well as renders.
+    Default on; ``FREETOKEN_CONTEXT_PREFLIGHT=0`` (or a falsey
+    ``config.context_preflight``) drops back to render-only validation, which is
+    what an operator wants if the extra ~1.2 µs/token encode is not worth paying
+    on every request."""
+    env = os.environ.get("FREETOKEN_CONTEXT_PREFLIGHT")
+    if env is not None:
+        return env.strip().lower() not in ("0", "false", "off", "no")
+    return bool(getattr(getattr(state, "config", None), "context_preflight", True))
+
+
+def served_max_seq_len(state: Any) -> int | None:
+    """The context window in force, or None when it cannot be read (never fail a
+    request over a missing limit — the scheduler still enforces the real one)."""
+    try:
+        value = int(state.config.max_seq_len)
+    except Exception:  # noqa: BLE001
+        return None
+    return value if value > 0 else None
+
+
+async def preflight_error(spec: GenSpec, state: Any) -> GenerationError | None:
+    """Validate ``spec``'s prompt frontend-side, returning the failure an adapter
+    should surface as an HTTP 400 *before* committing an SSE stream — once headers
+    go out, a rejection can only ride in-stream, where some agents show nothing but
+    "empty response".
+
+    Two checks: the chat template must render, and (unless preflight is disabled)
+    the rendered prompt must fit ``max_seq_len``. The overflow answer is the same
+    ``context_length_exceeded`` the scheduler would produce, just without paying a
+    queue slot for it. The worker still renders and encodes authoritatively.
+    Best-effort: a state without a frontend tokenizer, or one that fails to
+    *initialize*, skips validation rather than blocking the generation path.
     """
+    return await _preflight(
+        TokenizeMsg(
+            uid=0,
+            text=spec.messages,
+            sampling_params=SamplingParams(),
+            chat_template_kwargs=spec.chat_template_kwargs,
+            tools=spec.template_tools,
+        ),
+        state,
+    )
+
+
+async def preflight_text_error(text: str, state: Any) -> GenerationError | None:
+    """``preflight_error`` for a raw-text prompt (/v1/completions), which has no
+    chat template to render — only the length check applies."""
+    return await _preflight(
+        TokenizeMsg(uid=0, text=text, sampling_params=SamplingParams()), state
+    )
+
+
+async def _preflight(msg: TokenizeMsg, state: Any) -> GenerationError | None:
     build = getattr(state, "frontend_tokenizer", None)
     if build is None:
         return None
-    msg = TokenizeMsg(
-        uid=0,
-        text=spec.messages,
-        sampling_params=SamplingParams(),
-        chat_template_kwargs=spec.chat_template_kwargs,
-        tools=spec.template_tools,
-    )
     try:
         manager = await asyncio.to_thread(build)
     except Exception:  # noqa: BLE001 -- server fault, not this request's problem
         return None
+    if not context_preflight_enabled(state):
+        try:
+            await asyncio.to_thread(manager.render_prompt, msg)
+        except Exception as exc:  # noqa: BLE001 -- mirror the worker's classification
+            return GenerationError(f"could not encode request: {exc}")
+        return None
     try:
-        await asyncio.to_thread(manager.render_prompt, msg)
+        input_ids = (await asyncio.to_thread(manager.tokenize, [msg]))[0]
     except Exception as exc:  # noqa: BLE001 -- mirror the worker's classification
         return GenerationError(f"could not encode request: {exc}")
+    limit = served_max_seq_len(state)
+    prompt_tokens = int(input_ids.numel())
+    # `>=`, not `>`: the scheduler drops a request whose prompt leaves zero decode
+    # budget (max_seq_len - input_len <= 0), so the preflight must reject exactly
+    # the same set or a request would pass here and fail there.
+    if limit is not None and prompt_tokens >= limit:
+        return GenerationError(
+            context_overflow_message(prompt_tokens, limit), CONTEXT_LENGTH_EXCEEDED
+        )
     return None
+
+
+def _ack_is_reasoning(was_reasoning: bool, reasoning_delta: str) -> bool:
+    """Whether one ack's output counts toward ``reasoning_tokens``: the parser was
+    already inside a reasoning block when the chunk arrived, or the chunk itself
+    opened one (an explicit ``<think>``). The chunk that carries ``</think>`` still
+    counts — its tokens were generated inside the block; the next one does not."""
+    return bool(was_reasoning or reasoning_delta)
 
 
 def _make_reasoning_parser(spec: GenSpec, state: Any) -> ReasoningParser | None:
@@ -564,6 +653,7 @@ async def _generate_events_impl(uid: int, spec: GenSpec, state: Any) -> AsyncIte
     prompt_tokens = 0
     completion_tokens = 0
     cached_tokens = 0
+    reasoning_tokens = 0
     pending = ""
     parse_tools = spec.parse_tools
     reasoning_parser = _make_reasoning_parser(spec, state)
@@ -661,7 +751,10 @@ async def _generate_events_impl(uid: int, spec: GenSpec, state: Any) -> AsyncIte
         cached_tokens += ack.cached_tokens
         content_delta = ack.incremental_output
         if reasoning_parser is not None and content_delta:
+            was_reasoning = reasoning_parser.in_reasoning
             reasoning_delta, content_delta = reasoning_parser.parse_stream_chunk(content_delta)
+            if _ack_is_reasoning(was_reasoning, reasoning_delta):
+                reasoning_tokens += ack.completion_tokens_delta
             if reasoning_delta:
                 stripped_reasoning = strip_special_tokens(reasoning_delta, specials)
                 if stripped_reasoning:  # a bare special token must not open a thinking block
@@ -741,6 +834,7 @@ async def _generate_events_impl(uid: int, spec: GenSpec, state: Any) -> AsyncIte
     yield GenDone(
         finish_reason, prompt_tokens, completion_tokens,
         matched_stop=engine_matched_stop, cached_tokens=cached_tokens,
+        reasoning_tokens=reasoning_tokens,
     )
 
 
@@ -751,14 +845,24 @@ async def _generate_full_impl(uid: int, spec: GenSpec, state: Any) -> GenResult:
     prompt_tokens = 0
     completion_tokens = 0
     cached_tokens = 0
+    reasoning_tokens = 0
     engine_finish_reason: str | None = None
     engine_matched_stop: str | None = None
+    # The split itself is one-shot over the whole completion (below); this second,
+    # streaming parser exists only to attribute each ack's tokens to reasoning or
+    # content, which a one-shot parse cannot recover.
+    reasoning_meter = _make_reasoning_parser(spec, state)
     async for ack in state.wait_for_ack(uid):
         if getattr(ack, "error", None):
             raise GenerationError(ack.error, getattr(ack, "error_code", None))
         prompt_tokens += ack.prompt_tokens_delta
         completion_tokens += ack.completion_tokens_delta
         cached_tokens += ack.cached_tokens
+        if reasoning_meter is not None and ack.incremental_output:
+            was_reasoning = reasoning_meter.in_reasoning
+            meter_delta, _ = reasoning_meter.parse_stream_chunk(ack.incremental_output)
+            if _ack_is_reasoning(was_reasoning, meter_delta):
+                reasoning_tokens += ack.completion_tokens_delta
         full_content += ack.incremental_output
         if ack.finished:
             engine_finish_reason = getattr(ack, "finish_reason", None)
@@ -785,4 +889,5 @@ async def _generate_full_impl(uid: int, spec: GenSpec, state: Any) -> GenResult:
         completion_tokens=completion_tokens,
         matched_stop=engine_matched_stop,
         cached_tokens=cached_tokens,
+        reasoning_tokens=reasoning_tokens,
     )
