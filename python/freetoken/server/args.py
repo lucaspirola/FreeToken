@@ -881,6 +881,16 @@ def parse_args(
         ),
     )
     parser.set_defaults(context_preflight=True)
+    parser.add_argument(
+        "--json-retry",
+        type=int,
+        default=ServerArgs.json_retry,
+        help=(
+            "Repair attempts when a response_format json_object/json_schema answer is not "
+            "valid JSON: one greedy resubmission per attempt with the error appended. "
+            "0 disables; the raw answer is returned after the last attempt."
+        ),
+    )
 
     parser.add_argument(
         "--force-nonempty-content",

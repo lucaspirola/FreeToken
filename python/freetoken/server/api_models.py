@@ -29,6 +29,46 @@ class Tool(BaseModel):
     function: Function
 
 
+class JsonSchemaFormat(BaseModel):
+    """The `json_schema` payload of `response_format` (OpenAI structured outputs).
+
+    Typed so the schema reaches JSON mode as a real dict instead of `extra`.
+    `strict` is accepted and recorded but is advisory here: FreeToken has no
+    constrained decoding, so a schema is enforced by validating the completion and
+    retrying, not by masking the sampler (see `server/json_output.py`)."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    name: str | None = None
+    description: str | None = None
+    strict: bool | None = None
+    # `schema` shadows BaseModel.schema(); the wire key stays "schema" via the alias.
+    json_schema: dict[str, Any] | None = Field(default=None, alias="schema")
+
+
+class ResponseFormat(BaseModel):
+    """OpenAI `response_format`: text (the default), a bare JSON object, or a JSON
+    object constrained to a schema. Switchyard's judge/classifier targets send
+    `json_schema` (strict) or `json_object` verbatim."""
+
+    model_config = ConfigDict(extra="allow")
+
+    type: Literal["text", "json_object", "json_schema"] = "text"
+    json_schema: JsonSchemaFormat | None = None
+
+    @property
+    def json_mode(self) -> bool:
+        return self.type in ("json_object", "json_schema")
+
+    @property
+    def schema_dict(self) -> dict[str, Any] | None:
+        """The JSON Schema to validate against, or None (json_object, or a
+        json_schema wrapper with no schema body)."""
+        if self.type != "json_schema" or self.json_schema is None:
+            return None
+        return self.json_schema.json_schema
+
+
 class ToolChoiceFunction(BaseModel):
     name: str
 
@@ -94,7 +134,10 @@ class ChatCompletionRequest(BaseModel):
     parallel_tool_calls: bool | None = None
     function_call: Any | None = None
     logit_bias: dict[str, float] | None = None
-    response_format: dict[str, Any] | None = None
+    # JSON mode. Typed (not a bare dict) so the handler reads the schema without
+    # re-validating the wire shape on every request; /v1/completions keeps the
+    # untyped field because it still rejects the feature.
+    response_format: ResponseFormat | None = None
     # Accepted-and-ignored OpenAI fields Switchyard sends. Typed (not swallowed by
     # extra="allow") so they are visible to the handler: `prompt_cache_key` is a
     # session-affinity hint (bound to a KV session by the sessions layer),

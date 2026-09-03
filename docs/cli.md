@@ -87,6 +87,9 @@ See [models.md](models.md#moe-backends) for what each backend does.
 | `--tool-call-parser` | auto | Tool-call format; auto-inferred from the model family |
 | `--reasoning-parser` | auto | Splits chain-of-thought into `reasoning_content`; auto-inferred; `off` disables |
 | `--enable-cache-report` | off | Report prefix-cache hits in each response's usage block |
+| `--no-context-preflight` | off | Skip the frontend tokenize-and-check that returns HTTP 400 `context_length_exceeded` before a prompt is queued |
+| `--force-nonempty-content` | off | When a turn ends with empty content and no tool call, move the reasoning text into `content` (coding agents, Switchyard) |
+| `--json-retry` | 1 | Greedy repair resubmissions when a `response_format` json answer is not valid JSON; 0 disables |
 
 ## ft shell
 

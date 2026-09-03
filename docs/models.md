@@ -208,6 +208,17 @@ work too.
   live decode and final-chunk prefill were about 7% slower. It therefore remains a
   long-context/capacity tier rather than the Q6 default. See
   `benchmarks/results/ornith_5080_q6_q5_kv_2026-08-30.md`.
+- `/v1/chat/completions` serves OpenAI JSON mode (`response_format` of type
+  `json_object` or `json_schema`) without constrained decoding: the schema is
+  appended to the system block, `enable_thinking` defaults to false for the call
+  (an explicit `chat_template_kwargs.enable_thinking` or `reasoning_effort` still
+  wins), the completion is buffered, stripped of think residue and code fences,
+  and returned as canonical JSON — one content delta before the finish chunk on
+  the streaming path. A `json_schema` reply that fails validation is retried once
+  at temperature 0 with the error fed back as a user turn (`FREETOKEN_JSON_RETRY`,
+  default 1, 0 disables); a reply that still fails is returned verbatim with HTTP
+  200 rather than an error, which is what lets a Switchyard judge route fall
+  through to a stronger target. `/v1/completions` still rejects `response_format`.
 - Nemotron 3 Super uses its native hybrid Mamba-2 / full-attention / latent-MoE
   architecture. The NVFP4 release needs about 60 GiB of host RAM for expert banks and
   10.3 GiB of resident GPU weights. Its Mamba-2 recurrent state is ~160 MiB per
@@ -262,7 +273,7 @@ work too.
   ```
   ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
     --max-running-requests 16 --elastic-initial-requests 4 --kv-grow-step-tokens 65536 \
-    --num-tokens 262144 --max-seq-len-override 131072 --kv-cache-dtype q8_0 \
+    --num-tokens 262144 --max-seq-len-override 131072 --kv-cache-dtype fp8_e4m3 \
     --attention-backend triton --moe-backend offload --moe-pageable-gpu --moe-cache-auto \
     --memory-ratio 0.90 --max-prefill-length 8192 --host-ram-reserve-gb 3 --enable-cache-report
   ```

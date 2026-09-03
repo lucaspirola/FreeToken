@@ -22,6 +22,7 @@ from .api_models import (
 )
 from .client_sessions import chat_session_id
 from .function_call_parser import ToolCallItem
+from .json_output import apply_json_instruction, schema_instruction
 from .request_logger import log_request
 from .generation import (
     ContentDelta,
@@ -98,6 +99,10 @@ def chat_request_to_genspec(
 
     ``force_nonempty_content`` is the server default (--force-nonempty-content);
     the request can override it per call through ``chat_template_kwargs``.
+
+    A JSON-mode ``response_format`` also rewrites the prompt here (schema into the
+    system block, thinking off by default); the output half lives in
+    ``generation``/``json_output``.
     """
     from .model_meta import effort_toggle_kwargs
 
@@ -105,12 +110,24 @@ def chat_request_to_genspec(
     thinking_type = _thinking_type(req)
     if req.reasoning_effort or thinking_type:
         ctk = effort_toggle_kwargs(req.reasoning_effort, ctk, thinking_type=thinking_type)
+    json_mode = req.response_format is not None and req.response_format.json_mode
+    json_schema = req.response_format.schema_dict if json_mode else None
+    if json_mode:
+        # Thinking off by default for a JSON call: the caller wants an object, not a
+        # thought, and a think block is decode tokens the answer never uses (and one
+        # more thing to strip). An explicit enable_thinking — direct, or via
+        # reasoning_effort/`thinking`, which have already written it — wins.
+        ctk = dict(ctk or {})
+        ctk.setdefault("enable_thinking", False)
     ctk, force_nonempty = _force_nonempty_content(ctk, force_nonempty_content)
     wire_messages = [m.model_dump(exclude_none=True) for m in req.messages]
     if map_developer_role:
         wire_messages = _map_developer_role(wire_messages)
+    messages = render_messages(wire_messages)
+    if json_mode:
+        messages = apply_json_instruction(messages, schema_instruction(json_schema))
     return GenSpec(
-        messages=render_messages(wire_messages),
+        messages=messages,
         sampling_params=resolve_sampling(
             temperature=req.temperature,
             top_k=req.top_k,
@@ -126,6 +143,8 @@ def chat_request_to_genspec(
         session_id=req.session_id,
         session_ttl_seconds=req.session_ttl_seconds,
         force_nonempty_content=force_nonempty,
+        json_mode=json_mode,
+        json_schema=json_schema,
     )
 
 
@@ -233,11 +252,6 @@ async def handle_chat_completion(
         return create_error_response("function_call is not supported; use tools/tool_choice instead")
     if req.logit_bias is not None:
         return create_error_response("logit_bias is not supported")
-    if _response_format_unsupported(req.response_format):
-        return create_error_response(
-            "response_format json_object/json_schema is not supported (no constrained decoding)",
-            param="response_format",
-        )
     if req.n != 1:
         return create_error_response("Only n=1 is supported", param="n")
     # Switchyard forwards top_logprobs verbatim; 0 (or absent) asks for nothing, so
@@ -869,7 +883,12 @@ def _usage(
 
 
 def _response_format_unsupported(response_format: dict[str, Any] | None) -> bool:
-    # We have no constrained/guided decoding; only plain text ('text' or unset) is honored.
+    """/v1/completions only: JSON mode is a chat feature.
+
+    Chat serves `json_object`/`json_schema` by instruction + validation + retry
+    (`server/json_output.py`), which needs a system block and a repair turn — a raw
+    text completion has neither, and no client asks for it there. So the legacy
+    rejection stays on this route rather than silently returning unshaped text."""
     return response_format is not None and response_format.get("type") not in (None, "text")
 
 

@@ -18,7 +18,7 @@ import json
 import os
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from . import request_ring
@@ -35,6 +35,11 @@ except Exception:  # pragma: no cover — jinja2 always ships with transformers
     _TemplateError = ()
 
 from .function_call_parser import FunctionCallParser, TOOLS_TAG_LIST, ToolCallItem
+from .json_output import (
+    coerce_json_content,
+    json_retry_budget,
+    retry_user_message,
+)
 from .reasoning_parser import (
     DSV4_SPECIAL_TOKENS,
     ReasoningParser,
@@ -156,6 +161,12 @@ class GenSpec:
     #: pre-closed by the template and that still writes only a thought would
     #: otherwise answer with an empty message.
     force_nonempty_content: bool = False
+    #: JSON mode (OpenAI ``response_format``). The completion is buffered, repaired
+    #: (think residue / code fences stripped, first balanced JSON value extracted)
+    #: and re-emitted as canonical JSON; ``json_schema`` additionally validates and
+    #: retries. The adapter sets both fields and the matching prompt instruction.
+    json_mode: bool = False
+    json_schema: dict[str, Any] | None = None
 
     @property
     def parse_tools(self) -> bool:
@@ -607,7 +618,7 @@ async def generate_events(
     first_token_at: float | None = None
     error: str | None = None
     try:
-        async for ev in _generate_events_impl(uid, spec, state):
+        async for ev in _generate_events_json(uid, spec, state):
             if isinstance(ev, GenDone):
                 prompt_tokens = ev.prompt_tokens
                 completion_tokens = ev.completion_tokens
@@ -634,7 +645,7 @@ async def generate_full(
     result: GenResult | None = None
     error: str | None = None
     try:
-        result = await _generate_full_impl(uid, spec, state)
+        result = await _generate_full_json(uid, spec, state)
         return result
     except GenerationError as exc:
         error = str(exc)
@@ -646,6 +657,127 @@ async def generate_full(
             completion_tokens=result.completion_tokens if result else 0,
             error=error,
         )
+
+
+# --------------------------------------------------------------------------- #
+# JSON mode (response_format). See ``json_output`` for the why.
+# --------------------------------------------------------------------------- #
+def _json_retry_spec(spec: GenSpec, error: str) -> GenSpec:
+    """The repair attempt: the same conversation plus a user turn naming the
+    failure, decoded greedily. Temperature 0 (and an unrestricted top_p/top_k, or
+    the sampler is not actually greedy) because a second sample from the same
+    distribution that just failed is worth nothing — the point is the added
+    instruction, not a different roll."""
+    return replace(
+        spec,
+        messages=[*spec.messages, retry_user_message(error)],
+        sampling_params=replace(
+            spec.sampling_params, temperature=0.0, top_p=1.0, top_k=-1
+        ),
+    )
+
+
+async def _submit_retry(spec: GenSpec, state: Any) -> tuple[int, GenSpec]:
+    """Submit a repair attempt. It runs unbound: the session lease is still held by
+    the turn being repaired (the scheduler serializes a session's turns), so
+    reusing the id would deadlock the retry against its own first attempt."""
+    retry_spec = replace(spec, session_id=None, session_reclaimable=False)
+    return await submit_generation(retry_spec, state), retry_spec
+
+
+async def _generate_full_json(uid: int, spec: GenSpec, state: Any) -> GenResult:
+    """``_generate_full_impl`` under JSON mode: canonicalize the completion, and on
+    a parse/schema failure retry (bounded by ``json_retry_budget``) with the error
+    fed back to the model. A final failure returns the raw content with the
+    generation's own finish_reason — JSON mode never turns a produced answer into
+    an HTTP error, because Switchyard reads an unusable verdict as a soft failure
+    and falls through to a stronger target, while a 4xx breaks the route."""
+    if not spec.json_mode:
+        return await _generate_full_impl(uid, spec, state)
+    attempt_spec = spec
+    owned_uid: int | None = None
+    budget = json_retry_budget(state)
+    unusable: GenResult | None = None  # the best answer so far, raw
+    for attempt in range(budget + 1):
+        try:
+            result = await _generate_full_impl(uid, attempt_spec, state)
+        except asyncio.CancelledError:
+            if owned_uid is not None:
+                await state.abort_user(owned_uid)
+            raise
+        except GenerationError:
+            # A repair attempt that fails on its own (the added turn overflowed the
+            # window, the lease went away) must not erase an answer we already have.
+            if unusable is None:
+                raise
+            return unusable
+        if result.tool_calls:
+            return result  # a tool call is a different answer shape; leave it alone
+        content, error = coerce_json_content(result.content, spec.json_schema)
+        result.content = content
+        if error is None or attempt == budget:
+            return result
+        unusable = result
+        uid, attempt_spec = await _submit_retry(_json_retry_spec(spec, error), state)
+        owned_uid = uid
+    return result  # unreachable: the loop always returns on its last attempt
+
+
+async def _generate_events_json(uid: int, spec: GenSpec, state: Any) -> AsyncIterator[GenEvent]:
+    """The streaming half of JSON mode. Content cannot stream incrementally — the
+    reply is only known to be JSON once it is complete, and a retry would rewrite
+    what was already sent — so content deltas are buffered and re-emitted as
+    exactly ONE delta carrying the canonical JSON, just before the terminal
+    GenDone. Reasoning deltas still stream live (clients render them separately,
+    and Switchyard's judge decoder ignores them)."""
+    if not spec.json_mode:
+        async for ev in _generate_events_impl(uid, spec, state):
+            yield ev
+        return
+    attempt_spec = spec
+    owned_uid: int | None = None
+    budget = json_retry_budget(state)
+    unusable: tuple[str, GenDone] | None = None  # the best answer so far, raw
+    for attempt in range(budget + 1):
+        parts: list[str] = []
+        done: GenDone | None = None
+        tool_seen = False
+        try:
+            async for ev in _generate_events_impl(uid, attempt_spec, state):
+                if isinstance(ev, ContentDelta):
+                    parts.append(ev.text)
+                elif isinstance(ev, GenDone):
+                    done = ev
+                else:
+                    if isinstance(ev, (ToolCallStart, ToolCallArgsDelta, ToolCallsDelta)):
+                        tool_seen = True
+                    yield ev
+        except asyncio.CancelledError:
+            if owned_uid is not None:
+                await state.abort_user(owned_uid)
+            raise
+        except GenerationError:
+            # See _generate_full_json: a failed repair keeps the earlier answer.
+            if unusable is None:
+                raise
+            yield ContentDelta(unusable[0])
+            yield unusable[1]
+            return
+        raw = "".join(parts)
+        if tool_seen:
+            content, error = raw, None  # tool call: not a JSON answer, pass through
+        else:
+            content, error = coerce_json_content(raw, spec.json_schema)
+        if error is None or attempt == budget:
+            if content:
+                yield ContentDelta(content)
+            if done is not None:
+                yield done
+            return
+        if done is not None:
+            unusable = (content, done)
+        uid, attempt_spec = await _submit_retry(_json_retry_spec(spec, error), state)
+        owned_uid = uid
 
 
 async def _generate_events_impl(uid: int, spec: GenSpec, state: Any) -> AsyncIterator[GenEvent]:

@@ -142,6 +142,9 @@ class EngineConfig:
     # out; FREETOKEN_CONTEXT_PREFLIGHT overrides both). The scheduler enforces the window
     # regardless -- this only decides where the client learns about it.
     context_preflight: bool = True
+    # Repair attempts for response_format json_object/json_schema when the answer
+    # is not valid JSON (--json-retry; FREETOKEN_JSON_RETRY overrides).
+    json_retry: int = 1
 
     @cached_property
     def kv_quant(self):
