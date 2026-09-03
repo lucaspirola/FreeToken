@@ -7,6 +7,8 @@ one route.
 
 This page is the operator's reference for the Nemotron 3.5 Lightning profile on a
 16 GiB RTX 5080, but nothing here is Nemotron-specific except the launch line.
+The model-side sizing, launch profiles and 1M single-session notes live in
+[`docs/nemotron.md`](nemotron.md).
 
 Automated checks live in `scripts/switchyard_e2e.py` (wrapper:
 `scripts/switchyard_e2e.sh`).
