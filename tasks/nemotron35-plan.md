@@ -386,7 +386,7 @@ PCIe ≈ 100 ms/token — not viable). Instead rely on what exists and validate 
 User decision (2026-09-04): 1M profile runs ONE resident session; all other sessions queue and are
 served in sequence via spill/restore. The 16-way profile remains for short-context Switchyard traffic.
 Gate (after Phase 2 kernels, before Phase 4): 1M profile `--max-seq-len-override 1048576
---num-tokens 1048576 --kv-cache-dtype fp8_e4m3 --attention-backend triton --kv-grow-step-tokens
+--num-tokens 1048576 --kv-cache-dtype q8_0 --attention-backend triton --kv-grow-step-tokens
 131072 --max-running-requests 1 --linear-state-slots <minimum accepted> --session-spill-ram-gb 12
 --session-spill-dir <nvme>`; three sessions grown to ~1M each with disjoint needles, one spilled
 and restored, all coherent; record prefill/decode tok/s and spill/restore times.
