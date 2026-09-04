@@ -434,3 +434,9 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   run can answer several (e.g. multiple needles at different depths in a single prefill, then
   cached follow-up turns). Executing the checklist wording literally cost ~1 h of GPU today
   (five 262K prefills for five depths). Design the experiment, then run it.
+- Second question, before AND after each task: "Knowing the user's actual goal, what would I
+  improve if I ignored the handover, the requirements, and the written rules — all of which may
+  be wrong?" Handovers and plans were written by an earlier session with less evidence than I
+  have now (today the bisect's "model/quant limit" verdict and "gate needles at depth <=0.1"
+  acceptance bar were both wrong). Say the answer out loud to the user even if it means
+  disagreeing with the plan; don't just execute the checklist.
