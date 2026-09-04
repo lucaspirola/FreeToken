@@ -194,30 +194,118 @@ def test_one_running_request_spills_the_idle_lease_instead_of_dropping_the_donat
     assert cm._mamba_donation_skips == 0
 
 
-def test_admission_reserves_state_slots_through_the_lease_spill():
-    """Same five-slot pool, but the pressure lands at admission: three slots, one lease."""
-    from freetoken.scheduler.prefill import PrefillAdder
+def _lease_a_session(cm, pool, page_table, ids=(1, 2, 3, 4, 5), pages=(100, 101, 102, 103)):
+    """Finish a turn and convert its committed prefix into a session lease (locked snapshot)."""
+    a = _admit(cm, pool, page_table, 0, list(ids), list(pages), len(pages))
+    cm.cache_req(a, finished=True)
+    return a, cm.retain_prefix(a.input_ids, len(pages))
 
+
+def _scheduler_with_lease(cm, lease, *, reclaimable=True, token_ids=None):
+    """A real Scheduler carrying one idle session lease, with no engine and no spill store."""
+    from freetoken.scheduler.scheduler import Scheduler, SessionLease
+
+    sched = Scheduler.__new__(Scheduler)
+    sched.cache_manager = cm
+    sched._session_spill_store = None
+    sched.config = SimpleNamespace(auto_session_grace_seconds=0.0)
+    sched._sessions = {
+        "a": SessionLease(
+            handle=lease,
+            ttl_seconds=300.0,
+            reclaimable=reclaimable,
+            last_used_at=1.0,
+            token_ids=token_ids,
+        )
+    }
+    cm.mamba_reclaim_hook = sched._reclaim_soft_sessions_for_state_slot
+    return sched
+
+
+def test_real_scheduler_hook_spills_the_lease_and_lands_the_donation():
+    """End to end through the production hook, not a stub: five slots, one idle auto lease."""
     pool = _pool(5)
     page_table = torch.zeros(4, 64, dtype=torch.int32)
     cm = CacheManager(64, 1, page_table, "hybrid_radix", linear_state_pool=pool)
 
-    a = _admit(cm, pool, page_table, 0, [1, 2, 3, 4, 5], [100, 101, 102, 103], 4)
-    cm.cache_req(a, finished=True)
-    lease = cm.retain_prefix(a.input_ids, 4)
+    a, lease = _lease_a_session(cm, pool, page_table)
+    sched = _scheduler_with_lease(cm, lease, token_ids=a.input_ids[:4])
+
+    b = _admit(cm, pool, page_table, 1, [20, 21, 22, 23, 24], [300, 301, 302, 303], 4)
+    assert pool.num_free_slots == 0 and cm.mamba_available_size == 0
+
+    frozen = b.mamba_ping_pong[0]
+    cm.cache_req(b, finished=False)                   # used to raise
+
+    assert sched._sessions["a"].handle is None        # the idle conversation was released
+    assert sched._sessions["a"].expires_at is not None
+    assert b.mamba_ping_pong[0] != frozen             # B's snapshot reached the tree
+    assert cm.match_req(_pend([20, 21, 22, 23, 99])).mamba_value == frozen
+    assert cm._mamba_donation_skips == 0
+
+
+def test_real_scheduler_hook_keeps_an_explicit_lease_and_degrades_instead():
+    """An explicit (non-reclaimable) lease is never spilled -- the donation gives way."""
+    pool = _pool(5)
+    page_table = torch.zeros(4, 64, dtype=torch.int32)
+    cm = CacheManager(64, 1, page_table, "hybrid_radix", linear_state_pool=pool)
+
+    a, lease = _lease_a_session(cm, pool, page_table)
+    sched = _scheduler_with_lease(cm, lease, reclaimable=False, token_ids=a.input_ids[:4])
+
+    b = _admit(cm, pool, page_table, 1, [20, 21, 22, 23, 24], [300, 301, 302, 303], 4)
+    pp_before = b.mamba_ping_pong
+    cm.cache_req(b, finished=False)
+
+    assert sched._sessions["a"].handle is lease       # the explicit lease is untouched
+    assert b.mamba_ping_pong == pp_before             # B kept its working set
+    assert b.mamba_last_track_seqlen is None
+    assert cm._mamba_donation_skips == 1
+    assert cm.match_req(_pend([20, 21, 22, 23, 99])).cuda_handle.cached_len == 0
+    # A's prefix is still reusable -- the lease bought exactly what it was holding.
+    assert cm.match_req(_pend([1, 2, 3, 4, 5])).cuda_handle.cached_len == 4
+
+
+def test_admission_reserves_state_slots_through_the_lease_spill():
+    """Same five-slot pool, but the pressure lands at admission: three slots, one lease."""
+    from freetoken.core import SamplingParams
+    from freetoken.scheduler.prefill import PrefillAdder
+    from freetoken.scheduler.table import TableManager
+    from freetoken.scheduler.utils import PendingReq
+
+    pool = _pool(5)
+    page_table = torch.zeros(4, 64, dtype=torch.int32)
+    cm = CacheManager(64, 1, page_table, "hybrid_radix", linear_state_pool=pool)
+    tm = TableManager(4, page_table)
+    tm.allocate()                                     # table row 3 is the leased session's
+
+    a, lease = _lease_a_session(cm, pool, page_table)
     pool.alloc(1)                                     # a live request holds one more slot
     # Two free, and the third is the lease's -- pinned, so nothing is evictable.
     assert pool.num_free_slots == 2
     assert cm.prefix_cache.mamba_evictable_size == 0
 
-    assert cm.reserve_mamba_slots(3) is False         # no hook: honest refusal, no raise
-    cm.mamba_reclaim_hook = lambda n: (cm.unlock(lease), True)[1]
-    assert cm.reserve_mamba_slots(3) is True          # lease spilled -> the seat opens
+    # A fresh prompt (no shared prefix, so admission does no pinned host copy).
+    pending = PendingReq(
+        uid=7,
+        input_ids=torch.tensor([50, 51, 52, 53], dtype=torch.int32),
+        sampling_params=SamplingParams(max_tokens=1),
+    )
 
-    # And the adder consults exactly that path (rather than ensure_mamba_slots alone).
-    import inspect
+    adder = PrefillAdder(
+        token_budget=64, reserved_size=0, cache_manager=cm, table_manager=tm
+    )
+    assert adder._try_allocate_one(pending) is None   # no hook: refused, never raises
+    assert pool.num_free_slots == 2                   # and nothing was consumed
 
-    assert "reserve_mamba_slots(3)" in inspect.getsource(PrefillAdder._try_allocate_one)
+    _scheduler_with_lease(cm, lease, token_ids=a.input_ids[:4])
+    got = PrefillAdder(
+        token_budget=64, reserved_size=0, cache_manager=cm, table_manager=tm
+    )._try_allocate_one(pending)
+    assert got is not None
+    _handle, _table_idx, linear_slot_idx, ping_pong, _restore = got
+    assert linear_slot_idx is not None and len(ping_pong) == 2
+    assert pool.num_free_slots == 0                   # the lease's slot became B's working set
 
 
 def test_scheduler_state_slot_reclaim_releases_the_lru_idle_lease():
