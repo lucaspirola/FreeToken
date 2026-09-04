@@ -1,6 +1,6 @@
 # Nemotron 3.5 Lightning on FreeToken — handover
 
-State as of 2026-09-04 ~22:30, HEAD 508ea32 on `main` (not pushed). Read this, then
+State as of 2026-09-05 ~03:00, HEAD acc91e9 on `main` (not pushed). Read this, then
 `tasks/nemotron35-plan.md` (spec + decisions), `tasks/todo.md` (checklist), `tasks/lessons.md`
 (rules), `docs/nemotron.md` (profiles), `docs/switchyard.md` (router contract + e2e harness).
 Memory notes: host embedder service, host-OOM rules, plan pointer.
@@ -46,38 +46,61 @@ restore) is implemented and unit-tested. Three things are NOT finished (below).
    saturate their calibrated `input_scale`, but by the same 1.8e-5 clipped fraction at the
    passing 131K and the failing 147K — see `FREETOKEN_DEBUG_FP8_ACT_STATS`) and the whole
    NVFP4 path (W4A16 end to end, no activation quantization anywhere).
-2. **16-way Switchyard soak — STILL OPEN. `81ab30e` FAILS both routes; the last tree that
-   passed is `befcde6` + the §R6 `reserved_pages` fix.** Write-ups in
-   `benchmarks/results/nemotron35_lightning_5080_switchyard_soak_2026-09-04.md`:
-   §"Rerun against fad1fc4" (the KV fatal, closed) and §"Run against 81ab30e" (this verdict).
+2. **16-way Switchyard soak — STILL OPEN. `ea7ed7c` FAILS both routes and is WORSE than
+   `81ab30e`; the last tree that passed is `befcde6` + the §R6 `reserved_pages` fix.**
+   Write-ups in `benchmarks/results/nemotron35_lightning_5080_switchyard_soak_2026-09-04.md`:
+   §"Rerun against fad1fc4" (the KV fatal, closed), §"Run against 81ab30e", and
+   §"Run against ea7ed7c (+acc91e9)" (2026-09-05, this verdict).
    - History: `fad1fc4` closed the `committed_pages_required` fatal but starved the stage
      route by charging its chunk cap in `reserved_size` (whole remaining prompts) instead of
      pages; the §R6 fix (`PrefillAdder.reserved_pages`) restored it — stage 471 req / 0 err /
      1 STALLED, mean 2.37 lanes per prefill batch.
-   - **`81ab30e` (fresh admits gated on finishability + this chunk) regresses it: stage
-     268 req / 15 timeouts / 7 STALLED, passthrough 720 req / 16 timeouts / 10 STALLED**, all
-     failures `long-context`, p95 600 s on stage. The fatal stays closed (0
-     `committed_pages_required`, 0 `LinearStatePool exhausted`, 0 tracebacks, 0 oversize
-     warnings, `/health` ok on every sample, 3 s shutdown, GPU 0 MiB).
-   - Root cause, from `py-spy dump --locals` on the wedged core process (§S5): the scheduler
-     spends **52–53 % of each phase emitting no batch at all** (gaps of 492 s, 515 s, 624 s),
-     looping `schedule_next_batch` → a full 118 K-token radix `match_prefix` per pending fresh
-     candidate → refuse all → `None`. Every gap opens at `token usage: 1.00` with
-     `#running-req` 0–2 and `#queue-req` 10–16. The finishability budget is
-     `cache_manager.max_size - inflight_prefill_size`, i.e. **the whole pool**: it subtracts
-     neither the KV held by requests already decoding nor the retained/locked session
-     prefixes, so admissions keep arriving until the pool is full and then no lane can buy its
-     next chunk and nothing can complete to free one. `_reclaim_for_blocked_prefill` fires on
-     every `None` and returns False (`Cold restore ... failed (AssertionError('Eviction did
-     not free enough space.'))`); the only escape is the session idle timeout minutes later.
-   - While it *is* scheduling `81ab30e` is genuinely better: 4.71 lanes/prefill batch vs 2.37
-     and 2,938 vs 1,877 prefill tok/s on stage. The fix direction is to bound the
-     finishability budget by what the pool can actually give back, not to revert the lane win.
-   - Do the next attempt as a CPU-only A/B first (`scratchpad/soak2/lane_ab.py` shape), then
-     one 20 m stage soak. Drivers: `scratchpad/soak5/` (this run), `scratchpad/soak3/`,
-     `scratchpad/soak2/` under
+   - `81ab30e` (fresh admits gated on finishability against the WHOLE pool) regressed it:
+     stage 268 req / 15 timeouts / 7 STALLED, passthrough 720 / 16 / 10; 52 % of each phase
+     emitting no batch, gaps of 492/515/624 s, self-recovering via the session idle timeout.
+   - **`ea7ed7c` (gate against `admissible_size` = `available_size` + idle reclaimable lease
+     tokens, aging patience 8) is worse: stage 176 req / 32 timeouts / 12 STALLED,
+     passthrough 32 req / 32 timeouts (100 % error) / 18 STALLED.** The scheduler emitted its
+     LAST batch 5 m 35 s into the stage phase and never emitted another: **2,616 s of
+     unbroken silence** across the rest of stage and the whole passthrough phase. This is a
+     **permanent deadlock**, not a stall — the session idle timeout (112 expiries during the
+     run) frees nothing.
+   - Root cause, from `py-spy dump --locals` at the 4 min and 44 min marks of the same stall
+     (byte-identical locals, `inflight_prefill: 222538` in both): **14 chunked prefills own
+     the entire pool and deadlock against each other.** They have forwarded ~237.8 K tokens
+     and still owe 222,538 — a combined footprint of ~460 K against a 262,144-token pool,
+     **1.76x**. Nothing is decoding (`#running-req: 0`), so nothing can complete to release a
+     page, and every continuation defers at `_add_one_req` with `kv_pages == 0` on the pass's
+     FIRST candidate (`reserved_pages: 0`, so `available_size == 0`). Fresh admits are
+     correctly refused by then (`blocked_fresh: True`) — too late.
+   - Why the gate does not catch it: it is applied **only at the moment of admission, against
+     a capacity that later admissions also spend**. An idle lease's tokens count as admissible
+     for prompt A; A is admitted, forwards one 8 K chunk, stays chunked — and on the next pass
+     the same lease tokens count again as admissible for prompt B. Nothing re-validates that
+     the *set* of already-admitted, unfinished prefills can all finish. Same family as §R6,
+     `fad1fc4` and `81ab30e`: the budget is expressed in a currency the guarded check does not
+     spend. Fix direction (§T8 of the write-up): make the fresh admit's remaining footprint a
+     **standing** reservation held for the life of the prefill and require
+     `sum(reservations) + this admit <= admissible_size` on every pass, or cap concurrent
+     chunked prefills outright. Lanes per prefill batch went 2.37 -> 4.71 -> 6.57 across the
+     three trees while errors went 0 -> 15 -> 32: seating more lanes is not the metric.
+   - The fatals all stay closed: **0** `committed_pages_required`, **0** `LinearStatePool
+     exhausted`, **0** tracebacks, **0** oversize warnings, `/health` ok on every sample,
+     15 s shutdown of a fully wedged server, GPU 0 MiB. 16 `Eviction did not free enough
+     space` warnings, all at the phase boundary when 16 new sessions tried to restore.
+   - `benchmarks/scheduler_replay.py` PASSES `ea7ed7c` (that is the gate it was built
+     against) and the live soak fails. Ticket 11 stands and widens: the replay does not model
+     a *set* of chunked prefills whose summed footprint exceeds the pool.
+   - **`acc91e9` was not measurable here** (only 5 decode batches at 16 lanes, engine starved
+     92 % of the run); its 16-way effect is expected to be small anyway, since the decode grid
+     is `batch x head_blocks x kv_splits` and is already SM-filling at batch 16. It IS clearly
+     visible single-stream — see item 12.
+   - Drivers: `scratchpad/soak6/` (this run, incl. the new `gaps.py`), `scratchpad/soak5/`,
+     `scratchpad/soak3/`, `scratchpad/soak2/` under
      /tmp/claude-1000/-home-lucas-ai-FreeToken/f4e2e9e3-.../scratchpad/.
-   - Open tickets from this run are 8-11 below.
+   - Open tickets from these runs are 8-11 below; the analyzer lesson is that a deadlock
+     produces **zero** `gap >= 30 s` rows, because the silence is after the last batch line,
+     not between two of them — measure trailing silence too.
 3. **1M gate — CLOSED 2026-09-04, all four criteria PASS.** Write-up:
    `benchmarks/results/nemotron35_lightning_5080_1m_sessions_2026-09-04.md`. One session grown
    to **1,039,989 tokens** (8 turns × 130K, needle recalled at every length, twice); demand
@@ -164,6 +187,43 @@ restore) is implemented and unit-tested. Three things are NOT finished (below).
    on both routes. It models neither retained session leases, nor decode residency, nor the
    idle timeout, which is where the stall comes from. Either extend it or stop treating it as
    an acceptance gate for scheduler policy.
+
+12. **Cross-engine oracle — first live sweep done 2026-09-05, 262K: NO ENGINE BUG.**
+    Write-up: `benchmarks/results/nemotron35_lightning_5080_oracle_2026-09-05.md`; generated
+    report and recordings in `~/ai/bench/oracle/2026-09-05/`. FreeToken **19/24** graded turns
+    vs llama.cpp **17/24** on a byte-identical 262,076-token prompt: 15 `agree`, 3
+    `both-miss`, 4 `llamacpp-only-miss`, **2 `freetoken-only-miss`** — and both of those are
+    composition failures on turns where retrieval demonstrably succeeded (one adds two
+    correctly-retrieved codes **off by one**; the other gets the sum exactly right and names
+    the wrong key as larger). **Zero `retention`, zero `selection`, 12/12 needles `in state`
+    on both engines.** The one mid-depth direct miss (quarry, depth 0.500) is made by BOTH
+    engines, both returning the near-duplicate `quarry register` twin — a model interference
+    limit, not an engine or NVFP4 effect. llama.cpp shows three `interference-near` classes to
+    FreeToken's one. Cost: 7 min of GPU for both engines at 262K (one prefill, 19 cached
+    turns at 99.978 % cached).
+    **`acc91e9` confirmed in a real workload**: 105.5 tok/s median decode at a 262 K context
+    (56.3 on 2026-09-04) and **2.7x llama.cpp** on the same prompt/card; prefill 1,949 vs
+    1,740 tok/s, TTFT 134.5 vs 150.6 s.
+    **1M FreeToken leg (no llama.cpp leg — optional and not attempted): 7/19 turns, and
+    ZERO `retention`.** 1,044,416-token haystack, TTFT 1,813.8 s at 576 tok/s (prefill
+    unchanged), turns 2-19 at 4.61 s TTFT / **80.7 tok/s decode** (~20 on 2026-09-04 —
+    `acc91e9` confirmed at 1M). Direct probes collapse (1/6; the depth-0.03 `quarry register`
+    code 1,607,392 acts as an attractor) but **leak-free reverse `code -> key` probes recover
+    5 of 6 needles exactly**, so the state holds them and *addressing* is what fails:
+    5 `interference-near` + 1 `recall-partial`, in-state 5/6. A single-question-shape gate
+    would have filed six retention bugs; the correct count is zero. Composition is the weak
+    axis (every combined sum wrong at 1M vs 4/6 right at 262K). The control is still denied.
+    **Procedure bug found and fixed in the doc**: `--target-prompt-tokens 1048576` against
+    `--num-tokens 1048576` fails at *turn 2* with `context_length_exceeded` (1,048,623 >
+    1,048,576) after paying the full 1,818 s prefill — the suite is a conversation and grows.
+    Use `--target-prompt-tokens 1044480` at the top rung; the failed recording is kept as
+    `ft_1048576_ctxoverflow.json`. Still open at 1M: run the llama.cpp leg alongside it — the
+    prediction to test is that it shows the same interference collapse (it already showed more
+    of it than FreeToken at 262K).
+    Doc bug: `docs/oracle.md`'s Phase-A serve line names `--session-spill-dir
+    /mnt/nvme/ft-spill`, which does not exist on this host — the drivers use
+    `~/.cache/freetoken/oracle-spill`. Drivers: `scratchpad/oracle/{serve_ft.sh,phaseA.sh,
+    phaseB.sh}`.
 
 Scratchpad root (survives Claude restarts, not WSL restarts):
 /tmp/claude-1000/-home-lucas-ai-FreeToken/af23ede4-e8ad-4c8d-8b38-c8be515d8870/scratchpad/

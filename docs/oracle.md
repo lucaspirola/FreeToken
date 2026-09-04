@@ -69,6 +69,14 @@ column does not invalidate a pass — it just means that pass is not independent
 - **The lock caps a job at 4 h** (`FREETOKEN_GPU_LOCK_MAX_HOLD`). A 1M llama.cpp
   recording has never been run on this host and may not fit inside it; see the budget
   table below.
+- **Leave headroom above the top rung.** The suite is a *conversation*: every graded turn
+  appends its question and its reply, so turn 19's prompt is ~1.3 K tokens longer than turn
+  1's, and the server also reserves the decode budget. Serving `--num-tokens 1048576` and
+  recording `--target-prompt-tokens 1048576` therefore fails at **turn 2** with
+  `context_length_exceeded` after paying the full 30-minute prefill (observed 2026-09-05,
+  1,048,623 > 1,048,576). Either serve the top rung with headroom, or record it at
+  `--target-prompt-tokens 1044480`. The llama.cpp side already does this automatically
+  (`--llama-ctx-headroom`, default 8192).
 - `--filler-cursor` rotates the haystack so a previous run's session checkpoint cannot
   match. The filler repeats every 64 lines, so **use a value that is not a multiple of
   64** or you get a byte-identical prompt and the stale checkpoint matches anyway.
@@ -98,7 +106,7 @@ FREETOKEN_PIN_BUDGET_GB=17 scripts/gpu_lock.sh \
   --kv-grow-step-tokens 131072 --kv-cache-dtype q8_0 --attention-backend triton \
   --moe-backend offload --moe-cache-auto --linear-state-slots 6 \
   --memory-ratio 0.85 --max-prefill-length 8192 --host-ram-reserve-gb 6 \
-  --session-spill-ram-gb 12 --session-spill-dir /mnt/nvme/ft-spill \
+  --session-spill-ram-gb 12 --session-spill-dir ~/.cache/freetoken/oracle-spill \
   --port 8123
 
 # terminal 2 -- the recording (CPU-side; the GPU work happens in the server)

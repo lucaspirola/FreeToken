@@ -707,3 +707,228 @@ Two secondary observations from the same dumps, both filed as tickets in the han
   `soakStage/results-switchyard_stage/`, `soakPass/results-switchyard_passthrough/`,
   `stats_after_stage.json`, `stats_after_pass.json`
 * `soak4_killed/` — the 9-minute aborted first attempt (clean; see S1)
+
+---
+
+# Run against `ea7ed7c` (+`acc91e9`) — admission gate against `admissible_size`
+
+2026-09-05 01:22–02:14 local · FreeToken at **`acc91e9`** (tree = `ea7ed7c` "Scheduler:
+admission gate against admissible_size; replay models session leases" + `acc91e9` "Triton
+decode: size kv_splits from SM count"), working tree **clean** · same RTX 5080 / WSL2 host,
+31 GiB `MemAvailable` at launch, embedder service not running, GPU 0 MiB before and after.
+
+**Verdict: FAIL, and worse than `81ab30e`.** The scheduler emitted its last batch **5 m 35 s
+into the stage phase** and never emitted another one: 2,616 s of continuous silence across
+the rest of stage *and the whole passthrough phase*. `81ab30e` stalled for 8–10 minutes at a
+time and recovered; this tree **deadlocks permanently** — the session idle timeout, which was
+`81ab30e`'s escape hatch, no longer frees anything.
+
+## T1. Exact commands
+
+```bash
+systemctl --user stop piro-board-embedder.service   # host bus not running; service inactive
+FREETOKEN_GPU_LOCK_WAIT=300 scripts/gpu_lock.sh <scratch>/soak6/run.sh
+```
+
+`soak6/{run.sh,serve.sh,sample.sh,split.py,analyze.py}` are `soak5`'s byte-for-byte with the
+scratch path changed; `soak6/gaps.py` is new (the batch-log gap analyzer §S5 was done by
+hand). Server line and soak invocations identical to §S1.
+
+## T2. Timeline
+
+| | |
+|---|---|
+| server start → `{"status":"ok"}` | **41 s** |
+| soak stage | 1,540 s, **FAIL** (`error rate 18.1818% > 0%`) |
+| soak passthrough | 1,200 s, **FAIL** (`error rate 100.0000% > 0%`) |
+| **last batch of the entire run** | **01:29:48**, 5 m 35 s into stage |
+| scheduler deaths / detected restarts | 0 / 0 |
+| `/health` non-ok samples | **0** (40 soak checks + the 10 s watchdog; `health_bad.log` absent) |
+| metrics / invalid-request canaries | 0 / 0 failures |
+| driver stop of a live (wedged) server | `shutdown_seconds=15` |
+| GPU at end | **0 MiB**, no leftover venv python |
+
+## T3. Request counts
+
+| | **stage (20 m)** | **passthrough (20 m)** |
+|---|---|---|
+| requests / successes / failures | 176 / 144 / **32** | 32 / **0** / **32** |
+| error rate | **18.1818 %** | **100 %** |
+| error kinds | `timeout` ×32 | `timeout` ×32 |
+| failing scenarios | long-context 16, prefix-reuse 16 | growing-conversation 16, prefix-reuse 16 |
+| p50 / p95 / p99 ms | 30,704 / 600,001 / 600,002 | 600,001 / 600,002 / 600,002 |
+| requests/s | 0.114 | 0.027 |
+| STALLED intervals (of 20) | **12** | **18** (+2 DEGRADED) |
+
+Comparison of the three trees on the **stage** route:
+
+| | `befcde6`+§R6 (pass) | `81ab30e` | **`ea7ed7c`+`acc91e9`** |
+|---|---|---|---|
+| verdict | **PASS** | FAIL | **FAIL (deadlock)** |
+| requests / errors | 471 / **0** | 268 / 15 | **176 / 32** |
+| STALLED intervals | 1 | 7 | **12** |
+| p95 ms | 200,742 | 600,001 | 600,001 |
+| mean lanes / prefill batch | 2.37 | 4.71 | **6.57** |
+| longest batch-log gap | — | 624 s | **2,616 s and never recovers** |
+
+## T4. Throughput during the 335 s it was scheduling
+
+The whole run produced **204 batch lines**, all between 01:24:13 and 01:29:48.
+
+| | stage (01:24:13–01:29:48) |
+|---|---|
+| prefill batches | 162 |
+| mean lanes / prefill batch | **6.57** (median 4) |
+| median `#new-token` | 4,164 |
+| prefill instant tok/s | median **2,092**, mean 2,811, max 9,109 |
+| new tokens prefilled | 692,416 (2,067 tok/s over the window) |
+| prefix reuse | 68.2 % (1,481,658 cached / 2,174,074) |
+| decode batches | 42 |
+| decode aggregate tok/s | median 75.4, max **176.5** |
+| decode per-stream tok/s | median 6.53, max 22.3 |
+| decode at `#running-req` 16 | n=5, agg median 80.1, per-stream 5.01 |
+| batches at `#mamba-slot: 96/96` | 14 |
+| busiest FreeToken process | **median 109.0 % CPU** (550 samples) — same as every other run |
+| peak GPU | 14,250 MiB |
+
+**Lanes keep going up and the run keeps getting worse**: 2.37 → 4.71 → 6.57 mean lanes per
+prefill batch across the three trees, 0 → 15 → 32 errors. Seating more lanes is not the
+metric.
+
+**`acc91e9` is not visible in a 16-way aggregate, and this run cannot measure it.** Only
+5 decode batches at 16 lanes exist (against 59 in the `81ab30e` run), at a different median
+context, and the engine was starved for 92 % of the run. Taken at face value the 16-way
+aggregate is *lower* (80.1 vs 137.1 tok/s median) — do not read that as a regression; read it
+as "not measured". The mechanism also predicts a small effect here: the decode grid is
+`batch × head_blocks × kv_splits`, so at batch 16 it is already SM-filling and the split-count
+fix (a **single-stream** 83 → 145 tok/s win at 131K) has little left to buy. A clean 16-way
+decode number needs a tree that schedules.
+
+## T5. The failure: 14 chunked prefills deadlock the pool against each other
+
+Not a crash, not a fatal, not a livelock that ends. The last 47 s before the freeze
+(abridged; `#cached-token: 0` marks a continuation, `#running-req` is the decode set):
+
+```
+01:29:01 Prefill batch, #new-seq: 9,  #new-token: 6471, token usage: 0.45, #running-req: 9, #queue-req: 7
+01:29:05 Prefill batch, #new-seq: 9,  #new-token: 8192, token usage: 0.57, #running-req: 7, #queue-req: 9
+01:29:11 Prefill batch, #new-seq: 13, #new-token: 8192, token usage: 0.74, #running-req: 3, #queue-req: 13
+01:29:17 Prefill batch, #new-seq: 14, #new-token: 8192, token usage: 0.89, #running-req: 2, #queue-req: 14
+01:29:44 Prefill batch, #new-seq: 14, #new-token: 8192, token usage: 0.94, #running-req: 0, #queue-req: 15
+01:29:48 Prefill batch, #new-seq: 13, #new-token: 7243, token usage: 1.00, #running-req: 0, #queue-req: 16
+                              <-- 2,616 s of nothing; the run ends here -->
+```
+
+`py-spy dump --locals` on the scheduler process (pid 2830479 → here 3613985), 9 samples
+across the 4 min and the 44 min marks of the same stall, is unambiguous and **identical at
+both**:
+
+```
+_add_one_req  (prefill.py:195)   cached_len: 23846  remain_len: 8189  chunk_size: 585
+                                 kv_ps: 1  kv_pages: 0  max_kv_end: 23846
+try_add_one   (prefill.py:303)
+schedule_next_batch (prefill.py:551)
+      lane_cap: 0   seatable_lanes: 14   available_lanes: 14   reqs: []   chunked_list: []
+      refusals: 0…15   index: 0…15   is_continuation: True   blocked_fresh: False→True
+      inflight_prefill: 222538          (identical in every sample, 40 minutes apart)
+PrefillAdder.__init__  token_budget: 8192  reserved_size: 222538  reserved_pages: 0
+```
+
+`kv_pages = max(0, available_size - reserved_pages) // kv_ps` is **0 on the pass's very first
+candidate** (`index: 0`, `reserved_pages: 0`), so `available_size == 0`: the pool is 100 %
+locked. Every pending entry is a **continuation**, every one defers at `chunk_size <= 0`, the
+pass returns `None`, `_reclaim_for_blocked_prefill` finds nothing to release, repeat forever.
+
+**The state that produces it.** 14 chunked prefills are in flight. They have forwarded
+≈ 237.8 K tokens (the last `/v1/stats` before the report froze: `used_pages 237819 /
+262144`) and still owe **222,538** tokens — a combined footprint of ≈ 460 K against a
+**262,144-token pool, 1.76×**. Nothing is decoding (`#running-req: 0`), so nothing can
+complete and hand a page back; no continuation can buy the next page it needs to reach
+completion. The `#queue-req: 16` behind them are correctly refused (`blocked_fresh: True`) —
+too late.
+
+**Why the escape hatch is gone.** In `81ab30e` the stall was a *fresh-admit* over-commit
+against decoding KV, and the session idle timeout eventually released a retained prefix. Here
+the over-committed parties are the in-flight prefills themselves: 112 sessions expired by idle
+timeout during the run and it changed nothing, because the KV those leases used to hold had
+already been converted into these prefills' forwarded pages. The 16
+`Eviction did not free enough space` / `Cold restore for session … failed` warnings all land
+at **01:51:33–34**, the instant the stage clients disconnect and the passthrough clients
+arrive: 16 new sessions try to restore into a pool that has nothing to give.
+
+**What the fix did and did not fix.** `ea7ed7c`'s gate is correct about what it measures. A
+fresh admit is charged its whole remaining footprint against
+`admissible_size = available_size + idle-reclaimable lease tokens`, and the adder is seeded
+with the unforwarded tail of every in-flight prefill — which is why, once the pool is full,
+`blocked_fresh` goes True and no *new* prompt gets in. But the check is only ever applied
+**at the moment of admission, against a capacity that later admissions also spend**: an idle
+lease's tokens are counted as admissible for prompt A, A is admitted but only forwards one
+8 K chunk, and on the next pass the same lease tokens are counted again as admissible for
+prompt B. Nothing ever re-validates the invariant that the *set* of already-admitted,
+not-yet-finished prefills can all finish. Fourteen of them fit through that door one at a
+time and then owned the pool.
+
+The rule the previous three fixes each restated, again: **a resource budget must subtract what
+the pool has already promised, not only what it has already given.** `81ab30e` failed to
+subtract the KV held by decoders; `ea7ed7c` subtracts that, and fails to subtract the
+*reclaimable capacity it has already promised to prefills that have not finished*.
+
+## T6. Markers — the fatals all stay closed
+
+| | count |
+|---|---|
+| `committed_pages_required` | **0** |
+| `LinearStatePool exhausted` | **0** |
+| `Traceback (most recent call last)` | **0** |
+| oversize (`can never be admitted`) warnings | **0** |
+| `Eviction did not free enough space` | **16** (all at 01:51:33–34, the phase boundary) |
+| `Restored cold session` (success) | **0** |
+| `expired after idle timeout` | 112 |
+| `KV grew` | 3 (65,536 → 262,144) |
+| `/health` non-ok | 0 |
+
+## T7. What this run proves
+
+* **Item 2 of the handover is still open.** `ea7ed7c`+`acc91e9` fails the 16-way Switchyard
+  soak on both routes, worse than `81ab30e`. `befcde6` + the §R6 `reserved_pages` fix remains
+  the only tree that has passed the stage route.
+* The failure mode has moved one layer down: from *fresh admits over-committing against
+  decoders* to *concurrently chunked prefills over-committing against each other*, and it is
+  now **permanent** rather than self-healing.
+* `benchmarks/scheduler_replay.py` passes this commit (that is the gate `ea7ed7c` was built
+  against, `stall_usage_p50 = 1.0` on `81ab30e` and clean here) and the live soak still fails.
+  The replay's own "still only checkable on hardware" list — spill/restore cost of a reclaimed
+  lease, GDN slots, real per-pass CPU — did not include *this*: it does not model a set of
+  chunked prefills whose summed footprint exceeds the pool. Ticket 11 stands, extended.
+* Everything the residency/fatal work closed stays closed (T6), and shutdown of a fully
+  wedged server is still clean (15 s, GPU 0 MiB).
+
+## T8. Fix direction (not implemented — scheduler.py/prefill.py are another agent's files)
+
+Bound the **live** set, not the arriving one. Two candidates, both cheap:
+
+1. **Admit against the residual, and keep it.** When a fresh admit is granted, record its full
+   remaining footprint as a standing reservation held for the life of the prefill, and require
+   `sum(reservations) + this admit ≤ admissible_size` on every pass. This is exactly the
+   `reserved_size` seed, promoted from a per-pass quantity to a persistent one — the property
+   `fad1fc4`+§R6 had by accident (it charged the whole prompt against `available_size`) and
+   that §R7 asked to relax for long-context concurrency. The relaxation is what broke it.
+2. **Cap concurrent chunked prefills** by `pool_size / expected_prompt_size`, or simply refuse
+   a fresh admit whenever `inflight_prefill_size + this_prompt > admissible_size`. The 14
+   lanes here would have been ~5.
+
+Either way the acceptance test is a live 16-way soak on **both** routes, and the analyzer must
+report the trailing silence after the last batch line, not only the gaps between two lines —
+this run's `gaps >= 30 s` count inside the stage phase is **zero**, because the deadlock is
+not *between* two batch lines.
+
+## T9. Artifacts
+
+`/tmp/claude-1000/-home-lucas-ai-FreeToken/f4e2e9e3-f4f5-40d0-9980-b3b09d1ef47d/scratchpad/`
+
+* `soak6/{run.sh,serve.sh,sample.sh,split.py,analyze.py,gaps.py}` — driver + analyzers
+* `soak6/{server.log,driver.log,resources.csv,soakStage.log,soakPass.log,phase_stage.log,
+  phase_pass.log}`, `soak6/soakStage/results-switchyard_stage/`,
+  `soak6/soakPass/results-switchyard_passthrough/`, `stats_after_{stage,pass}.json`
+* `soak6/pyspy_stall1.txt` (4 min into the stall), `soak6/pyspy_stall2.txt` (30 min into the
+  same stall, `inflight_prefill` byte-identical)

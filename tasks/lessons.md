@@ -517,3 +517,53 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   loaded, and they predicted the end-to-end decode rate to within a few percent
   (`non-attention ms/token` inferred at one length extrapolated correctly to the others).
   Do the kernel sweep first; the server run then only has to confirm it.
+
+## 2026-09-05 (soak vs `ea7ed7c`, and the first cross-engine oracle sweep)
+- **A deadlock produces ZERO "gaps between batch lines".** The `gaps >= 30 s` analyzer written
+  for the `81ab30e` stalls reported **0 gaps** inside the failing stage phase of `ea7ed7c` —
+  because the silence starts after the *last* batch line and never ends, so there is no second
+  line to measure against. Always report the **trailing silence** (last batch line → end of
+  phase) and the *fraction of the phase after the last batch*, not only inter-line gaps.
+  Here: last batch 5 m 35 s into a 50-minute run, 2,616 s of unbroken silence.
+- **`/v1/stats` freezes when the scheduler does.** Two calls six minutes apart returned
+  byte-identical `used_pages` and `completed` during the deadlock: the report is refreshed by
+  the batch loop, so a wedged engine serves a stale snapshot that looks like a healthy one.
+  Trust `py-spy --locals` over `/v1/stats` for "what is the pool doing right now"; use the
+  stats only for the last-known-good value, and say so.
+- **`py-spy --locals` twice, 40 minutes apart, is the cheapest proof of "deadlock" vs "slow".**
+  `inflight_prefill: 222538` byte-identical in both dumps settles it in one line: not one token
+  was forwarded in 40 minutes. Sample the same frame twice, far apart, before writing "stall".
+- **Same bug family, third time: a budget checked only at admission is not a budget.**
+  `fad1fc4` charged the wrong currency; `81ab30e` charged against the whole pool; `ea7ed7c`
+  charges the right quantity but only *at the moment of admission*, so the same idle-lease
+  tokens are counted as admissible for prompt A, then again for prompt B on the next pass. The
+  invariant that fails is always about the **set already admitted**, never about the arrival.
+  Ask "what re-validates this after the pass ends?" of every admission gate.
+- **More lanes is not the metric.** Mean lanes per prefill batch went 2.37 → 4.71 → 6.57 across
+  the three trees, and errors went 0 → 15 → 32. Report lanes next to error rate or it reads as
+  progress.
+- **A soak result can be un-measurable for the other change in the tree.** `acc91e9`'s decode
+  win could not be read from this run at all (5 decode batches at 16 lanes, engine starved 92 %
+  of the wall clock). Say "not measured", not "regressed" — and get the number somewhere the
+  engine actually runs (the 262K oracle turn loop gave it: 105.5 tok/s median).
+- **The cross-engine oracle paid for itself on its first run.** Both engines, independently,
+  answered the depth-0.500 direct question with the planted near-duplicate twin. A
+  single-engine run logs that as "FreeToken loses mid-depth needles at 262K" — the exact wrong
+  verdict the 2026-09-04 bisect drew. Two engines turned it into `both-miss` /
+  `interference-near` in one command.
+- **Grade the failure, not the boolean.** Both `freetoken-only-miss` rows at 262K were
+  composition failures on turns whose retrieval was correct — one added two correctly
+  retrieved codes **off by one** (9,854,499 vs 9,854,500), the other produced the right sum and
+  named the wrong key as larger. Read the answer text before filing anything.
+- **Check the doc's paths against the host before scripting them.** `docs/oracle.md`'s Phase-A
+  serve line names `--session-spill-dir /mnt/nvme/ft-spill`; there is no `/mnt/nvme` on this
+  machine (one `/` on `/dev/sdd`). One `ls` before the run, not one failed 30-minute prefill.
+- **At 1M, ask `code -> key` before concluding anything.** Direct `key -> code` questions pass
+  1 of 6; leak-free **reverse** probes recover 5 of 6 of the same codes exactly. The needles are
+  in state and the *addressing* is what fails. Six retention bugs would have been filed off the
+  direct column alone. (Same shape as the 2026-09-04 combined-question recovery, now general.)
+- **A long-context suite that is a conversation must be sized below the context ceiling.**
+  `--target-prompt-tokens 1048576` against `--num-tokens 1048576` passes turn 1 and then fails
+  turn 2 with `context_length_exceeded` — after 1,818 s of prefill. Every graded turn appends
+  its question *and its reply*, and the server also reserves the decode budget. Subtract the
+  whole conversation's growth from the target before starting a 30-minute prefill.

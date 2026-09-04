@@ -19,7 +19,7 @@ Full plan: tasks/nemotron35-plan.md
   - [x] 2B2 triton fallback tuning  - [x] 2B4 cache sizing study (triton default, LFU for 16-way, hybrid rejected)  - [x] 1M single-session spill gate (all 4 criteria PASS, 2026-09-04; restore NVMe 1.32 GiB/s vs RAM 5-8 GiB/s)
 
 ## Phase 3 — Switchyard
-- [x] 3A wire/errors  - [x] 3B JSON mode  - [x] 3C sessions+parsers  - [ ] 3D soak run (**FAILS at 81ab30e**: stage 268/15 timeouts, passthrough 720/16; last passing tree `befcde6`+reserved_pages fix -- see soak results §"Run against 81ab30e" and handover item 2)  - [x] 3E residency: spill on demand + capacity/age retention + restart-persistent checkpoints  - [x] 3F prefetch next queued checkpoint to RAM  - [x] 3G partial-prefix restore + stray `</think>` + prefill-time boundary capture
+- [x] 3A wire/errors  - [x] 3B JSON mode  - [x] 3C sessions+parsers  - [ ] 3D soak run (**FAILS at `ea7ed7c`+`acc91e9`, 2026-09-05, WORSE than 81ab30e**: stage 176 req/32 timeouts/12 STALLED, passthrough 32/32 = 100% error/18 STALLED; permanent deadlock, last batch 5m35s in, 2,616 s of unbroken silence; 14 chunked prefills own the pool at 1.76x its size. Last passing tree is still `befcde6`+reserved_pages fix -- see soak results §"Run against ea7ed7c" and handover item 2)  - [x] 3E residency: spill on demand + capacity/age retention + restart-persistent checkpoints  - [x] 3F prefetch next queued checkpoint to RAM  - [x] 3G partial-prefix restore + stray `</think>` + prefill-time boundary capture
 
 ## Phase 3H — hidden-state export (Switchyard probe contract)
 - [x] 3H implement (1f2de67)  - [x] 3H GPU parity check (all 52 layers cosine >= 0.998840)
@@ -274,9 +274,15 @@ Command: `ft serve --model ~/ai/models/Ornith-1.5-35B-Q4_K_M.gguf
   64-bit address math costs nothing on geometries inside the int32 ceiling.
 
 ## Queue (2026-09-04 evening, agreed with user)
-- [ ] Scheduler admission fix (R1 whole-prompt gate, R2 break→continue) + final stage soak
-- [ ] Combined GPU session: soak + one 1M prefill with 5 needles (depths .05/.25/.5/.75/.95),
-      a control question, and one question combining two needles
+- [ ] Scheduler admission fix -- **attempt 2 (`ea7ed7c`, `admissible_size`) also FAILS the live
+      soak (2026-09-05)**, worse than `81ab30e`: permanent deadlock among 14 concurrently
+      chunked prefills whose summed footprint is 1.76x the pool. The gate is applied only at
+      admission, against capacity that later admissions spend again. Next attempt: make the
+      admit's remaining footprint a STANDING reservation for the life of the prefill (or cap
+      concurrent chunked prefills) -- soak write-up §T8, handover item 2.
+- [x] Combined GPU session: soak + one 1M prefill with needles at 6 depths, a control, and
+      combined/reverse probes -- superseded by `benchmarks/oracle_cross_engine.py`, run
+      2026-09-05 (oracle results file).
 - [x] decode_launch_config Nemotron head-shape branch (bisect ticket) -- done 2026-09-05
 - [ ] Q4: push the 101 unpushed commits to a branch; CI for CPU-only checks (scheduler replay,
       scheduler tests, parity probe CPU half)
@@ -298,8 +304,14 @@ Command: `ft serve --model ~/ai/models/Ornith-1.5-35B-Q4_K_M.gguf
         Clearing any of them lets that line be deleted and the rule re-enabled.
 - [ ] Q5: profile the prefill curve (3,000 tok/s @131K → 1,064 @524K): attention vs SSD scan vs
       KV grow; fix or file
-- [ ] Q1: standing cross-engine oracle — same prompts through llama.cpp and FreeToken,
-      compare top-k logits / per-layer hidden states at several lengths; runnable on demand
+- [x] Q1: standing cross-engine oracle — tool landed in `5f7c0d6`, **first live sweep run
+      2026-09-05 at 262K** (`benchmarks/results/nemotron35_lightning_5080_oracle_2026-09-05.md`):
+      FreeToken 19/24 vs llama.cpp 17/24, 2 `freetoken-only-miss` (both composition, not
+      retrieval), **0 retention failures on either engine**. Top-k logit comparison still
+      blocked on FreeToken having no logprobs in `SamplingParams` (see docs/oracle.md).
+      **1M FreeToken leg also run** (no llama.cpp leg): 7/19 turns, 0 `retention`, 5/6 needles
+      recovered by leak-free reverse probes — interference, not retention. Remaining: the 131K
+      and 524K rungs, and the llama.cpp 1M leg.
 
 ## Backlog
 - [ ] Prompt-lookup (n-gram) speculative decoding for agent-session decode
