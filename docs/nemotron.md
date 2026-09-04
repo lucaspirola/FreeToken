@@ -61,9 +61,17 @@ only, I=1856) plus one shared expert.
   the decode CUDA graphs). Raising `FREETOKEN_PIN_BUDGET_GB` to ≥ 17 (backed by a
   `.wslconfig` `memory=` large enough to hold it) pins every layer and keeps the
   graphs; the preflight script prints which side of the line this host is on.
-- **Expert GEMM**: ungated ReLU² experts are served by the Triton NVFP4 kernels.
-  `--nvfp4-backend marlin` is rejected at config time (its fused kernel assumes a
-  gated `[2I, H]` bank).
+- **Expert GEMM**: `--nvfp4-backend auto` picks flashinfer's sm_120 W4A16 fused MoE
+  (`b12x`) for the ungated ReLU² experts — it fuses `relu(x)²` in the epilogue, so no
+  dequant round trip. Measured on the 5080 at H=2688 / I=1856 / E=128 / top-6
+  (`benchmarks/bench_nvfp4_moe_kernels.py`, per MoE layer, cold L2): prefill 0.85 ms vs
+  4.5 ms at M=256 and 12.6 ms vs 74.6 ms at M=8192 (≈5–6× Triton, 88% of the 960 GB/s
+  roofline), batched decode 1.6× Triton at M=8/16. Triton still wins single-stream
+  decode (M≤4) by ~1.3×, so a decode-only deployment can force `--nvfp4-backend triton`;
+  prefill dominates everywhere else. `--nvfp4-backend marlin` is rejected at config time
+  (its fused kernel assumes a gated `[2I, H]` bank and a silu epilogue), and
+  `--moe-backend cpu`/`hybrid` pins the layout back to `triton` because CPU decode reads
+  the native ModelOpt rows.
 
 ### Launch profiles
 
@@ -72,7 +80,7 @@ P1 — bring-up profile (single stream, no quantized KV):
 ```
 ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   --max-running-requests 1 --moe-backend offload --moe-pageable-gpu --moe-cache-auto \
-  --num-tokens 65536 --memory-ratio 0.90 --max-prefill-length 4096 --host-ram-reserve-gb 3
+  --num-tokens 65536 --memory-ratio 0.85 --max-prefill-length 8192 --host-ram-reserve-gb 3
 ```
 
 P2 — serving profile (16 concurrent, elastic KV, prefix cache, quantized KV):
@@ -82,7 +90,7 @@ ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   --max-running-requests 16 --elastic-initial-requests 4 --kv-grow-step-tokens 65536 \
   --num-tokens 262144 --max-seq-len-override 131072 --kv-cache-dtype q8_0 \
   --attention-backend triton --moe-backend offload --moe-pageable-gpu --moe-cache-auto \
-  --memory-ratio 0.90 --max-prefill-length 4096 --host-ram-reserve-gb 3 --enable-cache-report
+  --memory-ratio 0.85 --max-prefill-length 8192 --host-ram-reserve-gb 3 --enable-cache-report
 ```
 
 Quantized KV requires `--attention-backend triton`; bf16 KV with the FlashInfer
