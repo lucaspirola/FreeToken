@@ -226,10 +226,24 @@ Command: `ft serve --model ~/ai/models/Ornith-1.5-35B-Q4_K_M.gguf
   *before* computing whether a shrink is possible, so once KV is above its initial step every
   idle moment wipes the whole prefix cache and often shrinks nothing (`server.gen1.log`
   09:44-09:47 shows dozens of "teardown evicted N ... keep 262144 tokens committed").
-- [ ] 262K recall bisect (blocks the 1M goal): fresh 262K needle fails even without spill/restore
-  (1M gate, 2026-09-04) while 131K passes. Bisect on the same prompt: (a) bf16 KV + FlashInfer
-  attention, (b) q8_0 + Triton attention, (c) FREETOKEN_MAMBA2_REF=1, (d) --max-prefill-length
-  4096; compare state dumps (FREETOKEN_MAMBA2_STATE_DUMP) and next-token logits at the needle
-  question between 131K and 262K variants. Suspects: Triton decode attention launch tables above
-  2^18 tokens (kv_splits/tile), q8_0 block-scale precision at long range, position/page-table
-  width at >262,144 (tokenizer model_max_length), Mamba state magnitude drift.
+- [x] 262K recall bisect (2026-09-04) -- **no FreeToken bug**; the limit is the checkpoint's.
+  Write-up: `benchmarks/results/nemotron35_lightning_5080_262k_bisect_2026-09-04.md`.
+  One fixed 262,144-token prompt (needle depth 0.52) + the same prompt at 131,072, fresh server
+  per row, chat endpoint, greedy, thinking off. All eight variants fail at 262K and pass at 131K:
+  q8_0 / fp8_e4m3 / bf16 KV, Triton / FlashInfer attention, SSD-kernel / `FREETOKEN_MAMBA2_REF=1`,
+  4096 / 8192 prefill chunks, growable / static KV, NVFP4 / `FREETOKEN_NEMOTRON_DENSE_DEQUANT=1`
+  dense. Growable-vs-static is **bit-identical** (0.000e+00 state and logits at both lengths), and
+  the q8_0-vs-bf16 state divergence is *larger* at the passing 131K than at the failing 262K.
+  The predictor is the needle's absolute position: at 262,144 tokens depth 0.057 recalls exactly
+  while 0.267 / 0.519 / 0.761 / 0.947 all miss, and the length sweep is non-monotonic (147,456
+  FAIL, 163,840 PASS, 180,224 PASS, 196,608 FAIL), so nothing keyed on 2^18 can explain it.
+  Actions: gate mid-depth recall at 131K only; at >=196,608 gate a depth<=0.1 needle plus
+  capacity/coherence. `bench_long_context.py` gained `--needle-depth` (+ tests).
+- [ ] Follow-up from that bisect (perf, not correctness): `decode_launch_config` has no
+  context-length key and every tuned branch needs the Ornith head shape, so Nemotron always takes
+  the `(kv_splits=8, block_n=32, warps=4)` fallback -- 16 CTAs on 84 SMs at 262K KV. Likely the
+  72.6 -> 51.8 -> 32.0 tok/s decode curve. `num_kv_splits_ptr` is passed to both decode kernels
+  and dereferenced in neither.
+- [ ] Follow-up from that bisect (1M blocker): Triton KV loaders widen slot ids to int64 on store
+  (`kv_quant.py:52,161`) but not on load (`attention.py:621,1119,1271`). Safe at Nemotron's
+  `stride_ks=256` (~8.4M slots) but ~1.05M at head_dim 256 / 8 kv heads.

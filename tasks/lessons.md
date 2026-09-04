@@ -232,3 +232,35 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   wrapper refuses to start below 22 GiB MemAvailable, caps a hold at 4 h, sets
   oom_score_adj=1000 on the job, and kills its worker tree on exit; (3) at most two
   subagents at a time, never one that ends its turn while its GPU job continues.
+
+## 2026-09-04 (Nemotron 3.5 Lightning, 262K needle bisect — closed, no engine bug)
+- **Sweep the PROMPT before you sweep the engine.** Eight engine variants (three KV dtypes, two
+  attention backends, kernel-vs-reference Mamba, two chunk sizes, growable-vs-static KV,
+  NVFP4-vs-bf16 dense) all failed at 262,144 and all passed at 131,072 — 8 servers, ~50 GPU
+  minutes, zero signal. The variable that *did* move the outcome was the needle's depth, found in
+  one extra server: at a fixed 262,144 tokens, depth 0.057 recalls exactly and 0.267 / 0.519 /
+  0.761 / 0.947 all miss. A depth-0.05 control at the failing length is the engine's alibi and
+  costs one request — run it FIRST, before any variant matrix.
+- **Non-monotonic ⇒ not a code path.** The length sweep at fixed depth went PASS(131,072),
+  FAIL(147,456), PASS(163,840), PASS(180,224), FAIL(196,608), FAIL(262,144). Nothing keyed on a
+  power of two — 2^18, a page-table width, a tokenizer `model_max_length` of 262,144 — can pass at
+  180,224 and fail at 147,456. Check monotonicity before writing the boundary-bug hypothesis down.
+- **Byte-identical wrong answers across two independent kernels exonerate both.** The Triton
+  packed-q8_0 loader and FlashInfer bf16 produced the same degenerate continuation
+  ("…ledledger…ledder…") at 262K. An indexing or precision fault does not agree across
+  implementations; a model behaviour does.
+- Prove a suspect subsystem is a no-op by *exact equality*, not by reasoning: growable-vs-static
+  KV was 0.000e+00 on state, conv and logits at both lengths, which retires the whole
+  `grow_runtime_kv` / MoE-rebuild / graph-recapture path in one number.
+- Re-confirmed: state-divergence magnitude carries zero signal. q8_0-vs-bf16 KV diverged *more*
+  at the passing 131K (1.46e-01) than at the failing 262K (5.71e-02).
+- Top-5 next-token logits at the question are a weak instrument when top-1 is a word: the 262K
+  depth-0.05 run *passes* with no `5` in its top-5, because the digits are sampled several steps
+  after "The secret passcode is". Grade the decoded answer; use logits only as corroboration.
+- **Never edit a shell script while it is executing.** bash re-reads the file by byte offset, so
+  rewriting `run_variant.sh` mid-run produced `line 17: t: command not found` and a bogus rc=127
+  on a variant whose data was actually fine. Write a new file, or edit between runs.
+- 6 of Nemotron-H's 52 layers are full attention (`layers_block_type` 5, 12, 19, 26, 33, 42); the
+  other 23 mixers carry fixed-size Mamba-2 state. Expect depth-dependent, non-monotonic retrieval
+  well below any architectural context limit, and expect NVIDIA's 1M claim (BF16 checkpoint) not
+  to transfer to the NVFP4 release for *retrieval* — capacity and coherence are separate claims.

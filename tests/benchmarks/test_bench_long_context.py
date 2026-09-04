@@ -19,6 +19,34 @@ def test_synthetic_needle_sample_is_unambiguous_and_long():
     assert len(question) > 5_000_000
 
 
+def test_synthetic_haystack_carries_no_digits_but_the_needle():
+    """A numeric needle in a digit-bearing haystack measures distractors, not recall.
+
+    The 2026-09-04 1M gate answered `1563630` -- assembled from filler record
+    numbers -- instead of the planted passcode, so this property is load-bearing.
+    """
+    question, expected = bench.synthetic_needle_sample()
+    haystack = question.replace(expected, "", 1)
+    assert not any(character.isdigit() for character in haystack)
+
+
+@pytest.mark.parametrize("depth", (0.05, 0.25, 0.5, 0.75, 0.95))
+def test_synthetic_needle_depth_places_the_needle(depth):
+    """The 262K bisect turns on depth: 0.05 recalls at 262,144 tokens and 0.5 does not."""
+    question, expected = bench.synthetic_needle_sample(depth)
+    assert question.count(expected) == 1
+    body = question[question.index("\n\n") + 2 :]
+    actual = body.index(expected) / len(body)
+    assert abs(actual - depth) < 0.01
+    assert not any(character.isdigit() for character in question.replace(expected, "", 1))
+
+
+@pytest.mark.parametrize("depth", (0.0, 1.0, -0.1, 1.5))
+def test_synthetic_needle_rejects_a_depth_outside_the_haystack(depth):
+    with pytest.raises(ValueError):
+        bench.synthetic_needle_sample(depth)
+
+
 def test_prefill_rates_reads_last_scheduler_sample(tmp_path):
     log = tmp_path / "server.log"
     log.write_text(

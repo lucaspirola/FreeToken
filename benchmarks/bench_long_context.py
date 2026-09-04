@@ -42,6 +42,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="use the built-in deterministic needle prompt instead of --ruler",
     )
+    p.add_argument(
+        "--needle-depth",
+        type=float,
+        default=0.5,
+        help="fraction of the synthetic haystack that precedes the needle (default 0.5)",
+    )
     p.add_argument("--target-prompt-tokens", type=int, default=261_800)
     p.add_argument("--decode", type=int, default=128)
     p.add_argument("--max-context", type=int, default=262_144)
@@ -96,14 +102,27 @@ def load_row(path: str, index: int) -> tuple[str, str]:
     raise SystemExit(f"sample {index} not found in {path}")
 
 
-def synthetic_needle_sample() -> tuple[str, str]:
-    """Portable retrieval/coherence gate when the external RULER data is absent."""
+def synthetic_needle_sample(depth: float = 0.5) -> tuple[str, str]:
+    """Portable retrieval/coherence gate when the external RULER data is absent.
+
+    ``depth`` places the needle at that fraction of the haystack. It matters:
+    the 2026-09-04 262K bisect showed Nemotron 3.5 Lightning NVFP4 recalls a
+    needle at depth 0.05 of a 262,144-token prompt and misses the same needle
+    at depth 0.27 of the same prompt, on the same server, so a gate that can
+    only probe 0.5 cannot separate a model limit from an engine regression.
+    The filler carries no digits at all -- a numeric needle in a haystack that
+    does is a distractor test, not a retrieval test.
+    """
     expected = "5663623"
+    if not 0.0 < depth < 1.0:
+        raise ValueError("needle depth must be strictly between 0 and 1")
     # Deliberately exceed the default 261.8K-token target for normal GGUF
     # tokenizers so the default invocation really exercises the requested
-    # long-context length; trim_filler then preserves the centered needle.
-    before = "The orchard ledger says the copper marker is inactive.\n" * 50_000
-    after = "The harbor ledger says the silver marker is inactive.\n" * 50_000
+    # long-context length; trim_filler then preserves the needle's depth.
+    records = 100_000
+    leading = min(records - 1, max(1, round(records * depth)))
+    before = "The orchard ledger says the copper marker is inactive.\n" * leading
+    after = "The harbor ledger says the silver marker is inactive.\n" * (records - leading)
     question = (
         "Read the records below. Remember the one secret passcode and ignore all "
         "inactive marker descriptions.\n\n"
@@ -388,8 +407,8 @@ def load_tokenizer(model: str):
 def main() -> int:
     args = parse_args()
     if args.synthetic_needle:
-        question, expected = synthetic_needle_sample()
-        workload = "built-in synthetic needle"
+        question, expected = synthetic_needle_sample(args.needle_depth)
+        workload = f"built-in synthetic needle (depth {args.needle_depth:.2f})"
     else:
         question, expected = load_row(args.ruler, args.sample)
         workload = f"{args.ruler} sample={args.sample}"
