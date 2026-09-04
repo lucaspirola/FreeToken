@@ -264,3 +264,26 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   other 23 mixers carry fixed-size Mamba-2 state. Expect depth-dependent, non-monotonic retrieval
   well below any architectural context limit, and expect NVIDIA's 1M claim (BF16 checkpoint) not
   to transfer to the NVFP4 release for *retrieval* — capacity and coherence are separate claims.
+
+## 2026-09-04 (Nemotron 3.5 Lightning, 262K needle — cross-engine, the bisect's verdict RETRACTED)
+- **Retraction.** The entry above ("262K needle bisect — closed, no engine bug") concluded a
+  model/quant retrieval limit. llama.cpp (commit 6b80c74, official `ggml-org` **Q4_0** GGUF —
+  that repo has no Q4_K_M) recalls the *byte-identical* prompts at 262,160 tokens at depths
+  0.06 / 0.27 / 0.52 / 0.76 / 0.95 and at 147K / 196K / 262K — 8/8 PASS, answer `5663623` —
+  while FreeToken on the NVFP4 checkpoint, re-run the same hour, still passes only at 0.06.
+  Details: `benchmarks/results/nemotron35_lightning_5080_262k_crossengine_2026-09-04.md`.
+- **A variant matrix run entirely inside one engine cannot exonerate that engine.** Eight
+  FreeToken variants failing identically means the fault is common to all eight, not absent.
+  The cheapest decisive control was another *implementation* of the same architecture, and it
+  cost ~25 GPU minutes end to end — less than the matrix it overturned. Run the cross-engine
+  control BEFORE writing "no defect found", not after.
+- Make the prompt identity provable, not assumed: rebuild through the same helpers with the
+  same HF tokenizer and `sha1sum` the result against the earlier run's prompt files. All eight
+  matched, which is what makes the contradiction airtight (and llama.cpp then reported the
+  same 262,160 post-template token count, so the chat templates agree too).
+- A 16 GiB card is not a reason to skip a llama.cpp cross-check of a 30B-A3B model: `-ngl 999
+  --n-cpu-moe 14` (routed experts of 14 of 52 blocks in host RAM) held 15.4/15.9 GiB VRAM and
+  still prefilled 262K tokens at ~2,230 tok/s, ~2 minutes per data point.
+- `scripts/gpu_lock.sh`'s exit trap `pkill -9 -g $$` kills the whole process group, i.e. the
+  pipeline that invoked it: every `gpu_lock.sh ... | tail` returns 137 with the output lost.
+  Have the wrapped script `exec >` its own log file and read that afterwards.
