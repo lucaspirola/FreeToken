@@ -206,6 +206,13 @@ ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
 - **`--linear-state-slots 5` is the accepted floor** at `--max-running-requests 1`
   (`4·mr + 1` for `hybrid_radix`); 3 and 4 are rejected at startup. The default is 9, so
   pinning 5 returns ~188 MiB (≈ 35 expert slots) to the MoE cache.
+- **Prefer 6 when two conversations alternate.** Five slots are padding + live + 2 ping-pong
+  + *exactly one* idle session lease, so a second session's first turn finds the pool full
+  and the scheduler spills the idle lease on demand to get its snapshot slot (correct — it is
+  the 3E residency policy — but it costs a checkpoint + restore per alternating turn, and at
+  1M that is GiB of KV). One extra slot (47 MiB) lets an idle lease and a live request
+  coexist. Before 2026-09-04 this shortage was fatal rather than slow: the chunk commit's
+  unguarded `pool.alloc(1)` raised `LinearStatePool exhausted` and killed the scheduler.
 - **Expert slots vs KV growth**: each committed 131 072-token KV step costs ~0.40 GiB and
   ~76 expert slots. Auto starts at 1 786 slots and steps 1 663 (262K) → 1 586 (393K) →
   1 510 (524K) → 1 434 (655K); a full 1M session extrapolates to ~1 180 slots (rate 0.40).

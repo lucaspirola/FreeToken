@@ -137,6 +137,11 @@ class Scheduler(SchedulerIOMixin):
             ),
             page_index_offset=(1 if growable_kv else 0),
         )
+        # Second-currency demand signal. ``ensure_mamba_slots`` can only reach UNLOCKED radix
+        # snapshots, and an idle automatic session lease holds its node locked for as long as
+        # the conversation stays resident -- so without this hook a pool whose whole snapshot
+        # cache has become leases reports zero evictable slots and every donation/restore fails.
+        self.cache_manager.mamba_reclaim_hook = self._reclaim_soft_sessions_for_state_slot
         self.decode_manager = DecodeManager(config.page_size)
         max_prefill_seqs = _resolve_max_prefill_seqs(config)
         self.prefill_manager = PrefillManager(
@@ -1327,6 +1332,38 @@ class Scheduler(SchedulerIOMixin):
             if not pressured():
                 break
             released |= self._release_soft_session_handle(sid, "admission pressure")
+        return released
+
+    def _reclaim_soft_sessions_for_state_slot(self, n: int = 1) -> bool:
+        """Checkpoint LRU idle automatic leases until ``n`` GDN state slots are reachable.
+
+        The KV-shaped reclaim above is driven by a *queued* request. A recurrent-state slot is
+        also needed at moments no admission covers -- when a prefill chunk commits its snapshot,
+        or a cold session is restored -- and an idle lease pins its snapshot node against
+        ``evict_mamba``, so without this nothing would ever release it. Spilling the idle
+        conversation rather than failing the live one is the 3E residency policy: no spill while
+        nobody needs the slot, an on-demand checkpoint the moment somebody does.
+
+        Stops as soon as the demand is met -- a per-allocation signal, not a bulk drain.
+        """
+        cm = getattr(self, "cache_manager", None)
+        if cm is None or not getattr(cm, "is_hybrid", False):
+            return False
+        candidates = sorted(
+            (
+                (lease.last_used_at, sid)
+                for sid, lease in getattr(self, "_sessions", {}).items()
+                if lease.reclaimable
+                and lease.active_uid is None
+                and lease.handle is not None
+            ),
+            key=lambda item: item[0],
+        )
+        released = False
+        for _last_used, sid in candidates:
+            if cm.mamba_available_size >= n:
+                break
+            released |= self._release_soft_session_handle(sid, "GDN state-slot pressure")
         return released
 
     def _reclaim_for_blocked_prefill(self) -> bool:

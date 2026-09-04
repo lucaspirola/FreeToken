@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, List, Tuple
 import torch
 from freetoken.core import Req
 from freetoken.kvcache import BaseCacheHandle, MatchResult, create_prefix_cache
-from freetoken.utils import align_down, div_ceil
+from freetoken.utils import align_down, div_ceil, init_logger
 
 if TYPE_CHECKING:
     from .utils import PendingReq
@@ -27,6 +27,8 @@ _SWA_EVICTION_INTERVAL = _swa_eviction_interval()
 # prompt end. The gap covers templates whose generation prompt injects tokens that vanish when
 # the client drops reasoning (Qwen's "<think>\n": the re-render diverges 2 tokens BEFORE P).
 _SWA_RETAIN_GAP = 16
+
+logger = init_logger(__name__)
 
 
 class CacheManager:
@@ -71,6 +73,13 @@ class CacheManager:
     # ----- capability hooks (defaults; plugged-in pools may narrow them) -----
     supports_runtime_rebuild = True
     prefill_chunk_budget = None  # generic shared page pool: no per-model prefill chunk cap
+    # Demand-driven second-currency reclaim. The scheduler owns session leases, which pin
+    # radix snapshots (``retain_prefix`` locks the node, so ``evict_mamba`` skips it) and are
+    # therefore invisible to ``ensure_mamba_slots``. It installs ``hook(n) -> bool`` here: it
+    # checkpoints LRU idle automatic leases until ``n`` slots are reachable, returning True when
+    # it released anything. None = no sessions (unit tests, non-session serving).
+    mamba_reclaim_hook = None
+    _mamba_donation_skips = 0
 
     def page_usage(self) -> tuple[int, int]:
         """(used_pages, total_pages): allocated, non-evictable pages over the pool total
@@ -293,6 +302,38 @@ class CacheManager:
             self.linear_state_pool.free(er.mamba_slots)
             self._free(er.kv_indices)
 
+    def reserve_mamba_slots(self, n: int) -> bool:
+        """Get ``n`` GDN state slots onto the free-list; True when the pool can now serve them.
+
+        Escalates through the three reclaim tiers in cost order:
+
+        1. the free-list;
+        2. LRU eviction of UNLOCKED radix snapshots (:meth:`ensure_mamba_slots`);
+        3. the scheduler's session-lease reclaim -- the only tier that reaches a *locked*
+           snapshot. An idle automatic lease holds its node's ``mamba_ref_count`` above zero
+           for as long as the conversation stays resident, so tier 2 cannot see it at all, and
+           spilling that lease on demand IS the 3E residency policy: the idle conversation is
+           checkpointed, not the live request refused.
+
+        Never raises; the caller decides what a shortage means.
+        """
+        pool = self.linear_state_pool
+        if pool.num_free_slots >= n:
+            return True
+        self.ensure_mamba_slots(n)
+        if pool.num_free_slots < n and self.mamba_reclaim_hook is not None:
+            if self.mamba_reclaim_hook(n):
+                self.ensure_mamba_slots(n)
+        return pool.num_free_slots >= n
+
+    def acquire_mamba_slot(self) -> int | None:
+        """One GDN state slot, or ``None`` when the pool is genuinely full (see
+        :meth:`reserve_mamba_slots`). Never raises: every caller treats a snapshot slot as an
+        optimization it can do without."""
+        if not self.reserve_mamba_slots(1):
+            return None
+        return self.linear_state_pool.alloc(1)[0]
+
     def remap_mamba_slots(self, remap: dict[int, int]) -> None:
         if not self.is_hybrid:
             return
@@ -464,10 +505,9 @@ class CacheManager:
         slot = None
         inserted = False
         try:
-            self.ensure_mamba_slots(1)
-            if self.linear_state_pool.num_free_slots < 1:
+            slot = self.acquire_mamba_slot()
+            if slot is None:
                 raise RuntimeError("no GDN snapshot slot available for cold session restore")
-            slot = self.linear_state_pool.alloc(1)[0]
             for chunk, value in store.iter_chunks(record):
                 if chunk.family == "gdn_conv":
                     self.linear_state_pool.conv_states[:, slot].copy_(value.to(
@@ -685,13 +725,29 @@ class CacheManager:
             return
         frozen_idx = 1 - req.mamba_next_track_idx          # the slot the forward just wrote
         frozen = req.mamba_ping_pong[frozen_idx]
+        # Reserve the replacement ping-pong slot BEFORE donating. Donating is a prefix-cache
+        # optimization; the request's own three-slot working set is not. Reserving first makes
+        # the shortage recoverable -- once ``frozen`` belongs to the tree there is no way back,
+        # and the unguarded ``pool.alloc(1)`` that used to sit below killed the whole scheduler
+        # process with ``LinearStatePool exhausted`` the first time 16-way concurrency plus
+        # session leases pinned every snapshot in the pool. Reserving first also retires the
+        # ordering hazard the old lock-then-alloc dance guarded against: nothing has been
+        # donated yet, so the eviction this may trigger cannot reclaim a just-committed node
+        # (and ``old_handle`` is still locked, so this request's own prefix KV is safe).
+        replacement = self.acquire_mamba_slot()
+        if replacement is None:
+            self._note_mamba_donation_skipped()
+            req.mamba_last_track_seqlen = None
+            # Keep the pages and both ping-pong slots: the request commits at a later track
+            # boundary or at finish, exactly like the "no boundary crossed" path above. Prefix
+            # reuse for this chunk is lost; the request is not.
+            return
         prefix_len, mamba_exist = self.prefix_cache.insert(
             req.input_ids[:L], page_indices[:L], frozen)
         self.unlock(old_handle)
         self._free(page_indices[old_handle.cached_len : prefix_len])
-        # Lock the committed snapshot node FIRST: the replacement-slot alloc below can trigger
-        # evict_mamba (via ensure_mamba_slots), which would otherwise reclaim this still-unlocked
-        # just-donated node -- freeing its KV pages under the still-decoding request.
+        # Lock the committed snapshot node before returning: it is a live reuse point that the
+        # still-decoding request reads through its own page-table row.
         m = self.prefix_cache.match_prefix(req.input_ids[:L])
         # Same re-point as the generic path: the dedup free above returned this request's own
         # pages for [old_handle.cached_len, prefix_len) while its row still named them.
@@ -701,11 +757,22 @@ class CacheManager:
         req.cache_handle = HybridCacheHandle(m.cached_len, m.node, m.kv_indices)
         self.lock(req.cache_handle)
         if not mamba_exist:                                # tree took `frozen`; replace it
-            self.ensure_mamba_slots(1)
             pp = list(req.mamba_ping_pong)
-            pp[frozen_idx] = pool.alloc(1)[0]
+            pp[frozen_idx] = replacement
             req.mamba_ping_pong = tuple(pp)
+        else:                     # tree kept its own snapshot; `frozen` stays with the request
+            pool.free(replacement)
         req.mamba_last_track_seqlen = None
+
+    def _note_mamba_donation_skipped(self) -> None:
+        """Debug-log the first degraded chunk commit; count the rest (reported by /v1/stats
+        indirectly through the mamba usage gauge, which is already 1.00 whenever this fires)."""
+        self._mamba_donation_skips += 1
+        if self._mamba_donation_skips == 1:
+            logger.debug(
+                "GDN state pool full (0 free, 0 evictable snapshots): skipping prefix-cache "
+                "snapshot donation; prefix reuse degrades until a slot frees up"
+            )
 
     def _cache_req_swa(self, req: Req, *, finished: bool) -> None:
         """SWA cache_req: commit the request's full KV prefix into the SWARadixCache (node.value =

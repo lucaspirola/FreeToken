@@ -11,12 +11,37 @@ import time
 from typing import Any, Callable
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+
+# Health is a liveness probe as much as a lifecycle one: answer 503 whenever the doc says
+# "error", so a router or supervisor polling it sees a failing upstream instead of a healthy
+# one that answers nothing.
+HEALTH_ERROR_STATUS = 503
+
+
+def dead_backend_reason(state: Any) -> str | None:
+    """Name the first backend worker process that is no longer running, else None.
+
+    ``fatal_error`` alone is not a liveness signal: the supervisor thread latches it up to one
+    poll after the fact and then *returns*, so any later death (or a wedged supervisor) leaves
+    it None forever. In the Switchyard soak that produced a nine-minute stall in which every
+    ``/health`` probe answered ``{"status": "ok"}`` with a dead scheduler behind it. The
+    ``multiprocessing.Process`` handles are already on the frontend state; ask them directly.
+    """
+    for proc in getattr(state, "backend_processes", None) or ():
+        try:
+            alive = proc.is_alive()
+        except Exception:  # noqa: BLE001 -- unqueryable handle: assume alive (as the supervisor does)
+            continue
+        if not alive:
+            return f"backend worker {getattr(proc, 'name', '?')} is not running"
+    return None
 
 
 def build_health(state: Any, version: str) -> dict:
     """Full-lifecycle health doc: loading -> ok -> error."""
     instance_id = getattr(state, "instance_id", None)
-    fatal = getattr(state, "fatal_error", None)
+    fatal = getattr(state, "fatal_error", None) or dead_backend_reason(state)
     if fatal:
         return {"status": "error", "message": fatal, "instance_id": instance_id}
 
@@ -56,7 +81,10 @@ def register_control_routes(
 ) -> None:
     @app.get("/health")
     async def health():
-        return build_health(get_state(), app.version)
+        doc = build_health(get_state(), app.version)
+        if doc.get("status") == "error":
+            return JSONResponse(status_code=HEALTH_ERROR_STATUS, content=doc)
+        return doc
 
     from . import request_ring
 

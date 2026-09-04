@@ -69,10 +69,11 @@ class PrefillAdder:
         # Second currency (hybrid GDN): reserve 1 live + 2 ping-pong state slots; evict tree
         # snapshots if the pool is short, fail admission if still short (mirrors the KV gate).
         if self.cache_manager.is_hybrid:
-            pool = self.cache_manager.linear_state_pool
-            if pool.num_free_slots < 3:
-                self.cache_manager.ensure_mamba_slots(3)
-            if pool.num_free_slots < 3:
+            # reserve_mamba_slots escalates past eviction into the session-lease spill: an idle
+            # automatic lease pins its snapshot node, so without that tier a small pool (the 1M
+            # profile runs five slots: padding + live + 2 ping-pong + one lease) admits nothing
+            # once a second conversation arrives.
+            if not self.cache_manager.reserve_mamba_slots(3):
                 return self.cache_manager.unlock(handle)
 
         # Third currency (SWA): refuse admission unless the swa pool can seat this request's first

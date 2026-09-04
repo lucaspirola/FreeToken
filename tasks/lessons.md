@@ -132,3 +132,83 @@
   settles in one afternoon what a week of reasoning about metadata cannot. Dump at the last
   prefill forward (`ChunkedReq.can_decode` is False on continuations) and skip the engine's
   warmup batches (`uid == -1`) or the record is the wrong forward.
+
+## 2026-09-04 — never `pkill -f <pattern>` that matches your own shell
+`pkill -f "drive.py --port 8123"` (and later `pkill -f "freetoken.cli serve --model ..."`)
+matched the `bash -c ... eval '<the same text>'` wrapper the Bash tool runs, so pkill killed
+the command that issued it: exit 144, and every step chained after the pkill (the `rm`, the
+`mv`, the relaunch) silently never ran. Twice in one session the follow-up work was lost.
+Rule: kill by PID (`pgrep -f` first, inspect, then `kill <pid>`), or by venv path with a
+pattern that cannot appear in your own command line, and NEVER put cleanup or relaunch steps
+in the same command as a `pkill`.
+
+## 2026-09-04 — a shared repo can move under a long GPU run
+Two other agents were editing `/home/lucas/ai/FreeToken` during the 1M-session gate: HEAD moved
+ec54e21 -> da02c16 mid-run and `scheduler/cache.py` was rewritten 2 minutes after my server
+started. The server kept running the code it imported at launch, so its traceback line numbers
+no longer matched the file on disk -- which made the crash look like it came from a line that
+contains no such call. Before debugging a serving crash, check `git log -1` and the source
+file's mtime against the server's start time; if the tree moved, re-read the diff before
+writing a fix, because the bug may already be fixed in the working tree.
+
+## 2026-09-04 — a numeric needle needs a digit-free haystack
+The first 1M-gate filler numbered every record ("Record 0000123 ... bay 45 ... day 12"). At
+131 K tokens Nemotron 3.5 Lightning answered `1563630` -- a 7-digit string assembled from the
+distractors -- instead of the planted `5663623`. The same prompt with digit-free filler (the
+shape `bench_long_context.py`'s synthetic needle uses) recalled correctly. When planting a
+numeric needle, keep every other digit out of the haystack, or the gate measures the
+distractor set rather than retrieval.
+
+## 2026-09-04 (Nemotron 3.5 Lightning, Switchyard soak scheduler crash — task 3F)
+- **A cache-management step must never be able to kill the scheduler.** `_cache_req_hybrid`
+  donated a frozen Mamba snapshot to the radix tree and *then* `pool.alloc(1)`'d a replacement
+  ping-pong slot. Donating is an optimization; once the slot is in the tree there is no way
+  back, so the shortage was unrecoverable and raised. Reserve the replacement BEFORE the
+  irreversible step, and skip the whole commit when it cannot be reserved.
+- **Two-currency pools need the *demand* signal wired to every allocation site, not just to
+  admission.** `ensure_mamba_slots` can only reach UNLOCKED radix snapshots; an idle session
+  lease (`retain_prefix`) locks its node, so a pool whose entire snapshot cache has become
+  leases reports `mamba usage 1.00` with zero evictable and every eviction attempt frees
+  nothing. `_reclaim_for_blocked_prefill` only runs for a *queued* request — nothing covered
+  the mid-flight chunk commit or a cold restore. Route them through one escalating helper
+  (free-list -> LRU evict -> spill the LRU idle lease).
+- Slot accounting is the root cause, and it is arithmetic, not a leak: at
+  `--max-running-requests 16` the pool is `4·16 + 2·16 + 1 = 97` slots (96 reportable), and the
+  32-slot snapshot *cache* is exactly what session leases convert into non-evictable state.
+  The same shape bites at R=1: `--linear-state-slots 5` seats padding + live + 2 ping-pong +
+  ONE lease, so a second conversation's first turn was fatal.
+- `mamba usage 1.00` in the prefill log is not "the pool is busy": `_mamba_slot_usage` excludes
+  free slots AND evictable snapshots, so 96/96 literally means `free == 0 and evictable == 0`.
+  It is a precise pre-crash signature — read the gauge's definition before interpreting it.
+- **`/health` that reads a latched flag is not a liveness probe.** `fatal_error` is set by the
+  supervisor thread one poll after a death and that thread then *returns*; any later death
+  leaves `/health` answering `{"status":"ok"}` forever (nine minutes of soak probes passed
+  against a server answering nothing). The `multiprocessing.Process` handles are already on
+  the frontend state — ask `is_alive()` in the handler, and answer 503.
+- **uvicorn's `timeout_graceful_shutdown` defaults to `None` = wait forever.** With a dead
+  backend the in-flight ASGI tasks never finish, so the stop wedges in "Waiting for background
+  tasks to complete" (38 min observed) holding the GPU and ~20 GB of pinned expert banks.
+  Bound it, reap (join + SIGKILL) the workers on every stop path rather than only `terminate()`,
+  and arm a plain-thread hard-exit backstop for the case where the event loop itself is wedged.
+- A GPU repro is not the only "before/after" available: running the new regression test from a
+  detached `git worktree` at the parent commit reproduced the byte-identical
+  `RuntimeError: LinearStatePool exhausted: need 1, have 0` in 3 seconds, with no GPU lock.
+- Unrelated tests error under GPU contention (`tests/models/test_laguna_modules.py` raised 6
+  RuntimeErrors while a sibling agent's server was loading, passed alone). Re-run a suspicious
+  failure alone before attributing it to your diff.
+- A server whose scheduler died keeps the API process (and any wrapper lock)
+  alive indefinitely; `scripts/gpu_lock.sh` then blocks every other GPU job.
+  Check `fuser <lock>` + `nvidia-smi` (holder with 0 MiB = dead server) before
+  assuming a queue is merely slow. The /health-503 + bounded-shutdown fix is
+  the real cure.
+
+## 2026-09-04 — never kill a session driver mid-turn: the restore already consumed the checkpoint
+Pausing the 1M gate between rounds, I killed the driver one second after the last turn's
+notification -- but the driver had already issued the next turn, and the scheduler had already
+restored that session's cold checkpoint (`_restore_cold_session` calls `_discard_session_spill`
+on success: the record is *consumed*, its bytes now live in the KV pool). Aborting the request
+then freed that KV, so the session lost its whole 262 K prefix and the next turn re-prefilled
+393 K tokens from scratch (305 s, `cached_tokens` 0) -- which looks exactly like a spill/restore
+bug in the logs. Before stopping a driver, wait for it to be idle (no in-flight request), or
+give it an explicit stop-after-this-turn flag. A checkpoint survives a *disconnect*, but not a
+disconnect that lands after the restore.

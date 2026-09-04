@@ -200,3 +200,33 @@ Command: `ft serve --model ~/ai/models/Ornith-1.5-35B-Q4_K_M.gguf
 - tests/moe/test_prefill_hit_d2d.py::test_batch_memcpy_roundtrip is a pre-existing order-dependent flake (dst produced on the default stream, probe syncs its own stream). Ticket it; not Nemotron work.
 - Ticket: `--kv-grow-step-tokens` + `--nvfp4-backend flashinfer` crashes at init (b12x banks include an int32 bank that `kernel/vmm.py` `_DTYPE_NAMES` lacks). Not blocking (triton is the default).
 - 1M gate must retest the 262K/524K needle through the chat endpoint (cache study saw misses on the raw completions probe, the known artifact).
+
+## Task 3F — Switchyard soak scheduler crash (2026-09-04)
+
+- [x] `_cache_req_hybrid` reserves the replacement ping-pong slot before donating the frozen
+  Mamba snapshot; when no slot can be reserved the chunk commit is skipped (debug-logged once)
+  instead of raising `LinearStatePool exhausted` (`scheduler/cache.py:725-780`).
+- [x] One escalating reclaim path (`CacheManager.reserve_mamba_slots` / `acquire_mamba_slot`):
+  free-list -> LRU snapshot eviction -> on-demand spill of the LRU idle session lease
+  (`Scheduler._reclaim_soft_sessions_for_state_slot`). Wired into the chunk commit, the cold
+  session restore and admission (`scheduler/prefill.py:71-77`), covering both R=16 and the
+  1M R=1 / `--linear-state-slots 5` case.
+- [x] `/health` consults the backend process handles and answers 503 with a reason when a
+  worker is gone (`server/control_api.py:19-40,80-85`).
+- [x] Shutdown bounded: `timeout_graceful_shutdown` on both uvicorn entry points, terminate +
+  reap (join/SIGKILL, whole-set budget) on every stop path, plus a hard-exit backstop
+  (`server/api_server.py:61-71,99-155,~410`).
+- [x] Tests: `tests/scheduler/test_hybrid_pool_exhaustion.py` (11),
+  `tests/server/test_health_liveness_and_shutdown.py` (12). Both files fail at HEAD in a
+  detached worktree with the byte-identical soak stack trace.
+- [ ] Follow-up ticket: `_maybe_shrink_growable_kv` calls `evict_all_unlocked_prefixes()`
+  *before* computing whether a shrink is possible, so once KV is above its initial step every
+  idle moment wipes the whole prefix cache and often shrinks nothing (`server.gen1.log`
+  09:44-09:47 shows dozens of "teardown evicted N ... keep 262144 tokens committed").
+- [ ] 262K recall bisect (blocks the 1M goal): fresh 262K needle fails even without spill/restore
+  (1M gate, 2026-09-04) while 131K passes. Bisect on the same prompt: (a) bf16 KV + FlashInfer
+  attention, (b) q8_0 + Triton attention, (c) FREETOKEN_MAMBA2_REF=1, (d) --max-prefill-length
+  4096; compare state dumps (FREETOKEN_MAMBA2_STATE_DUMP) and next-token logits at the needle
+  question between 131K and 262K variants. Suspects: Triton decode attention launch tables above
+  2^18 tokens (kv_splits/tile), q8_0 block-scale precision at long range, position/page-table
+  width at >262,144 (tokenizer model_max_length), Mamba state magnitude drift.

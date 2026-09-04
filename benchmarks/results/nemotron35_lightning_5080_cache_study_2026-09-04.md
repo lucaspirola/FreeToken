@@ -364,6 +364,13 @@ FREETOKEN_PIN_BUDGET_GB=17 ft serve --model $LIGHTNING \
 `--nvfp4-backend` is deliberately absent from both (the `triton` default is the
 recommendation). `--linear-state-slots 5` is the accepted floor and buys ~35 expert slots.
 
+**Addendum 2026-09-04 (task 3F).** Five slots seat padding + live + 2 ping-pong + exactly one
+idle session lease, so a second conversation's first turn finds the GDN pool full. That used to
+kill the scheduler (`LinearStatePool exhausted: need 1, have 0` from the chunk commit's
+unguarded `pool.alloc(1)`); it now spills the LRU idle lease on demand instead. The floor is
+unchanged, but prefer `--linear-state-slots 6` when two sessions alternate — one extra slot
+(47 MiB) avoids a checkpoint + restore per turn. See `docs/nemotron.md`.
+
 ---
 
 ## Reproduction

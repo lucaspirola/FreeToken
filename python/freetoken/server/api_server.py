@@ -59,6 +59,16 @@ _MODEL_SAMPLING: Dict[str, Any] = {}
 # shutdown is treated as expected — no ERROR log, no "failed" latch. See run_backend_supervisor.
 _SHUTTING_DOWN = threading.Event()
 BACKEND_DEATH_EXIT_GRACE_S = 10.0
+# uvicorn's graceful shutdown waits on in-flight ASGI tasks with NO timeout by default. When
+# the backend has died those tasks never complete: the stop wedges in "Waiting for background
+# tasks to complete" (38 minutes observed) with the port closed, the GPU held and ~20 GB of
+# pinned expert banks still resident, so a supervisor restart policy keyed on exit never fires.
+SHUTDOWN_GRACE_S = 10.0
+# Total budget for terminate -> join -> SIGKILL of the worker processes, across all of them.
+WORKER_REAP_TIMEOUT_S = 5.0
+# Backstop for a stop that wedges anyway (a wedged event loop never runs the lifespan, so no
+# amount of uvicorn config helps): kill the workers from a plain thread and leave.
+SHUTDOWN_HARD_DEADLINE_S = SHUTDOWN_GRACE_S + WORKER_REAP_TIMEOUT_S + 10.0
 
 
 def get_global_state() -> FrontendManager:
@@ -86,11 +96,39 @@ def _terminate_backend_workers(processes: List[Any]) -> None:
             continue
 
 
+def _force_exit_after(deadline_s: float) -> threading.Timer:
+    """Hard backstop: a stop that has not completed by ``deadline_s`` kills the workers and exits.
+
+    Runs on a plain timer thread, so it survives a wedged event loop -- which is the case it
+    exists for. Everything it does is idempotent with the orderly path.
+    """
+
+    def _kill() -> None:
+        logger.error(
+            "Shutdown did not complete within %.0fs; killing backend workers and exiting",
+            deadline_s,
+        )
+        state = _GLOBAL_STATE
+        processes = list(getattr(state, "backend_processes", None) or []) if state else []
+        _terminate_backend_workers(processes)
+        _reap_backend_workers(processes, timeout=WORKER_REAP_TIMEOUT_S)
+        os._exit(1)
+
+    timer = threading.Timer(deadline_s, _kill)
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
 def _exit_after_backend_death(grace_s: float) -> threading.Timer:
     def _stop() -> None:
         if _SHUTTING_DOWN.is_set():
             return  # an external stop got here first
         logger.error("Backend worker is gone and cannot be restarted; stopping the API server")
+        # Arm the backstop BEFORE signalling: the graceful stop this kicks off has to walk past
+        # the very ASGI tasks the dead backend will never answer, and if it stalls there nothing
+        # else in this process is left to notice.
+        _force_exit_after(SHUTDOWN_HARD_DEADLINE_S)
         os.kill(os.getpid(), signal.SIGTERM)
 
     timer = threading.Timer(grace_s, _stop)
@@ -99,14 +137,18 @@ def _exit_after_backend_death(grace_s: float) -> threading.Timer:
     return timer
 
 
-def _reap_backend_workers(processes: List[Any], timeout: float = 5.0) -> None:
-    """Wait out a preceding ``_terminate_backend_workers`` and SIGKILL whatever is still
-    standing. Only the shell path needs this: it owns the process lifetime end to end (no
-    outer signal takes the process down for it), and a worker that ignored SIGTERM would keep
-    the GPU and the IPC sockets after the shell has already returned to the user's terminal."""
+def _reap_backend_workers(processes: List[Any], timeout: float = WORKER_REAP_TIMEOUT_S) -> None:
+    """Wait out a preceding ``_terminate_backend_workers`` and SIGKILL whatever is still standing.
+
+    ``timeout`` is the budget for the whole set, not per process, so the caller's stop stays
+    bounded however many workers there are. Every stop path needs this, not just the shell:
+    ``terminate()`` alone leaves a wedged worker holding the GPU and its pinned expert banks
+    (~20 GB here) after the API process is gone, and the next serve then OOMs the box.
+    """
+    deadline = time.monotonic() + max(0.0, timeout)
     for p in processes or []:
         try:
-            p.join(timeout=timeout)
+            p.join(timeout=max(0.0, deadline - time.monotonic()))
             if p.is_alive():
                 p.kill()
         except Exception:  # noqa: BLE001 -- already-gone / unqueryable handle: nothing to do
@@ -396,9 +438,12 @@ class FrontendManager:
     def shutdown(self):
         self.send_tokenizer.stop()
         self.recv_tokenizer.stop()
-        # Tear the workers down ourselves (best-effort). _SHUTTING_DOWN is already set by the
-        # time shutdown() runs, so the supervisor attributes the ensuing deaths to the stop.
+        # Tear the workers down ourselves. _SHUTTING_DOWN is already set by the time shutdown()
+        # runs, so the supervisor attributes the ensuing deaths to the stop. Reap as well as
+        # terminate, under a bounded budget: a worker that ignores SIGTERM otherwise outlives
+        # this process still holding the GPU and its pinned expert banks.
         _terminate_backend_workers(self.backend_processes)
+        _reap_backend_workers(self.backend_processes, timeout=WORKER_REAP_TIMEOUT_S)
 
 
 @asynccontextmanager
@@ -968,7 +1013,10 @@ def _serve_and_run_shell(host: str, port: int) -> None:
     netloc = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
     origin = resolve_server_url(f"http://{netloc}").origin
 
-    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, access_log=False))
+    server = uvicorn.Server(uvicorn.Config(
+        app, host=host, port=port, access_log=False,
+        timeout_graceful_shutdown=SHUTDOWN_GRACE_S,
+    ))
     thread = threading.Thread(target=server.run, name="freetoken-uvicorn", daemon=True)
     thread.start()
     _install_shell_stop_handlers()
@@ -1107,4 +1155,4 @@ def run_api_server(config: ServerArgs, start_backend: Callable[[], "Any"], run_s
         _serve_and_run_shell(host, port)
         return
     # uvicorn stays on the main thread (signal handling unchanged); ^C reaches the worker group.
-    uvicorn.run(app, host=host, port=port)
+    uvicorn.run(app, host=host, port=port, timeout_graceful_shutdown=SHUTDOWN_GRACE_S)
