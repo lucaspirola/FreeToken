@@ -738,6 +738,42 @@ def test_b12x_relu2_matches_triton_backend():
     assert float(cos) > 0.999, f"b12x vs triton cosine {float(cos)}"
 
 
+@cuda
+def test_e2m1_arithmetic_decode_matches_the_lut_exactly():
+    """The kernels dequantize FP4 codes by bit construction (``_e2m1_decode``) rather than
+    gathering a 16-entry LUT. Exhaustive over all 256 packed bytes (both nibbles) plus a
+    random draw, bitwise -- ``torch.equal`` against the table, and a separate signbit
+    check because ``-0.0 == 0.0`` compares equal and code 8 must stay negative zero."""
+    import triton
+    import triton.language as tl
+
+    from freetoken.kernel.triton.nvfp4_fused_moe import _e2m1_decode
+
+    @triton.jit
+    def _decode_bytes(src_ptr, out_ptr, n, BLOCK: tl.constexpr):
+        offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < n
+        b = tl.load(src_ptr + offs, mask=mask, other=0).to(tl.int32)
+        tl.store(out_ptr + 2 * offs, _e2m1_decode(b & 0xF), mask=mask)
+        tl.store(out_ptr + 2 * offs + 1, _e2m1_decode((b >> 4) & 0xF), mask=mask)
+
+    device = torch.device("cuda")
+    g = torch.Generator().manual_seed(11)
+    src = torch.cat(
+        [
+            torch.arange(256, dtype=torch.uint8),  # every possible packed byte
+            torch.randint(0, 256, (4096,), dtype=torch.uint8, generator=g),
+        ]
+    ).to(device)
+    out = torch.empty(2 * src.numel(), dtype=torch.float32, device=device)
+    _decode_bytes[(triton.cdiv(src.numel(), 256),)](src, out, src.numel(), BLOCK=256)
+
+    codes = torch.stack([src & 0xF, src >> 4], dim=-1).reshape(-1).long()
+    ref = _E2M1.to(device)[codes]
+    assert torch.equal(out, ref)
+    assert torch.equal(torch.signbit(out), torch.signbit(ref))
+
+
 def _ungated_gpu_banks(device, seed: int = 31):
     """Layer-0 ungated banks on the GPU, in ``fused_experts_*`` argument order."""
     sources = _make_ungated_sources(seed)

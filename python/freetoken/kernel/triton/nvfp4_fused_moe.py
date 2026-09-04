@@ -11,7 +11,8 @@ Layout, for an expert weight ``W[N, K]``:
   - ``global[slot, n]`` fp16: per-output-row scale (``weight_scale_2``).
   - ``W[n, k] = E2M1[code] * scale[n, k//16] * global[n]``.
 
-The global scale is constant along K, so it is applied once after the K-loop.
+The global scale is constant along K, so it is applied once after the K-loop. The
+``E2M1[code]`` step is arithmetic (:func:`_e2m1_decode`), not a LUT gather -- see there.
 
 Decode (M=1) is HBM-bandwidth bound. :func:`_decode_nvfp4_marlin_kernel` is the production
 decode GEMV (int32 wide loads + deferred K reduction); :func:`_decode_nvfp4_moe_kernel` is
@@ -47,9 +48,42 @@ _E2M1_VALUES = [
 
 @functools.lru_cache(maxsize=None)
 def _e2m1_lut(device_index: int) -> torch.Tensor:
+    """The 16 E2M1 values as a device tensor, for the decode GEMVs (see
+    :func:`_e2m1_decode` for why prefill does not use it)."""
     return torch.tensor(
         _E2M1_VALUES, dtype=torch.float32, device=torch.device("cuda", device_index)
     )
+
+
+@triton.jit
+def _e2m1_decode(code):
+    """FP4 E2M1 code (0..15) -> its fp32 value, by bit construction.
+
+    Used by the **prefill** GEMM in place of the 16-entry LUT gather
+    (``tl.load(lut_ptr + code)``). However small and L1-resident the table is, that is one
+    *indexed* load per element of the dequantized tile: at the prefill GEMM's
+    [BLOCK_KB, BLOCK_N] operand it issues more LSU traffic than the ``tl.dot`` it feeds,
+    and the grouped GEMM was bound by it -- 8192x6 routes went 48.4 -> 38.8 ms and M=256
+    3.92 -> 2.10 ms just from this swap, at identical tiles.
+
+    The **decode** GEMVs deliberately keep the gather. They are HBM-bandwidth bound with
+    idle LSU capacity, so the L1 hits hide under the weight stream while these integer ops
+    sit on the dependency chain instead: measured, the arithmetic form costs decode 8-10%
+    at M=8/16 and nothing at M=1. Same values either way, so the choice is pure scheduling.
+
+    The code is ``s|ee|m``, magnitudes 0, .5, 1, 1.5, 2, 3, 4, 6. For magnitude >= 2 the
+    value is ``2**(mag // 2 - 1) * (1 + .5 * (mag & 1))``, whose fp32 bits are exactly
+    ``(126 + (mag >> 1)) << 23 | (mag & 1) << 22``. Magnitudes 0 and 1 (0.0 and 0.5) are
+    the two exceptions and fold in with one select. Everything stays in the integer
+    domain so the sign is an OR of the fp32 sign bit rather than a negation -- that is
+    what keeps code 8 at -0.0 (as the table had it) instead of +0.0, and makes the result
+    bit-identical to the LUT for all 16 codes.
+    """
+    mag = code & 7
+    normal = ((126 + (mag >> 1)) << 23) | ((mag & 1) << 22)
+    bits = tl.where(mag > 1, normal, tl.where(mag == 1, 0x3F000000, 0))  # 0x3F000000 == 0.5
+    bits = tl.where(code > 7, bits | -2147483648, bits)  # -2147483648 == the sign bit
+    return bits.to(tl.float32, bitcast=True)
 
 
 @triton.jit
@@ -263,7 +297,6 @@ def _prefill_nvfp4_moe_kernel(
     sorted_token_ids_ptr,
     expert_ids_ptr,    # cache slot per M-block
     num_tokens_post_padded_ptr,
-    lut_ptr,
     N,
     K,
     EM,
@@ -318,16 +351,14 @@ def _prefill_nvfp4_moe_kernel(
 
         p_ptrs = packed_base + byte_idx[:, None] * stride_pkb
         bytes_ = tl.load(p_ptrs, mask=byte_mask[:, None], other=0).to(tl.int32)
-        lo = bytes_ & 0xF
-        hi = (bytes_ >> 4) & 0xF
         sblk = byte_idx // 8
         s_ptrs = scale_base + sblk[:, None] * stride_sblk
         if e4m3_native_cx():
             scale = tl.load(s_ptrs, mask=byte_mask[:, None], other=0.0).to(tl.float32)
         else:
             scale = e4m3_u8_to_f32(tl.load(s_ptrs, mask=byte_mask[:, None], other=0))
-        b_lo = tl.load(lut_ptr + lo) * scale  # [BLOCK_KB, BLOCK_N]
-        b_hi = tl.load(lut_ptr + hi) * scale
+        b_lo = _e2m1_decode(bytes_ & 0xF) * scale  # [BLOCK_KB, BLOCK_N]
+        b_hi = _e2m1_decode((bytes_ >> 4) & 0xF) * scale
 
         a_lo = tl.load(a_ptrs_lo, mask=token_mask[:, None] & byte_mask[None, :], other=0.0)
         a_hi = tl.load(a_ptrs_hi, mask=token_mask[:, None] & byte_mask[None, :], other=0.0)
@@ -354,8 +385,9 @@ def _prefill_nvfp4_moe_kernel(
 
 __all__ = [
     "_apply_act",
+    "_e2m1_decode",
+    "_e2m1_lut",
     "_decode_nvfp4_moe_kernel",
     "_decode_nvfp4_marlin_kernel",
     "_prefill_nvfp4_moe_kernel",
-    "_e2m1_lut",
 ]

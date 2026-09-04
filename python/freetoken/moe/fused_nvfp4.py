@@ -430,7 +430,6 @@ def _prefill_gemm(
     _prefill_nvfp4_moe_kernel[grid](
         a, packed, scale, glob, c, topk_weights_flat, sorted_ids, expert_ids,
         num_tokens_post_padded,
-        _e2m1_lut(a.device.index),
         N, K, EM, num_valid_tokens,
         a.stride(0), a.stride(1),
         packed.stride(0), packed.stride(1), packed.stride(2),
