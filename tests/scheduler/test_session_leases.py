@@ -180,6 +180,9 @@ class _SpillStore:
         self.records: dict[str, object] = {}
         self.discarded: list[object] = []
         self.touched: list[object] = []
+        self.prefetching: str | None = None
+        self.cancelled: str | None = None
+        self.protected: set[str] = set()
 
     def spill(self, session_id, token_ids, page_indices, linear_slot):
         record = SimpleNamespace(
@@ -207,6 +210,30 @@ class _SpillStore:
             return
         self.discarded.append(record)
         self.records.pop(getattr(record, "session_id", None), None)
+
+    # Look-ahead promotion (3F): the double records the calls, moves no bytes.
+    def start_prefetch(self, session_id, *, protect=()) -> bool:
+        record = self.records.get(session_id)
+        if record is None or record.tier != "disk" or self.prefetching is not None:
+            return False
+        self.prefetching = session_id
+        self.protected = set(protect)
+        return True
+
+    def collect_prefetch(self, session_id=None, *, wait: bool = False):
+        if self.prefetching is None or session_id not in (None, self.prefetching):
+            return None
+        promoted, self.prefetching = self.prefetching, None
+        if self.cancelled == promoted:
+            return None
+        self.records[promoted].tier = "ram"
+        return promoted
+
+    def cancel_prefetch(self, session_id=None) -> bool:
+        if self.prefetching is None or session_id not in (None, self.prefetching):
+            return False
+        self.cancelled = self.prefetching
+        return True
 
 
 class _SessionCache(_Cache):
@@ -501,3 +528,110 @@ def test_spill_and_restore_logs_report_sub_second_durations(caplog):
         assert seconds is not None, message
         assert float(seconds.group(1)) >= 0.0
     assert "1.00 GiB" not in spilled[0]  # the double's 1 MiB record, not a rounded stub
+
+
+# ------------------------------------------------- look-ahead prefetch (task 3F)
+
+
+def _queued_disk_checkpoint(scheduler, session_id="B", tokens=(1, 2, 3, 4)):
+    """A checkpoint sitting on NVMe for a session whose request is already queued."""
+    import torch
+
+    store = scheduler._session_spill_store
+    record = store.spill(
+        session_id, torch.tensor(tokens, dtype=torch.int32), list(range(len(tokens))), 3
+    )
+    record.tier = "disk"
+    scheduler.prefill_manager.pending_list.append(_queued(2, session_id))
+    return record
+
+
+def test_a_queued_session_prefetches_its_disk_checkpoint_while_the_resident_runs():
+    scheduler = _demand_scheduler()
+    store = scheduler._session_spill_store
+    scheduler._sessions["A"] = SessionLease(
+        "A-handle", 300.0, active_uid=1, reclaimable=True, last_used_at=1.0
+    )
+    _queued_disk_checkpoint(scheduler)
+
+    # A is mid-turn: B cannot be admitted, which is exactly the window to read it in.
+    assert scheduler._schedule_next_batch() is None
+    assert store.prefetching == "B"
+    assert store.protected == {"A"}  # the resident checkpoint never pays for the look-ahead
+
+    # The next scheduler iteration installs it, so admission finds it in RAM.
+    assert scheduler._schedule_next_batch() is None
+    assert store.get("B").tier == "ram"
+    assert scheduler.prefill_manager.admitted == []
+
+
+def test_no_look_ahead_for_an_explicit_lease_or_a_session_without_a_checkpoint():
+    scheduler = _demand_scheduler()
+    store = scheduler._session_spill_store
+    _queued_disk_checkpoint(scheduler, "explicit")
+    # An explicit session_id lease is never spilled, so there is nothing to promote.
+    scheduler._sessions["explicit"] = SessionLease(None, 300.0, reclaimable=False)
+    scheduler.prefill_manager.pending_list.append(_queued(3, "unknown-session"))
+
+    scheduler._reclaim_for_blocked_prefill()
+
+    assert store.prefetching is None
+    assert store.get("explicit").tier == "disk"
+
+
+def test_an_aborted_request_cancels_its_in_flight_look_ahead():
+    from freetoken.message import AbortBackendMsg
+
+    scheduler = _demand_scheduler()
+    store = scheduler._session_spill_store
+    scheduler._abort_tombstones = {}
+    scheduler._sessions["B"] = SessionLease(None, 300.0, reclaimable=True)
+    record = _queued_disk_checkpoint(scheduler)
+
+    scheduler._reclaim_for_blocked_prefill()
+    assert store.prefetching == "B"
+
+    scheduler._process_one_msg(AbortBackendMsg(uid=2, session_id="B"))
+
+    assert store.cancelled == "B"
+    assert store.collect_prefetch() is None  # the bytes read so far are dropped
+    assert record.tier == "disk"  # and the checkpoint survives for the reconnect
+
+
+def test_a_restore_blocked_by_the_resident_session_is_retried_before_admission():
+    """The pools the restore needs are the ones the resident lease still owns."""
+    import torch
+
+    scheduler = _demand_scheduler()
+    store = scheduler._session_spill_store
+    store.spill("B", torch.tensor([1, 2, 3, 4], dtype=torch.int32), [0, 1, 2, 3], 3)
+    scheduler._sessions["B"] = SessionLease(None, 300.0, reclaimable=True)
+    scheduler._sessions["A"] = SessionLease(
+        "A-handle", 300.0, reclaimable=True, last_used_at=1.0
+    )
+    pending = _queued(2, "B")
+    # A real PendingReq carries a tensor; the checkpoint covers all but its last token.
+    pending.input_ids = torch.tensor([1, 2, 3, 4, 5], dtype=torch.int32)
+    scheduler.prefill_manager.pending_list.append(pending)
+    scheduler.cache_manager.hybrid_session_restore_geometry = lambda _t: (0, 99)
+
+    attempts = []
+
+    def _restore(_record, _store):
+        attempts.append(len(attempts))
+        if len(attempts) == 1:
+            raise RuntimeError("no GDN snapshot slot available for cold session restore")
+        return "restored"
+
+    scheduler.cache_manager.restore_hybrid_session_prefix = _restore
+
+    # Message receipt: A still owns the state slot, so the restore fails -- but the
+    # checkpoint is kept rather than thrown away.
+    assert scheduler._restore_cold_session("B", torch.tensor([1, 2, 3, 4, 5])) is False
+    assert store.get("B") is not None
+
+    # The blocked admission checkpoints A and retries B's restore in the same pass.
+    assert scheduler._schedule_next_batch() is None
+    assert attempts == [0, 1]
+    assert scheduler._sessions["B"].handle == "restored"
+    assert store.get("B") is None

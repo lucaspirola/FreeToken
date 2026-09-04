@@ -58,7 +58,7 @@ parsers all resolve automatically from the checkpoint and the GPU.
 | `--cache-type` | radix | `radix` (prefix reuse; SWA/GDN-aware variants picked automatically) or `naive` |
 | `--attention-backend`, `--attn` | auto | `trtllm`/`fi`/`fa`/`triton`/`dsv4_sparse`/`dsa`; `prefill,decode` pair allowed; auto picks per model + GPU |
 | `--session-spill-dir` | auto | Cold storage for idle automatic-agent KV/GDN checkpoints; `off` disables it |
-| `--session-spill-ram-gb` | 2 | RAM-first cold-session budget, additionally bounded by the host reserve |
+| `--session-spill-ram-gb` | 4 | RAM-first cold-session budget, additionally bounded by the host reserve; sized to hold one look-ahead checkpoint beside the one being written |
 | `--session-spill-disk-gb` | 64 | Per-server disk/NVMe cold-session budget |
 | `--session-spill-limit-gb` | 50 | Total retained checkpoint bytes (RAM + disk); a spill over the cap evicts least-recently-used checkpoints instead of failing |
 | `--session-spill-persist` / `--no-session-spill-persist` | on | Keep checkpoints across restarts (startup adopts manifests matching this model + K/V layout, deletes the rest) or wipe them on exit |

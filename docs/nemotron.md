@@ -190,6 +190,18 @@ Residency policy (task 3E, decided 2026-09-04):
   spill root, adopts valid records, and deletes stale/foreign ones; shutdown no longer
   rmtrees. Restore still requires an exact prefix + fingerprint match.
 
+Decisions from the 1M gate (task 3F, 2026-09-04):
+
+- **Look-ahead promotion.** NVMe restore measured ~1.3 GiB/s (0.98 s at 393K, ~2.5 s
+  projected at 1M) against ~0.13 s from RAM, so while the resident session decodes, a
+  queued session whose checkpoint is on disk has it read into the RAM tier on one
+  background thread (one in flight, cancelled when the request goes away). It respects
+  the RAM budget and the host reserve, and makes room by demoting other RAM checkpoints
+  to disk (LRU) -- never the resident or restoring session's own. `--session-spill-ram-gb`
+  now defaults to **4** so one 1M look-ahead fits beside the checkpoint being written.
+- **A restore blocked by the resident session is retried, not discarded**, at the
+  admission-failure point that spills its competitor.
+
 Measured sizing (task 2B4, 2026-09-04 — see
 `benchmarks/results/nemotron35_lightning_5080_cache_study_2026-09-04.md`):
 

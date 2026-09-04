@@ -320,7 +320,8 @@ def parse_args(
         default=ServerArgs.session_spill_ram_gb,
         help=(
             "Maximum RAM used by cold session checkpoints. Allocation also preserves "
-            "--host-ram-reserve-gb; overflow uses --session-spill-dir."
+            "--host-ram-reserve-gb; overflow uses --session-spill-dir. The default holds "
+            "one look-ahead checkpoint beside the one being written."
         ),
     )
     parser.add_argument(

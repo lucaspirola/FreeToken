@@ -42,7 +42,9 @@ class EngineConfig:
     # the cold tier. RAM is bounded independently and is admitted only while
     # MemAvailable remains above host_ram_reserve_gb; overflow goes to disk.
     session_spill_dir: str | None = "auto"
-    session_spill_ram_gb: float = 2.0
+    # 4 GiB holds one look-ahead 1M checkpoint (~3 GiB KV + boundary states) beside the
+    # one being written, which is what makes the queued-session prefetch worth doing.
+    session_spill_ram_gb: float = 4.0
     session_spill_disk_gb: float = 64.0
     # Total retained checkpoint bytes (RAM + disk). A spill that would exceed it evicts
     # least-recently-used checkpoints instead of refusing; checkpoint lifetime is

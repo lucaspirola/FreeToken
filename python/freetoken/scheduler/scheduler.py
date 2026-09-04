@@ -1060,6 +1060,10 @@ class Scheduler(SchedulerIOMixin):
         must not pay a full device-to-host copy.
         """
         session = getattr(self, "_sessions", {}).pop(session_id, None)
+        store = getattr(self, "_session_spill_store", None)
+        if store is not None:
+            # Abort, disconnect or idle expiry: nobody is waiting on this promotion.
+            store.cancel_prefetch(session_id)
         if session is None:
             return False, None
         if session.handle is not None:
@@ -1196,6 +1200,9 @@ class Scheduler(SchedulerIOMixin):
         record = session.spill or store.get(session_id)
         if record is None:
             return False
+        # A look-ahead promotion of this very record is worth waiting out: it is reading
+        # the same bytes this restore needs, only into RAM.
+        store.collect_prefetch(session_id, wait=True)
         session.spill = record
         store.touch(record)
         # The final prompt token must still run through prefill. Never install a checkpoint
@@ -1240,10 +1247,14 @@ class Scheduler(SchedulerIOMixin):
             )
             return True
         except Exception as exc:  # reuse is an optimization, never an admission gate
+            # Keep the checkpoint: the usual failure is a pool that the resident session
+            # still owns, and the retry after its release (_reclaim_for_blocked_prefill)
+            # is exactly what makes a queued 1M session restore instead of recompute.
             logger.warning(
-                "Cold restore for session %s failed (%r); recomputing", session_id, exc
+                "Cold restore for session %s failed (%r); will retry before admission",
+                session_id,
+                exc,
             )
-            self._discard_session_spill(session)
             session.handle = None
             return False
 
@@ -1373,11 +1384,42 @@ class Scheduler(SchedulerIOMixin):
         mid-turn when its competitor arrived becomes a candidate the instant its turn ends,
         so the queued request is admitted on the next scheduler iteration.
         """
+        self._prefetch_queued_session()
         for pending in getattr(self.prefill_manager, "pending_list", ()):
             if pending.chunked_req is not None:
                 continue  # a continuation already owns its resources
-            return self._reclaim_soft_sessions_for_pending(pending, pending.session_id)
+            released = self._reclaim_soft_sessions_for_pending(pending, pending.session_id)
+            if released and pending.session_id:
+                # The competitor's KV and state slot are free now, so a checkpoint that
+                # could not be installed at message receipt gets its second chance -- from
+                # RAM if the look-ahead above finished in time.
+                self._restore_cold_session(pending.session_id, pending.input_ids)
+            return released
         return False
+
+    def _prefetch_queued_session(self) -> str | None:
+        """Promote the next queued session's disk checkpoint to RAM while another runs.
+
+        NVMe restore of a 1M checkpoint costs ~2.5 s against ~0.13 s from RAM, and a queued
+        request has the whole of the resident session's turn to wait. Best effort: a refused
+        promotion (budget, host reserve, one already in flight) just leaves it on disk.
+        """
+        store = getattr(self, "_session_spill_store", None)
+        if store is None:
+            return None
+        promoted = store.collect_prefetch()
+        sessions = getattr(self, "_sessions", {})
+        resident = {sid for sid, lease in sessions.items() if lease.handle is not None}
+        for pending in getattr(self.prefill_manager, "pending_list", ()):
+            session_id = getattr(pending, "session_id", None)
+            lease = sessions.get(session_id) if session_id else None
+            if not session_id or session_id in resident:
+                continue
+            if lease is not None and not lease.reclaimable:
+                continue  # explicit leases are never spilled: there is nothing to promote
+            if store.start_prefetch(session_id, protect=resident):
+                break
+        return promoted
 
     def _sessions_need_service(self) -> bool:
         """True while a lease deadline or a live checkpoint still needs periodic polling.

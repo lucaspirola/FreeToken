@@ -9,6 +9,10 @@ and deletes everything else (which also collects directories leaked by a crash).
 Retention is by capacity and age, never by lease lifetime: a spill that would exceed the
 total byte cap (or the filesystem guard) evicts least-recently-used checkpoints until it
 fits, and only a single record larger than the whole cap is refused.
+
+A queued session's disk record can be promoted to the RAM tier ahead of its admission
+(:meth:`start_prefetch`): the read runs on one background thread, and the main thread
+installs the result, so the look-ahead never races the store's accounting.
 """
 
 from __future__ import annotations
@@ -17,11 +21,12 @@ import hashlib
 import json
 import os
 import shutil
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import Iterable, Iterator
 
 import torch
 
@@ -57,6 +62,18 @@ class SessionSpillRecord:
     created_at: float = 0.0
     last_used_at: float = 0.0
     directory: Path | None = field(default=None)
+
+
+@dataclass
+class _Prefetch:
+    """One in-flight disk->RAM promotion. Only the reader loop touches ``values``."""
+
+    session_id: str
+    record: SessionSpillRecord
+    cancel: threading.Event
+    started: float
+    thread: threading.Thread | None = None
+    values: list[torch.Tensor] | None = None
 
 
 def _mem_available_bytes() -> int:
@@ -133,6 +150,7 @@ class SessionSpillStore:
         )
         self.persist = bool(persist)
         self.model_id = str(model_id)
+        self._prefetch: _Prefetch | None = None
         self.ram_bytes = 0
         self.disk_bytes = 0
         self._records: list[SessionSpillRecord] = []
@@ -351,10 +369,13 @@ class SessionSpillStore:
         self.discard(victim)
         return True
 
-    def _choose_tier(self, byte_size: int) -> str | None:
+    def _ram_has_room(self, byte_size: int) -> bool:
         # The extra 256 MiB covers one bounded D2H gather and Python/torch metadata.
         ram_headroom = _mem_available_bytes() - self.host_reserve_bytes - (256 << 20)
-        if byte_size <= self.ram_budget_bytes - self.ram_bytes and byte_size <= ram_headroom:
+        return byte_size <= self.ram_budget_bytes - self.ram_bytes and byte_size <= ram_headroom
+
+    def _choose_tier(self, byte_size: int) -> str | None:
+        if self._ram_has_room(byte_size):
             return "ram"
         if self._disk_has_room(byte_size):
             return "disk"
@@ -383,7 +404,7 @@ class SessionSpillStore:
         linear_slot: int,
     ) -> SessionSpillRecord | None:
         tokens = token_ids.detach().to(device="cpu", dtype=torch.int32).clone()
-        num_pages = int(page_indices.numel())
+        num_pages = int(len(page_indices))
         byte_size = self._payload_bytes(num_pages, tokens)
         # Drop any previous checkpoint for this session first: its directory is the same
         # deterministic path this spill is about to write.
@@ -552,9 +573,121 @@ class SessionSpillStore:
                     pending = pool.submit(load, disk_chunks[index + 1])
                 yield chunk, value
 
+    # ---------------------------------------------------------------- prefetch
+
+    def _make_ram_room(self, byte_size: int, protect: set[str]) -> bool:
+        """Demote least-recently-used RAM records to disk until ``byte_size`` fits.
+
+        ``protect`` is never demoted: the resident and restoring sessions' checkpoints are
+        the ones about to be needed, so paying to move them would defeat the look-ahead.
+        """
+        if self._ram_has_room(byte_size):
+            return True
+        victims = sorted(
+            (
+                record
+                for record in self._records
+                if record.valid and record.tier == "ram" and record.session_id not in protect
+            ),
+            key=lambda record: (record.last_used_at, record.created_at),
+        )
+        for victim in victims:
+            if self._demote_to_disk(victim) and self._ram_has_room(byte_size):
+                return True
+        return self._ram_has_room(byte_size)
+
+    def start_prefetch(self, session_id: str, *, protect: Iterable[str] = ()) -> bool:
+        """Begin promoting one queued session's disk checkpoint to RAM. One at a time.
+
+        Returns False (never raises) when there is nothing to promote or the RAM budget
+        cannot hold it: the look-ahead is an optimization, never an admission gate.
+        """
+        self.collect_prefetch()  # reap a finished or cancelled predecessor
+        if self._prefetch is not None:
+            return False
+        record = self.get(session_id)
+        if record is None or record.tier != "disk":
+            return False
+        files = [chunk.file for chunk in record.chunks]
+        if any(path is None for path in files):
+            return False
+        if not self._make_ram_room(record.byte_size, set(protect) | {session_id}):
+            return False
+        cancel = threading.Event()
+        state = _Prefetch(session_id, record, cancel, time.perf_counter())
+
+        def _read() -> None:
+            values: list[torch.Tensor] = []
+            try:
+                for path in files:
+                    if cancel.is_set():
+                        return
+                    values.append(torch.load(path, map_location="cpu", weights_only=True))
+            except Exception:  # a torn read just means the restore reads it from disk
+                return
+            state.values = values
+
+        state.thread = threading.Thread(target=_read, name="session-prefetch", daemon=True)
+        self._prefetch = state
+        state.thread.start()
+        return True
+
+    def collect_prefetch(
+        self, session_id: str | None = None, *, wait: bool = False
+    ) -> str | None:
+        """Install a finished promotion (main thread only). Returns the session promoted."""
+        state = self._prefetch
+        if state is None or (session_id is not None and state.session_id != session_id):
+            return None
+        if state.thread is not None and state.thread.is_alive():
+            if not wait:
+                return None
+            state.thread.join()
+        self._prefetch = None
+        record, values = state.record, state.values
+        if (
+            state.cancel.is_set()
+            or values is None
+            or not record.valid
+            or record.tier != "disk"
+            or len(values) != len(record.chunks)
+            or not self._ram_has_room(record.byte_size)
+        ):
+            return None
+        self._promote_to_ram(record, values)
+        logger.info_rank0(
+            "Prefetched cold session %s to RAM (%.2f GiB in %.2f s)",
+            record.session_id,
+            record.byte_size / (1 << 30),
+            time.perf_counter() - state.started,
+        )
+        return record.session_id
+
+    def cancel_prefetch(self, session_id: str | None = None) -> bool:
+        """Abandon an in-flight promotion; its reader drops the bytes it already read."""
+        state = self._prefetch
+        if state is None or (session_id is not None and state.session_id != session_id):
+            return False
+        state.cancel.set()
+        return True
+
+    def _promote_to_ram(self, record: SessionSpillRecord, values: list[torch.Tensor]) -> None:
+        directory = record.directory
+        for chunk, value in zip(record.chunks, values, strict=True):
+            chunk.value = value
+            chunk.file = None
+        record.tier = "ram"
+        record.directory = None
+        self.disk_bytes = max(0, self.disk_bytes - record.byte_size)
+        self.ram_bytes += record.byte_size
+        if directory is not None:
+            shutil.rmtree(directory, ignore_errors=True)
+
     def discard(self, record: SessionSpillRecord | None) -> None:
         if record is None or not record.valid:
             return
+        if self._prefetch is not None and self._prefetch.record is record:
+            self.cancel_prefetch()
         record.valid = False
         self._records = [candidate for candidate in self._records if candidate is not record]
         if self._by_session.get(record.session_id) is record:
@@ -572,6 +705,7 @@ class SessionSpillStore:
 
     def shutdown(self) -> None:
         """Persisting shutdown only flushes manifests; the root survives for the next run."""
+        self.cancel_prefetch()
         if not self.persist:
             for record in list(self._records):
                 self.discard(record)

@@ -343,3 +343,99 @@ def test_record_larger_than_the_whole_cap_is_refused(tmp_path):
     assert resident is None
     assert store._records == [] and list(tmp_path.iterdir()) == []
     store.shutdown()
+
+
+# ------------------------------------------------------------- look-ahead prefetch (3F)
+
+
+def _boundary_pools(tmp_path, **overrides):
+    kv, linear, manager = _pools()
+    kwargs = dict(
+        directory=str(tmp_path),
+        ram_budget_bytes=1 << 30,
+        disk_budget_bytes=1 << 30,
+        host_reserve_bytes=0,
+    )
+    kwargs.update(overrides)
+    return kv, linear, manager, SessionSpillStore(kv, linear, **kwargs)
+
+
+def _disk_record(store, linear, session_id, monkeypatch):
+    """Spill one record that the host-reserve guard forces onto the disk tier."""
+    monkeypatch.setattr(
+        "freetoken.scheduler.session_spill._mem_available_bytes", lambda: 0
+    )
+    tokens = torch.tensor([1, 2, 3], dtype=torch.int32)
+    record = store.spill(session_id, tokens, tokens, linear.alloc(1)[0])
+    monkeypatch.setattr(
+        "freetoken.scheduler.session_spill._mem_available_bytes", lambda: 8 << 30
+    )
+    assert record is not None and record.tier == "disk"
+    return record
+
+
+def test_prefetch_promotes_a_queued_session_checkpoint_to_ram(tmp_path, monkeypatch, caplog):
+    import logging
+
+    _kv, linear, _manager, store = _boundary_pools(tmp_path)
+    record = _disk_record(store, linear, "agent-a", monkeypatch)
+    directory = record.directory
+
+    with caplog.at_level(logging.INFO, logger="freetoken.scheduler.session_spill"):
+        assert store.start_prefetch("agent-a") is True
+        assert store.start_prefetch("agent-b") is False  # one in flight at a time
+        assert store.collect_prefetch("agent-a", wait=True) == "agent-a"
+
+    assert record.tier == "ram" and record.directory is None
+    assert store.ram_bytes == record.byte_size and store.disk_bytes == 0
+    assert all(c.value is not None and c.file is None for c in record.chunks)
+    assert not directory.exists()
+    assert any(m.startswith("Prefetched cold session agent-a to RAM") for m in caplog.messages)
+    store.shutdown()
+
+
+def test_prefetch_is_refused_when_the_ram_budget_cannot_hold_it(tmp_path, monkeypatch):
+    _kv, linear, _manager, store = _boundary_pools(tmp_path, ram_budget_bytes=0)
+    record = _disk_record(store, linear, "agent-a", monkeypatch)
+
+    assert store.start_prefetch("agent-a") is False  # refusal, not an error
+    assert store.start_prefetch("nobody") is False
+    assert store.collect_prefetch() is None
+    assert record.tier == "disk" and record.directory.is_dir()
+    store.shutdown()
+
+
+def test_prefetch_demotes_an_lru_ram_record_but_never_a_protected_one(tmp_path, monkeypatch):
+    _kv, linear, _manager, store = _boundary_pools(tmp_path)
+    monkeypatch.setattr(
+        "freetoken.scheduler.session_spill._mem_available_bytes", lambda: 8 << 30
+    )
+    tokens = torch.tensor([1, 2, 3], dtype=torch.int32)
+    resident = store.spill("resident", tokens, tokens, linear.alloc(1)[0])
+    assert resident is not None and resident.tier == "ram"
+    store.ram_budget_bytes = resident.byte_size  # room for exactly one RAM record
+    queued = _disk_record(store, linear, "queued", monkeypatch)
+
+    # The resident session's own checkpoint is never the one that pays for the look-ahead.
+    assert store.start_prefetch("queued", protect={"resident"}) is False
+    assert resident.tier == "ram"
+
+    assert store.start_prefetch("queued") is True
+    assert store.collect_prefetch(wait=True) == "queued"
+    assert resident.tier == "disk" and queued.tier == "ram"
+    store.shutdown()
+
+
+def test_a_cancelled_prefetch_leaves_the_checkpoint_on_disk(tmp_path, monkeypatch):
+    _kv, linear, _manager, store = _boundary_pools(tmp_path)
+    record = _disk_record(store, linear, "agent-a", monkeypatch)
+
+    assert store.start_prefetch("agent-a") is True
+    assert store.cancel_prefetch("agent-a") is True
+    assert store.collect_prefetch(wait=True) is None
+    assert record.tier == "disk" and record.directory.is_dir()
+    assert store.ram_bytes == 0
+    # The cancelled slot is reusable once its reader has stopped.
+    assert store.start_prefetch("agent-a") is True
+    assert store.collect_prefetch(wait=True) == "agent-a"
+    store.shutdown()
