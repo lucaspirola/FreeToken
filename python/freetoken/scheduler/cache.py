@@ -79,6 +79,11 @@ class CacheManager:
     # checkpoints LRU idle automatic leases until ``n`` slots are reachable, returning True when
     # it released anything. None = no sessions (unit tests, non-session serving).
     mamba_reclaim_hook = None
+    # KV-shaped counterpart, read by the prefill admission gate. ``hook() -> int`` returns the
+    # tokens held by IDLE reclaimable session leases: locked, so invisible to
+    # ``available_size``, but released on demand the moment an admission needs them. None =
+    # no sessions (unit tests, non-session serving), and the gate then sees only what is free.
+    reclaimable_tokens_hook = None
     _mamba_donation_skips = 0
 
     def page_usage(self) -> tuple[int, int]:
@@ -129,6 +134,54 @@ class CacheManager:
                      else self.prefix_cache.size_info.evictable_size)
         future = (self.num_pages - self.committed_pages) * self.page_size
         return evictable + len(self.free_slots) * self.page_size + future
+
+    @property
+    def admissible_size(self) -> int:
+        """Tokens admission can actually obtain: what is free now, plus what reclaim can free.
+
+        The three-way split of the pool that matters to a gate is: free-or-evictable
+        (``available_size``), locked-but-reclaimable-on-demand (idle session leases), and
+        locked-and-not-reclaimable (KV held by decoding requests, and the leases of sessions
+        with a request in flight). Only the first two are obtainable, and this is their sum.
+
+        ``available_size`` alone under-counts and refuses prompts the scheduler could seat by
+        spilling an idle conversation; ``max_size`` over-counts by the whole third bucket,
+        which is what filled the pool to ``token usage: 1.00`` with nothing able to advance
+        (soak report S5).
+        """
+        hook = self.reclaimable_tokens_hook
+        if hook is None:
+            return self.available_size
+        return self.available_size + max(0, int(hook()))
+
+    @property
+    def max_size(self) -> int:
+        """Every token slot the pool can EVER offer, committed or not.
+
+        This is a *ceiling*, not a budget. It is the right figure for exactly one question --
+        "is this prompt larger than the pool itself?", i.e. can it never be admitted at any
+        pool state -- and it is the wrong figure for admission, because the difference
+        between it and ``available_size`` is the KV already given away to decoding requests
+        and to locked/retained session prefixes. Charging admission against it is what let
+        the pool fill to ``token usage: 1.00`` with nothing able to advance
+        (benchmarks/results/nemotron35_lightning_5080_switchyard_soak_2026-09-04.md, S5).
+        """
+        return self.num_pages * self.page_size
+
+    def prefix_fingerprint(self) -> tuple:
+        """Cheap witness of the prefix tree's contents, for memoising a prefix match.
+
+        A match can only get *deeper* if the tree gained nodes, and any insert or eviction
+        moves one of these totals, so an unchanged fingerprint means an unchanged
+        ``match_prefix`` result for every input. Admission uses it to skip re-walking a
+        118K-token prompt on every pass it is refused (soak report S5: the whole CPU budget
+        of a stall went into ``fast_compare_key``).
+        """
+        if self.is_hybrid or self.is_swa:
+            return (self.prefix_cache.full_evictable_size,
+                    self.prefix_cache.full_protected)
+        info = self.prefix_cache.size_info
+        return (info.evictable_size, info.protected_size)
 
     def committed_pages_required(self, reqs: List[Req]) -> int:
         """Physical page ceiling needed to allocate ``reqs``' next forward.

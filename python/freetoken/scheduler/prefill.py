@@ -55,7 +55,10 @@ class PrefillAdder:
     # satisfiable, and that check demands exactly the batch's per-chunk page deltas. Charging
     # the whole remainder let one long in-flight prompt reserve the pool away from every other
     # continuation in the pass (6 lanes -> 2 with 700 free pages and a 600-page batch).
-    # Negative means "start from reserved_size" (i.e. the decode in-flight tokens).
+    # Negative means "start from reserved_size". The manager passes it explicitly instead,
+    # because reserved_size now also carries the unforwarded tail of every prompt already
+    # mid-prefill -- a cross-pass admission claim, not a page demand this pass can be asked
+    # for. Inheriting it here would re-create exactly the starvation the note above records.
     reserved_pages: int = -1
 
     def __post_init__(self) -> None:
@@ -71,18 +74,47 @@ class PrefillAdder:
         if self.table_manager.available_size == 0:
             return None
 
+        # Cheap pre-check on the memoised match, BEFORE the radix walk. While the tree is
+        # unchanged a re-walk returns the same ``cached_len``, so this arithmetic is exact
+        # and a refusal here is the refusal the full path would have reached. It exists
+        # because the walk is O(prompt): during the soak's stalls the scheduler re-matched
+        # 118K-token prompts on every pass and forwarded nothing, and py-spy found it inside
+        # ``fast_compare_key`` on four of five samples (soak report S5).
+        fingerprint = self.cache_manager.prefix_fingerprint()
+        budget = self.cache_manager.admissible_size
+        if req.match_fp == fingerprint:
+            estimated = req.input_len - req.match_cached_len + req.output_len
+            if estimated + self.reserved_size > budget:
+                return None
+
         # TODO: consider host cache match case
         mr = self.cache_manager.match_req(req)
         handle = mr.cuda_handle
         cached_len = handle.cached_len
+        req.match_fp = fingerprint
+        req.match_cached_len = cached_len
         # TODO: better estimate policy
         extend_len = req.input_len - cached_len
         estimated_len = extend_len + req.output_len
 
-        if estimated_len + self.reserved_size > self.cache_manager.available_size:
+        # Charge the whole remaining footprint against the pages the pool can actually
+        # OBTAIN. ``available_size`` is evictable prefix + free list + uncommitted suffix:
+        # by construction it already excludes the KV held by decoding requests and the
+        # locked/retained session prefixes that eviction cannot touch, which is exactly what
+        # a gate against ``max_size`` could not see. ``reserved_size`` carries the rest of
+        # the claim -- in-flight decode growth, the unforwarded tail of every prompt already
+        # mid-prefill, and whatever this pass has admitted so far.
+        #
+        # Charging the *remaining* tail rather than the whole prompt is what makes this
+        # stable as a prefill advances: forwarding a chunk drops ``available_size`` and the
+        # charge by the same number of tokens, so an in-flight prompt never frees admission
+        # room for a new one by making progress. (Charging the shrinking tail against
+        # ``max_size`` does exactly that, and livelocks.)
+        if estimated_len + self.reserved_size > budget:
             return None
         self.cache_manager.lock(handle)
-        if estimated_len + self.reserved_size > self.cache_manager.available_size:
+        # Re-read: lock() moved the matched prefix out of ``evictable``, so the budget shrank.
+        if estimated_len + self.reserved_size > self.cache_manager.admissible_size:
             return self.cache_manager.unlock(handle)
 
         # Second currency (hybrid GDN): reserve 1 live + 2 ping-pong state slots; evict tree
@@ -162,6 +194,19 @@ class PrefillAdder:
         kv_pages = max(0, self.cache_manager.available_size - self.reserved_pages) // kv_ps
         max_kv_end = (div_ceil(cached_len, kv_ps) + kv_pages) * kv_ps
         chunk_size = min(chunk_size, max(max_kv_end - cached_len, 0))
+        # A chunk that COMPLETES the prompt hands the request straight to the decode
+        # manager, and its ``output_len`` pages are then allocated one per forward with no
+        # gate of their own. They have to come out of the same budget as this chunk, or the
+        # pass leaves ``available_size`` below ``inflight_tokens`` and the next decode batch
+        # is unbackable -- "batch needs 5 pages but only 2 are physically allocatable".
+        # When both do not fit, forward less and stay chunked: the request finishes in a
+        # later pass, when its decode IS backable. (Charging ``output_len`` unconditionally
+        # would instead make every continuation reserve against its own next chunk and
+        # starve its peers.)
+        if chunk_size >= remain_len:
+            chunk_size = min(
+                chunk_size, max(max_kv_end - cached_len - pending_req.output_len, 0)
+            )
         if chunk_size <= 0:
             # The pool cannot back one page for this request right now. Defer instead of
             # raising: the request keeps its place at the head of the pending list and the
@@ -202,8 +247,22 @@ class PrefillAdder:
         is_chunked = chunk_size < remain_len
         CLS = ChunkedReq if is_chunked else Req
         self.token_budget -= chunk_size
-        self.reserved_size += remain_len + pending_req.output_len
+        # Only a FRESH admit adds a new claim on ``available_size``: a continuation's
+        # remaining footprint is seeded into ``reserved_size`` by the manager at the top of
+        # every pass (see schedule_next_batch), because the adder is rebuilt each pass and
+        # would otherwise be blind to prompts admitted earlier. Charging it twice was
+        # harmless while the pass stopped at the first refusal; now that it continues past
+        # one, a continuation can be reached after a fresh admit and the duplicate would
+        # refuse its own peers.
+        if pending_req.chunked_req is None:
+            self.reserved_size += remain_len + pending_req.output_len
         self.reserved_pages += self._page_span(cached_len, cached_len + chunk_size)
+        if not is_chunked:
+            # This request's prompt is complete, so it decodes on the very next forward and
+            # those pages are allocated with no further gate. Book them now -- after its own
+            # chunk was sized, so it never reserves against itself -- so the lanes behind it
+            # in this same pass can no longer spend them.
+            self.reserved_pages += pending_req.output_len
         # NOTE: update the tokens ids only; new pages will be allocated in the scheduler
         _slice = slice(cached_len, cached_len + chunk_size)
         device_ids = self.table_manager.token_pool[table_idx, _slice]
@@ -294,6 +353,89 @@ class PrefillManager:
     # grouping fresh prompts through this length amortizes full-layer setup.
     # Zero keeps ``max_batch_seqs`` a hard cap (including explicit CLI values).
     small_prompt_group_tokens: int = 0
+    # A refused request no longer ends the pass (see schedule_next_batch), so the scan needs
+    # its own bound or a long queue of unseatable requests would be walked on every pass.
+    # Sized above the usual --max-running-requests so a full queue is still scanned once;
+    # the pass also stops as soon as the token budget is spent.
+    max_admission_refusals: int = 32
+    # Passes a refused FRESH prompt tolerates being overtaken before it reserves the queue.
+    #
+    # Strict FIFO among fresh admits (never overtake a refused prompt) protects long prompts
+    # -- without it the long-context requests the soak timed out on never win a size
+    # comparison against a short one, costing 25% of the prefill tokens on the stage profile.
+    # But applied unconditionally it converts ONE temporarily unaffordable prompt into a dead
+    # scheduler: the pass admits nothing, so nothing completes, so nothing is freed, so the
+    # prompt stays unaffordable -- observed as a pass refusing a 118K head while a median of
+    # 8 admissible requests sat behind it, until the 600 s client timeout collected them all.
+    #
+    # Aging gets both. While a refusal is young its queue-mates go first, and the requests
+    # they complete are what release the KV (and idle the sessions whose leases reclaim can
+    # then buy) that the blocked prompt is waiting for. Once it has been passed over this
+    # many times it blocks the fresh queue behind it and the pool drains toward it.
+    #
+    # The value is the knob between throughput and long-prompt latency, swept on the replay
+    # (seed 7, 20,000 forwards; switchyard-stage error rate / stage wait-to-first-chunk p95):
+    #     patience   2      4      8     16     32
+    #     err rate  .296   .230   .210   .185   .092
+    #     wait p95  355 s  360 s  379 s  427 s  466 s
+    # Larger is better for goodput and worse for the long-context prompts the soak timed out
+    # on. 8 is the largest value whose wait p95 still sits under the upstream merge-base
+    # baseline (395 s), so the fairness the strict rule was protecting is preserved.
+    admission_patience: int = 8
+
+    def _pending_prefill_size(self) -> int:
+        """Unforwarded footprint of every prompt already mid-prefill.
+
+        The adder is rebuilt every pass, so without this hand-over it cannot see the claim
+        that prompts admitted in EARLIER passes still have on the pool. Each contributes the
+        tail it has yet to forward plus its decode, and not its whole prompt: the part it
+        already forwarded is allocated and locked, so it has left ``available_size``
+        already, and charging it twice would refuse admissions the pool can afford.
+        """
+        total = 0
+        for req in self.pending_list:
+            chunked = req.chunked_req
+            if chunked is not None:
+                total += max(0, req.input_len - chunked.cached_len) + req.output_len
+        return total
+
+    def _seatable_lanes(self, reserved: int) -> int:
+        """Lanes this pass can plausibly seat -- the divisor the interleave share needs.
+
+        ``token_budget // waiting`` divides by the QUEUE DEPTH: sixteen queued requests buy
+        a 512-token chunk even in a pass whose pool can seat two lanes, which is 12.5% of
+        the budget and the whole of the interleave's throughput regression (soak report R5).
+        The seating limit is knowable and cheap -- pure arithmetic over the pending list,
+        no prefix walk and no allocation.
+
+        Deliberately an estimate, and deliberately an over-estimate where it is wrong: a
+        lane counted here that the pass then cannot seat only makes the surviving chunks
+        smaller, never unbackable. The per-chunk cap in ``_add_one_req`` is what enforces
+        the pool exactly.
+        """
+        budget = self.cache_manager.admissible_size - reserved
+        slots = self.table_manager.available_size
+        lanes = 0
+        blocked_fresh = False
+        for req in self.pending_list:
+            if req.chunked_req is not None:
+                lanes += 1  # already admitted and already charged; the gate does not re-run
+                continue
+            if blocked_fresh:
+                continue
+            # The cached part is not modelled (a prefix hit can only make a lane cheaper),
+            # so this reads the prompt at full price -- the conservative direction for a
+            # divisor, since over-counting lanes is what shrinks chunks.
+            cost = req.input_len + req.output_len
+            if slots <= 0 or cost > budget:
+                # Mirror the admission loop's strict FIFO: nothing fresh behind a fresh
+                # request the pool turned away is seatable this pass either.
+                blocked_fresh = True
+                continue
+            budget -= cost
+            slots -= 1
+            lanes += 1
+        return max(lanes, 1)
 
     def add_one_req(self, req: UserMsg) -> None:
         self.pending_list.append(
@@ -328,11 +470,31 @@ class PrefillManager:
             lane_cap = 0
 
         # estimated offset due to in-flight decode
+        inflight_prefill = self._pending_prefill_size()
         adder = PrefillAdder(
             token_budget=prefill_budget,
-            reserved_size=self.decode_manager.inflight_tokens,
+            # Every claim on ``available_size`` that this pass did not create: the growth
+            # the running decodes will still allocate, plus the unforwarded tail of every
+            # prompt already mid-prefill. The second term is what keeps a fresh admit from
+            # being let into a pool that its own in-flight peers have already spoken for --
+            # the anti-livelock invariant. It is charged against ``available_size`` and not
+            # against the pool maximum precisely because the maximum still counts the KV
+            # held by decoding requests and by locked/retained session prefixes, which
+            # admission cannot spend (soak report S5).
+            reserved_size=self.decode_manager.inflight_tokens + inflight_prefill,
+            # NOT the sum above. ``reserved_pages`` is the per-chunk cap's budget and it is
+            # spent in the pass it is computed for, so it books only the decode pages THIS
+            # pass can be asked for: the requests already decoding, plus (charged in
+            # ``_add_one_req``, after each one's own chunk is sized) the requests whose
+            # prefill finishes here. A continuation with chunks still to go decodes many
+            # passes from now, against a pool that will have moved; reserving for it here
+            # only starves its peers -- the 6-lanes-to-2 regression of soak report R6.
+            reserved_pages=self.decode_manager.inflight_tokens,
             cache_manager=self.cache_manager,
             table_manager=self.table_manager,
+        )
+        seatable_lanes = (
+            self._seatable_lanes(adder.reserved_size) if self.interleave_chunks else 0
         )
         reqs: List[Req] = []
         chunked_list: List[PendingReq] = []
@@ -342,21 +504,53 @@ class PrefillManager:
         # once at admission, so continuation chunks (already-chunked reqs) contribute 0.
         log_new_tokens = 0
         log_cached_tokens = 0
-        admitted_items = 0
+        admitted_index: set[int] = set()
+        refusals = 0
+        # FIFO fairness among FRESH admits: STRICT, no overtaking. A refusal no longer ends
+        # the pass, so without this a later fresh prompt would jump the queue past one the
+        # pool just turned away -- and since the refusals land on the long prompts, "later
+        # and cheaper" means "every short prompt, forever".
+        #
+        # Continuations are a different class and are never gated by this rule: they were
+        # admitted in an earlier pass, so they are already ahead in FIFO order. Letting them
+        # through a refused fresh admit is the whole point of not breaking -- the pass used
+        # to abandon a median of 13 queued requests, 11 of them seatable.
+        blocked_fresh = False
         stopped_for_lane_cap = False
         for index, pending_req in enumerate(self.pending_list):
+            if adder.token_budget <= 0:
+                break
             is_continuation = pending_req.chunked_req is not None
+            if not is_continuation:
+                if (pending_req.input_len + pending_req.output_len
+                        > self.cache_manager.max_size):
+                    # Unsatisfiable at EVERY pool state, not just this one: the pool could
+                    # be empty and this prompt still would not fit. Skipping it WITHOUT
+                    # setting ``blocked_fresh`` is what keeps it from wedging the queue --
+                    # FIFO fairness towards a request that can never be served is just a
+                    # stalled scheduler.
+                    if not pending_req.oversize_warned:
+                        pending_req.oversize_warned = True  # every pass re-skips it
+                        logger.warning_rank0(
+                            "Request %d needs %d KV tokens but the pool holds at most %d; "
+                            "it can never be admitted and is being skipped",
+                            pending_req.uid,
+                            pending_req.input_len + pending_req.output_len,
+                            self.cache_manager.max_size,
+                        )
+                    continue
+                if blocked_fresh:
+                    continue
             chunk_limit = None
             if self.interleave_chunks:
                 waiting = len(self.pending_list) - index
-                available_lanes = (
-                    max(lane_cap - len(reqs), 1)
-                    if lane_cap
-                    else waiting
+                available_lanes = max(
+                    (lane_cap if lane_cap else seatable_lanes) - len(reqs), 1
                 )
                 chunk_limit = max(1, adder.token_budget // min(waiting, available_lanes))
             if req := adder.try_add_one(pending_req, chunk_limit=chunk_limit):
-                admitted_items += 1
+                pending_req.refused_passes = 0
+                admitted_index.add(index)
                 pending_req.chunked_req = None
                 if isinstance(req, ChunkedReq):
                     pending_req.chunked_req = req
@@ -376,10 +570,25 @@ class PrefillManager:
                     stopped_for_lane_cap = index + 1 < len(self.pending_list)
                     break
             else:
-                break  # We cannot add more requests
+                # Skip, do not stop. The pass used to end here, abandoning every queued
+                # request behind the refused one -- a median of 13, of which 11 the pools
+                # could have seated. Continuations in particular are never gated by the
+                # fresh-admit rule, so a blocked fresh prompt must not block them.
+                refusals += 1
+                if not is_continuation:
+                    pending_req.refused_passes += 1
+                    # Reserve the queue only once this prompt has been patient enough; see
+                    # ``admission_patience``.
+                    blocked_fresh = blocked_fresh or (
+                        pending_req.refused_passes >= self.admission_patience
+                    )
+                if refusals >= self.max_admission_refusals:
+                    break
         if len(reqs) == 0:
             return None
-        remaining = self.pending_list[admitted_items:]
+        remaining = [
+            req for i, req in enumerate(self.pending_list) if i not in admitted_index
+        ]
         # Interleaved mode rotates unfinished lanes behind requests that did not run this pass.
         # The default preserves the original strict chunked-prefill ordering.
         # If admission stopped on a resource-constrained request, keep the active continuations

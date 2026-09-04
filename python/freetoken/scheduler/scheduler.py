@@ -157,6 +157,13 @@ class Scheduler(SchedulerIOMixin):
         # the conversation stays resident -- so without this hook a pool whose whole snapshot
         # cache has become leases reports zero evictable slots and every donation/restore fails.
         self.cache_manager.mamba_reclaim_hook = self._reclaim_soft_sessions_for_state_slot
+        # KV counterpart of the same idea, for ADMISSION rather than for state slots. An idle
+        # reclaimable lease holds its prefix locked, so it counts in neither ``free_slots``
+        # nor ``evictable_size`` and is invisible to ``available_size`` -- yet the scheduler
+        # releases exactly these on demand (``_reclaim_soft_sessions_for_pending``) whenever
+        # an admission needs the room. Without this the gate treats a pool full of idle
+        # conversations as a full pool and refuses prompts it could seat by spilling one.
+        self.cache_manager.reclaimable_tokens_hook = self._reclaimable_session_tokens
         self.decode_manager = DecodeManager(config.page_size)
         max_prefill_seqs = _resolve_max_prefill_seqs(config)
         self.prefill_manager = PrefillManager(
@@ -1361,7 +1368,12 @@ class Scheduler(SchedulerIOMixin):
             return False
         # The store is the owner: a checkpoint outlives its lease (idle expiry, disconnect,
         # or a server restart), so look it up by id rather than through the lease object.
-        record = session.spill or store.get(session_id)
+        # The lease's own reference can be STALE: SessionSpillStore.discard() (capacity
+        # eviction) clears the record's chunks and marks it invalid while the lease keeps
+        # pointing at the object, so an unchecked reference both reports an eviction as a
+        # prefix divergence and shadows a newer valid record for the same session id.
+        spilled = session.spill if session.spill is not None and session.spill.valid else None
+        record = spilled or store.get(session_id)
         if record is None:
             return False
         # A look-ahead promotion of this very record is worth waiting out: it is reading
@@ -1528,6 +1540,19 @@ class Scheduler(SchedulerIOMixin):
                 break
             released |= self._release_soft_session_handle(sid, "admission pressure")
         return released
+
+    def _reclaimable_session_tokens(self) -> int:
+        """KV tokens held by idle reclaimable leases -- capacity admission can still buy.
+
+        Deliberately excludes an ACTIVE session's lease: that prefix belongs to a request
+        already in flight, ``_reclaim_soft_sessions_for_pending`` will not release it, and
+        counting it is how a gate ends up admitting into a pool that cannot move.
+        """
+        total = 0
+        for lease in getattr(self, "_sessions", {}).values():
+            if lease.reclaimable and lease.active_uid is None and lease.handle is not None:
+                total += int(getattr(lease.handle, "cached_len", 0))
+        return total
 
     def _reclaim_soft_sessions_for_state_slot(self, n: int = 1) -> bool:
         """Checkpoint LRU idle automatic leases until ``n`` GDN state slots are reachable.

@@ -300,3 +300,64 @@ Command: `ft serve --model ~/ai/models/Ornith-1.5-35B-Q4_K_M.gguf
 - [ ] Replay real Switchyard traces as the benchmark instead of synthetic soaks/needles
 - [ ] NOTE 2026-09-04: fork/main has 14 Ada/Ornith commits (cefa4bd..62f5a66) not in local main;
       local main pushed as fork/nemotron35 (58e5f04). Merge/rebase decision pending (user).
+
+## Scheduler admission gate, redo after the 81ab30e revert (worktree agent-a88d6be62b77b9bee)
+
+Background: `81ab30e` passed the CPU replay gate but stalled the live 16-way soak 52% of
+the wall clock (soak report §S). Its finishability gate charged
+`max_size - inflight_prefill_size`, ignoring KV held by decoding requests and by
+retained/locked session prefixes. Reverted in `5bf0bcc`.
+
+- [x] 1. Make the replay reproduce the live failure
+  - [x] session residency leases: `retain_prefix` on finish, locked across turns,
+        released only on idle expiry or demand reclaim
+  - [x] model `Scheduler._reclaim_for_blocked_prefill` (LRU idle lease) and the
+        600 s client timeout that abandons a starved request
+  - [x] `switchyard-stage` profile: 16 sessions, sticky scenario, growing prefixes
+  - [x] stall metrics (`stall_seconds` / `stall_frac` / episodes) + `timeouts`
+  - [x] wall-clock proxy: `match_req` calls/tokens per pass
+  - [x] acceptance: 81ab30e stalls on the new profile, 68c54e7 does not
+- [x] 2. Corrected admission gate
+  - [x] charge finishability against obtainable pages (`available_size`), seeding
+        the adder with queued continuations' remaining footprints
+  - [x] cache the prefix match per pending req so refused passes stop re-walking
+  - [x] keep R2 continue-past-refusals, completing-chunk decode reservation,
+        `spill.valid`; drop `max_size` / `inflight_prefill_size` / `prefill_footprint`
+- [x] 3. Verify: tests/scheduler green, replay gate on all profiles, ruff,
+      `git diff --check`; floors raised to achieved minus 5%
+
+### Review
+
+**What the replay was missing.** It ran with `session_id=None` throughout, so no turn ever
+reached `_free_req_resources(retain_session=True)` -> `retain_prefix`, and no page was ever
+*locked*. Everything a request finished with went back to the tree as evictable, so
+`available_size` never diverged from "the pool minus what is running" -- exactly the
+divergence 81ab30e's gate mis-read. It also had no idle expiry, no demand reclaim, no client
+timeout, and no wall-clock accounting for passes that emit no batch, so a stall was invisible
+(the old loop called it a `LIVELOCK` fatal and stopped).
+
+**The corrected gate.** Charge a fresh admit's whole remaining footprint against
+`CacheManager.admissible_size` = `available_size` + tokens held by *idle reclaimable* session
+leases. That is the pool's three-way split done honestly: free/evictable, locked-but-buyable,
+locked-and-not-buyable (decoding requests, and leases of sessions with a request in flight).
+`available_size` alone under-counts the second bucket; `max_size` over-counts the third, which
+is the soak's stall. The adder is additionally seeded with the *unforwarded tail* of every
+prompt already mid-prefill, which is the anti-livelock invariant and is stable under progress:
+forwarding a chunk drops both the budget and the charge by the same tokens, so an advancing
+prefill never manufactures admission room. Kept from 81ab30e: continue-past-refusals, the
+completing-chunk decode reservation, the oversize skip, `spill.valid`. Dropped: `max_size` as
+the budget, `inflight_prefill_size`, `ChunkedReq.prefill_footprint`, the chunk-only charge.
+Replaced: strict FIFO among fresh admits became *aging* (`admission_patience`), because
+unconditional strict FIFO turns one unaffordable prompt into a dead scheduler.
+
+**Numbers** (seed 7, 20,000 forwards): see the report and the floors in
+`benchmarks/scheduler_replay.py`. The load-bearing result is that `81ab30e` PASSES the two
+residency-free profiles (it out-throughputs this fix there) and FAILS `switchyard-stage` at
+`stall_usage_p50 = 1.0000`, which is the live signature the old gate could not see.
+
+**Still only checkable on hardware** -- the replay does not model: the spill/cold-restore cost
+of a reclaimed lease (it treats release as free, where the server writes a checkpoint and may
+fail the restore with "Eviction did not free enough space"); non-reclaimable/explicit leases,
+which age out only on TTL; GDN state slots and the `mamba-slot 96/96` regime; and the real
+per-pass CPU cost, which is reported as `match_calls`/`match_tokens` rather than charged to
+the clock. A live 16-way soak on both routes remains the acceptance test.
