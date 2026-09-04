@@ -42,7 +42,7 @@ only, I=1856) plus one shared expert.
 ### Sizing on a 16 GB GPU
 
 - **Host RAM**: the NVFP4 routed-expert banks are 15.4 GiB (≈16.5 GB). With
-  `--host-ram-reserve-gb 3` and the ~4 GiB non-bank process footprint, plan on
+  `--host-ram-reserve-gb 6` and the ~4 GiB non-bank process footprint, plan on
   ≥ 23 GiB of MemAvailable. Run `python benchmarks/preflight_nemotron_host.py`
   first — it reports MemAvailable/SwapFree, the pin budget, the pinned/pageable
   layer split, VRAM holders, stale `~/.cache/torch_extensions` locks and stray
@@ -103,7 +103,7 @@ P1 — bring-up profile (single stream, no quantized KV):
 ```
 ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   --max-running-requests 1 --moe-backend offload --moe-pageable-gpu --moe-cache-auto \
-  --num-tokens 65536 --memory-ratio 0.85 --max-prefill-length 8192 --host-ram-reserve-gb 3
+  --num-tokens 65536 --memory-ratio 0.85 --max-prefill-length 8192 --host-ram-reserve-gb 6
 ```
 
 P2 — serving profile (16 concurrent, elastic KV, prefix cache, quantized KV):
@@ -115,7 +115,7 @@ ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   --num-tokens 262144 --max-seq-len-override 131072 --kv-cache-dtype q8_0 \
   --attention-backend triton --moe-backend offload --moe-cache-auto \
   --moe-cache-policy lfu \
-  --memory-ratio 0.85 --max-prefill-length 8192 --host-ram-reserve-gb 3 --enable-cache-report
+  --memory-ratio 0.85 --max-prefill-length 8192 --host-ram-reserve-gb 6 --enable-cache-report
 ```
 
 `--moe-cache-policy lfu` is the 2B4 recommendation and is worth 1.80× aggregate decode at
@@ -199,7 +199,7 @@ ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   --max-running-requests 1 --max-seq-len-override 1048576 --num-tokens 1048576 \
   --kv-grow-step-tokens 131072 --kv-cache-dtype q8_0 --attention-backend triton \
   --moe-backend offload --moe-cache-auto --linear-state-slots 5 \
-  --memory-ratio 0.85 --max-prefill-length 8192 --host-ram-reserve-gb 3 \
+  --memory-ratio 0.85 --max-prefill-length 8192 --host-ram-reserve-gb 6 \
   --session-spill-ram-gb 12 --session-spill-dir <nvme>
 ```
 

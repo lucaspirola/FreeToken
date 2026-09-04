@@ -152,7 +152,7 @@ P1 (bring-up, single stream):
 ```
 ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   --max-running-requests 1 --moe-backend offload --moe-pageable-gpu --moe-cache-auto \
-  --num-tokens 65536 --memory-ratio 0.85 --max-prefill-length 8192 --host-ram-reserve-gb 3
+  --num-tokens 65536 --memory-ratio 0.85 --max-prefill-length 8192 --host-ram-reserve-gb 6
 ```
 P2 (target: 16 concurrent, elastic, prefix cache, quantized KV):
 ```
@@ -160,7 +160,7 @@ ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   --max-running-requests 16 --elastic-initial-requests 4 --kv-grow-step-tokens 65536 \
   --num-tokens 262144 --max-seq-len-override 131072 --kv-cache-dtype q8_0 \
   --attention-backend triton --moe-backend offload --moe-pageable-gpu --moe-cache-auto \
-  --memory-ratio 0.85 --max-prefill-length 8192 --host-ram-reserve-gb 3 --enable-cache-report
+  --memory-ratio 0.85 --max-prefill-length 8192 --host-ram-reserve-gb 6 --enable-cache-report
 ```
 User decision (2026-09-03): KV cache is FP8 (`fp8_e4m3`, FreeToken block scales; checkpoint k_scale/v_scale ignored). Quantized KV requires `--attention-backend triton`; bf16 KV + FlashInfer is the fallback (KV is
 only +0.75 GiB at 262K). Try `FREETOKEN_PIN_BUDGET_GB` ≥ 17 to drop `--moe-pageable-gpu` and

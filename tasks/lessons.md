@@ -225,3 +225,10 @@ restore had already consumed the record. When driving a multi-turn session gate,
 chat-control marker out of the assistant text before resending it, never force the reply length,
 and expect `cached_tokens == 0` to mean "prefix diverged", not "spill/restore is broken" --
 check for `Discarded cold session ...: client token prefix changed` before blaming the store.
+- 2026-09-04 12:18 host OOM: kernel killed a FreeToken worker (18 GB shmem banks + 5 GB anon)
+  and the sweep took the tmux scope incl. Claude Code. Rules: (1) ANY job that loads the
+  checkpoint (server, parity, kernel test on real layers, ft bench bw) takes
+  scripts/gpu_lock.sh — "small GPU footprint" is not the criterion, host RAM is; (2) the lock
+  wrapper refuses to start below 22 GiB MemAvailable, caps a hold at 4 h, sets
+  oom_score_adj=1000 on the job, and kills its worker tree on exit; (3) at most two
+  subagents at a time, never one that ends its turn while its GPU job continues.
