@@ -298,3 +298,5 @@ Command: `ft serve --model ~/ai/models/Ornith-1.5-35B-Q4_K_M.gguf
 ## Backlog
 - [ ] Prompt-lookup (n-gram) speculative decoding for agent-session decode
 - [ ] Replay real Switchyard traces as the benchmark instead of synthetic soaks/needles
+- [ ] NOTE 2026-09-04: fork/main has 14 Ada/Ornith commits (cefa4bd..62f5a66) not in local main;
+      local main pushed as fork/nemotron35 (58e5f04). Merge/rebase decision pending (user).
