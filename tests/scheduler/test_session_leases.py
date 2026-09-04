@@ -180,12 +180,29 @@ class _SpillStore:
         self.records: dict[str, object] = {}
         self.discarded: list[object] = []
         self.touched: list[object] = []
+        self.captured: list = []
         self.prefetching: str | None = None
         self.cancelled: str | None = None
         self.protected: set[str] = set()
 
-    def spill(self, session_id, token_ids, page_indices, linear_slot, *, extra_states=()):
-        boundaries = sorted({len(page_indices), *(int(b) for b, _slot in extra_states)})
+    def spill(
+        self,
+        session_id,
+        token_ids,
+        page_indices,
+        linear_slot,
+        *,
+        extra_states=(),
+        captured_states=(),
+    ):
+        self.captured = list(captured_states)
+        boundaries = sorted(
+            {
+                len(page_indices),
+                *(int(b) for b, _slot in extra_states),
+                *(int(b) for b, _conv, _rec in captured_states),
+            }
+        )
         record = SimpleNamespace(
             session_id=session_id,
             num_pages=len(page_indices),
@@ -699,3 +716,159 @@ def test_a_restore_blocked_by_the_resident_session_is_retried_before_admission()
     assert attempts == [4, 4]
     assert scheduler._sessions["B"].handle == "restored"
     assert store.get("B") is None
+
+
+# ------------------------------------ prefill-captured state boundaries (task 3G)
+
+
+def _linear_state_pool(num_slots=8):
+    import torch
+
+    from freetoken.kvcache.linear_state_pool import LinearStatePool
+    from freetoken.models.config import LinearGatedDeltaGroupConfig
+
+    group = LinearGatedDeltaGroupConfig(
+        name="linear", layer_ids=(0,), num_key_heads=2, num_value_heads=2,
+        key_head_dim=8, value_head_dim=8, conv_kernel_dim=4, output_gate=True,
+    )
+    return LinearStatePool(group, num_slots, torch.bfloat16, torch.device("cpu"), tp_size=1)
+
+
+def _long_session(scheduler, tokens, captures):
+    """A resident 200K-token lease whose turns captured state at ``captures``."""
+    import torch
+
+    handle = SimpleNamespace(
+        node=SimpleNamespace(mamba_value=3),
+        get_matched_indices=lambda: list(range(len(tokens))),
+    )
+    lease = SessionLease(handle, 300.0, reclaimable=True)
+    lease.token_ids = tokens
+    lease.state_captures = [
+        (b, torch.zeros(2, dtype=torch.float32), torch.full((2,), float(b)))
+        for b in captures
+    ]
+    scheduler._sessions["A"] = lease
+    return lease
+
+
+def test_a_drift_in_the_last_tokens_of_a_200k_session_resumes_at_the_last_capture():
+    """The 1M profile keeps no radix snapshots, so the prefill captures are the only cut
+    points a 200K checkpoint has. One retokenized tail must cost the tail, not 200K."""
+    import torch
+
+    scheduler = _demand_scheduler()
+    store = scheduler._session_spill_store
+    tokens = torch.arange(200_000, dtype=torch.int32)
+    lease = _long_session(scheduler, tokens, [65_536, 131_072, 196_608])
+
+    scheduler._spill_soft_session("A", lease)
+    record = store.get("A")
+    assert record is not None
+    assert record.state_boundaries == [65_536, 131_072, 196_608, 200_000]
+
+    # The client echoes its own last turn back with the final 100 tokens retokenized.
+    drifted = torch.cat(
+        (tokens[:199_900].clone(), torch.full((101,), 7, dtype=torch.int32))
+    )
+    installed = []
+    scheduler.cache_manager.hybrid_session_restore_geometry = lambda _t: (0, 99)
+    scheduler.cache_manager.restore_hybrid_session_prefix = lambda _r, _s, n=None: (
+        installed.append(n) or "restored"
+    )
+    scheduler._sessions["A"] = SessionLease(None, 300.0, reclaimable=True)
+
+    assert scheduler._restore_cold_session("A", drifted) is True
+    assert installed == [196_608]  # 3 328 tokens re-prefilled instead of 200 000
+
+
+def test_captured_states_are_released_once_the_checkpoint_owns_them():
+    import weakref
+
+    import torch
+
+    scheduler = _demand_scheduler()
+    store = scheduler._session_spill_store
+    tokens = torch.arange(4, dtype=torch.int32)
+    lease = _long_session(scheduler, tokens, [2])
+    staged = weakref.ref(lease.state_captures[0][2])
+
+    scheduler._spill_soft_session("A", lease)
+
+    assert [b for b, _c, _r in store.captured] == [2]  # handed to the checkpoint ...
+    assert lease.state_captures == []  # ... and the staging is dropped
+    del store.captured
+    assert staged() is None
+
+
+def test_state_capture_defaults_on_only_when_snapshot_slots_are_scarce():
+    import torch
+
+    def _install(num_slots, running, wanted=None):
+        scheduler = Scheduler.__new__(Scheduler)
+        pool = SimpleNamespace(
+            num_slots=num_slots,
+            device=torch.device("cpu"),
+            bytes_per_slot=lambda: 1 << 20,
+            conv_states=torch.zeros(1, num_slots),
+            recurrent_states=torch.zeros(1, num_slots),
+        )
+        scheduler.cache_manager = SimpleNamespace(
+            linear_state_pool=pool, session_state_capture_hook=None
+        )
+        scheduler._session_spill_store = SimpleNamespace(
+            state_stride_tokens=65_536, max_states=8
+        )
+        scheduler._state_capture = None
+        scheduler._install_state_capture(
+            SimpleNamespace(
+                max_running_req=running, session_spill_capture_states=wanted
+            )
+        )
+        return scheduler
+
+    # The 1M profile: 5 slots for one request cannot spare one to donate.
+    assert _install(5, 1)._state_capture is not None
+    # The default pool leaves snapshot slots over, so the free radix boundaries suffice.
+    assert _install(9, 1)._state_capture is None
+    assert _install(16, 3)._state_capture is not None  # scarce again at 3 running requests
+    # And the flag overrides the automatic choice either way.
+    assert _install(9, 1, wanted=True)._state_capture is not None
+    assert _install(5, 1, wanted=False)._state_capture is None
+
+
+def test_every_prefill_forward_offers_its_boundary_snapshot_to_the_session():
+    """Intermediate chunks never reach cache_req, so the drain is the only point that sees
+    a long prompt's boundaries -- one capture per stride of prefilled tokens."""
+    import torch
+
+    from freetoken.scheduler.session_spill import PrefillStateCapture
+
+    linear = _linear_state_pool()
+    scheduler = _demand_scheduler()
+    scheduler._state_capture = PrefillStateCapture(linear, stride=64, max_states=8)
+    lease = SessionLease(None, 300.0, reclaimable=True)
+    scheduler._sessions["A"] = lease
+
+    def _chunk(boundary, next_track_idx, session_id="A"):
+        return SimpleNamespace(
+            session_id=session_id,
+            mamba_last_track_seqlen=boundary,
+            mamba_ping_pong=(1, 2),
+            mamba_next_track_idx=next_track_idx,
+        )
+
+    torch.manual_seed(23)
+    linear.recurrent_states.normal_()
+    expected = linear.recurrent_states[:, 1].clone()
+
+    # The forward flipped the index, so the state it just wrote is in ping_pong[0].
+    scheduler._capture_session_states(SimpleNamespace(reqs=[_chunk(64, 1)]))
+    scheduler._capture_session_states(SimpleNamespace(reqs=[_chunk(96, 0)]))  # < 1 stride
+    scheduler._capture_session_states(SimpleNamespace(reqs=[_chunk(128, 1)]))
+    # A request with no lease (plain completion) and one with no boundary are ignored.
+    scheduler._capture_session_states(SimpleNamespace(reqs=[_chunk(192, 1, None)]))
+    scheduler._capture_session_states(SimpleNamespace(reqs=[_chunk(None, 1)]))
+
+    assert [b for b, _c, _r in lease.state_captures] == [64, 128]
+    assert torch.equal(lease.state_captures[0][2], expected)

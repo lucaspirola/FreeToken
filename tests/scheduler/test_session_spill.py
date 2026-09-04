@@ -523,3 +523,68 @@ def test_a_cancelled_prefetch_leaves_the_checkpoint_on_disk(tmp_path, monkeypatc
     assert store.start_prefetch("agent-a") is True
     assert store.collect_prefetch(wait=True) == "agent-a"
     store.shutdown()
+
+
+# -------------------------------------------------- prefill-time state capture (3G)
+
+
+def _capture(stride=64, max_states=8):
+    from freetoken.scheduler.session_spill import PrefillStateCapture
+
+    linear = _linear_pool()
+    torch.manual_seed(13)
+    linear.conv_states.normal_()
+    linear.recurrent_states.normal_()
+    return linear, PrefillStateCapture(linear, stride=stride, max_states=max_states)
+
+
+def test_capture_takes_one_state_per_stride_and_never_more_than_the_cap():
+    linear, capture = _capture()
+
+    taken = capture.capture([], 64, 1)
+    taken = capture.capture(taken, 100, 2)  # 36 tokens on: inside the stride, no copy
+    assert [b for b, _c, _r in taken] == [64]
+    assert torch.equal(taken[0][1], linear.conv_states[:, 1])
+    assert torch.equal(taken[0][2], linear.recurrent_states[:, 1])
+
+    for boundary in range(128, 64 * 21, 64):
+        taken = capture.capture(taken, boundary, 1)
+
+    boundaries = [b for b, _c, _r in taken]
+    assert len(boundaries) == 8  # the cap holds however long the turn runs
+    assert boundaries == sorted(boundaries) and boundaries[-1] == 64 * 20
+    assert len(set(boundaries)) == 8
+
+
+def test_capture_thinning_keeps_stride_spaced_coverage_of_the_whole_prefix():
+    _linear, capture = _capture(stride=65_536, max_states=8)
+    kept = capture.thin(
+        [(b, None, None) for b in range(65_536, 65_536 * 12 + 1, 65_536)]
+    )
+    boundaries = [b for b, _c, _r in kept]
+    assert len(boundaries) == 8
+    assert boundaries[-1] == 65_536 * 12  # the newest boundary always survives
+    assert all(
+        later - earlier >= 65_536
+        for earlier, later in zip(boundaries, boundaries[1:])
+    )
+
+
+def test_captured_states_ride_into_the_checkpoint_beside_the_final_one(tmp_path):
+    kv, linear, manager, store = _boundary_pools(tmp_path)
+    tokens = torch.tensor([41, 42, 43, 44, 45, 46], dtype=torch.int32)
+    pages, final_slot, _boundary_slot = _seeded_session(kv, linear, manager, tokens)
+    conv = torch.randn_like(linear.conv_states[:, 0])
+    recurrent = torch.randn_like(linear.recurrent_states[:, 0])
+
+    record = store.spill(
+        "agent-a", tokens, pages, final_slot, captured_states=[(3, conv, recurrent)]
+    )
+    assert record is not None and record.state_boundaries == [3, 6]
+
+    restored = manager.restore_hybrid_session_prefix(record, store, 3)
+    assert restored.cached_len == 3
+    assert torch.equal(linear.recurrent_states[:, restored.node.mamba_value], recurrent)
+    assert torch.equal(linear.conv_states[:, restored.node.mamba_value], conv)
+    manager.unlock(restored)
+    store.shutdown()

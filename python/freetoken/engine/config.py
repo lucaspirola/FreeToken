@@ -58,6 +58,11 @@ class EngineConfig:
     # restore cuts at the deepest stored boundary the client's tokens still match, so this
     # bounds the re-prefill a retokenization drift costs -- at ~47 MiB per boundary.
     session_spill_state_stride: int = 65_536
+    # Copy the recurrent state to the host every ``session_spill_state_stride`` prefilled
+    # tokens. None = automatic: on only when the state pool holds fewer than 6 slots per
+    # running request, which is when a chunk commit cannot spare a slot to donate a snapshot
+    # to the radix tree and a partial-prefix restore would otherwise have nothing to cut at.
+    session_spill_capture_states: bool | None = None
     attention_backend: str = "auto"
     moe_backend: str = "auto"
     # NVFP4 routed-expert GEMM backend (--nvfp4-backend): auto|marlin|flashinfer|triton.

@@ -341,6 +341,25 @@ def parse_args(
         ),
     )
     parser.add_argument(
+        "--session-spill-capture-states",
+        dest="session_spill_capture_states",
+        action="store_true",
+        default=ServerArgs.session_spill_capture_states,
+        help=(
+            "Copy a session's recurrent state to the host every "
+            "--session-spill-state-stride prefilled tokens, so a cold restore has cut "
+            "points even when the state pool is too small to leave snapshots in the "
+            "prefix tree. Automatic by default: on below 6 state slots per running "
+            "request. Costs up to 8 state slots' worth of host RAM per resident turn."
+        ),
+    )
+    parser.add_argument(
+        "--no-session-spill-capture-states",
+        dest="session_spill_capture_states",
+        action="store_false",
+        help="Never copy recurrent state to the host during prefill.",
+    )
+    parser.add_argument(
         "--session-spill-persist",
         dest="session_spill_persist",
         action="store_true",

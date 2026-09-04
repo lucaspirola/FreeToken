@@ -207,6 +207,18 @@ Decisions from the 1M gate (tasks 3F/3G, 2026-09-04):
   matching prefix that ends on a stored boundary and re-prefills the tail, instead of
   discarding 1.24 GiB over one retokenized `</think>`. Records written before this
   (manifest v1) are deleted on adoption.
+- **Prefill-time state capture** (`--session-spill-capture-states`, auto). At
+  `--linear-state-slots 5` the chunk commit cannot reserve a replacement ping-pong slot,
+  so it donates no snapshot at all and the radix-derived boundaries above are empty --
+  the partial restore degrades to whole-or-nothing exactly where it matters. So while a
+  turn prefills, the boundary snapshot the forward already wrote is copied to the host
+  every `--session-spill-state-stride` tokens (async D2H on a side stream into pinned
+  staging, synchronized before the spill; the current stream waits on the event so the
+  next forward cannot overwrite the frozen slot mid-transfer). At most 8 are held --
+  ~376 MiB per resident turn on Lightning -- merged across the session's turns, unioned
+  with any radix-held boundaries at spill time, and freed at the spill or when the lease
+  closes. Auto-on below 6 state slots per running request, i.e. only when the free
+  snapshots are scarce.
 - **A restore blocked by the resident session is retried, not discarded**, at the
   admission-failure point that spills its competitor.
 - The `nemotron_v3` reasoning parser now drops a `<think>`/`</think>` that arrives

@@ -4,7 +4,7 @@ import json
 import math
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, NamedTuple, NoReturn, Set, Tuple, TypeAlias
 
 import torch
@@ -105,6 +105,9 @@ class SessionLease:
     last_used_at: float = 0.0
     token_ids: torch.Tensor | None = None
     spill: SessionSpillRecord | None = None
+    # Host state copies taken while this session's turns prefilled; consumed by the next
+    # checkpoint and released with it (or when the lease closes).
+    state_captures: list = field(default_factory=list)
 
 
 class Scheduler(SchedulerIOMixin):
@@ -232,6 +235,7 @@ class Scheduler(SchedulerIOMixin):
             self.engine, config
         )
         self._session_spill_last_pressure_check = 0.0
+        self._state_capture = None
         if self._session_spill_store is not None:
             logger.info_rank0(
                 "Cold session tier enabled: RAM %.2f GiB, disk %.2f GiB, retained "
@@ -242,6 +246,7 @@ class Scheduler(SchedulerIOMixin):
                 "persistent" if config.session_spill_persist else "wiped on exit",
                 config.host_ram_reserve_gb,
             )
+            self._install_state_capture(config)
         self.tokenizer = load_tokenizer(config.model_path)
         self.eos_token_ids = load_eos_token_ids(config.model_path, self.tokenizer)
         self.toolcall_anchor_id = None
@@ -639,6 +644,11 @@ class Scheduler(SchedulerIOMixin):
 
         batch, (_, next_tokens_cpu, copy_done) = last_data[0].batch, last_data[1]
         copy_done.synchronize()
+        # Optional for the same reason as the observer below: the low-level drain tests
+        # call this with a scheduler-shaped stub.
+        capture_states = getattr(self, "_capture_session_states", None)
+        if batch.is_prefill and capture_states is not None:
+            capture_states(batch)
         # Several low-level drain tests intentionally invoke this method with a
         # minimal scheduler-shaped stub. Runtime schedulers always expose the
         # observer; keeping it optional here preserves that narrow test seam.
@@ -999,6 +1009,28 @@ class Scheduler(SchedulerIOMixin):
             logger.error(f"Unknown message type: {type(msg)}")
             raise NotImplementedError
 
+    def _capture_session_states(self, batch) -> None:
+        """Copy each session request's just-written boundary snapshot to the host.
+
+        Runs once per drained prefill forward, which is the only point that sees every
+        chunk: a prompt's intermediate chunks never reach ``cache_req``, and its last one
+        can donate to the radix tree only when the state pool has a slot to spare. The
+        snapshot the forward wrote sits in the frozen ping-pong slot until the next forward
+        overwrites it, so this is the moment to take it; the capture itself drops boundaries
+        closer together than one stride.
+        """
+        capture = getattr(self, "_state_capture", None)
+        sessions = getattr(self, "_sessions", None)
+        if capture is None or not sessions:
+            return
+        for req in batch.reqs:
+            boundary = getattr(req, "mamba_last_track_seqlen", None)
+            lease = sessions.get(getattr(req, "session_id", None) or "")
+            if boundary is None or lease is None or req.mamba_ping_pong is None:
+                continue
+            frozen = req.mamba_ping_pong[1 - req.mamba_next_track_idx]
+            lease.state_captures = capture.capture(lease.state_captures, boundary, frozen)
+
     def _restore_linear_states(self, batch) -> None:
         """COW-restore a hybrid prefix hit's GDN snapshot into its freshly-allocated live slot
         (first chunk only). MUST run on the ENGINE stream so it is program-ordered after the
@@ -1078,6 +1110,7 @@ class Scheduler(SchedulerIOMixin):
             store.cancel_prefetch(session_id)
         if session is None:
             return False, None
+        session.state_captures = []
         if session.handle is not None:
             self.cache_manager.unlock(session.handle)
         if discard_state:
@@ -1141,6 +1174,40 @@ class Scheduler(SchedulerIOMixin):
         )
         return True
 
+    def _install_state_capture(self, config) -> None:
+        """Turn on prefill-time state capture when the tree cannot hold spare snapshots.
+
+        A chunk commit donates its boundary snapshot only if it can reserve a replacement
+        ping-pong slot, so a pool below padding + live + 2 ping-pong + 1 spare per running
+        request (6) leaves a restore nothing to cut at. That is precisely the 1M profile
+        (``--linear-state-slots 5``), so the capture defaults on there and off wherever the
+        cheaper radix snapshots already survive.
+        """
+        # (The capture itself is driven from _capture_session_states, once per drained
+        # prefill forward -- a chunk commit runs only for a prompt's last chunk.)
+        pool = getattr(self.cache_manager, "linear_state_pool", None)
+        store = self._session_spill_store
+        if pool is None or store is None:
+            return
+        wanted = getattr(config, "session_spill_capture_states", None)
+        scarce = pool.num_slots < 6 * max(1, int(config.max_running_req))
+        if not (scarce if wanted is None else wanted):
+            return
+        from .session_spill import PrefillStateCapture
+
+        self._state_capture = PrefillStateCapture(
+            pool, stride=store.state_stride_tokens, max_states=store.max_states
+        )
+        logger.info_rank0(
+            "Capturing session recurrent state every %d prefilled tokens (%d slots for "
+            "%d running request(s); at most %d x %.0f MiB of host RAM per resident turn)",
+            store.state_stride_tokens,
+            pool.num_slots,
+            config.max_running_req,
+            store.max_states,
+            pool.bytes_per_slot() / (1 << 20),
+        )
+
     def _discard_session_spill(self, session: SessionLease) -> None:
         store = getattr(self, "_session_spill_store", None)
         if store is not None and session.spill is not None:
@@ -1180,16 +1247,23 @@ class Scheduler(SchedulerIOMixin):
         if linear_slot is None or len(page_indices) != len(session.token_ids):
             return
         self._discard_session_spill(session)
+        capture = getattr(self, "_state_capture", None)
+        if capture is not None:
+            capture.synchronize()  # the staged copies are host-readable now
         started = time.perf_counter()
         record = store.spill(
             session_id,
             session.token_ids,
             page_indices,
             linear_slot,
-            # Earlier x``track_chunk_size`` states the tree still holds: they are what a
-            # later restore cuts at when the client's tokens drifted near the end.
+            # Earlier x``track_chunk_size`` states the tree still holds, plus the ones
+            # captured during prefill: they are what a later restore cuts at when the
+            # client's tokens drifted near the end.
             extra_states=self.cache_manager.hybrid_session_state_boundaries(handle),
+            captured_states=session.state_captures,
         )
+        # The checkpoint owns its own copies now; free the staging either way.
+        session.state_captures = []
         elapsed = time.perf_counter() - started
         if record is None:
             logger.warning(

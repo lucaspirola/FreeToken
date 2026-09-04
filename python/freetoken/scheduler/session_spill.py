@@ -32,6 +32,7 @@ import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
@@ -97,6 +98,31 @@ class _Prefetch:
     started: float
     thread: threading.Thread | None = None
     values: list[torch.Tensor] | None = None
+
+
+def select_state_boundaries(
+    candidates: Iterable[int], final: int, *, stride: int, max_states: int
+) -> list[int]:
+    """Thin ``candidates`` to at most ``max_states`` boundaries, ``final`` always kept.
+
+    Two passes over the candidates, newest first: the first spends the budget on
+    ``stride``-spaced coverage of the whole prefix, the second gives what is left to the
+    freshest boundaries -- which is where a retokenization drift almost always is, and is
+    all a short session has to offer.  Shared by the checkpoint writer and by the
+    prefill-time capture list, so both thin the same way.
+    """
+    final = int(final)
+    kept = [final]
+    for gap in (max(1, int(stride)), 0):
+        for boundary in sorted({int(c) for c in candidates}, reverse=True):
+            if len(kept) >= max_states:
+                return sorted(kept)
+            if boundary <= 0 or boundary >= final or boundary in kept:
+                continue
+            if gap and min(abs(boundary - k) for k in kept) < gap:
+                continue
+            kept.append(boundary)
+    return sorted(kept)
 
 
 def _mem_available_bytes() -> int:
@@ -435,24 +461,9 @@ class SessionSpillStore:
     # ------------------------------------------------------------------ spill
 
     def _select_state_boundaries(self, candidates: Iterable[int], final: int) -> list[int]:
-        """Thin ``candidates`` to at most ``max_states`` boundaries, ``final`` always kept.
-
-        Two passes over the candidates, newest first: the first spends the budget on
-        ``state_stride_tokens``-spaced coverage of the whole prefix, the second gives what is
-        left to the freshest boundaries -- which is where a retokenization drift almost
-        always is, and is all a short session has to offer.
-        """
-        kept = [int(final)]
-        for gap in (self.state_stride_tokens, 0):
-            for boundary in sorted({int(c) for c in candidates}, reverse=True):
-                if len(kept) >= self.max_states:
-                    return sorted(kept)
-                if boundary <= 0 or boundary >= final or boundary in kept:
-                    continue
-                if gap and min(abs(boundary - k) for k in kept) < gap:
-                    continue
-                kept.append(boundary)
-        return sorted(kept)
+        return select_state_boundaries(
+            candidates, final, stride=self.state_stride_tokens, max_states=self.max_states
+        )
 
     @torch.inference_mode()
     def spill(
@@ -463,15 +474,26 @@ class SessionSpillStore:
         linear_slot: int,
         *,
         extra_states: Sequence[tuple[int, int]] = (),
+        captured_states: Sequence[tuple[int, torch.Tensor, torch.Tensor]] = (),
     ) -> SessionSpillRecord | None:
-        """Checkpoint one session. ``extra_states`` are ``(prefix length, pool slot)`` pairs
-        for earlier boundaries the caller can still reach (live radix snapshots), and are
-        what lets a later restore cut before a client-side token drift."""
+        """Checkpoint one session, with the recurrent state at several prefix boundaries.
+
+        ``extra_states`` are ``(prefix length, pool slot)`` pairs still live in the state
+        pool (radix snapshots on this session's path); ``captured_states`` are
+        ``(prefix length, conv, recurrent)`` host copies taken during prefill, for the
+        profiles whose state pool is too small to hold spare snapshots. Both are what let a
+        later restore cut before a client-side token drift instead of losing the record.
+        """
         tokens = token_ids.detach().to(device="cpu", dtype=torch.int32).clone()
         num_pages = int(len(page_indices))
-        slots = {int(b): int(slot) for b, slot in extra_states}
-        slots[num_pages] = int(linear_slot)
-        boundaries = self._select_state_boundaries(slots, num_pages)
+        states: dict[int, int | tuple[torch.Tensor, torch.Tensor]] = {
+            int(boundary): (conv, recurrent) for boundary, conv, recurrent in captured_states
+        }
+        # A live pool slot and a host capture at the same boundary hold the same state; the
+        # slot is preferred because its copy is the one this spill pays for anyway.
+        states.update({int(b): int(slot) for b, slot in extra_states})
+        states[num_pages] = int(linear_slot)
+        boundaries = self._select_state_boundaries(states, num_pages)
         byte_size = self._payload_bytes(num_pages, tokens, len(boundaries))
         # Drop any previous checkpoint for this session first: its directory is the same
         # deterministic path this spill is about to write.
@@ -517,12 +539,16 @@ class SessionSpillStore:
 
             pool = self.linear_state_pool
             for boundary in boundaries:
-                slot = slots[boundary]
-                for family, source in (
-                    ("gdn_conv", pool.conv_states),
-                    ("gdn_recurrent", pool.recurrent_states),
-                ):
-                    value = source[:, slot].cpu().clone().contiguous()
+                source = states[boundary]
+                pair = (
+                    (pool.conv_states[:, source], pool.recurrent_states[:, source])
+                    if isinstance(source, int)
+                    else source
+                )
+                for family, tensor in zip(STATE_FAMILIES, pair, strict=True):
+                    # ``clone`` also releases the capture's pinned staging once the
+                    # session's list is dropped.
+                    value = tensor.cpu().clone().contiguous()
                     if tier == "ram":
                         chunks.append(SpillChunk(family, -1, boundary, value=value))
                     else:
@@ -809,4 +835,95 @@ class SessionSpillStore:
                 pass
 
 
-__all__ = ["SessionSpillRecord", "SessionSpillStore", "SpillChunk"]
+class PrefillStateCapture:
+    """Bounded host copies of a session's recurrent state, taken while its turn prefills.
+
+    The partial-prefix restore needs a recurrent state at the cut. Its cheap source is the
+    radix tree's own x``track_chunk_size`` snapshots, but only the last chunk of a prompt
+    reaches a chunk commit at all, and at ``--linear-state-slots 5`` -- padding + live + two
+    ping-pong slots -- even that one cannot reserve a replacement slot, so it donates
+    nothing. Every prefill forward does write its boundary snapshot into the frozen
+    ping-pong slot, though; this copies that slot to the host once per ``stride`` tokens and
+    hands the result to the next spill.
+
+    The copy is issued on a side stream into pinned staging and never synchronizes the CPU;
+    the current stream then waits on its event, which is what keeps the next forward from
+    overwriting the frozen slot underneath the transfer. One event per stride against
+    seconds of prefill is not a stall the GPU can feel.
+
+    Cost is ``max_states`` x ``bytes_per_slot`` of host RAM per resident turn (8 x ~47 MiB
+    on Nemotron 3.5 Lightning), released when the session spills or its lease closes.
+    """
+
+    def __init__(self, linear_state_pool, *, stride: int, max_states: int) -> None:
+        self.pool = linear_state_pool
+        self.stride = max(1, int(stride))
+        self.max_states = max(1, int(max_states))
+        self._device = getattr(linear_state_pool, "device", torch.device("cpu"))
+        self._stream = (
+            torch.cuda.Stream(device=self._device) if self._device.type == "cuda" else None
+        )
+        self._event = None
+
+    def _staged(self, source: torch.Tensor) -> torch.Tensor:
+        if self._device.type != "cuda":
+            return source.cpu().clone()
+        host = torch.empty(source.shape, dtype=source.dtype, pin_memory=True)
+        host.copy_(source, non_blocking=True)
+        return host
+
+    def capture(self, taken: list, boundary: int, slot: int) -> list:
+        """Stage the state at ``boundary`` from ``slot`` onto ``taken``, and return it.
+
+        A boundary less than one stride past the newest capture is skipped, so the cost is
+        one bounded transfer per stride of prefilled tokens however small the model's own
+        snapshot granularity is.
+        """
+        boundary = int(boundary)
+        taken = taken or []
+        if boundary <= 0 or any(boundary - b < self.stride for b, _c, _r in taken):
+            return taken
+        if self._stream is not None:
+            self._stream.wait_stream(torch.cuda.current_stream(self._device))
+        staging = nullcontext() if self._stream is None else torch.cuda.stream(self._stream)
+        with staging:
+            conv = self._staged(self.pool.conv_states[:, slot])
+            recurrent = self._staged(self.pool.recurrent_states[:, slot])
+        if self._stream is not None:
+            self._event = torch.cuda.Event()
+            self._event.record(self._stream)
+            # The frozen ping-pong slot is rewritten by a later forward: make everything
+            # this scheduler enqueues next (the engine stream waits on it in turn) come
+            # after the transfer that is reading it.
+            torch.cuda.current_stream(self._device).wait_event(self._event)
+        return self.thin(taken + [(boundary, conv, recurrent)])
+
+    def thin(self, captures: list) -> list:
+        """Keep at most ``max_states`` captures, by the checkpoint's own boundary rule."""
+        captures = sorted(captures, key=lambda item: item[0])
+        if len(captures) <= self.max_states:
+            return captures
+        keep = set(
+            select_state_boundaries(
+                (item[0] for item in captures),
+                captures[-1][0],
+                stride=self.stride,
+                max_states=self.max_states,
+            )
+        )
+        return [item for item in captures if item[0] in keep]
+
+    def synchronize(self) -> None:
+        """Make every staged copy readable on the host (called before a spill)."""
+        if self._event is not None:
+            self._event.synchronize()
+            self._event = None
+
+
+__all__ = [
+    "PrefillStateCapture",
+    "SessionSpillRecord",
+    "SessionSpillStore",
+    "SpillChunk",
+    "select_state_boundaries",
+]

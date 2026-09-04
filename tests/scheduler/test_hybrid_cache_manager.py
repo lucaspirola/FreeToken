@@ -179,3 +179,29 @@ def test_snapshot_boundary_follows_the_model_chunk():
         CacheManager(256, 128, pt128, "hybrid_radix", linear_state_pool=_pool())
     ok = CacheManager(256, 128, pt128, "hybrid_radix", linear_state_pool=_mamba2_pool())
     assert ok.prefix_cache.page_size == 128
+
+
+def test_a_pool_without_a_spare_slot_donates_no_snapshot_at_all():
+    """Why prefill-time state capture exists: at the 1M profile's `--linear-state-slots 5`
+    (padding + live + 2 ping-pong) the chunk commit cannot reserve a replacement slot, so it
+    donates nothing and a cold restore is left with no boundary to cut at."""
+    pool = _pool(num_slots=4)
+    page_table = torch.zeros(4, 64, dtype=torch.int32)
+    cm = CacheManager(64, 1, page_table, "hybrid_radix", linear_state_pool=pool)
+
+    mr = cm.match_req(_pend([1, 2, 3, 4, 5]))
+    live, pp = pool.alloc(1)[0], tuple(pool.alloc(2))
+    assert pool.num_free_slots == 0 and cm.acquire_mamba_slot() is None
+    page_table[0, :4] = torch.tensor([100, 101, 102, 103], dtype=torch.int32)
+    req = Req(input_ids=torch.tensor([1, 2, 3, 4, 5], dtype=torch.int32), table_idx=0,
+              cached_len=4, output_len=1, uid=0, sampling_params=SamplingParams(),
+              cache_handle=mr.cuda_handle)
+    req.linear_slot_idx, req.mamba_ping_pong = live, pp
+    req.mamba_next_track_idx = 1              # frozen = pp[0], the slot the forward wrote
+    req.mamba_last_track_seqlen = 4
+    cm.lock(mr.cuda_handle)
+
+    cm.cache_req(req, finished=False)
+
+    assert cm.match_req(_pend([1, 2, 3, 4, 9])).mamba_value is None
+    assert req.mamba_ping_pong == pp  # both slots still the request's own

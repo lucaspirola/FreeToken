@@ -62,6 +62,7 @@ parsers all resolve automatically from the checkpoint and the GPU.
 | `--session-spill-disk-gb` | 64 | Per-server disk/NVMe cold-session budget |
 | `--session-spill-limit-gb` | 50 | Total retained checkpoint bytes (RAM + disk); a spill over the cap evicts least-recently-used checkpoints instead of failing |
 | `--session-spill-state-stride` | 65536 | Spacing (tokens) of the extra recurrent-state boundaries a checkpoint carries; a restore resumes at the deepest boundary the client's tokens still match |
+| `--session-spill-capture-states` / `--no-...` | auto | Copy the recurrent state to the host every stride of prefilled tokens so a cold restore has cut points; auto = on below 6 state slots per running request (e.g. `--linear-state-slots 5`), costing up to 8 states (~376 MiB on Lightning) of host RAM per resident turn |
 | `--session-spill-persist` / `--no-session-spill-persist` | on | Keep checkpoints across restarts (startup adopts manifests matching this model + K/V layout, deletes the rest) or wipe them on exit |
 | `--auto-session-grace-seconds` | 0 (off) | Safety-net timer after which an idle auto-bound session may be checkpointed, and only while a request is queued or the pools are full; 0 keeps it resident until an admission needs the space |
 | `--host-ram-reserve-gb` | 3 | Minimum `MemAvailable` kept outside expert banks and RAM session checkpoints |
