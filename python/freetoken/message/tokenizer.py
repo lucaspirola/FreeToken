@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List
 
 from freetoken.core import SamplingParams
+from freetoken.hidden_states import HiddenStateSpec
 
 from .utils import deserialize_type, serialize_type
 
@@ -36,6 +37,10 @@ class DetokenizeMsg(BaseTokenizerMsg):
     # The request's stop strings (None when it has none), so the detokenizer can hold back
     # a trailing partial-stop prefix instead of streaming it and then needing to retract.
     stop_strs: list[str] | None = None
+    # Path of the hidden-state artifact this request's prefill wrote, echoed to the client
+    # as `kv_transfer_params.hidden_states_path`. Set once, on the reply that closes the
+    # prefill; None on every ordinary request.
+    hidden_states_path: str | None = None
     # KV page-pool usage snapshot at this step (not-evictable used/total), passed
     # through to the frontend for the shell status bar. 0/0 for owned-KV models.
     kv_used_pages: int = 0
@@ -75,6 +80,11 @@ class TokenizeMsg(BaseTokenizerMsg):
     session_id: str | None = None
     session_ttl_seconds: float | None = None
     session_reclaimable: bool = False
+    # Switchyard prefill-probe export (freetoken/hidden_states.py), already resolved
+    # against --hidden-states-dir; None on every ordinary request.
+    hidden_states: HiddenStateSpec | None = None
+    # Force a full recompute of the prompt (see Req.no_prefix_cache).
+    no_prefix_cache: bool = False
 
 
 @dataclass

@@ -105,6 +105,32 @@ class Message(BaseModel):
     tool_calls: list[ToolCall] | None = None
 
 
+class KvTransferParams(BaseModel):
+    """vLLM's hidden-state connector wire, as Switchyard's prefill router sends it.
+
+    The router posts ``max_tokens: 1`` with top-level ``kv_transfer_params`` and reads
+    ``kv_transfer_params.hidden_states_path`` off the response. ``hidden_states_path``
+    is a *directory* on the way in and the written ``.safetensors`` file on the way out
+    -- vLLM chooses the file name, and the reader is documented never to guess it.
+
+    FreeToken adds ``layer_ids`` (vLLM spells this
+    ``eagle_aux_hidden_state_layer_ids`` in the speculative-config at launch, which is
+    not a per-request knob there); it defaults to every block of the model.
+    ``include_output_tokens`` is accepted for wire compatibility and ignored: FreeToken
+    only ever exports prompt positions, which is all the router mean-pools.
+
+    This model is the only place ``kv_transfer_params`` is typed. /v1/completions,
+    /v1/messages and /v1/responses do not declare it, so it lands in their ``extra`` and
+    is ignored there -- the probe is a chat-completions feature.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    hidden_states_path: str | None = None
+    layer_ids: list[int] | None = None
+    include_output_tokens: bool = False
+
+
 class ChatCompletionRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -149,6 +175,10 @@ class ChatCompletionRequest(BaseModel):
     # explicit close, disconnect/abort, or idle expiry.
     session_id: str | None = None
     session_ttl_seconds: float | None = None
+    # Opt-in hidden-state export for Switchyard's prefill probe. Typed (not swallowed by
+    # extra="allow") because it changes how the request is served: it bypasses prefix
+    # reuse and binds no session. Requires --hidden-states-dir; see docs/switchyard.md.
+    kv_transfer_params: KvTransferParams | None = None
 
     @model_validator(mode="after")
     def _sync_max_completion_tokens(self) -> "ChatCompletionRequest":

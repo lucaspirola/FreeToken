@@ -7,6 +7,7 @@ import torch
 
 if TYPE_CHECKING:
     from freetoken.core import SamplingParams
+    from freetoken.hidden_states import HiddenStateSpec
 
     from .prefill import ChunkedReq
 
@@ -20,6 +21,10 @@ class PendingReq:
     mm_embeds: torch.Tensor | None = None
     session_id: str | None = None
     session_ttl_seconds: float | None = None
+    # Switchyard prefill-probe export; see freetoken/hidden_states.py.
+    hidden_states: HiddenStateSpec | None = None
+    # Match against the empty prefix (see Req.no_prefix_cache).
+    no_prefix_cache: bool = False
 
     @property
     def input_len(self) -> int:

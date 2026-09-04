@@ -95,6 +95,8 @@ See [models.md](models.md#moe-backends) for what each backend does.
 | `--no-context-preflight` | off | Skip the frontend tokenize-and-check that returns HTTP 400 `context_length_exceeded` before a prompt is queued |
 | `--force-nonempty-content` | off | When a turn ends with empty content and no tool call, move the reasoning text into `content` (coding agents, Switchyard) |
 | `--json-retry` | 1 | Greedy repair resubmissions when a `response_format` json answer is not valid JSON; 0 disables |
+| `--hidden-states-dir` | off | Enable the Switchyard prefill-probe export and make this directory its only permitted root; a request opts in per call with top-level `kv_transfer_params` and gets the artifact path back ([switchyard.md](switchyard.md#6-hidden-state-probe-target)) |
+| `--hidden-states-max-tokens` | 4096 | Prompt-token cap for one hidden-state probe; a longer prompt is a 400 `context_length_exceeded` (the artifact is tokens x layers x hidden) |
 
 ## ft shell
 

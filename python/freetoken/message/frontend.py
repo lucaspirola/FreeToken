@@ -56,6 +56,9 @@ class UserReply(BaseFrontendMsg):
     finish_reason: str | None = None
     # The stop string that ended generation (Anthropic reports it as stop_reason='stop_sequence').
     matched_stop: str | None = None
+    # Path of the hidden-state artifact this request's prefill wrote (Switchyard's
+    # prefill probe); echoed as `kv_transfer_params.hidden_states_path`. None otherwise.
+    hidden_states_path: str | None = None
 
 
 @dataclass

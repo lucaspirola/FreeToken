@@ -10,6 +10,11 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from freetoken.core import SamplingParams
+from freetoken.hidden_states import (
+    HiddenStateSpec,
+    resolve_hidden_states_dir,
+    validate_layer_ids,
+)
 from freetoken.message import TokenizeMsg
 from freetoken.tokenizer.effort import EFFORT_SCALE, KNOWN_REASONING_EFFORTS
 
@@ -94,6 +99,7 @@ def chat_request_to_genspec(
     *,
     map_developer_role: bool = True,
     force_nonempty_content: bool = False,
+    hidden_states: HiddenStateSpec | None = None,
 ) -> GenSpec:
     """OpenAI ChatCompletionRequest -> GenSpec (the OpenAI 'to_sampling_params').
 
@@ -145,7 +151,46 @@ def chat_request_to_genspec(
         force_nonempty_content=force_nonempty,
         json_mode=json_mode,
         json_schema=json_schema,
+        hidden_states=hidden_states,
     )
+
+
+def _hidden_states_spec(
+    req: ChatCompletionRequest, state: Any
+) -> HiddenStateSpec | None:
+    """Turn a request's ``kv_transfer_params`` into a resolved export spec.
+
+    Raises ``ValueError`` (-> HTTP 400) when the server has no
+    ``--hidden-states-dir``, when the requested directory escapes it, or when the layer
+    ids are not the contiguous-from-0 run Switchyard's artifact loader indexes
+    positionally. The default is every block of the model, which the engine fills in --
+    the frontend does not know the model's depth.
+    """
+    params = req.kv_transfer_params
+    if params is None:
+        return None
+    root = getattr(state.config, "hidden_states_dir", None)
+    directory = resolve_hidden_states_dir(params.hidden_states_path, root)
+    layer_ids = (
+        validate_layer_ids(params.layer_ids)
+        if params.layer_ids is not None
+        else _all_layer_ids(state)
+    )
+    return HiddenStateSpec(directory=directory, layer_ids=layer_ids)
+
+
+def _all_layer_ids(state: Any) -> list[int]:
+    """Every block of the served checkpoint, in forward order (the export default)."""
+    try:
+        num_layers = int(state.config.model_config.num_layers)
+    except Exception as exc:  # noqa: BLE001 -- no config, no defaulting
+        raise ValueError(
+            "cannot default kv_transfer_params.layer_ids for this model; send them "
+            f"explicitly ({exc})"
+        ) from exc
+    if num_layers < 1:
+        raise ValueError("the served model reports no layers to export")
+    return list(range(num_layers))
 
 
 def _force_nonempty_content(
@@ -279,11 +324,17 @@ async def handle_chat_completion(
             )
 
     try:
+        hidden_states = _hidden_states_spec(req, state)
+    except ValueError as exc:
+        return create_error_response(str(exc), param="kv_transfer_params")
+
+    try:
         spec = chat_request_to_genspec(
             req,
             model_sampling,
             map_developer_role=not _harmony_chat_template(state),
             force_nonempty_content=getattr(state.config, "force_nonempty_content", False),
+            hidden_states=hidden_states,
         )
     except ValueError as exc:
         return create_error_response(str(exc))
@@ -291,8 +342,12 @@ async def handle_chat_completion(
     # Bind the turn to a KV session lease before submit. An id FreeToken inferred
     # from the client's own conversation headers is reclaimable (the client never
     # learned to close it); an explicit session_id stays the client's to own.
+    # A hidden-state probe binds nothing: a lease exists to protect a prefix for the
+    # next turn, and the probe both refuses to reuse a prefix and has no next turn --
+    # leasing it would only park the router's throwaway prompt in the radix tree and
+    # serialize probes that Switchyard fires concurrently on one conversation.
     explicit_session = req.session_id is not None
-    spec.session_id = chat_session_id(req, request)
+    spec.session_id = None if hidden_states is not None else chat_session_id(req, request)
     spec.session_reclaimable = spec.session_id is not None and not explicit_session
     session_headers = (
         {"X-FreeToken-Session-Id": spec.session_id} if spec.session_id is not None else None
@@ -361,6 +416,12 @@ async def handle_chat_completion(
             result.reasoning_tokens,
         ),
     }
+    if result.hidden_states_path is not None:
+        # The written artifact, not the directory the client asked for: Switchyard reads
+        # the path off the response and is documented never to guess the file name.
+        payload["kv_transfer_params"] = {
+            "hidden_states_path": result.hidden_states_path
+        }
     # A plain dict when there is no header to carry (FastAPI serializes it to the
     # same JSONResponse); the session id has to ride on the response itself, which
     # is the one thing a returned dict cannot express.
@@ -574,7 +635,17 @@ async def stream_chat_completion_chunks(
             completion_tokens = ev.completion_tokens
             cached_tokens = ev.cached_tokens
             reasoning_tokens = ev.reasoning_tokens
-            yield _sse(_chat_chunk(req, uid, [{"delta": {}, "index": 0, "finish_reason": ev.finish_reason}]))
+            chunk = _chat_chunk(
+                req, uid, [{"delta": {}, "index": 0, "finish_reason": ev.finish_reason}]
+            )
+            if ev.hidden_states_path is not None:
+                # Streaming has no envelope to put this on but the terminal chunk. The
+                # probe itself never streams (Switchyard reads a plain JSON response),
+                # so this exists only so the field is not silently lost.
+                chunk["kv_transfer_params"] = {
+                    "hidden_states_path": ev.hidden_states_path
+                }
+            yield _sse(chunk)
 
     if req.stream_options and req.stream_options.include_usage:
         yield _sse(

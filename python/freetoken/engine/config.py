@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, List
 
 import torch
 from freetoken.distributed import DistributedInfo
+from freetoken.hidden_states import DEFAULT_MAX_TOKENS as HIDDEN_STATES_MAX_TOKENS
 from freetoken.models.register import _load_attr, get_model_spec
 from freetoken.utils import cached_load_hf_config
 
@@ -171,6 +172,12 @@ class EngineConfig:
     # Repair attempts for response_format json_object/json_schema when the answer
     # is not valid JSON (--json-retry; FREETOKEN_JSON_RETRY overrides).
     json_retry: int = 1
+    # Root directory for Switchyard prefill-probe hidden-state artifacts
+    # (--hidden-states-dir). None disables the feature: a request that asks for one is
+    # refused rather than served, and no other path may be written.
+    hidden_states_dir: str | None = None
+    # Per-probe prompt-token cap (--hidden-states-max-tokens); a longer prompt is a 400.
+    hidden_states_max_tokens: int = HIDDEN_STATES_MAX_TOKENS
 
     @cached_property
     def kv_quant(self):

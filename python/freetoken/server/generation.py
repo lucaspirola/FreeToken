@@ -23,6 +23,7 @@ from typing import Any
 
 from . import request_ring
 from freetoken.core import SamplingParams
+from freetoken.hidden_states import DEFAULT_MAX_TOKENS, HiddenStateSpec
 from freetoken.message import TokenizeMsg
 from freetoken.tokenizer.tokenize import resolve_thinking_mode
 
@@ -121,6 +122,9 @@ class GenDone:
     #: block (OpenAI's ``usage.completion_tokens_details.reasoning_tokens``). 0 when
     #: no reasoning parser is configured.
     reasoning_tokens: int = 0
+    #: Written hidden-state artifact (Switchyard's prefill probe), echoed as
+    #: ``kv_transfer_params.hidden_states_path``. None unless the request opted in.
+    hidden_states_path: str | None = None
 
 
 GenEvent = ReasoningDelta | ContentDelta | ToolCallStart | ToolCallArgsDelta | ToolCallsDelta | GenDone
@@ -138,6 +142,8 @@ class GenResult:
     cached_tokens: int = 0
     #: See ``GenDone.reasoning_tokens``.
     reasoning_tokens: int = 0
+    #: See ``GenDone.hidden_states_path``.
+    hidden_states_path: str | None = None
 
 
 @dataclass
@@ -167,6 +173,11 @@ class GenSpec:
     #: retries. The adapter sets both fields and the matching prompt instruction.
     json_mode: bool = False
     json_schema: dict[str, Any] | None = None
+    #: Switchyard prefill-probe export (``freetoken.hidden_states.HiddenStateSpec``),
+    #: already resolved against the server's ``--hidden-states-dir``. Set only by the
+    #: chat-completions adapter, from a request's ``kv_transfer_params``. A spec makes
+    #: the request bypass prefix reuse so every prompt token is really forwarded.
+    hidden_states: HiddenStateSpec | None = None
 
     @property
     def parse_tools(self) -> bool:
@@ -300,6 +311,8 @@ async def submit_generation(spec: GenSpec, state: Any) -> int:
             session_id=spec.session_id,
             session_ttl_seconds=spec.session_ttl_seconds,
             session_reclaimable=spec.session_reclaimable,
+            hidden_states=spec.hidden_states,
+            no_prefix_cache=spec.hidden_states is not None,
         )
     )
     return uid
@@ -401,6 +414,9 @@ async def preflight_error(spec: GenSpec, state: Any) -> GenerationError | None:
             tools=spec.template_tools,
         ),
         state,
+        probe_limit=(
+            hidden_states_max_tokens(state) if spec.hidden_states is not None else None
+        ),
     )
 
 
@@ -412,7 +428,18 @@ async def preflight_text_error(text: str, state: Any) -> GenerationError | None:
     )
 
 
-async def _preflight(msg: TokenizeMsg, state: Any) -> GenerationError | None:
+def hidden_states_max_tokens(state: Any) -> int:
+    """``--hidden-states-max-tokens`` in force for this server."""
+    try:
+        value = int(state.config.hidden_states_max_tokens)
+    except Exception:  # noqa: BLE001
+        return DEFAULT_MAX_TOKENS
+    return value if value > 0 else DEFAULT_MAX_TOKENS
+
+
+async def _preflight(
+    msg: TokenizeMsg, state: Any, *, probe_limit: int | None = None
+) -> GenerationError | None:
     build = getattr(state, "frontend_tokenizer", None)
     if build is None:
         return None
@@ -420,7 +447,10 @@ async def _preflight(msg: TokenizeMsg, state: Any) -> GenerationError | None:
         manager = await asyncio.to_thread(build)
     except Exception:  # noqa: BLE001 -- server fault, not this request's problem
         return None
-    if not context_preflight_enabled(state):
+    # A hidden-state probe always pays the encode, preflight flag or not: its own cap is
+    # a token count and there is no cheaper place to learn it before the artifact has
+    # already been captured (the scheduler repeats the check, but only after a queue slot).
+    if not context_preflight_enabled(state) and probe_limit is None:
         try:
             await asyncio.to_thread(manager.render_prompt, msg)
         except Exception as exc:  # noqa: BLE001 -- mirror the worker's classification
@@ -430,8 +460,14 @@ async def _preflight(msg: TokenizeMsg, state: Any) -> GenerationError | None:
         input_ids = (await asyncio.to_thread(manager.tokenize, [msg]))[0]
     except Exception as exc:  # noqa: BLE001 -- mirror the worker's classification
         return GenerationError(f"could not encode request: {exc}")
-    limit = served_max_seq_len(state)
     prompt_tokens = int(input_ids.numel())
+    if probe_limit is not None and prompt_tokens > probe_limit:
+        return GenerationError(
+            f"prompt is too long for a hidden-state probe: {prompt_tokens} tokens > "
+            f"{probe_limit} maximum (--hidden-states-max-tokens)",
+            CONTEXT_LENGTH_EXCEEDED,
+        )
+    limit = served_max_seq_len(state)
     # `>=`, not `>`: the scheduler drops a request whose prompt leaves zero decode
     # budget (max_seq_len - input_len <= 0), so the preflight must reject exactly
     # the same set or a request would pass here and fail there.
@@ -907,12 +943,14 @@ async def _generate_events_core(uid: int, spec: GenSpec, state: Any) -> AsyncIte
 
     engine_finish_reason: str | None = None
     engine_matched_stop: str | None = None
+    hidden_states_path: str | None = None
     async for ack in state.wait_for_ack(uid):
         if getattr(ack, "error", None):
             raise GenerationError(ack.error, getattr(ack, "error_code", None))
         prompt_tokens += ack.prompt_tokens_delta
         completion_tokens += ack.completion_tokens_delta
         cached_tokens += ack.cached_tokens
+        hidden_states_path = getattr(ack, "hidden_states_path", None) or hidden_states_path
         content_delta = ack.incremental_output
         if reasoning_parser is not None and content_delta:
             was_reasoning = reasoning_parser.in_reasoning
@@ -998,7 +1036,7 @@ async def _generate_events_core(uid: int, spec: GenSpec, state: Any) -> AsyncIte
     yield GenDone(
         finish_reason, prompt_tokens, completion_tokens,
         matched_stop=engine_matched_stop, cached_tokens=cached_tokens,
-        reasoning_tokens=reasoning_tokens,
+        reasoning_tokens=reasoning_tokens, hidden_states_path=hidden_states_path,
     )
 
 
@@ -1012,6 +1050,7 @@ async def _generate_full_impl(uid: int, spec: GenSpec, state: Any) -> GenResult:
     reasoning_tokens = 0
     engine_finish_reason: str | None = None
     engine_matched_stop: str | None = None
+    hidden_states_path: str | None = None
     # The split itself is one-shot over the whole completion (below); this second,
     # streaming parser exists only to attribute each ack's tokens to reasoning or
     # content, which a one-shot parse cannot recover.
@@ -1022,6 +1061,7 @@ async def _generate_full_impl(uid: int, spec: GenSpec, state: Any) -> GenResult:
         prompt_tokens += ack.prompt_tokens_delta
         completion_tokens += ack.completion_tokens_delta
         cached_tokens += ack.cached_tokens
+        hidden_states_path = getattr(ack, "hidden_states_path", None) or hidden_states_path
         if reasoning_meter is not None and ack.incremental_output:
             was_reasoning = reasoning_meter.in_reasoning
             meter_delta, _ = reasoning_meter.parse_stream_chunk(ack.incremental_output)
@@ -1061,4 +1101,5 @@ async def _generate_full_impl(uid: int, spec: GenSpec, state: Any) -> GenResult:
         matched_stop=engine_matched_stop,
         cached_tokens=cached_tokens,
         reasoning_tokens=reasoning_tokens,
+        hidden_states_path=hidden_states_path,
     )

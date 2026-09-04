@@ -104,10 +104,14 @@ class CacheManager:
     def match_req(self, req: PendingReq) -> MatchResult:
         input_len = req.input_len
         assert input_len > 0, "Input length must be greater than 0."
-        # Multimodal requests must not reuse a shared prefix: image-placeholder tokens
-        # have identical ids across images but carry different content (and KV), so a
-        # match would serve the wrong image's KV. Match against the empty prefix.
-        ids = req.input_ids[:0] if req.mm_embeds is not None else req.input_ids[: input_len - 1]
+        # Two request kinds must not reuse a shared prefix, and both match against the
+        # empty prefix instead. Multimodal: image-placeholder tokens have identical ids
+        # across images but carry different content (and KV), so a match would serve the
+        # wrong image's KV. no_prefix_cache: the request needs every prompt token
+        # actually forwarded -- the hidden-state probe observes the residual stream at
+        # each position, and a cached prefix would leave those positions unobserved.
+        bypass = req.mm_embeds is not None or getattr(req, "no_prefix_cache", False)
+        ids = req.input_ids[:0] if bypass else req.input_ids[: input_len - 1]
         if self.is_swa:
             from freetoken.kvcache.swa_radix_cache import SWACacheHandle
             m = self.prefix_cache.match_prefix(ids)

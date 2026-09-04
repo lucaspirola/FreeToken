@@ -368,9 +368,26 @@ class NemotronHBackbone(BaseOP):
         self.norm_f = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Run the block stack, optionally exporting each block's residual stream.
+
+        ``ctx.hidden_state_sink`` is the generic model-side hook for Switchyard's
+        prefill probe (freetoken/hidden_states.py): any model may call it after each
+        block, and every Nemotron-H block counts as one "layer" here -- mamba, MoE and
+        attention alike -- because the router consumes the residual stream, not a
+        per-kind subset. The captured value is the post-block residual (``x`` after the
+        block's own add), so it is neither normed by the next block nor by ``norm_f``,
+        which is what vLLM's ``eagle_aux_hidden_state_layer_ids`` export means. The sink
+        is None on every ordinary forward, making this one attribute read.
+        """
         x = self.embeddings.forward(input_ids)
-        for layer in self.layers.op_list:
-            x = layer.forward(x)
+        sink = get_global_ctx().hidden_state_sink
+        if sink is None:
+            for layer in self.layers.op_list:
+                x = layer.forward(x)
+        else:
+            for layer_id, layer in enumerate(self.layers.op_list):
+                x = layer.forward(x)
+                sink.capture(layer_id, x)
         return self.norm_f.forward(x)
 
 

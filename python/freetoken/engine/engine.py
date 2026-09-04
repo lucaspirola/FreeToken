@@ -19,6 +19,7 @@ from freetoken.distributed import (
     enable_pynccl_distributed,
     set_tp_info,
 )
+from freetoken.hidden_states import HiddenStateCollector
 from freetoken.layers import set_rope_device
 from freetoken.models import create_model, load_weight
 from freetoken.moe import create_moe_backend, is_offload_moe_backend
@@ -404,6 +405,12 @@ class Engine:
         self._pool_cls = resolve_pool_class(config.model_config)
         self.ctx = Context(config.page_size)
         set_global_ctx(self.ctx)
+        # Switchyard prefill-probe export. The collector is cheap (an empty dict) and
+        # holds nothing until a request opts in through kv_transfer_params.
+        self.hidden_states = HiddenStateCollector(
+            hidden_size=config.model_config.hidden_size,
+            num_layers=config.model_config.num_layers,
+        )
 
         self.tp_cpu_group = self._init_communication(config)
         free_min, free_max = self._sync_get_memory()
@@ -1589,11 +1596,18 @@ class Engine:
 
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
         assert torch.cuda.current_stream() == self.stream
-        with self.ctx.forward_batch(batch):
-            if self.graph_runner.can_use_cuda_graph(batch):
-                logits = self.graph_runner.replay(batch)
-            else:
-                logits = self.model.forward()
+        # Hidden-state capture exists only on the prefill path (begin_batch returns None
+        # for a decode batch, and for any prefill batch with no probe request in it), so
+        # the captured CUDA graphs and the steady-state decode step never see it.
+        self.ctx.hidden_state_sink = self.hidden_states.begin_batch(batch)
+        try:
+            with self.ctx.forward_batch(batch):
+                if self.graph_runner.can_use_cuda_graph(batch):
+                    logits = self.graph_runner.replay(batch)
+                else:
+                    logits = self.model.forward()
+        finally:
+            self.ctx.hidden_state_sink = None
         if self.cpu_moe_executor is not None:
             # One pinned read: surfaces a fired flag-handshake watchdog (dead coordinator
             # -> stale expert outputs) as a loud error instead of silent corruption.

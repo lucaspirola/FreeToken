@@ -963,6 +963,28 @@ def parse_args(
         ),
     )
 
+    parser.add_argument(
+        "--hidden-states-dir",
+        type=str,
+        default=ServerArgs.hidden_states_dir,
+        help=(
+            "Enable the Switchyard prefill-probe export and make this directory its only "
+            "permitted root. A /v1/chat/completions request opts in per call with top-level "
+            "kv_transfer_params; the response returns the artifact path. Off by default: "
+            "without this flag such a request is refused."
+        ),
+    )
+    parser.add_argument(
+        "--hidden-states-max-tokens",
+        type=int,
+        default=ServerArgs.hidden_states_max_tokens,
+        help=(
+            "Prompt-token cap for one hidden-state probe (a longer prompt is answered with "
+            "a 400 context_length_exceeded). Every layer of every prompt token is exported, "
+            "so the artifact grows as tokens x layers x hidden."
+        ),
+    )
+
     # Parse arguments
     kwargs = parser.parse_args(args).__dict__.copy()
 
@@ -978,6 +1000,16 @@ def parse_args(
         parser.error("--session-spill-state-stride must be >= 1")
     if kwargs["session_spill_limit_gb"] < 0:
         parser.error("--session-spill-limit-gb must be >= 0")
+    if kwargs["hidden_states_max_tokens"] < 1:
+        parser.error("--hidden-states-max-tokens must be >= 1")
+    if kwargs["hidden_states_dir"] is not None:
+        # Resolved once, at startup: every request's target is later checked for
+        # containment in this canonical path, so a symlinked or relative root must not
+        # survive into the per-request check.
+        root = os.path.realpath(os.path.expanduser(kwargs["hidden_states_dir"]))
+        if not os.path.isdir(root):
+            parser.error(f"--hidden-states-dir {root!r} is not an existing directory")
+        kwargs["hidden_states_dir"] = root
     if isinstance(kwargs["session_spill_dir"], str) and kwargs[
         "session_spill_dir"
     ].lower() in {"off", "none", "disable", "disabled"}:

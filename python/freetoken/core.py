@@ -9,6 +9,7 @@ import torch
 if TYPE_CHECKING:
     from freetoken.attention import BaseAttnBackend, BaseAttnMetadata
     from freetoken.attention.linear import FLAMetadata
+    from freetoken.hidden_states import HiddenStateSink, HiddenStateSpec
     from freetoken.kvcache import BaseCacheHandle, BaseKVCachePool
     from freetoken.kvcache.linear_state_pool import LinearStatePool
     from freetoken.moe import BaseMoeBackend
@@ -47,6 +48,15 @@ class Req:
     # None preserves the ordinary one-shot request lifecycle.
     session_id: str | None = None
     session_ttl_seconds: float | None = None
+    # Switchyard prefill-probe export (server/api_models.KvTransferParams). Set only when
+    # the request opted in; the engine installs a HiddenStateSink for the prefill batches
+    # that carry one and writes the artifact once the prompt is fully forwarded.
+    hidden_states: "HiddenStateSpec | None" = None
+    # Match against the empty prefix instead of the radix tree, so every prompt token is
+    # actually computed. The hidden-state probe needs it (a cached prefix would leave
+    # those positions' residual streams unobserved); the cache manager reads it in
+    # match_req, next to the multimodal bypass.
+    no_prefix_cache: bool = False
 
     # --- hybrid-radix (GDN linear-state) per-request slots; None for non-hybrid models or
     # until allocated from LinearStatePool. Set by the scheduler (P2). ---
@@ -180,6 +190,10 @@ class Context:
     # Per-request recurrent state for GatedDeltaNet layers; set by the engine for
     # hybrid linear-attention models, otherwise None.
     linear_state_pool: LinearStatePool | None = None
+    # Installed by the engine for the duration of one prefill forward that carries at
+    # least one hidden-state probe request, and None otherwise -- which is what keeps the
+    # model-side hook free: an ordinary forward reads this attribute once per pass.
+    hidden_state_sink: "HiddenStateSink | None" = field(default=None, init=False)
     _batch: Batch | None = field(default=None, init=False)
 
     @property

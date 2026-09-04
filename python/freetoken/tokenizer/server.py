@@ -248,6 +248,7 @@ def tokenize_worker(
                         swa_used_tokens=msg.swa_used_tokens,
                         swa_total_tokens=msg.swa_total_tokens,
                         gpu_mem_bytes=msg.gpu_mem_bytes,
+                        hidden_states_path=msg.hidden_states_path,
                     )
                     for msg, reply in zip(detokenize_msg, replies, strict=True)
                 ]
@@ -286,6 +287,8 @@ def tokenize_worker(
                             session_id=msg.session_id,
                             session_ttl_seconds=msg.session_ttl_seconds,
                             session_reclaimable=msg.session_reclaimable,
+                            hidden_states=msg.hidden_states,
+                            no_prefix_cache=msg.no_prefix_cache,
                         )
                         for msg, t in zip(ok_msgs, ok_tensors, strict=True)
                     ]

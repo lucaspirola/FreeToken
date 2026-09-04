@@ -184,6 +184,8 @@ class PrefillAdder:
             mm_embeds=pending_req.mm_embeds,
             session_id=pending_req.session_id,
             session_ttl_seconds=pending_req.session_ttl_seconds,
+            hidden_states=pending_req.hidden_states,
+            no_prefix_cache=pending_req.no_prefix_cache,
         )
         # Hybrid GDN per-request state slots (None for non-hybrid). On a fresh admit these are
         # freshly allocated; on a chunked continuation they are inherited from the prior chunk.
@@ -262,6 +264,8 @@ class PrefillManager:
                 mm_embeds=req.mm_embeds,
                 session_id=req.session_id,
                 session_ttl_seconds=req.session_ttl_seconds,
+                hidden_states=req.hidden_states,
+                no_prefix_cache=req.no_prefix_cache,
             )
         )
 

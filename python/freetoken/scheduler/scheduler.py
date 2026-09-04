@@ -719,6 +719,15 @@ class Scheduler(SchedulerIOMixin):
                         finish_reason=finish_reason,
                         matched_stop=matched_stop,
                         stop_strs=req.sampling_params.stop_strs or None,
+                        # This is the drain of the request's LAST prefill chunk (a
+                        # ChunkedReq continuation `continue`s above), so every prompt
+                        # token has been forwarded and captured.
+                        hidden_states_path=(
+                            self._write_hidden_states(req)
+                            if batch.is_prefill
+                            and getattr(req, "hidden_states", None) is not None
+                            else None
+                        ),
                     )
                 )
 
@@ -910,6 +919,11 @@ class Scheduler(SchedulerIOMixin):
                         session.active_uid = None
                         session.expires_at = time.monotonic() + session.ttl_seconds
                 return
+            if msg.hidden_states is not None:
+                refusal = self._hidden_states_refusal(msg, input_len)
+                if refusal is not None:
+                    self.send_result([refusal])
+                    return
             if msg.sampling_params.max_tokens > max_output_len:
                 msg.sampling_params.max_tokens = max_output_len
                 logger.warning_rank0(
@@ -1043,6 +1057,56 @@ class Scheduler(SchedulerIOMixin):
                 pool.copy_from(req.mamba_restore_src, req.linear_slot_idx)
                 req.mamba_restore_src = None  # consumed: restore exactly once
 
+    # ------------------------------------------------------------------ #
+    # Hidden-state probe (Switchyard prefill router; freetoken/hidden_states.py)
+    # ------------------------------------------------------------------ #
+    def _hidden_states_refusal(self, msg: UserMsg, input_len: int) -> ErrorReplyMsg | None:
+        """Reject a probe the engine cannot honor, or None when it can.
+
+        Both limits are checked frontend-side too (where they become a plain HTTP 400
+        before a queue slot is spent); this is the authoritative repeat, because a
+        server running with the context preflight off has no other gate.
+        """
+        spec = msg.hidden_states
+        limit = int(getattr(self.config, "hidden_states_max_tokens", 0) or 0)
+        if limit > 0 and input_len > limit:
+            return ErrorReplyMsg(
+                uid=msg.uid,
+                error=(
+                    f"prompt is too long for a hidden-state probe: {input_len} tokens > "
+                    f"{limit} maximum (--hidden-states-max-tokens)"
+                ),
+                code="context_length_exceeded",
+            )
+        num_layers = self.engine.config.model_config.num_layers
+        if len(spec.layer_ids) > num_layers:
+            return ErrorReplyMsg(
+                uid=msg.uid,
+                error=(
+                    f"kv_transfer_params.layer_ids asks for {len(spec.layer_ids)} layers "
+                    f"but this model has {num_layers}"
+                ),
+                code="invalid_request_error",
+            )
+        return None
+
+    def _write_hidden_states(self, req: Req) -> str | None:
+        """Serialize this request's captured prompt residual stream; None on failure.
+
+        A write failure (full disk, a directory that vanished) must not take the
+        scheduler down or fail a request whose completion is already sampled: it is
+        logged and the response simply carries no ``kv_transfer_params``, which is the
+        exact condition Switchyard's probe reports as a probe error.
+        """
+        try:
+            return self.engine.hidden_states.finish(req.uid)
+        except Exception as exc:  # noqa: BLE001 -- never fail a sampled turn over this
+            self.engine.hidden_states.discard(req.uid)
+            logger.error_rank0(
+                f"Hidden-state export failed for request {req.uid}: {exc}"
+            )
+            return None
+
     def _free_req_resources(self, req: Req, *, retain_session: bool = False) -> None:
         # Idempotent: an EOS-finished request can stay in running_reqs (output budget left), so an
         # abort in the same overlap iteration races _process_last_data and would free it twice --
@@ -1050,6 +1114,12 @@ class Scheduler(SchedulerIOMixin):
         # slots to two later requests. table_idx == -1 marks an already-freed request.
         if req.table_idx == -1:
             return
+        # Every abort path lands here, so this is the one place a probe's partial capture
+        # can be dropped instead of leaked. On a normal finish the artifact was already
+        # written (and the uid popped) when the prefill's reply was built, so this is a
+        # no-op there.
+        if getattr(req, "hidden_states", None) is not None:
+            self.engine.hidden_states.discard(req.uid)
         # Polymorphic free: the DSV4 manager returns the request's window pages + cmp/idx blocks
         # to their tier free-lists; the generic manager frees its KV pages (it reads
         # page_table[req.table_idx], so free the table entry after).

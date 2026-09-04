@@ -7,6 +7,7 @@ wire with its fields intact; these pin the ones carrying state a later consumer 
 
 from __future__ import annotations
 
+import torch
 from freetoken.message import (
     BaseBackendMsg,
     DetokenizeMsg,
@@ -152,3 +153,53 @@ def test_client_dicts_with_the_wire_tag_key_survive_intact():
         assert isinstance(out, TokenizeMsg)
         assert out.chat_template_kwargs == payload
         assert out.tools[0]["function"]["parameters"] == payload
+
+
+def test_hidden_state_spec_survives_the_wire_in_both_directions():
+    """The probe's spec crosses api -> tokenizer -> scheduler as a nested dataclass, and
+    the written path comes back on the reply that closes the prefill."""
+    from freetoken.hidden_states import HiddenStateSpec
+    from freetoken.message import UserMsg
+
+    spec = HiddenStateSpec(directory="/srv/hidden", layer_ids=[0, 1, 2])
+
+    tokenize = TokenizeMsg(
+        uid=5, text="hi", sampling_params=SamplingParams(max_tokens=1),
+        hidden_states=spec, no_prefix_cache=True,
+    )
+    tokenize_out = BaseTokenizerMsg.decoder(BaseTokenizerMsg.encoder(tokenize))
+    assert isinstance(tokenize_out.hidden_states, HiddenStateSpec)
+    assert tokenize_out.hidden_states.directory == "/srv/hidden"
+    assert tokenize_out.hidden_states.layer_ids == [0, 1, 2]
+    assert tokenize_out.no_prefix_cache is True
+
+    user = UserMsg(
+        uid=5, input_ids=torch.tensor([1, 2], dtype=torch.int32),
+        sampling_params=SamplingParams(max_tokens=1),
+        hidden_states=spec, no_prefix_cache=True,
+    )
+    user_out = BaseBackendMsg.decoder(user.encoder())
+    assert isinstance(user_out.hidden_states, HiddenStateSpec)
+    assert user_out.hidden_states.layer_ids == [0, 1, 2]
+    assert user_out.no_prefix_cache is True
+
+    detok = DetokenizeMsg(
+        uid=5, next_token=7, finished=True,
+        hidden_states_path="/srv/hidden/abc.safetensors",
+    )
+    detok_out = BaseTokenizerMsg.decoder(BaseTokenizerMsg.encoder(detok))
+    assert detok_out.hidden_states_path == "/srv/hidden/abc.safetensors"
+
+    reply = UserReply(
+        uid=5, incremental_output="", finished=True,
+        hidden_states_path="/srv/hidden/abc.safetensors",
+    )
+    reply_out = BaseFrontendMsg.decoder(BaseFrontendMsg.encoder(reply))
+    assert reply_out.hidden_states_path == "/srv/hidden/abc.safetensors"
+
+
+def test_ordinary_messages_carry_no_probe_state():
+    msg = TokenizeMsg(uid=1, text="hi", sampling_params=SamplingParams())
+    out = BaseTokenizerMsg.decoder(BaseTokenizerMsg.encoder(msg))
+    assert out.hidden_states is None
+    assert out.no_prefix_cache is False

@@ -44,7 +44,8 @@ The serving-compliance half of that line:
 | `--kv-cache-dtype q8_0` | FP8 KV (FreeToken block scales; the checkpoint's `k_scale`/`v_scale` are ignored). Requires `--attention-backend triton`. |
 
 Optional knobs that change the contract: `--no-context-preflight` (see §5),
-`--json-retry N` (see §4). Default listen address is `127.0.0.1:1919`.
+`--json-retry N` (see §4), `--hidden-states-dir DIR` (see §6). Default listen
+address is `127.0.0.1:1919`.
 
 ### Served context window
 
@@ -245,7 +246,135 @@ prompts that is measurable, which is what `--no-context-preflight` is for.
 
 ---
 
-## 6. Known limitations
+## 6. Hidden-state probe target
+
+Switchyard's prefill complexity router (branch `prefill-complexity-router-v1-port`,
+`crates/switchyard-components/src/prefill_probe/scorer.rs`) does not route on the answer
+— it routes on the prompt's *residual stream*. It posts one throwaway completion to a
+probe server, reads a `.safetensors` artifact off shared storage, mean-pools it per
+layer, and feeds the result to a learned head. FreeToken serves that contract; the probe
+weights are trained outside both repos and are not FreeToken's concern.
+
+Start the server with the export enabled — the directory is the **only** path FreeToken
+will ever write, canonicalized once at startup:
+
+```bash
+mkdir -p /tmp/ft-hidden-states
+ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
+  ... --hidden-states-dir /tmp/ft-hidden-states
+```
+
+Without the flag the feature is off and a probe request is a 400. The router's client
+must be able to read that same path (a shared mount, or the same host).
+
+### The request
+
+```bash
+curl http://127.0.0.1:1919/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "nemotron-3.5-lightning",
+    "messages": [{"role": "user", "content": "Return one short sentence."}],
+    "max_tokens": 1,
+    "kv_transfer_params": {
+      "hidden_states_path": "/tmp/ft-hidden-states",
+      "include_output_tokens": false
+    }
+  }'
+```
+
+| `kv_transfer_params` field | Meaning |
+|---|---|
+| `hidden_states_path` | Directory to write into. Must be `--hidden-states-dir` or a subdirectory of it — resolved through symlinks and `..`, and refused otherwise. Omit it to use the root. |
+| `layer_ids` | Which blocks to export. Default: every block, in forward order (52 on Lightning). Must be contiguous from 0 and ascending — Switchyard's loader indexes the middle axis positionally, so a gap would silently mislabel features. |
+| `include_output_tokens` | Accepted and ignored. FreeToken exports prompt positions only, which is all the router pools. |
+
+`kv_transfer_params` is typed **only** on `/v1/chat/completions`. On `/v1/completions`,
+`/v1/messages` and `/v1/responses` it lands in the untyped extras and is ignored.
+
+### The response
+
+```json
+{
+  "id": "chatcmpl-7", "object": "chat.completion", "model": "nemotron-3.5-lightning",
+  "choices": [{"index": 0, "message": {"role": "assistant", "content": "The"},
+               "finish_reason": "length"}],
+  "usage": {"prompt_tokens": 42, "completion_tokens": 1, "total_tokens": 43},
+  "kv_transfer_params": {
+    "hidden_states_path": "/tmp/ft-hidden-states/6f1c….safetensors"
+  }
+}
+```
+
+Read the path from the response; the file name is a uuid FreeToken chooses. On the
+stream path the same object rides on the terminal chunk (the router never streams).
+
+### The artifact
+
+| Key | Shape | Dtype |
+|---|---|---|
+| `hidden_states` | `[prompt_tokens, layers, hidden]` | BF16 |
+| `token_ids` | `[prompt_tokens]` | I64 |
+
+`hidden_states[t, i]` is the **post-block residual stream**: the value block `i` leaves
+behind after adding its mixer output to `x`, before the next block's input norm and
+before `norm_f`. It is not the final-norm output and not logits. On Nemotron-H every
+block is one "layer" here regardless of what it mixes — Lightning's 23 mamba, 23 MoE
+and 6 attention blocks are one 52-deep stream, and the router wants the stream.
+
+`token_ids` are the prompt tokens actually forwarded, in order, so a consumer never has
+to re-tokenize to line the rows up. It is optional in vLLM's contract; FreeToken always
+writes it, and Switchyard validates it when present.
+
+The file is written under an exclusive `flock` before the response goes out. Switchyard
+polls for the path (20 × 50 ms) and then takes `LOCK_EX` itself, so a reader that opens
+it mid-write blocks rather than parsing a truncated header. It **deletes** the artifact
+once it has scored it; FreeToken never cleans the directory up, so a client that stops
+consuming will fill the disk.
+
+### What a probe request does differently
+
+- **It bypasses prefix reuse.** A cached prefix would leave those positions out of the
+  forward and therefore out of the artifact. `Req.no_prefix_cache` makes the match run
+  against the empty prefix; the completed prompt is still committed to the radix tree,
+  so ordinary traffic behind the probe still hits.
+- **It binds no session lease.** `x-switchyard-session-id` and `prompt_cache_key` are
+  ignored for a probe: a lease protects a prefix for a next turn, and the probe refuses
+  to reuse a prefix and has no next turn. This also stops concurrent probes on one
+  conversation from serializing on a `session … is busy`.
+- **It is capped at `--hidden-states-max-tokens` (default 4096) prompt tokens.** A
+  longer prompt is a 400 with `error.code = context_length_exceeded`. The cap is a size
+  guard, not a context guard: every layer of every prompt token is exported, so one
+  4096-token probe over 52 layers at hidden 2688 is ~1.1 GiB. The check runs frontend
+  side even with `--no-context-preflight`, and again in the scheduler.
+- **It costs nothing when absent.** Without `kv_transfer_params` no sink is installed;
+  the model forward reads one attribute and the captured decode graphs never see it.
+
+### Verifying it
+
+CPU: `tests/server/test_hidden_states_probe.py` (wire + validation + writer round trip),
+`tests/scheduler/test_hidden_states_no_prefix_reuse.py`,
+`tests/models/test_nemotron_h_hidden_states.py` (the hook captures the post-block
+residual, not `norm_f`).
+
+GPU, against a running server (P1 profile plus `--hidden-states-dir`):
+
+```bash
+scripts/gpu_lock.sh uv run benchmarks/probe_hidden_states_parity.py \
+  --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
+  --base-url http://127.0.0.1:1919 --hidden-states-dir /tmp/ft-hidden-states \
+  --prompt-tokens 300
+```
+
+It sends one 300-token probe, loads the artifact, and compares each layer's mean-pooled
+vector against `transformers.AutoModelForCausalLM(output_hidden_states=True)` on CPU in
+bf16 over the artifact's own `token_ids` (HF's `hidden_states[i + 1]` is block `i`'s
+output). Per-layer cosine must exceed 0.99, which absorbs NVFP4/FP8 drift while still
+catching an off-by-one layer index, a final-norm leak, or a dropped prefill chunk.
+
+---
+
+## 7. Known limitations
 
 | Not supported | Behavior |
 |---|---|
@@ -267,7 +396,7 @@ non-Harmony templates). Responses carry `reasoning_content` (Switchyard also acc
 
 ---
 
-## 7. Running the checks
+## 8. Running the checks
 
 Build the Rust binaries once:
 
@@ -343,7 +472,7 @@ Claude Code points `ANTHROPIC_BASE_URL` at the router (`switchyard-server` serve
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Cause |
 |---|---|

@@ -5,6 +5,7 @@ from typing import Dict, List
 
 import torch
 from freetoken.core import SamplingParams
+from freetoken.hidden_states import HiddenStateSpec
 
 from .utils import deserialize_type, serialize_type
 
@@ -40,6 +41,11 @@ class UserMsg(BaseBackendMsg):
     session_id: str | None = None
     session_ttl_seconds: float | None = None
     session_reclaimable: bool = False
+    # Switchyard prefill-probe export (freetoken/hidden_states.py). Already resolved
+    # against --hidden-states-dir by the frontend; None on every ordinary request.
+    hidden_states: HiddenStateSpec | None = None
+    # Force a full recompute of the prompt (see Req.no_prefix_cache).
+    no_prefix_cache: bool = False
 
 
 @dataclass
