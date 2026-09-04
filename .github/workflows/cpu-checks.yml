@@ -1,0 +1,122 @@
+# CPU checks: the part of the suite that needs no GPU, on every push and PR.
+#
+# The GPU tests still only run by hand on a real box (see tests/README.md). What runs
+# here is everything that does not: the scheduler / server / kvcache / dsv4 / Nemotron-H
+# unit tests, `ruff check`, and the scheduler stage replay as a throughput gate.
+# See docs/cpu-checks.md for what each job covers and how to run it locally.
+#
+# Unlike nightly-wheels.yml this never touches the self-hosted engine-build node, so a
+# pull_request trigger is safe: every step runs on a GitHub-hosted runner with no GPU,
+# no CUDA toolkit and no secrets.
+
+name: CPU checks
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same ref makes the in-flight run pointless.
+concurrency:
+  group: cpu-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # setup.py links freetoken.kernel._pinned_tensor / _cpu_moe / _pageable_stage against
+  # libcudart and hard-requires CUDA_HOME, so `pip install -e .` cannot work on a runner
+  # with no CUDA toolkit. Nothing here needs the compiled extensions, so we install the
+  # dependencies only and put the sources on PYTHONPATH instead.
+  PYTHONPATH: ${{ github.workspace }}/python
+  # Every step below runs through `uv run --no-project`: --no-project keeps uv from
+  # discovering this pyproject.toml and trying to build+install the project (which would
+  # fail, see above), and VIRTUAL_ENV is then what points it at the venv we created.
+  VIRTUAL_ENV: ${{ github.workspace }}/.venv
+
+jobs:
+  cpu-checks:
+    if: github.repository == 'FlashML-org/FreeToken'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+
+      # requires-python is >=3.10; 3.12 is what the wheels and the dev boxes use.
+      - name: Create the environment
+        run: uv venv --python 3.12
+
+      # `uv pip install -e .` is out (see PYTHONPATH above), and the project version is
+      # dynamic so uv cannot read the dependency list without building either -- so read
+      # the static [project.dependencies] table straight out of pyproject.toml. It stays
+      # the single source of truth; adding a dependency there is picked up here for free.
+      - name: Resolve the runtime dependencies
+        run: |
+          python3 - <<'PY' > /tmp/cpu-requirements.txt
+          import tomllib
+          with open("pyproject.toml", "rb") as fh:
+              print("\n".join(tomllib.load(fh)["project"]["dependencies"]))
+          PY
+          cat /tmp/cpu-requirements.txt
+
+      # --no-sources drops the [tool.uv.sources] cu130 pin (a ~3 GB CUDA torch this job
+      # would never use); --torch-backend=cpu then resolves torch from the CPU index.
+      # The ruff version is pinned so a ruff release cannot fail an unrelated PR.
+      - name: Install
+        run: |
+          uv pip install --no-sources --torch-backend=cpu \
+            -r /tmp/cpu-requirements.txt "pytest>=6.0" "ruff==0.15.12"
+
+      # Cheap insurance: if this ever resolves to a CUDA build, the "CPU-only" claim of
+      # this whole workflow is false and the timings below stop meaning anything.
+      - name: Assert the CPU torch build
+        run: |
+          uv run --no-project python -c "
+          import torch
+          print('torch', torch.__version__, 'cuda', torch.version.cuda)
+          assert torch.version.cuda is None, 'expected a CPU-only torch build'
+          assert not torch.cuda.is_available()
+          "
+
+      - name: ruff check
+        run: uv run --no-project ruff check .
+
+      # All 1,290 tests collected from these paths run on a CUDA-less box: the
+      # GPU-dependent ones skip themselves (51 skips), the rest pass. Nothing here needs
+      # a deselect list or a new marker -- verified in a torch-2.11-CPU venv with no
+      # compiled extensions built.
+      #
+      # The other directories are deliberately out of scope for now:
+      #   tests/moe      -- one failure without flashinfer installed
+      #                     (test_offload.py::test_adjust_config_converts_moe_cache_rate_to_cache_size,
+      #                     'attention backend fi requires flashinfer'); the other 154
+      #                     tests in tests/moe + tests/kernels do pass on CPU, so this
+      #                     directory is a cheap follow-up once that one test skips.
+      #   tests/e2e      -- boots a real server against a local checkpoint (needs_weights)
+      #   tests/engine, tests/daemon, tests/tokenizer, the rest of tests/models
+      #                  -- not yet measured on a CPU-only runner; add them once they are.
+      - name: Unit tests
+        run: |
+          uv run --no-project pytest -q \
+            tests/scheduler \
+            tests/server \
+            tests/kvcache \
+            tests/dsv4 \
+            tests/models/test_nemotron_h.py \
+            tests/models/test_nemotron_h_chunked_prefill.py \
+            tests/models/test_nemotron_h_hidden_states.py \
+            tests/models/test_nemotron_h_mamba2_path.py
+
+      # Replays the Switchyard stage route through the real PrefillManager / CacheManager
+      # and fails if prefill throughput or completions drop below the floors recorded in
+      # the script. Catches the admission-gate starvation class of regression, which no
+      # unit test sees because it only shows up under sustained mixed-length traffic.
+      - name: Scheduler replay gate
+        run: uv run --no-project python benchmarks/scheduler_replay.py --gate

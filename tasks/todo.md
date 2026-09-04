@@ -269,6 +269,22 @@ Command: `ft serve --model ~/ai/models/Ornith-1.5-35B-Q4_K_M.gguf
 - [ ] decode_launch_config Nemotron head-shape branch (bisect ticket)
 - [ ] Q4: push the 101 unpushed commits to a branch; CI for CPU-only checks (scheduler replay,
       scheduler tests, parity probe CPU half)
+  - [x] CI half: `.github/workflows/cpu-checks.yml` (push + PR, any branch, hosted runner,
+        no GPU) running `ruff check`, the scheduler/server/kvcache/dsv4/Nemotron-H unit tests,
+        and `benchmarks/scheduler_replay.py --gate` (the bisect stage-replay harness promoted
+        out of scratch, with floors stage >=6.5M tok / 350 done, pressure >=8.5M / 85).
+        Docs: `docs/cpu-checks.md`. Measured at 81ab30e in a torch-2.11-CPU venv:
+        1,239 passed / 51 skipped in 14.2 s; gate 3.8 s wall, 428 MB RSS on two cores.
+  - [ ] Re-run the full unit-test step once no GPU job is live and record the wall time
+        (the 14.2 s above was measured before the current GPU session; the re-run was
+        deferred to keep host RSS free). Nothing else about the workflow is unverified.
+  - [ ] Optional follow-up: fold `tests/moe` + `tests/kernels` into the CI test list. Only
+        `tests/moe/test_offload.py::test_adjust_config_converts_moe_cache_rate_to_cache_size`
+        blocks it (it asks for the `fi` backend and errors instead of skipping when
+        flashinfer is absent); the other 154 tests in those two directories pass on CPU.
+  - [ ] Optional follow-up: the `[tool.ruff.lint] ignore` list in `pyproject.toml` is the
+        pre-existing violation set (E741 x79, E702 x47, E731 x18, F401 x17, F841 x13, ...).
+        Clearing any of them lets that line be deleted and the rule re-enabled.
 - [ ] Q5: profile the prefill curve (3,000 tok/s @131K → 1,064 @524K): attention vs SSD scan vs
       KV grow; fix or file
 - [ ] Q1: standing cross-engine oracle — same prompts through llama.cpp and FreeToken,

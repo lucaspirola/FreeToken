@@ -647,7 +647,7 @@ def test_stream_surfaces_generation_error_as_failed():
 
     async def boom():
         raise GenerationError("chat template rejected the conversation")
-        yield  # noqa: unreachable — makes this an async generator
+        yield  # unreachable -- makes this an async generator
 
     req = ResponsesRequest.model_validate({"model": "gpt-x", "input": "hi", "stream": True})
 
@@ -679,7 +679,7 @@ def test_stream_failure_keeps_the_error_code_codex_matches_on():
     async def boom():
         raise GenerationError("prompt is too long: 8178 tokens > 7223 maximum",
                               "context_length_exceeded")
-        yield  # noqa: unreachable — makes this an async generator
+        yield  # unreachable -- makes this an async generator
 
     req = ResponsesRequest.model_validate({"model": "gpt-x", "input": "hi", "stream": True})
 
@@ -756,7 +756,7 @@ def test_max_output_tokens_must_be_positive():
 def test_stream_unexpected_error_emits_failed():
     async def boom():
         raise ValueError("kaboom")
-        yield  # noqa: unreachable — makes this an async generator
+        yield  # unreachable -- makes this an async generator
 
     req = ResponsesRequest.model_validate({"model": "gpt-x", "input": "hi", "stream": True})
 

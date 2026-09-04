@@ -581,7 +581,7 @@ def test_stream_request_error_is_invalid_request_not_internal():
     async def boom():
         raise GenerationError("prompt is too long: 8181 tokens > 7223 maximum",
                               "context_length_exceeded")
-        yield  # noqa: unreachable — makes this an async generator
+        yield  # unreachable -- makes this an async generator
 
     async def run():
         out = []

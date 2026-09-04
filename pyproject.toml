@@ -123,3 +123,30 @@ markers = [
     "slow: takes tens of seconds (big kernel sweeps, real-checkpoint reads); deselect with -m 'not slow'",
     "needs_weights: needs a real local checkpoint, gated behind an env var (see tests/README.md)",
 ]
+
+# `ruff check` is a CI gate (.github/workflows/cpu-checks.yml). The active rule set is
+# ruff's default (E4, E7, E9, F) minus the codes below, which is exactly the subset the
+# tree is already clean under -- so the gate fails only on something newly introduced.
+# What stays on is the part that catches real bugs: syntax errors (E9), undefined names
+# and redefinitions (F821, F811), `is` against a literal (F632), broken %-format and
+# .format calls (F50x).
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+# Pre-existing debt, with the violation count at the commit that added this config.
+# To turn one back on, clear its violations in the same PR that removes the line.
+ignore = [
+    "E402",  #  5 -- module-level import after an env/availability guard, deliberate
+    "E701",  #  2
+    "E702",  # 47 -- `a = x; b = y` in kernel and benchmark code
+    "E712",  #  2
+    "E714",  #  1
+    "E731",  # 18 -- lambda assignment, mostly triton kernel dispatch tables
+    "E741",  # 79 -- `l` as a length/level variable throughout the kernels
+    "E742",  #  1
+    "F401",  # 17 -- unused imports; several are deliberate re-exports
+    "F541",  #  1
+    "F841",  # 13 -- assigned-never-used locals
+]

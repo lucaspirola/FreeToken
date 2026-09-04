@@ -50,6 +50,8 @@ See [docs/install.md](docs/install.md) for requirements. CUDA kernels are JIT-co
 
 Run the tests with `pytest`. Most tests need an NVIDIA GPU. `-m "not slow"` skips the long kernel sweeps; tests marked `needs_weights` are off unless you point them at a local checkpoint (see [tests/README.md](tests/README.md)).
 
+The subset that needs no GPU — `ruff check`, the scheduler / server / kvcache / DSV4 / Nemotron-H unit tests, and the scheduler replay throughput gate — runs in CI on every push and PR. [docs/cpu-checks.md](docs/cpu-checks.md) says what each one covers and how to run it locally, including how to read a scheduler replay gate failure.
+
 ## Commit messages
 
 We follow [Conventional Commits](https://www.conventionalcommits.org/):
