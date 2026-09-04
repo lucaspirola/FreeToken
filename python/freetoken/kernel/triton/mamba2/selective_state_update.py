@@ -43,8 +43,10 @@ Two backends, selected by `FREETOKEN_MAMBA2_DECODE`:
     The kernel in this file. Same numerics to fp32 roundoff, no JIT-compiled
     C++ dependency.
 
-``auto`` (the default) picks flashinfer when it imports *and* its JIT module
-builds; the first build failure demotes the process to Triton for good.
+``triton`` is the default (accuracy: 3e-7 state error vs the fp32 reference, against
+flashinfer's 1e-3 from its bf16 ``dt_bias``). ``auto`` picks flashinfer when it imports
+*and* its JIT module builds; the first build failure demotes the process to Triton for
+good.
 """
 
 from __future__ import annotations
@@ -347,7 +349,11 @@ _flashinfer_broken: str | None = None
 
 
 def _env_mode() -> str:
-    mode = (os.environ.get(_ENV) or "auto").strip().lower()
+    # Default: the Triton port. Decided 2026-09-04 (tasks/nemotron35-plan.md): its state
+    # error vs the fp32 reference is 3e-7 against flashinfer's 1e-3 (bf16 dt_bias), which
+    # matters over a 1M-token session. flashinfer is opt-in
+    # (FREETOKEN_MAMBA2_DECODE=flashinfer), or `auto` to prefer it when it builds.
+    mode = (os.environ.get(_ENV) or "triton").strip().lower()
     if mode not in ("auto", "flashinfer", "triton"):
         raise ValueError(
             f"{_ENV}={mode!r}; expected one of 'auto', 'flashinfer', 'triton'"

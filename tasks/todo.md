@@ -11,9 +11,12 @@ Full plan: tasks/nemotron35-plan.md
 
 ## Phase 2 — kernels
 - [x] T0 flashinfer SSU probe (usable)
-- [ ] 2A1 layout/metadata/wiring  - [x] 2A2 SSD prefill (kernels validated)  - [x] 2A3 decode SSU + gated norm
-- [ ] 2B1 b12x relu2  - [ ] 2B3 dense NVFP4 tuning
-- [ ] 2A4 integrate  - [ ] 2B2 triton fallback tuning  - [ ] 2B4 cache sizing study  - [ ] 1M multi-session spill gate
+- [x] 2A1 layout/metadata/wiring (state_layout kv|mamba2, track_chunk_size 64|128, FLAMetadata.mamba2)  - [x] 2A2 SSD prefill (kernels validated)  - [x] 2A3 decode SSU + gated norm
+- [x] 2B1 b12x relu2 (auto default; decode M≤4 to be settled by 2B4)  - [x] 2B3 dense NVFP4 tuning
+- [x] 2A4 integrate (P1 smoke + all 4 P2 serving gates + 32K needle + A/B vs FREETOKEN_MAMBA2_REF=1;
+      fixed a CUDA-graph use-after-free in the decode out-buffer; 131K needle at 8K chunks still open --
+      benchmarks/results/nemotron35_lightning_5080_mamba2_2026-09-04.md)
+  - [x] 2B2 triton fallback tuning  - [ ] 2B4 cache sizing study  - [ ] 1M multi-session spill gate
 
 ## Phase 3 — Switchyard
 - [x] 3A wire/errors  - [x] 3B JSON mode  - [x] 3C sessions+parsers  - [ ] 3D soak run (prep done)  - [x] 3E residency: spill on demand + capacity/age retention + restart-persistent checkpoints
@@ -194,3 +197,4 @@ Command: `ft serve --model ~/ai/models/Ornith-1.5-35B-Q4_K_M.gguf
   TTFT 125.265 s (29.2% lower / 1.41x faster). Both completed 15-token coherent
   responses without a crash. Worker environments proved the fallback leg had
   `FREETOKEN_GGUF_DISABLE_MMA=1` and the optimized leg did not.
+- tests/moe/test_prefill_hit_d2d.py::test_batch_memcpy_roundtrip is a pre-existing order-dependent flake (dst produced on the default stream, probe syncs its own stream). Ticket it; not Nemotron work.

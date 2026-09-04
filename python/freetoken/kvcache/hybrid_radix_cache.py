@@ -53,13 +53,21 @@ class EvictResult(NamedTuple):
 
 
 class HybridRadixCache:
-    def __init__(self, device: torch.device, page_size: int) -> None:
-        from freetoken.kernel.fla.chunk import CHUNK_SIZE
-        # Snapshots land on ×CHUNK_SIZE boundaries; require them to be page-aligned so the KV
-        # node boundary and the GDN-state boundary coincide (page_size in {1,2,4,8,16,32,64}).
-        assert CHUNK_SIZE % page_size == 0, (
-            f"hybrid_radix needs CHUNK_SIZE({CHUNK_SIZE}) % page_size({page_size}) == 0"
+    def __init__(self, device: torch.device, page_size: int,
+                 track_chunk_size: int | None = None) -> None:
+        if track_chunk_size is None:
+            from freetoken.kernel.fla.chunk import CHUNK_SIZE
+
+            track_chunk_size = CHUNK_SIZE
+        # Snapshots land on x``track_chunk_size`` boundaries -- the scan kernel's chunk size,
+        # 64 for FLA/GDN and 128 for Mamba-2 SSD (LinearGatedDeltaGroupConfig.track_chunk_size).
+        # Require them to be page-aligned so the KV node boundary and the state boundary
+        # coincide (page_size a power of two <= track_chunk_size).
+        assert track_chunk_size % page_size == 0, (
+            f"hybrid_radix needs track_chunk_size({track_chunk_size}) % "
+            f"page_size({page_size}) == 0"
         )
+        self.track_chunk_size = track_chunk_size
         self.device = device
         self.page_size = page_size
         self.key_fn = _get_key_fn(page_size)

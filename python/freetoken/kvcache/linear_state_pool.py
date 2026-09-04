@@ -21,11 +21,28 @@ def ssm_state_dtype() -> torch.dtype:
 def _linear_local_dims(
     group: LinearGatedDeltaGroupConfig, tp_size: int
 ) -> tuple[int, int, int]:
-    """TP-local ``(n_layers, conv_dim, v_heads)`` for the GDN state tensors -- the single
-    source of the sharding math shared by the pool allocation and the byte estimate."""
+    """TP-local ``(n_layers, conv_dim, v_heads)`` for the recurrent state tensors -- the
+    single source of the sharding math shared by the pool allocation and the byte estimate.
+
+    The recurrent slot is always ``[v_heads, key_head_dim, value_head_dim]``; only the conv
+    stream differs between the two layouts, because the projection that feeds the depthwise
+    conv packs different things:
+
+    ``kv`` (GDN)     q, k (``key_head_dim`` each, ``key_heads`` of them) then v.
+    ``mamba2`` (SSD) x (``v_heads x key_head_dim`` = the SSM inner width) then B and C
+                     (``key_heads x value_head_dim`` = G x N each) -- 4096 + 2*8*128 = 6144
+                     for Nemotron-3.5 Lightning.
+    """
     local_k_heads = div_even(group.num_key_heads, tp_size, allow_replicate=True)
     local_v_heads = div_even(group.num_value_heads, tp_size, allow_replicate=True)
-    local_conv_dim = 2 * local_k_heads * group.key_head_dim + local_v_heads * group.value_head_dim
+    if group.state_layout == "mamba2":
+        local_conv_dim = (
+            local_v_heads * group.key_head_dim + 2 * local_k_heads * group.value_head_dim
+        )
+    else:
+        local_conv_dim = (
+            2 * local_k_heads * group.key_head_dim + local_v_heads * group.value_head_dim
+        )
     return len(group.layer_ids), local_conv_dim, local_v_heads
 
 
@@ -189,6 +206,19 @@ class LinearStatePool:
         ``dst``. Used for COW-on-restore (donated snapshot -> fresh live slot)."""
         self.conv_states[:, dst].copy_(self.conv_states[:, src])
         self.recurrent_states[:, dst].copy_(self.recurrent_states[:, src])
+
+    @property
+    def group(self) -> LinearGatedDeltaGroupConfig:
+        return self._group
+
+    @property
+    def state_layout(self) -> str:
+        return self._group.state_layout
+
+    @property
+    def track_chunk_size(self) -> int:
+        """Chunk granularity of the hybrid-radix state snapshots (64 GDN / 128 Mamba-2)."""
+        return self._group.track_chunk_size
 
     def is_linear_layer(self, layer_id: int) -> bool:
         return layer_id in self._local_index

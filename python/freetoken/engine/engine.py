@@ -529,6 +529,28 @@ class Engine:
             self.dummy_req.linear_slot_idx = self.linear_state_pool.padding_slot
         dummy_page = 0 if getattr(self.kv_cache, "growable", False) else num_tokens
         self.page_table[self.dummy_req.table_idx].fill_(dummy_page)
+        # Mamba-2 decode kernel must exist BEFORE capture: the flashinfer front end JITs a
+        # module on first call (minutes) and the Triton kernel compiles, neither of which can
+        # happen inside a CUDA graph. One throw-away step on a scratch pool does both.
+        if (
+            self.linear_state_pool is not None
+            and linear_group.state_layout == "mamba2"
+            and self.device.type == "cuda"
+        ):
+            from freetoken.kernel.triton.mamba2 import warm_mamba2_decode
+
+            if self.linear_state_pool.recurrent_states.dtype is not torch.float32:
+                raise ValueError(
+                    "the Mamba-2 SSD kernels require an fp32 recurrent state pool; "
+                    f"FREETOKEN_MAMBA_SSM_DTYPE selected "
+                    f"{self.linear_state_pool.recurrent_states.dtype}"
+                )
+            backend = warm_mamba2_decode(
+                self.linear_state_pool.recurrent_states[0],
+                bs=max(1, config.max_running_req),
+                ngroups=linear_group.num_key_heads,
+            )
+            logger.info_rank0(f"Mamba-2 decode backend: {backend}")
         self.graph_runner = GraphRunner(
             stream=self.stream,
             device=self.device,

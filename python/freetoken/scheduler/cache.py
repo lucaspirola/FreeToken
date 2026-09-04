@@ -83,7 +83,10 @@ class CacheManager:
     def _make_prefix_cache(self, device, page_size, type):
         if type == "hybrid_radix":
             from freetoken.kvcache.hybrid_radix_cache import HybridRadixCache
-            return HybridRadixCache(device, page_size)
+            # The snapshot boundary is the model's scan chunk (GDN 64 / Mamba-2 128).
+            chunk = (self.linear_state_pool.track_chunk_size
+                     if self.linear_state_pool is not None else None)
+            return HybridRadixCache(device, page_size, chunk)
         if type == "swa_radix":
             from freetoken.kvcache.swa_radix_cache import SWARadixCache
             return SWARadixCache(device, page_size, self.sliding_window_size)
@@ -611,7 +614,7 @@ class CacheManager:
     def _cache_req_hybrid(self, req: Req, *, finished: bool) -> None:
         """Hybrid (GDN) cache_req: commit KV like radix AND manage the GDN state snapshot.
         Prefill chunk commit: DONATE the frozen ping-pong slot (the snapshot the forward wrote
-        at the tracked ×64 boundary mamba_last_track_seqlen) into the tree; replace it with a
+        at the tracked chunk boundary mamba_last_track_seqlen) into the tree; replace it with a
         fresh slot if the tree took it (dedup keeps it for reuse). Finish: donate the live slot
         (final full-sequence state, zero-copy since the req is done) and free the req's slots."""
         from freetoken.kvcache.hybrid_radix_cache import HybridCacheHandle
@@ -628,7 +631,7 @@ class CacheManager:
             return
 
         if finished:
-            # A pending freeze (the tool-call anchor, or a prefill ×64 track the request
+            # A pending freeze (the tool-call anchor, or a prefill chunk track the request
             # finished too early to chunk-commit) is a strictly shorter prefix than the live
             # donate below: insert it first and advance the dedup-free floor to its boundary
             # -- [prefix_len, L) is now tree-owned by the donated node, so only [old, prefix_len)
@@ -654,7 +657,7 @@ class CacheManager:
             # Donate the live slot (final full-sequence state). The live state is at cached_len;
             # only attach it when cached_len is itself the page-aligned node boundary (always for
             # page_size==1). For page_size>1 a non-aligned cached_len would attach an over-advanced
-            # state to a shorter prefix node -> skip the finish-donate (the ×64 prefill snapshots
+            # state to a shorter prefix node -> skip the finish-donate (the chunk-aligned prefill snapshots
             # remain as reuse points).
             insert_len = align_down(req.cached_len, self.page_size)
             keep_live = False
@@ -670,10 +673,10 @@ class CacheManager:
             self._free_req_slots(req, keep_live=keep_live)
             return
 
-        # Prefill chunk commit: donate the frozen snapshot at the tracked ×64 boundary.
+        # Prefill chunk commit: donate the frozen snapshot at the tracked chunk boundary.
         L = req.mamba_last_track_seqlen
         if L is None:
-            return  # no ×64 boundary crossed this chunk; req keeps its pages (committed later)
+            return  # no track boundary crossed this chunk; req keeps its pages (committed later)
         if align_down(L, self.page_size) != L:
             # page_size>1 only: insert would align the key down, attaching a state that encodes
             # L tokens to a SHORTER node -- a future hit would COW-restore an over-advanced

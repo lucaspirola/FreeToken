@@ -149,6 +149,28 @@ class SWAAttentionGroupConfig(BaseAttentionGroupConfig):
 
 @dataclass(frozen=True)
 class LinearGatedDeltaGroupConfig(BaseAttentionGroupConfig):
+    """Recurrent-state group: GatedDeltaNet (``state_layout="kv"``) or Mamba-2 SSD
+    (``state_layout="mamba2"``).
+
+    The two families keep different state geometries, so the four head/dim fields are
+    read through the layout:
+
+    ``"kv"`` (Qwen3.5 / Ornith GDN)
+        recurrent state ``[value_heads, key_head_dim, value_head_dim]``; conv stream
+        ``2 * key_heads * key_head_dim + value_heads * value_head_dim`` (q/k then v).
+
+    ``"mamba2"`` (Nemotron-3.5)
+        recurrent state ``[H, P, N]`` -- the native SSD / flashinfer layout, so the
+        kernels need no transposes -- with ``num_value_heads`` = H (ssm heads),
+        ``key_head_dim`` = P (head dim), ``value_head_dim`` = N (d_state) and
+        ``num_key_heads`` = G (B/C groups). The conv stream is
+        ``value_heads * key_head_dim + 2 * key_heads * value_head_dim`` (x then B, C),
+        i.e. 6144 for Nemotron-3.5 Lightning.
+
+    ``track_chunk_size`` is the boundary granularity of the hybrid-radix state
+    snapshots: the scan kernel's chunk size, 64 for FLA/GDN and 128 for Mamba-2 SSD.
+    """
+
     kind: ClassVar[Literal["linear_gated_delta"]] = "linear_gated_delta"
     cache_kind: ClassVar[Literal["linear_state"]] = "linear_state"
 
@@ -158,6 +180,15 @@ class LinearGatedDeltaGroupConfig(BaseAttentionGroupConfig):
     value_head_dim: int
     conv_kernel_dim: int
     output_gate: bool
+    state_layout: Literal["kv", "mamba2"] = "kv"
+    track_chunk_size: int = 64
+
+    def __post_init__(self) -> None:
+        if self.state_layout not in ("kv", "mamba2"):
+            raise ValueError(f"unknown linear state_layout {self.state_layout!r}")
+        chunk = self.track_chunk_size
+        if chunk <= 0 or chunk & (chunk - 1):
+            raise ValueError(f"track_chunk_size must be a power of two, got {chunk}")
 
 
 @dataclass(frozen=True)

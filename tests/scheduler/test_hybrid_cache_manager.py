@@ -147,3 +147,35 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn):
             fn()
             print(f"{name}: PASS")
+
+
+def _mamba2_pool(num_slots=16):
+    """Nemotron-3.5-shaped group: the "mamba2" layout with a 128-token snapshot chunk."""
+    g = LinearGatedDeltaGroupConfig(
+        name="mamba", layer_ids=(0,), num_key_heads=2, num_value_heads=4,
+        key_head_dim=16, value_head_dim=32, conv_kernel_dim=4, output_gate=True,
+        state_layout="mamba2", track_chunk_size=128,
+    )
+    return LinearStatePool(group=g, num_slots=num_slots, dtype=torch.bfloat16,
+                           device=torch.device("cpu"), tp_size=1)
+
+
+def test_snapshot_boundary_follows_the_model_chunk():
+    """CacheManager hands HybridRadixCache the group's track_chunk_size, so Nemotron's
+    snapshots land on x128 boundaries while GDN models keep x64 -- and a page_size that
+    would straddle the boundary is rejected at construction."""
+    import pytest
+
+    page_table = torch.zeros(4, 64, dtype=torch.int32)
+    gdn = CacheManager(64, 1, page_table, "hybrid_radix", linear_state_pool=_pool())
+    assert gdn.prefix_cache.track_chunk_size == 64
+
+    m2 = CacheManager(64, 1, page_table, "hybrid_radix", linear_state_pool=_mamba2_pool())
+    assert m2.prefix_cache.track_chunk_size == 128
+
+    # page_size 128 straddles a x64 snapshot boundary but is exactly one x128 boundary.
+    pt128 = torch.zeros(4, 256, dtype=torch.int32)
+    with pytest.raises(AssertionError, match=r"track_chunk_size\(64\) % page_size\(128\)"):
+        CacheManager(256, 128, pt128, "hybrid_radix", linear_state_pool=_pool())
+    ok = CacheManager(256, 128, pt128, "hybrid_radix", linear_state_pool=_mamba2_pool())
+    assert ok.prefix_cache.page_size == 128

@@ -10,10 +10,15 @@ What is genuinely different from the SWA sibling, and therefore what this module
   * ``evict_mamba`` counts SNAPSHOTS, tombstones internal nodes in place (keeping their KV), and
     frees KV eagerly when it takes a leaf, cascading through the tombstone leaves it exposes.
 
-Page size: apart from the constructor's ``CHUNK_SIZE % page_size == 0`` assertion, the class is
-page_size-agnostic -- ``align_down`` in ``_walk`` / ``insert`` is the only page-size-sensitive
-code.  The scenarios therefore run at one page size (4, big enough that page keying differs from
-token keying); the truncation test sweeps the page-size matrix.
+Page size: apart from the constructor's ``track_chunk_size % page_size == 0`` assertion, the
+class is page_size-agnostic -- ``align_down`` in ``_walk`` / ``insert`` is the only
+page-size-sensitive code.  The scenarios therefore run at one page size (4, big enough that page
+keying differs from token keying); the truncation test sweeps the page-size matrix.
+
+Track chunk size: the snapshot boundary granularity the *model* imposes (GDN 64, Mamba-2 SSD
+128).  The tree never sees a boundary -- the caller only ever inserts at one -- so the whole
+scenario suite is run at both values to pin exactly that: 128 must change nothing but which
+page sizes the constructor accepts.
 
 Expectations come from the page-keyed reference model in ``model.py``; ``Session.do_*`` compares
 every public result against it and ``Session.check()`` runs the invariant battery.
@@ -68,10 +73,11 @@ def live_snapshots(s: Session) -> int:
     return c["mamba_evictable"] + c["mamba_protected"]
 
 
-@pytest.fixture
-def hyb() -> Session:
-    """A hybrid cache at page_size=4 with its reference model and slot ledgers."""
-    return Session(SPEC)
+@pytest.fixture(params=[64, 128], ids=["c64", "c128"])
+def hyb(request) -> Session:
+    """A hybrid cache at page_size=4 with its reference model and slot ledgers, at both
+    snapshot granularities (GDN 64 / Mamba-2 128)."""
+    return Session(CacheSpec("hybrid", PAGE, track_chunk=request.param))
 
 
 def two_node_tree(s: Session) -> Tuple[Sequence[int], int, int]:
@@ -88,24 +94,34 @@ def two_node_tree(s: Session) -> Tuple[Sequence[int], int, int]:
 
 
 # --------------------------------------------------------------------------- constructor
-@pytest.mark.parametrize("page_size, ok", [(1, True), (4, True), (64, True),
-                                           (3, False), (48, False), (128, False)])
-def test_page_size_must_divide_chunk_size(page_size, ok):
-    """Snapshots land on x CHUNK_SIZE boundaries, so a page must not straddle one."""
-    from freetoken.kernel.fla.chunk import CHUNK_SIZE
+@pytest.mark.parametrize("track_chunk_size", [64, 128])
+@pytest.mark.parametrize("page_size", [1, 3, 4, 48, 64, 128])
+def test_page_size_must_divide_chunk_size(page_size, track_chunk_size):
+    """Snapshots land on x track_chunk_size boundaries (GDN 64 / Mamba-2 128), so a page
+    must not straddle one. page_size 128 is legal only at the Mamba-2 granularity."""
     from freetoken.kvcache.hybrid_radix_cache import HybridRadixCache
 
-    assert (CHUNK_SIZE % page_size == 0) is ok, "the parameter table assumed CHUNK_SIZE == 64"
+    ok = track_chunk_size % page_size == 0
     if not ok:
-        with pytest.raises(AssertionError,
-                           match=rf"CHUNK_SIZE\({CHUNK_SIZE}\) % page_size\({page_size}\)"):
-            HybridRadixCache(torch.device("cpu"), page_size=page_size)
+        with pytest.raises(
+            AssertionError,
+            match=rf"track_chunk_size\({track_chunk_size}\) % page_size\({page_size}\)",
+        ):
+            HybridRadixCache(torch.device("cpu"), page_size, track_chunk_size)
         return
-    c = HybridRadixCache(torch.device("cpu"), page_size=page_size)
-    assert c.page_size == page_size
+    c = HybridRadixCache(torch.device("cpu"), page_size, track_chunk_size)
+    assert c.page_size == page_size and c.track_chunk_size == track_chunk_size
     assert (c.full_evictable_size, c.mamba_evictable_size) == (0, 0)
     cold = c.match_prefix(torch.tensor([1] * page_size, dtype=torch.int64))
     assert (cold.cached_len, cold.mamba_value) == (0, None)
+
+
+def test_track_chunk_size_defaults_to_the_fla_constant():
+    """Omitting it keeps the GDN (Qwen3.5 / Ornith) behaviour byte for byte."""
+    from freetoken.kernel.fla.chunk import CHUNK_SIZE
+    from freetoken.kvcache.hybrid_radix_cache import HybridRadixCache
+
+    assert HybridRadixCache(torch.device("cpu"), 1).track_chunk_size == CHUNK_SIZE
 
 
 # --------------------------------------------------------------------------- insert / match
@@ -190,11 +206,12 @@ def test_insert_dedups_and_the_caller_frees_the_donated_slot(hyb):
     assert donated(hyb) in hyb.second.free                       # the loser was handed back
 
 
+@pytest.mark.parametrize("track_chunk", [64, 128], ids=["c64", "c128"])
 @pytest.mark.parametrize("P", [1, 4, 64], ids=["p1", "p4", "p64"])
-def test_insert_stores_whole_pages_only(P):
+def test_insert_stores_whole_pages_only(P, track_chunk):
     """``align_down`` governs both ends: fewer tokens than a page reaches the root (which cannot
     hold a snapshot, hence ``exists=True``), and a ragged tail is left with the caller."""
-    s = Session(CacheSpec("hybrid", P))
+    s = Session(CacheSpec("hybrid", P, track_chunk=track_chunk))
     stub = page_ids(P, 1)[: P - 1]                               # () at P == 1
     got, _ = s.do_insert(stub)
     assert (got.matched_len, got.second_exists) == (0, True)

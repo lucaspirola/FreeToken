@@ -42,17 +42,21 @@ class CacheSpec:
     kind: str                     # "plain" | "swa" | "hybrid"
     page_size: int
     window: int = 0               # swa only
+    #: hybrid only: the state-snapshot boundary granularity, i.e. the model's scan chunk
+    #: (LinearGatedDeltaGroupConfig.track_chunk_size -- 64 for GDN, 128 for Mamba-2).
+    track_chunk: int = 64
 
     @property
     def id(self) -> str:
-        return f"{self.kind}-p{self.page_size}" + (f"-w{self.window}" if self.kind == "swa" else "")
+        suffix = (f"-w{self.window}" if self.kind == "swa"
+                  else f"-c{self.track_chunk}" if self.kind == "hybrid" else "")
+        return f"{self.kind}-p{self.page_size}{suffix}"
 
     @property
     def unsupported(self) -> Optional[str]:
         """Why the class itself rejects this geometry, or None."""
-        from freetoken.kernel.fla.chunk import CHUNK_SIZE
-        if self.kind == "hybrid" and CHUNK_SIZE % self.page_size:
-            return (f"HybridRadixCache requires CHUNK_SIZE({CHUNK_SIZE}) % "
+        if self.kind == "hybrid" and self.track_chunk % self.page_size:
+            return (f"HybridRadixCache requires track_chunk_size({self.track_chunk}) % "
                     f"page_size({self.page_size}) == 0")
         return None
 
@@ -68,16 +72,21 @@ class CacheSpec:
                     SWAModel(P, w))
         if self.kind == "hybrid":
             from freetoken.kvcache.hybrid_radix_cache import HybridRadixCache
-            return HybridAdapter(HybridRadixCache(dev, page_size=P), P), HybridModel(P)
+            return (HybridAdapter(HybridRadixCache(dev, P, self.track_chunk), P),
+                    HybridModel(P))
         raise ValueError(f"unknown cache kind {self.kind!r}")
 
 
-#: The (class x page_size) matrix.  ``hybrid`` at page_size 128 is rejected by the class itself
-#: (snapshots land on CHUNK_SIZE=64 boundaries) and is skipped by the fixtures.
+#: The (class x page_size) matrix.  ``hybrid`` is run at both snapshot granularities: 64
+#: (FLA/GDN -- Qwen3.5, Ornith) and 128 (Mamba-2 SSD -- Nemotron-3.5). page_size 128 is
+#: rejected by the class itself at chunk 64 (a page would straddle a snapshot boundary) and
+#: skipped by the fixtures; at chunk 128 it is legal and exercised.
 ALL_SPECS: Tuple[CacheSpec, ...] = (
     CacheSpec("plain", 1), CacheSpec("plain", 4), CacheSpec("plain", 128),
     CacheSpec("swa", 1, window=4), CacheSpec("swa", 4, window=8), CacheSpec("swa", 128, window=128),
     CacheSpec("hybrid", 1), CacheSpec("hybrid", 4), CacheSpec("hybrid", 128),
+    CacheSpec("hybrid", 1, track_chunk=128), CacheSpec("hybrid", 4, track_chunk=128),
+    CacheSpec("hybrid", 64, track_chunk=128), CacheSpec("hybrid", 128, track_chunk=128),
 )
 
 

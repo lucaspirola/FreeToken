@@ -88,3 +88,20 @@
 - The `--memory-ratio` effect above is measurable end to end: 131 072 tokens with
   8192-token chunks runs 961 tok/s at 0.90 and 1 769 tok/s at 0.80; 4096-token
   chunks at 0.90 run 1 910 tok/s. Chunk size was a proxy for free VRAM.
+- A per-module output buffer that GROWS is a use-after-free under CUDA graphs (found
+  2026-09-04, task 2A4). Graph capture runs an eager warmup at every captured batch
+  size, so each graph bakes in the address it saw; an elastic capacity raise then puts
+  real decode batches ABOVE the largest captured size, those run eagerly, the buffer is
+  reallocated, and every later replay of a smaller graph writes into the freed block.
+  It surfaced three kernels away as `IndexKernel.cu:111 index out of bounds` on
+  `token_pool[output_mapping]` (exactly `#running-req` corrupted int64 indices). Cache
+  one buffer PER batch size and never replace an entry. Compute-sanitizer on the kernel
+  in isolation is clean for this class of bug -- the corruption needs the graph.
+- Bisecting a serving crash: (1) rerun the same profile from a detached worktree at the
+  parent commit (`git worktree add --detach`, `PYTHONPATH=<wt>/python`, and copy the
+  built `kernel/*.so` in -- the editable install's extensions do not come along) to tell
+  a regression from a pre-existing bug; (2) rerun on the same tree with the reference
+  path (`FREETOKEN_MAMBA2_REF=1`) to tell wiring from kernels. Two ~3-minute runs beat
+  an hour of reading.
+- `/health` returns 200 with `{"status": "loading"}` while weights load; a readiness
+  poll must require `"status": "ok"`, otherwise every gate request 503s.

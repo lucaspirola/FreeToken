@@ -184,14 +184,22 @@ def parse_config(hf_config: Any) -> ModelConfig:
     mamba_group = LinearGatedDeltaGroupConfig(
         name="mamba",
         layer_ids=mamba_ids,
-        # LinearStatePool is [value_heads, key_dim, value_dim]. Map those axes to
-        # Mamba's [heads, state_dim, head_dim].
+        # state_layout="mamba2": the pool slot is the native SSD / flashinfer
+        # [H, P, N] block, so no scan input or output is ever transposed. The generic
+        # axis names map to Mamba-2 as num_value_heads=H (ssm heads),
+        # key_head_dim=P (head dim), value_head_dim=N (d_state), num_key_heads=G
+        # (B/C groups) -- which also makes _linear_local_dims' mamba2 conv width
+        # H*P + 2*G*N = 6144 come out right.
         num_key_heads=int(hf_config.n_groups),
         num_value_heads=int(hf_config.mamba_num_heads),
-        key_head_dim=int(hf_config.ssm_state_size),
-        value_head_dim=int(hf_config.mamba_head_dim),
+        key_head_dim=int(hf_config.mamba_head_dim),
+        value_head_dim=int(hf_config.ssm_state_size),
         conv_kernel_dim=int(hf_config.conv_kernel),
         output_gate=True,
+        state_layout="mamba2",
+        # Radix state snapshots land on multiples of the SSD chunk (128), not the
+        # FLA/GDN 64: the chunk scan only materialises a state at its own boundaries.
+        track_chunk_size=int(hf_config.chunk_size),
     )
     groups = (
         mamba_group,

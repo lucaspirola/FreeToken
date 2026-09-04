@@ -93,3 +93,42 @@ if __name__ == "__main__":
     test_clear_slots_zeros_all_layers()
     test_copy_from_snapshot()
     print("LinearStatePool allocator unit: PASS")
+
+
+# ---------------------------------------------------------------- state_layout geometry
+def _lightning_group():
+    """Nemotron-3.5 Lightning: 23 mamba layers, H=64 heads x P=64, N=128 d_state, G=8."""
+    return LinearGatedDeltaGroupConfig(
+        name="mamba", layer_ids=tuple(range(23)),
+        num_key_heads=8, num_value_heads=64, key_head_dim=64, value_head_dim=128,
+        conv_kernel_dim=4, output_gate=True, state_layout="mamba2", track_chunk_size=128,
+    )
+
+
+def test_mamba2_pool_is_the_native_hpn_block():
+    """[L, slots, H, P, N] recurrent + a 6144-wide conv stream -- the SSD / flashinfer
+    layout, so no kernel input or output is ever transposed."""
+    pool = LinearStatePool(group=_lightning_group(), num_slots=5, dtype=torch.bfloat16,
+                           device=torch.device("cpu"), tp_size=1)
+    assert tuple(pool.recurrent_states.shape) == (23, 5, 64, 64, 128)
+    assert pool.recurrent_states.dtype is torch.float32     # decode kernel requires fp32
+    assert tuple(pool.conv_states.shape) == (23, 5, 6144, 3)
+    assert pool.state_layout == "mamba2" and pool.track_chunk_size == 128
+    assert pool.group is pool._group
+
+
+def test_mamba2_state_bytes_per_slot():
+    from freetoken.kvcache.linear_state_pool import linear_state_bytes_per_req
+
+    group = _lightning_group()
+    conv = 6144 * 3 * 2            # bf16 conv window
+    rec = 64 * 64 * 128 * 4        # fp32 [H, P, N]
+    assert linear_state_bytes_per_req(group, 1, torch.bfloat16) == 23 * (conv + rec)
+
+
+def test_gdn_pool_geometry_is_unchanged():
+    """The "kv" layout (Qwen3.5 / Ornith) keeps 2*Hk*Dk + Hv*Dv conv channels."""
+    pool = _pool(num_slots=4)
+    assert pool.state_layout == "kv" and pool.track_chunk_size == 64
+    assert tuple(pool.conv_states.shape) == (2, 4, 2 * 2 * 16 + 4 * 16, 3)
+    assert tuple(pool.recurrent_states.shape) == (2, 4, 4, 16, 16)

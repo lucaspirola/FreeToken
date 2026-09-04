@@ -301,8 +301,11 @@ def test_state_bytes_per_slot_matches_the_pool_arithmetic():
 
     config = parse_config(_hf_config(["mamba", "moe"] * 23 + ["attention"] * 6))
     group = config.attention_groups[0]
-    conv_dim = 2 * 8 * 128 + 64 * 64
-    expected = 23 * (conv_dim * 3 * 2 + 64 * 128 * 64 * 4)
+    assert group.state_layout == "mamba2"
+    # mamba2 axes: H=64 heads, P=64 head dim, N=128 d_state, G=8 B/C groups.
+    # conv stream = x (H*P) then B and C (G*N each); recurrent slot = [H, P, N] fp32.
+    conv_dim = 64 * 64 + 2 * 8 * 128
+    expected = 23 * (conv_dim * 3 * 2 + 64 * 64 * 128 * 4)
     assert _state_bytes_per_slot(group) == expected
     assert expected < 96 * 1024 * 1024
 

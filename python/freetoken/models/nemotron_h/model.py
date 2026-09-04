@@ -8,6 +8,11 @@ import torch.nn.functional as F
 from freetoken.attention.linear import build_fla_metadata
 from freetoken.core import get_global_ctx
 from freetoken.kernel.causal_conv1d import causal_conv1d_decode, causal_conv1d_varlen
+from freetoken.kernel.triton.mamba2 import (
+    mamba2_decode,
+    mamba2_gated_rmsnorm,
+    mamba2_prefill,
+)
 from freetoken.layers import (
     BaseOP,
     LinearColParallelMerged,
@@ -20,6 +25,8 @@ from freetoken.layers import (
 )
 from freetoken.models.blocks import BaseLLMModel
 from freetoken.utils import nvtx_annotate
+
+from .mamba2_reference import reference_enabled
 
 if TYPE_CHECKING:
     from freetoken.models.config import ModelConfig
@@ -48,6 +55,10 @@ class _DepthwiseConv1d(BaseOP):
 
 
 class _MambaGatedRMSNorm(BaseOP):
+    """``norm(x * silu(z))`` per group -- one fused Triton kernel (kernel/fla
+    layernorm_gated, pinned to the Mamba-2 flags by mamba2_gated_rmsnorm). The
+    pure-PyTorch twin lives in mamba2_reference.reference_gated_rmsnorm."""
+
     def __init__(self, size: int, groups: int, eps: float):
         self.weight = torch.empty(size)
         self.groups = groups
@@ -55,12 +66,11 @@ class _MambaGatedRMSNorm(BaseOP):
         self.eps = eps
 
     def forward(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
-        dtype = x.dtype
-        x = x.float() * F.silu(gate.float())
-        shape = x.shape
-        grouped = x.view(*shape[:-1], self.groups, self.group_size)
-        grouped = grouped * torch.rsqrt(grouped.square().mean(-1, keepdim=True) + self.eps)
-        return grouped.view(shape).to(dtype) * self.weight
+        if reference_enabled():
+            from .mamba2_reference import reference_gated_rmsnorm
+
+            return reference_gated_rmsnorm(x, gate, self.weight, self.eps, self.group_size)
+        return mamba2_gated_rmsnorm(x, gate, self.weight, self.eps, self.group_size)
 
 
 class NemotronHMamba2Mixer(BaseOP):
@@ -91,6 +101,9 @@ class NemotronHMamba2Mixer(BaseOP):
             self.intermediate_size, self.n_groups, config.rms_norm_eps
         )
         self.D = torch.empty(self.num_heads, dtype=torch.float32)
+        # Leading-underscore attrs are skipped by BaseOP.state_dict/load_state_dict.
+        self._A_cache: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._out_buffers: dict[tuple, torch.Tensor] = {}
         self.out_proj = _linear(
             args, f"{prefix}.out_proj", self.intermediate_size, config.hidden_size
         )
@@ -109,77 +122,77 @@ class NemotronHMamba2Mixer(BaseOP):
             bias=self.conv1d.bias,
         ).transpose(0, 1)
 
-    def _scan(self, x, dt, B, C, initial):
-        # The reference recurrence (transformers' pure-Torch chunk fallback, used when
-        # mamba_ssm is absent), with its four broadcast-and-sum contractions written as
-        # einsums. Same math to fp32 roundoff; 4.2 MiB/token of rank-6 temporaries
-        # becomes 0.22 MiB/token, which is what makes a >1K-token prefill chunk fit in
-        # 16 GB. See models/nemotron_h/chunk_scan.py.
-        from .chunk_scan import mamba2_chunk_scan
+    @property
+    def A(self) -> torch.Tensor:
+        """``-exp(A_log)`` [H] fp32, cached on the module.
 
-        return mamba2_chunk_scan(
-            x.unsqueeze(0), dt.unsqueeze(0), -torch.exp(self.A_log.float()),
-            B.unsqueeze(0), C.unsqueeze(0), chunk_size=self.chunk_size,
-            D=self.D, dt_bias=self.dt_bias, initial_states=initial.unsqueeze(0),
-            dt_softplus=True, dt_limit=self.dt_limit, return_final_states=True,
-        )
+        Both kernels want the negated log-decay, and the flashinfer decode front end
+        keys its stride-0 expanded views on ``id(A)`` -- rebuilding it every step would
+        allocate on every call and defeat that cache. Keyed on the identity of
+        ``A_log`` so a (re)load_state_dict is picked up."""
+        cached = self._A_cache
+        if cached is None or cached[0] is not self.A_log:
+            cached = (self.A_log, -torch.exp(self.A_log.float()))
+            self._A_cache = cached
+        return cached[1]
+
+    def _decode_out(self, x: torch.Tensor) -> torch.Tensor:
+        """The [bs, H, P] decode output buffer, so a steady-state step allocates nothing.
+
+        One buffer PER batch size, and an entry is never replaced once handed out. A
+        single grow-only buffer would be a use-after-free: capture runs an eager warmup
+        at every graph batch size, so each captured graph bakes in the address it saw,
+        and a later *eager* decode wider than the largest captured size (elastic capacity
+        raises max_running_requests above the captured sizes) would reallocate the buffer
+        and free the block those graphs still write to on every replay.
+
+        Keyed on (bs, dtype, device); the entry count is bounded by the graph batch-size
+        list plus the eager sizes actually seen, at 2 * H * P bytes each (128 KiB at
+        bs=16 for Lightning)."""
+        key = (x.shape[0], x.dtype, x.device)
+        buf = self._out_buffers.get(key)
+        if buf is None:
+            buf = torch.empty(x.shape[0], self.num_heads, self.head_dim,
+                              dtype=x.dtype, device=x.device)
+            self._out_buffers[key] = buf
+        return buf
 
     def _prefill_scan(self, x, dt, B, C, fla, pool) -> torch.Tensor:
-        li = pool.local_index(self.layer_id)
-        if fla.fresh_state_indices is not None:
-            pool.recurrent_states[li].index_fill_(0, fla.fresh_state_indices, 0.0)
-        outputs = []
-        offset = 0
-        for req in get_global_ctx().batch.padded_reqs:
-            length = req.extend_len
-            slot = req.linear_slot_idx if req.linear_slot_idx is not None else req.table_idx
-            initial = pool.recurrent_states[li, slot].transpose(-1, -2).contiguous()
-            sx, sdt, sB, sC = (v[offset:offset + length] for v in (x, dt, B, C))
+        """Chunked SSD scan over the whole varlen batch in one launch.
 
-            # Hybrid-radix asks for at most one mid-chunk snapshot per request. Split the
-            # reference scan at that boundary so the donated state is exact.
-            boundary = None
-            if req.mamba_last_track_seqlen is not None:
-                candidate = req.mamba_last_track_seqlen - req.cached_len
-                if 0 < candidate < length:
-                    boundary = candidate
-            if boundary is not None:
-                out1, state1 = self._scan(
-                    sx[:boundary], sdt[:boundary], sB[:boundary], sC[:boundary], initial
-                )
-                assert req.mamba_ping_pong is not None
-                dst = req.mamba_ping_pong[1 - req.mamba_next_track_idx]
-                pool.recurrent_states[li, dst].copy_(state1[0].transpose(-1, -2))
-                out2, final = self._scan(
-                    sx[boundary:], sdt[boundary:], sB[boundary:], sC[boundary:], state1[0]
-                )
-                out = torch.cat((out1[0], out2[0]), dim=0)
-            else:
-                scanned, final = self._scan(sx, sdt, sB, sC, initial)
-                out = scanned[0]
-            pool.recurrent_states[li, slot].copy_(final[0].transpose(-1, -2))
-            outputs.append(out)
-            offset += length
-        return torch.cat(outputs, dim=0)
+        The pool slot is already the kernels' native [H, P, N] block, so nothing is
+        transposed; `has_initial_state` zeroes the carried state of fresh sequences
+        inside the gather, replacing the old `fresh_state_indices` index_fill_."""
+        li = pool.local_index(self.layer_id)
+        state_source = pool.recurrent_states[li]
+        assert fla.mamba2 is not None, "Mamba-2 prefill needs FLAMetadata.mamba2"
+        track = fla.track_dst is not None
+        out, states = mamba2_prefill(
+            x, dt, B, C,
+            A=self.A, D=self.D, dt_bias=self.dt_bias,
+            meta=fla.mamba2, cu_seqlens=fla.cu_seqlens,
+            state_source=state_source, indices=fla.cache_indices,
+            has_initial_state=fla.has_initial_state,
+            return_intermediate_states=track,
+            dt_softplus=True, dt_limit=self.dt_limit,
+        )
+        if track:
+            # Hybrid-radix mid-prefill snapshot: the state at the deepest interior chunk
+            # boundary is already a row of the per-chunk block, so the donate is a gather
+            # + scatter instead of the reference path's second scan.
+            state_source.index_copy_(
+                0, fla.track_dst, states[fla.track_h_row].to(state_source.dtype)
+            )
+        return out
 
     def _decode_scan(self, x, dt, B, C, fla, pool) -> torch.Tensor:
-        from transformers.models.nemotron_h.modeling_nemotron_h import (
-            mamba2_selective_state_update,
-        )
-
         li = pool.local_index(self.layer_id)
-        indices = fla.cache_indices.long()
-        state = pool.recurrent_states[li].index_select(0, indices).transpose(-1, -2).contiguous()
-        A = -torch.exp(self.A_log.float())[:, None, None].expand(
-            -1, self.head_dim, self.state_size
+        return mamba2_decode(
+            x, dt, B, C,
+            A=self.A, D=self.D, dt_bias=self.dt_bias,
+            state_source=pool.recurrent_states[li], indices=fla.cache_indices,
+            out=self._decode_out(x), dt_softplus=True,
         )
-        out = mamba2_selective_state_update(
-            state, x, dt[:, :, None].expand(-1, -1, self.head_dim), A, B, C,
-            self.D[:, None].expand(-1, self.head_dim),
-            dt_bias=self.dt_bias[:, None].expand(-1, self.head_dim), dt_softplus=True,
-        )
-        pool.recurrent_states[li].index_copy_(0, indices, state.transpose(-1, -2))
-        return out
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         ctx = get_global_ctx()
@@ -211,12 +224,18 @@ class NemotronHMamba2Mixer(BaseOP):
         x = x.view(-1, self.num_heads, self.head_dim)
         B = B.view(-1, self.n_groups, self.state_size)
         C = C.view(-1, self.n_groups, self.state_size)
-        if batch.is_decode:
+        if reference_enabled():
+            from . import mamba2_reference
+
+            scan = (mamba2_reference.reference_decode_scan if batch.is_decode
+                    else mamba2_reference.reference_prefill_scan)
+            scanned = scan(self, x, dt, B, C, fla, pool)
+        elif batch.is_decode:
             scanned = self._decode_scan(x, dt, B, C, fla, pool)
         else:
             scanned = self._prefill_scan(x, dt, B, C, fla, pool)
-        # The pure-Torch chunk scan accumulates/returns fp32; the reference casts back
-        # to the input dtype before the gated norm and output projection.
+        # The SSD kernels return x's dtype; the pure-Torch reference accumulates in fp32
+        # and is cast back here, matching HF before the gated norm and output projection.
         out = self.norm.forward(
             scanned.reshape(-1, self.intermediate_size).to(gate.dtype), gate
         )

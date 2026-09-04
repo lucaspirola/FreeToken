@@ -2,9 +2,10 @@
 
 A long prompt is prefilled in `--max-prefill-length` chunks: each chunk reads the
 previous chunk's recurrent + conv state out of the ``LinearStatePool`` and writes its
-own back. On top of that, ``_prefill_scan`` splits the scan a second time, at the
-hybrid-radix track boundary (a multiple of the FLA ``CHUNK_SIZE`` = 64, which is NOT a
-multiple of the Mamba chunk size 128), so it can freeze a donatable mid-chunk snapshot.
+own back. On top of that the forward freezes a donatable mid-chunk snapshot at the
+deepest interior hybrid-radix track boundary (a multiple of the group's
+``track_chunk_size`` -- for Mamba-2 that is the SSD chunk, 128, so the snapshot is a row
+of the per-chunk state block the scan already produced).
 
 Both handoffs must be invisible: the layer output and the carried state have to match a
 single-chunk prefill of the same tokens. This pins that invariant against the pure-Torch
@@ -150,7 +151,7 @@ def test_chunked_prefill_matches_single_pass(chunk_len, track):
 
 @cuda_only
 def test_prefill_scan_splits_at_the_track_boundary():
-    """The ×64 track split is exercised (and exact) even though 64 is not a Mamba chunk."""
+    """The x128 track snapshot is exercised, and exact against a standalone prefill."""
     import freetoken.core as core
     from freetoken.core import Batch, Context, set_global_ctx
     from freetoken.kvcache.linear_state_pool import LinearStatePool
@@ -184,7 +185,7 @@ def test_prefill_scan_splits_at_the_track_boundary():
     batch.padded_reqs = batch.reqs
     with ctx.forward_batch(batch), torch.inference_mode():
         mixer.forward(hidden)
-    # 320 tokens -> deepest strictly-interior x64 boundary is 256, and the frozen snapshot
+    # 320 tokens -> deepest strictly-interior x128 boundary is 256, and the frozen snapshot
     # lands in ping-pong slot 5 (mamba_next_track_idx flipped to 1 while building metadata).
     assert req.mamba_last_track_seqlen == 256
     assert req.mamba_next_track_idx == 1
