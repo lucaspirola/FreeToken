@@ -440,3 +440,41 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   have now (today the bisect's "model/quant limit" verdict and "gate needles at depth <=0.1"
   acceptance bar were both wrong). Say the answer out loud to the user even if it means
   disagreeing with the plan; don't just execute the checklist.
+
+## 2026-09-04 (final Switchyard soak vs `81ab30e`, and the 1M multi-needle run)
+- **A scheduler policy is graded on the wall clock it spends NOT scheduling.** `81ab30e` seats
+  2.0x the lanes and prefills 1.6x faster than the tree that passed — and fails the soak,
+  because 52–53 % of each phase produces no batch line at all (gaps of 492 s, 515 s, 624 s).
+  Error rate and p95 say "15 timeouts"; the diagnosis only appears when you measure the
+  wall-clock **gaps between consecutive batch-log lines**. Add that to every soak analyzer.
+- **`py-spy dump --locals` settles "wedged or merely slow" in one call.** No instrumentation,
+  no restart, no code change: it named the frame (`schedule_next_batch`), the hot leaf
+  (`fast_compare_key` inside a 118 K-token radix walk) and the exact locals that decide the
+  branch (`lane_cap: 0`, `seatable_lanes: 2`, `reqs: []`, `refusals: 2`,
+  `blocked_fresh: False`). Under WSL `ptrace_scope=1` it needs `sudo <path to py-spy>` —
+  `sudo env PATH=$PATH py-spy` does not resolve a `uvx`-installed binary; find the archive
+  path first. CPU% cannot distinguish a livelock here: the loop reads ~106–109 % in every
+  state, healthy or stalled.
+- **A CPU replay gate is not an acceptance test for a scheduler policy.**
+  `benchmarks/scheduler_replay.py` scored the failing commit at 2.49x tokens / 2.14x
+  completions. It models no retained session leases, no decode residency and no idle timeout —
+  which is precisely where the stall lives. Keep the live soak as the gate.
+- **A resource budget must subtract what the pool has already given away.** `81ab30e` gates a
+  fresh admit's finishability against `cache_manager.max_size - inflight_prefill_size`, i.e.
+  the WHOLE pool minus prompts mid-prefill — not minus the KV held by requests already
+  decoding, nor the retained/locked session prefixes that reclaim cannot evict. Admissions
+  keep arriving until `token usage: 1.00`, then no lane can buy its next chunk and nothing can
+  complete to free one. Same family as the two earlier cap bugs (§R6, `fad1fc4`): every time,
+  the budget was expressed in a currency the guarded check does not spend.
+- **One prefill, many questions: design long-context recall runs as a conversation.** A 1.04M
+  prompt costs 1,815 s to prefill and ~5 s per follow-up turn once the prefix cache holds it
+  (`cached_tokens` = prompt − 40). Six needles + a control + a combined question cost 34 min of
+  GPU instead of ~4 h as eight separate prompts — and the 4 h `gpu_lock` cap makes the naive
+  version impossible, not merely slow.
+- **Ask each needle in more than one question shape before concluding it was not retained.**
+  At 1.04M the model answered the depth-0.25 needle with the depth-0.05 code when asked
+  directly, then produced `9,854,500 = 5,663,623 + 4,190,877` when asked to compare and add the
+  two — so the "missing" needle was in the state all along. A single-question gate would have
+  filed a retention bug against the kernels. (Same shape as the 262K bisect's wrong "model/quant
+  limit" verdict.) Also grade a control key that is absent: it separates "cannot retrieve" from
+  "fabricates", and this checkpoint passed it (`No belfry ledger code found.`).

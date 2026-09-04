@@ -490,3 +490,220 @@ Same server line, `--route switchyard/stage --duration 20m`:
 * `soak2/analyze.py` — the batch-log parser behind §R4/§R5; `soak2/lane_ab.py` — the
   CPU-only lane A/B of §R6
 * `soak3/` — the stage-route re-run with the fix (same layout)
+
+---
+
+# Run against `81ab30e` (fresh-admit gate: finishability + this chunk)
+
+2026-09-04 21:00–21:54 local · FreeToken at **`81ab30e`** ("Scheduler: gate fresh admits on
+finishability + this chunk, continue past refusals"), working tree clean apart from the
+untracked `benchmarks/bench_multi_needle.py` · same RTX 5080 / WSL2 host, 30 GiB available at
+launch · one `scripts/gpu_lock.sh` holding the GPU for the whole server lifetime ·
+`piro-board-embedder.service` inactive · server line byte-identical to §R1
+(`scratchpad/soak5/serve.sh`) · **stage route first, then passthrough**, 20 min each at
+`--concurrency 16`, default scenario set.
+
+**Verdict: FAIL on both routes.** No crash, no fatal, no traceback — the scheduler simply
+stops producing batches for eight to ten minutes at a time, on a pool it has filled to
+`token usage: 1.00`, and the soak's 600 s client timeout collects the casualties.
+
+| | previous best (`befcde6` + §R6 fix, `soak3`) | **`81ab30e`** |
+|---|---|---|
+| stage 20 m | **PASS** 471 req / 0 err / 1 STALLED | **FAIL** 268 req / **15 timeouts** (5.5970 %) / **7 STALLED** |
+| passthrough 20 m | (soak2, `befcde6`) PASS 1,219 / 0 / 0 | **FAIL** 720 req / **16 timeouts** (2.2222 %) / **10 STALLED** |
+| stage p50 / p95 / p99 ms | 29,104 / 200,742 / 257,441 | 28,662 / **600,001** / 600,002 |
+| stage mean lanes per prefill batch | 2.37 | **4.71** |
+| stage prefill instant tok/s (median) | 1,877 | **2,938** |
+| passthrough decode at `#running-req == 16` | 161.4 agg / 10.09 per stream | 158.4 agg / 9.90 per stream |
+| `committed_pages_required` / tracebacks | 0 / 0 | **0 / 0** |
+
+The throughput half of the commit message reproduces: while `81ab30e` is scheduling it seats
+**2.0x the lanes** and prefills **1.6x faster** than the tree that passed. It is the *time
+spent not scheduling* that fails the soak.
+
+## S1. Exact commands
+
+```bash
+systemctl --user stop piro-board-embedder.service    # already inactive
+FREETOKEN_GPU_LOCK_WAIT=300 scripts/gpu_lock.sh <scratch>/soak5/run.sh
+```
+
+`run.sh` starts `serve.sh` (identical to `scratchpad/soak3/serve.sh`), waits for
+`/health` == ok, runs a 10 s upstream-`/health` watchdog and the 5 s per-process resource
+sampler, then:
+
+```bash
+scripts/switchyard_e2e.sh soak --base-url http://127.0.0.1:1919 \
+  --model nemotron-3.5-lightning --duration 20m --concurrency 16 \
+  --route switchyard/stage       --workdir <scratch>/soak5/soakStage
+scripts/switchyard_e2e.sh soak --base-url http://127.0.0.1:1919 \
+  --model nemotron-3.5-lightning --duration 20m --concurrency 16 \
+  --route switchyard/passthrough --workdir <scratch>/soak5/soakPass
+```
+
+### The aborted first attempt (20:47–20:57), for the record
+
+An earlier launch of the identical driver was killed nine minutes in when the controlling
+Claude Code process was killed; the server went down with it (clean FastAPI shutdown in the
+log). Its 9 minutes are **clean**: 214 prefill and 52 decode batches, **0** `Traceback`,
+**0** `committed_pages_required`, **0** `LinearStatePool exhausted`, **0** oversize
+("can never be admitted") warnings, and `health_bad.log` never created. Archived at
+`scratchpad/soak4_killed/`. It contains no evidence either way about the stalls, which begin
+at t≈10 min.
+
+## S2. Timeline
+
+| | |
+|---|---|
+| server start → `{"status":"ok"}` | **21 s** |
+| soak stage | 1,736 s wall (20 m + drain), **FAIL** (`error rate 5.5970% > 0%`) |
+| soak passthrough | 1,217 s, **FAIL** (`error rate 2.2222% > 0%`) |
+| scheduler deaths / detected restarts | **0 / 0** |
+| `/health` non-ok samples | **0** (40 soak checks + ~5 min of 10 s watchdog; `health_bad.log` absent) |
+| metrics / invalid-request canaries | 0 / 0 failures |
+| driver stop of a live server | `shutdown_seconds=3` |
+| GPU at end | **0 MiB**, no leftover venv python |
+
+## S3. Request counts
+
+| | **stage (20 m)** | **passthrough (20 m)** |
+|---|---|---|
+| requests / successes / failures | 268 / 253 / **15** | 720 / 704 / **16** |
+| error rate | **5.5970 %** | **2.2222 %** |
+| error kinds | `timeout` x15 | `timeout` x16 |
+| failing scenario | **long-context, all 15** | **long-context, all 16** |
+| p50 / p95 / p99 ms | 28,662 / 600,001 / 600,002 | 7,261 / 81,960 / 600,003 |
+| requests/s | 0.154 | 0.591 |
+| STALLED intervals (of 20) | **7** | **10** |
+
+Per scenario — stage: prefix-reuse 58, growing-conversation 57, tool-call-burst 57,
+large-tool-catalog 48, long-context 33 **+15 failures**. Passthrough: prefix-reuse 144,
+growing-conversation 144, tool-call-burst 144, large-tool-catalog 144, long-context 128
+**+16 failures**.
+
+## S4. Throughput while it is scheduling
+
+| phase | prefill batches | mean lanes/batch | median `#new-token` | prefill instant tok/s (median) | decode batches | decode agg tok/s | per stream |
+|---|---|---|---|---|---|---|---|
+| stage | 370 | **4.71** | 7,502 | **2,938** | 97 | 41.4 median (90.4 at 16-way, n=10) | 5.65 |
+| passthrough | 252 | **5.18** | 3,995 | 1,502 | 100 | 158.0 median (158.4 at 16-way, n=49) | **9.90** |
+
+Prefix reuse: stage 74.7 % (2.03 M new / 5.99 M cached), passthrough 88.5 % (1.08 M / 8.33 M).
+KV grew 65,536 → 262,144 in three steps and stayed there. Busiest FreeToken process:
+**median 109.0 % CPU** over 588 five-second samples — the same ~106–109 % the healthy runs
+show, so the stall is not distinguishable by CPU (see S5 for what it actually is).
+Peak GPU 14,415 MiB.
+
+## S5. The failure: the scheduler stops emitting batches for 8–10 minutes at a time
+
+Not a crash and not KV exhaustion-as-a-fatal. **Gaps in the batch log**, measured as the
+wall-clock between consecutive `Prefill batch` / `Decode batch` lines:
+
+| phase | gaps > 30 s | total silent time | share of the phase |
+|---|---|---|---|
+| stage (1,889 s) | 21:11:12 **+492 s**, 21:23:19 **+515 s** | **1,007 s** | **53 %** |
+| passthrough (1,326 s) | 21:34:51 **+624 s**, 21:48:00 +72 s | **696 s** | **52 %** |
+
+Every gap opens on the same picture — a pool at 1.00 with work queued and almost nothing
+running:
+
+```
+21:11:08 Decode batch,  #running-req: 2, #token: 261953, token usage: 1.00, #queue-req: 14
+21:11:09 Prefill batch, #new-seq: 1, #new-token: 104, token usage: 1.00, #running-req: 1, #queue-req: 14
+                                    <-- 492 s of nothing -->
+21:23:18 Decode batch,  #running-req: 1, #token: 262124, token usage: 1.00, #queue-req: 10
+21:23:19 Prefill batch, #new-seq: 1, #new-token: 91,  token usage: 1.00, #running-req: 0, #queue-req: 10
+                                    <-- 515 s of nothing -->
+21:34:51 Prefill batch, #new-seq: 1, #new-token: 1435, token usage: 1.00, #running-req: 0, #queue-req: 16
+                                    <-- 624 s of nothing -->
+21:45:15 Prefill batch, #new-seq: 16, #new-token: 8192, #cached-token: 1651608, token usage: 0.72, #running-req: 14
+```
+
+**The scheduler loop is alive and busy the whole time.** `py-spy dump` on the core process
+(pid 2830479) during the 624 s passthrough gap, five samples, four of them identical:
+
+```
+Thread 2830479 (active): "MainThread"
+    fast_compare_key   (freetoken/kernel/radix.py:20)
+    get_match_len      (freetoken/kvcache/radix_cache.py:85)
+    _walk              (freetoken/kvcache/hybrid_radix_cache.py:299)
+    match_prefix       (freetoken/kvcache/hybrid_radix_cache.py:88)
+    match_req          (freetoken/scheduler/cache.py:121)
+    _try_allocate_one  (freetoken/scheduler/prefill.py:118)
+    try_add_one        (freetoken/scheduler/prefill.py:360)
+    schedule_next_batch(freetoken/scheduler/prefill.py:571)
+    _schedule_next_batch / normal_loop / run_forever
+```
+
+with `--locals` on the `schedule_next_batch` frame:
+
+```
+lane_cap: 0        seatable_lanes: 2      reqs: []        refusals: 2
+blocked_fresh: False                      stopped_for_lane_cap: False
+  _try_allocate_one  chunk_limit: 4096
+  match_req          input_len: 117999    (radix walk: prefix_len 8207, match_len 6287)
+```
+
+So every pass: walk the pending list, run a **full 118 K-token radix prefix walk per fresh
+candidate**, refuse all of them, return `None`, repeat. `_reclaim_for_blocked_prefill` is
+called on every `None` (scheduler.py:2076) and returns False — it has nothing left to
+release. The one thing it did log in the window is the giveaway:
+
+```
+21:44:52 WARNING Cold restore for session ... failed (AssertionError('Eviction did not free enough space.'))
+```
+
+Each stall ends only when *something external* frees KV: the automatic session idle timeout
+(178 `expired after idle timeout` / `retained KV is now reclaimable` pairs per phase) or the
+in-flight long request finally finishing. 21:45:15's recovery batch seats 16 lanes at once
+against a pool that has fallen to 0.72.
+
+### Why `81ab30e` produces this and its parent did not
+
+`fad1fc4`+§R6 charged a fresh admit's **whole remaining prompt** against `available_size`, so
+the number of long prompts in flight was bounded by what the pool could actually finish; that
+is the property §R7 complained about ("caps long-context concurrency at 1–2 in a 262 K pool")
+and it is also what kept the pool from being consumed by prompts that cannot complete.
+`81ab30e` replaces it with two checks — finishability against `cache_manager.max_size` minus
+`inflight_prefill_size`, and this pass's chunk against `available_size`. The finishability
+budget is **the whole pool**: it does not subtract the KV held by requests already decoding,
+nor the retained/locked session prefixes that `_reclaim_for_blocked_prefill` cannot evict.
+Admissions therefore keep arriving while a 118 K-token prompt is mid-prefill and a second one
+is mid-decode, the pool reaches 1.00, and from there **no lane can buy its next chunk and no
+request can complete to release one**. The engine is not wedged forever — the idle timeout is
+the escape hatch — but a soak with a 600 s client limit reads that as 31 timeouts.
+
+Two secondary observations from the same dumps, both filed as tickets in the handover:
+
+* `lane_cap: 0` on this model (`_resolve_max_prefill_seqs` returns 0 unless the checkpoint
+  has `gguf_expert_types`), so `stopped_for_lane_cap` can never become True and the
+  interleaved rotation `remaining + chunked_list` is **dead code on exactly the profile that
+  enables interleaving here**.
+* The per-pass cost of a refused pass is `O(queue x prompt)` radix walks: 16 pending
+  118 K-token prompts are re-matched from scratch on every scheduling pass that ends in
+  `None`. Harmless when a pass admits something; it is the whole CPU budget during a stall.
+
+## S6. What this run proves
+
+* `81ab30e` **fails** the 16-way Switchyard soak on both routes. The gate for item 2 of the
+  handover is **not** met at this commit; `befcde6` + the §R6 `reserved_pages` fix remains the
+  last tree that passed the stage route.
+* The fatal that this whole line of work exists to close stays closed: **0**
+  `committed_pages_required`, **0** `LinearStatePool exhausted`, **0** tracebacks, **0**
+  oversize warnings, `/health` ok on every sample, clean 3 s shutdown, GPU 0 MiB.
+* The commit's throughput claim is real but is not worth its cost: 2.0x lanes and 1.6x
+  prefill rate, against 52 % of the wall clock spent emitting no batch at all.
+* `benchmarks/scheduler_replay.py` (the replay gate landed in `508ea32`) reported
+  "2.49x tokens / 2.14x completions" for this commit. It does not model retained session
+  leases, decode residency or the idle timeout, so it cannot see this failure — a live soak
+  is still the acceptance test.
+
+## S7. Artifacts
+
+`/tmp/claude-1000/-home-lucas-ai-FreeToken/f4e2e9e3-f4f5-40d0-9980-b3b09d1ef47d/scratchpad/`
+
+* `soak5/{run.sh,serve.sh,sample.sh,split.py,analyze.py}` — driver; `soak5/server.log`,
+  `driver.log`, `resources.csv`, `soakStage.log`, `soakPass.log`,
+  `soakStage/results-switchyard_stage/`, `soakPass/results-switchyard_passthrough/`,
+  `stats_after_stage.json`, `stats_after_pass.json`
+* `soak4_killed/` — the 9-minute aborted first attempt (clean; see S1)

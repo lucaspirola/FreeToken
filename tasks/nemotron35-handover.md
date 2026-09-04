@@ -1,6 +1,6 @@
 # Nemotron 3.5 Lightning on FreeToken — handover
 
-State as of 2026-09-04 ~14:40, HEAD 1f2de67+ on `main` (not pushed). Read this, then
+State as of 2026-09-04 ~22:30, HEAD 508ea32 on `main` (not pushed). Read this, then
 `tasks/nemotron35-plan.md` (spec + decisions), `tasks/todo.md` (checklist), `tasks/lessons.md`
 (rules), `docs/nemotron.md` (profiles), `docs/switchyard.md` (router contract + e2e harness).
 Memory notes: host embedder service, host-OOM rules, plan pointer.
@@ -40,36 +40,38 @@ restore) is implemented and unit-tested. Three things are NOT finished (below).
    saturate their calibrated `input_scale`, but by the same 1.8e-5 clipped fraction at the
    passing 131K and the failing 147K — see `FREETOKEN_DEBUG_FP8_ACT_STATS`) and the whole
    NVFP4 path (W4A16 end to end, no activation quantization anywhere).
-2. **16-way Switchyard soak — RERUN 2026-09-04 against `fad1fc4`. The KV fatal is CLOSED;
-   the soak's own gate needs one more fix (uncommitted, in the tree).** Write-up:
-   `benchmarks/results/nemotron35_lightning_5080_switchyard_soak_2026-09-04.md` §"Rerun
-   against fad1fc4". 50 min of load at `befcde6`, 1,941 successful requests, **0**
-   `committed_pages_required`, 0 `LinearStatePool exhausted`, 0 tracebacks, `/health` ok on
-   every sample, clean 4 s shutdown, GPU 0 MiB. Soak A/`switchyard/passthrough` 20 m PASS
-   (1,219 req / 0 err; 161 tok/s aggregate at 16-way, 10.1 per stream) and soak B/resilience
-   10 m PASS (448 / 0) — both routes the previous attempt never reached. Soak
-   A/`switchyard/stage` 20 m **FAILED**: 4 long-context `timeout`s (600 s client limit) and
-   4 STALLED intervals, no crash — **prefill starvation**, one 512-token lane per pass with
-   half the KV pool free. Cause: `fad1fc4`'s chunk cap subtracts `reserved_size` (each
-   admitted req's WHOLE remaining prompt) although the batch only allocates its *chunk*, so
-   one long continuation reserves the pool away from its peers (CPU-only A/B, no GPU:
-   6/6 lanes at `c4486b6`, **2/6** at `befcde6`, 6/6 with the fix —
-   `scratchpad/soak2/lane_ab.py`). **Fix is in the working tree, NOT committed**:
-   `PrefillAdder.reserved_pages` (decode in-flight + one page span per admitted chunk) is
-   what the cap charges against — strictly tighter than `committed_pages_required`, so the
-   fatal stays closed — plus a sixth case in
-   `tests/scheduler/test_chunked_prefill_kv_backpressure.py` (fails on the old cap).
-   Verified end to end: the stage route re-run with it **PASSES** — 471 req / 0 err vs
-   278 / 4, 1 STALLED vs 4, p95 201 s vs 393 s, mean 2.37 lanes/prefill batch vs 1.56
-   (`scratchpad/soak3/`). Still open (tickets in §R7): `chunk_limit = token_budget //
-   waiting` divides the 8 K budget by QUEUE DEPTH not by admissible lanes (pre-existing; it
-   is what leaves stage p95 at 200 s); no `/v1/stats` counter for deferred/capped chunks, so
-   engagement can only be shown circumstantially; `_try_allocate_one` reserves a fresh
-   admit's whole prompt, capping long-context concurrency at 1-2 in a 262 K pool. Also
-   measured: a blocked prefill does **not** spin — the busiest process holds median 106 %
-   CPU in every phase, including 60 s intervals that completed 0 requests. Drivers:
-   scratchpad/soak2/{run.sh,serve.sh,sample.sh,analyze.py,lane_ab.py} and scratchpad/soak3/
-   under /tmp/claude-1000/-home-lucas-ai-FreeToken/f4e2e9e3-.../scratchpad/.
+2. **16-way Switchyard soak — STILL OPEN. `81ab30e` FAILS both routes; the last tree that
+   passed is `befcde6` + the §R6 `reserved_pages` fix.** Write-ups in
+   `benchmarks/results/nemotron35_lightning_5080_switchyard_soak_2026-09-04.md`:
+   §"Rerun against fad1fc4" (the KV fatal, closed) and §"Run against 81ab30e" (this verdict).
+   - History: `fad1fc4` closed the `committed_pages_required` fatal but starved the stage
+     route by charging its chunk cap in `reserved_size` (whole remaining prompts) instead of
+     pages; the §R6 fix (`PrefillAdder.reserved_pages`) restored it — stage 471 req / 0 err /
+     1 STALLED, mean 2.37 lanes per prefill batch.
+   - **`81ab30e` (fresh admits gated on finishability + this chunk) regresses it: stage
+     268 req / 15 timeouts / 7 STALLED, passthrough 720 req / 16 timeouts / 10 STALLED**, all
+     failures `long-context`, p95 600 s on stage. The fatal stays closed (0
+     `committed_pages_required`, 0 `LinearStatePool exhausted`, 0 tracebacks, 0 oversize
+     warnings, `/health` ok on every sample, 3 s shutdown, GPU 0 MiB).
+   - Root cause, from `py-spy dump --locals` on the wedged core process (§S5): the scheduler
+     spends **52–53 % of each phase emitting no batch at all** (gaps of 492 s, 515 s, 624 s),
+     looping `schedule_next_batch` → a full 118 K-token radix `match_prefix` per pending fresh
+     candidate → refuse all → `None`. Every gap opens at `token usage: 1.00` with
+     `#running-req` 0–2 and `#queue-req` 10–16. The finishability budget is
+     `cache_manager.max_size - inflight_prefill_size`, i.e. **the whole pool**: it subtracts
+     neither the KV held by requests already decoding nor the retained/locked session
+     prefixes, so admissions keep arriving until the pool is full and then no lane can buy its
+     next chunk and nothing can complete to free one. `_reclaim_for_blocked_prefill` fires on
+     every `None` and returns False (`Cold restore ... failed (AssertionError('Eviction did
+     not free enough space.'))`); the only escape is the session idle timeout minutes later.
+   - While it *is* scheduling `81ab30e` is genuinely better: 4.71 lanes/prefill batch vs 2.37
+     and 2,938 vs 1,877 prefill tok/s on stage. The fix direction is to bound the
+     finishability budget by what the pool can actually give back, not to revert the lane win.
+   - Do the next attempt as a CPU-only A/B first (`scratchpad/soak2/lane_ab.py` shape), then
+     one 20 m stage soak. Drivers: `scratchpad/soak5/` (this run), `scratchpad/soak3/`,
+     `scratchpad/soak2/` under
+     /tmp/claude-1000/-home-lucas-ai-FreeToken/f4e2e9e3-.../scratchpad/.
+   - Open tickets from this run are 8-11 below.
 3. **1M gate — CLOSED 2026-09-04, all four criteria PASS.** Write-up:
    `benchmarks/results/nemotron35_lightning_5080_1m_sessions_2026-09-04.md`. One session grown
    to **1,039,989 tokens** (8 turns × 130K, needle recalled at every length, twice); demand
@@ -109,10 +111,53 @@ restore) is implemented and unit-tested. Three things are NOT finished (below).
    **The reference needs `--reference-dt-min 0.0` (the default).** transformers hard-codes
    the same 1e-3 `dt` floor that item 1 identified as a bug; leaving it in fails 12
    shallow layers (worst 0.9406 at layer 3) — an independent confirmation of item 1.
+4b. **1M multi-needle recall — 2026-09-04, 5/8.** One 1,039,994-token prefill (TTFT
+   **1,815 s**, 573 tok/s whole-prompt), then eight questions on the same chat prefix, each
+   hitting the prefix cache for 99.9954 %+ of its prompt (TTFT 4.7–7.0 s, decode 19.2–20.3
+   tok/s). Write-up:
+   `benchmarks/results/nemotron35_lightning_5080_1m_multineedle_2026-09-04.md`; harness:
+   **`benchmarks/bench_multi_needle.py`** (new, untracked). Depths 0.05 / 0.75 / 0.95 recall,
+   0.25 / 0.50 / 0.60 do not; the control (a key absent from the text) is correctly denied
+   with no fabrication. **The headline is question 8**: asked which of the depth-0.05 and
+   depth-0.25 codes is larger and for their sum, the model returned
+   9,854,500 = 5,663,623 + 4,190,877 — so the depth-0.25 needle it had just "missed" when
+   asked directly *is* in the state. Grade long-context recall with more than one question
+   shape per needle before blaming retention.
+
 5. Ticket: `--kv-grow-step-tokens` + `--nvfp4-backend flashinfer` crashes (VMM int32 bank).
 6. Ticket: `_maybe_shrink_growable_kv` evicts all unlocked prefixes before checking whether a
    shrink is possible (wipes the prefix cache at idle above the initial KV step).
 7. Ticket: tests/moe/test_prefill_hit_d2d.py order-dependent flake.
+8. Ticket: **an over-pool prompt has no client rejection path.** `PrefillManager.
+   schedule_next_batch` skips a fresh request whose `input_len + output_len >
+   cache_manager.max_size`, logs one `... can never be admitted and is being skipped` warning
+   and `continue`s — but never removes it from `pending_list` and never fails the request, so
+   the client hangs until its own timeout with no error. It also keeps inflating `waiting =
+   len(pending_list) - index`, shrinking every other lane's interleave chunk. Worse,
+   `_seatable_lanes` does **not** have the same skip: it sets `blocked_fresh = True` on the
+   first request whose cost exceeds the budget, so one permanently unadmittable prompt pins
+   the seatable-lane estimate at the number of continuations for as long as it sits in the
+   queue. Fix: fail it with a 400/413 at admission (or at `add_one_req`), and mirror the skip
+   in `_seatable_lanes`.
+9. Ticket: **`stopped_for_lane_cap` rotation is dead code on this model.**
+   `stopped_for_lane_cap` is only assigned inside `if lane_cap and len(reqs) >= lane_cap`, and
+   `lane_cap = max_batch_seqs = _resolve_max_prefill_seqs(config)` is **0** for Nemotron
+   (it returns 1 only when the checkpoint has `gguf_expert_types`) — confirmed live by
+   `py-spy dump --locals` during the `81ab30e` soak (`lane_cap: 0`). So the interleaved branch
+   `self.pending_list = remaining + chunked_list` is unreachable exactly on the profile that
+   turns interleaving on. Its own comment describes a different trigger ("admission stopped on
+   a resource-constrained request"), which is `blocked_fresh` / the `refusals` break, not the
+   lane cap. Decide which one it means and set the flag there, or delete the branch.
+10. Ticket: a refused prefill pass costs `O(queue x prompt)` radix walks — 16 pending
+   118 K-token prompts are re-`match_prefix`ed from scratch on every pass that returns `None`
+   (4 of 5 py-spy samples during the stall were inside `fast_compare_key`). Cache the match
+   per pending request until its prompt or the tree changes, or skip the walk when the pass
+   has already refused a fresh admit.
+11. Ticket: `benchmarks/scheduler_replay.py` (the CPU replay gate added in `508ea32`) scored
+   `81ab30e` at "2.49x tokens / 2.14x completions" — the commit that then failed the live soak
+   on both routes. It models neither retained session leases, nor decode residency, nor the
+   idle timeout, which is where the stall comes from. Either extend it or stop treating it as
+   an acceptance gate for scheduler policy.
 
 Scratchpad root (survives Claude restarts, not WSL restarts):
 /tmp/claude-1000/-home-lucas-ai-FreeToken/af23ede4-e8ad-4c8d-8b38-c8be515d8870/scratchpad/

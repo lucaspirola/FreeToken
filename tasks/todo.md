@@ -16,13 +16,18 @@ Full plan: tasks/nemotron35-plan.md
 - [x] 2A4 integrate (P1 smoke + all 4 P2 serving gates + 32K needle + A/B vs FREETOKEN_MAMBA2_REF=1;
       fixed a CUDA-graph use-after-free in the decode out-buffer; 131K needle at 8K chunks still open --
       benchmarks/results/nemotron35_lightning_5080_mamba2_2026-09-04.md)
-  - [x] 2B2 triton fallback tuning  - [x] 2B4 cache sizing study (triton default, LFU for 16-way, hybrid rejected)  - [ ] 1M single-session spill gate (also measures restore NVMe vs RAM for candidate 3F prefetch)
+  - [x] 2B2 triton fallback tuning  - [x] 2B4 cache sizing study (triton default, LFU for 16-way, hybrid rejected)  - [x] 1M single-session spill gate (all 4 criteria PASS, 2026-09-04; restore NVMe 1.32 GiB/s vs RAM 5-8 GiB/s)
 
 ## Phase 3 — Switchyard
-- [x] 3A wire/errors  - [x] 3B JSON mode  - [x] 3C sessions+parsers  - [ ] 3D soak run (prep done)  - [x] 3E residency: spill on demand + capacity/age retention + restart-persistent checkpoints  - [x] 3F prefetch next queued checkpoint to RAM  - [x] 3G partial-prefix restore + stray `</think>` + prefill-time boundary capture
+- [x] 3A wire/errors  - [x] 3B JSON mode  - [x] 3C sessions+parsers  - [ ] 3D soak run (**FAILS at 81ab30e**: stage 268/15 timeouts, passthrough 720/16; last passing tree `befcde6`+reserved_pages fix -- see soak results §"Run against 81ab30e" and handover item 2)  - [x] 3E residency: spill on demand + capacity/age retention + restart-persistent checkpoints  - [x] 3F prefetch next queued checkpoint to RAM  - [x] 3G partial-prefix restore + stray `</think>` + prefill-time boundary capture
 
 ## Phase 3H — hidden-state export (Switchyard probe contract)
-- [x] 3H implement (1f2de67)  - [ ] 3H GPU parity check
+- [x] 3H implement (1f2de67)  - [x] 3H GPU parity check (all 52 layers cosine >= 0.998840)
+
+## Long-context recall
+- [x] 1M multi-needle, one prefill, 8 graded questions (5/8; depths 0.05/0.75/0.95 pass, 0.25/0.50/0.60 fail,
+      control denied, combined question recovers the depth-0.25 needle) -- `benchmarks/bench_multi_needle.py`,
+      `benchmarks/results/nemotron35_lightning_5080_1m_multineedle_2026-09-04.md`
 
 ## Phase 4 — MTP (time-boxed, flagged)
 - [x] NO-GO (2026-09-04 cache study: verify step 1.63× cost, projected 0.96× gain; flag not built)
