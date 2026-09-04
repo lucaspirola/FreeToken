@@ -403,3 +403,28 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   memory one: `chunk_limit = token_budget // waiting` (interleaved mode) divides the 8 K budget
   by the QUEUE DEPTH, so 16 queued requests cost a 512-token chunk even when the pass seats one
   lane. Compare the `#new-seq`/`#new-token` histogram between two runs before blaming a pool.
+
+## 2026-09-04 (Nemotron 3.5 Lightning, 1M session gate — residency criteria)
+- **A demand-driven mechanism needs a demand that actually fails admission.** The spill
+  trigger was a 6-token request from a foreign session; the resident 1.04M session leaves
+  ~8.5K tokens of the 1,048,576-token pool free, so it fit, nothing was reclaimed, no
+  checkpoint was written — and the next phase silently degraded from a 2.7 s restore into a
+  ~1 h cold re-prefill. Size the competing request from the *free* pool (60K worked), and
+  make the script assert the expected artifact (`ls <spill root>/*/manifest.json`) before it
+  spends the next hour.
+- **Rebuilding a long context incrementally beats re-prefilling it.** Eight 130K turns grow a
+  session to 1.04M in 31 min of prefill because each turn only prefills its own tail; one cold
+  1.04M prompt is ~1 h. When a long-context run has to be redone, redo it as growth.
+- **Check the on-disk manifest version before planning a run around an old checkpoint.**
+  `MANIFEST_VERSION` went 1 → 2 in `b7242d2` (boundary states), so the 2.1 GiB record left by
+  the previous session was deleted at startup (`adopted 0 checkpoint(s), removed 1 stale
+  entr(ies)`) — the whole plan to restore it was dead before the server came up.
+- **A cap that fits exactly one record cannot demonstrate *which* victim LRU picks.** Size the
+  budget to hold N−1 of N candidates (1.6 GiB for three 0.54 GiB checkpoints) or the eviction
+  test proves only that the cap is a cap.
+- `--session-spill-ram-gb 0` is how you force the NVMe tier: at the 4 GiB default a 3.5 GiB
+  checkpoint stays in RAM, where a restart destroys it and the "survives restart" criterion
+  cannot be tested at all.
+- Measure a session checkpoint at 3.65 KiB/token (q8_0 KV + 8 × 47 MiB boundary states), not
+  at the 3.1 KiB/token the KV alone suggests: the v2 state snapshots are ~20 % of a 131K
+  record and the byte cap is charged on the total.

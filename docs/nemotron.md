@@ -255,15 +255,24 @@ ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
 - **Throughput** on a growing synthetic-needle prompt: 131K prefill 3 007 tok/s / decode
   72.6 tok/s; 262K 1 790 / 51.8; 524K 997 / 32.0. Prefill cost is quadratic in context
   (526 s for a cold 524K prompt).
-- **Coherence caveat**: the needle passes at 131K but is missed at 262K and 524K on the raw
-  `/v1/completions` continuation. 262 144 is exactly the tokenizer's `model_max_length`.
-  Treat **~131K–256K as the coherent ceiling** and re-verify the long end through
-  `/v1/chat/completions` before advertising 1M (`bench_long_context.py` asks through the chat
-  endpoint as of `ec54e21`; the 2B4 runs predate that).
+- ~~**Coherence caveat**: the needle passes at 131K but is missed at 262K and 524K.~~
+  **Retracted 2026-09-04.** Those 2B4 runs predate both the chat-endpoint gate (`ec54e21`) and
+  the Mamba-2 `dt`-floor fix (`3ac79ec`). Re-run through `/v1/chat/completions` at depth 0.50
+  the needle **passes at 262,160 and at 524,304 tokens** (1,925 / 1,064 tok/s prefill, 56.3 /
+  34.5 tok/s decode), and a 1,040,080-token conversation recalls its needle as well —
+  `benchmarks/results/nemotron35_lightning_5080_1m_sessions_2026-09-04.md`.
 - `--nvfp4-backend flashinfer` **cannot be combined with `--kv-grow-step-tokens`** (growable
   KV allocates the slot cache as VMM tensors; the b12x banks include an int32 bank
   `VMMTensor` does not support). The `triton` default is required here, and is the
   recommendation anyway.
 
-Still outstanding for the gate: three sessions grown to ~1M each with disjoint needles, one
-spilled and restored, all coherent, recording spill/restore times.
+Gate closed 2026-09-04
+(`benchmarks/results/nemotron35_lightning_5080_1m_sessions_2026-09-04.md`): three sessions
+grown to 655K each and one to **1,039,989** tokens, needle recalled at every length; the 1M
+session spilled on demand (3.53 GiB to NVMe in 2.980 s, 1.18 GiB/s) and, after the server was
+restarted, restored by the new process (**2.681 s, 1.32 GiB/s**, whole prefix, byte-identical
+answer). Capacity/age eviction confirmed at a 1.6 GiB cap (oldest-by-`last_used_at` first;
+survivors restore; a record larger than the cap is refused, not thrashed).
+Note `--session-spill-ram-gb 0` if you want the NVMe tier exercised: at the 4 GiB default a
+3.5 GiB checkpoint stays in RAM and does not survive a restart, and a *resident* session is
+never checkpointed at all (by design — spill is on demand), so a restart loses it.

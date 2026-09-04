@@ -70,11 +70,28 @@ restore) is implemented and unit-tested. Three things are NOT finished (below).
    CPU in every phase, including 60 s intervals that completed 0 requests. Drivers:
    scratchpad/soak2/{run.sh,serve.sh,sample.sh,analyze.py,lane_ab.py} and scratchpad/soak3/
    under /tmp/claude-1000/-home-lucas-ai-FreeToken/f4e2e9e3-.../scratchpad/.
-3. **1M gate remainder**: restart persistence, capacity/age eviction, a ≥1M-size NVMe restore
-   timing, results file benchmarks/results/nemotron35_lightning_5080_1m_sessions_<date>.md.
-   Growth to 524K×3 and spill/restore-on-demand were verified; driver:
-   scratchpad/1m/{drive.py,serve.sh,summarize.py}. Retest 262K/524K needles via chat only
-   AFTER item 1 resolves.
+3. **1M gate — CLOSED 2026-09-04, all four criteria PASS.** Write-up:
+   `benchmarks/results/nemotron35_lightning_5080_1m_sessions_2026-09-04.md`. One session grown
+   to **1,039,989 tokens** (8 turns × 130K, needle recalled at every length, twice); demand
+   spill of the resident 1M session **3.53 GiB to NVMe in 2.980 s (1.18 GiB/s)**; a **new**
+   `ft serve` process adopted the checkpoint (`adopted 1 checkpoint(s)`) and its next turn
+   **restored 1,040,020/1,040,020 tokens from disk in 2.681 s (1.32 GiB/s)** — 9.8 s wall
+   against the 1,861 s of prefill that built the prefix, with a byte-identical (correct)
+   answer across the restart. Capacity/age eviction verified at a 1.6 GiB cap: the third spill
+   evicted the older of two candidates by `last_used_at`, survivors still restored (0.255 s),
+   and a record larger than the whole cap is refused rather than evicting the world.
+   262K/524K needles re-run through `/v1/chat/completions` at depth 0.50 after the `dt` fix:
+   **262,160 PASS** (1,925 tok/s prefill, 56.3 decode) and **524,304 PASS** (1,064, 34.5) —
+   the cache study's "~131K–256K coherent ceiling" caveat is retracted.
+   Notes/tickets from the run (§6 of the write-up): `_restore_cold_session` uses
+   `session.spill` without checking `.valid`, so a capacity eviction is reported as
+   "client tokens diverge" (one-line fix, not applied — scheduler.py is another agent's file);
+   a *resident* session is never checkpointed, so a restart loses it (spill-on-shutdown flag
+   would fix); `_evict_one_lru` can evict the record the pending admission is about to restore;
+   `--session-spill-ram-gb 0` is what forces the NVMe tier for this test (the 4 GiB default
+   keeps a 3.5 GiB checkpoint in RAM, where a restart destroys it). Drivers:
+   scratchpad/1m2/{serve.sh,drive.py,trigger.py,hold1b.sh,hold4_lru.sh,hold3_evict.sh,
+   hold2_needles.sh} under /tmp/claude-1000/-home-lucas-ai-FreeToken/f4e2e9e3-.../scratchpad/.
 4. **Phase 3H hidden-state export — CLOSED 2026-09-04, parity PASS.** All 52 exported
    layers match transformers' own `NemotronHBlock` stack at cosine **>= 0.998840** on the
    mean-pooled residual (gate 0.99); median 0.999760. Write-up:
