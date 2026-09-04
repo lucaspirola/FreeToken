@@ -428,3 +428,9 @@ check for `Discarded cold session ...: client token prefix changed` before blami
 - Measure a session checkpoint at 3.65 KiB/token (q8_0 KV + 8 × 47 MiB boundary states), not
   at the 3.1 KiB/token the KV alone suggests: the v2 state snapshots are ~20 % of a 131K
   record and the byte cap is charged on the total.
+
+## 2026-09-04 (experiment design, from user correction)
+- Before any run longer than ~10 min, write down the question it answers and check whether ONE
+  run can answer several (e.g. multiple needles at different depths in a single prefill, then
+  cached follow-up turns). Executing the checklist wording literally cost ~1 h of GPU today
+  (five 262K prefills for five depths). Design the experiment, then run it.
