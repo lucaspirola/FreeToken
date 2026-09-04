@@ -21,14 +21,16 @@ bandwidth roofline (H100 lm_head), the ALU version reaches ~64%. Numerically the
 Dispatch (``nvfp4_dense_linear``):
   * M == 1 (decode): int32 wide-load GEMV, deferred K reduction. Split-K when ``N`` is small
     (shared expert) so the SMs stay fed; single-pass full-K for the huge ``lm_head``.
-  * 1 < M <= 64 (batched decode, lm_head prefill last-token batch): tensor-core dot GEMM that
-    dequants in the K loop, with the same split-K trick when ``M x N`` alone cannot fill the
-    SMs. Reads only the packed weight -- the bf16 scratch path would cost ~4.5x the traffic,
-    which at these M is the whole latency.
-  * M > 64 (prefill): dequantize the whole weight to a bf16 scratch (memory-roof Triton
+  * small M (batched decode, lm_head prefill last-token batch, short prefill chunks):
+    tensor-core dot GEMM that dequants in the K loop, with the same split-K trick when
+    ``M x N`` alone cannot fill the SMs. Reads only the packed weight -- the bf16 scratch
+    path would cost ~4.5x the traffic, which at these M is the whole latency.
+  * large M (prefill): dequantize the whole weight to a bf16 scratch (memory-roof Triton
     kernel, N-chunked to bound the allocation) and run cuBLAS. In-kernel dequant GEMMs
-    re-dequantize every weight tile ``M / BLOCK_M`` times and top out ~3x slower than cuBLAS
-    on H100; dequant-once + cuBLAS is within ~7% of the bf16 GEMM at prefill M.
+    re-dequantize every weight tile ``M / BLOCK_M`` times and eventually lose to cuBLAS;
+    dequant-once + cuBLAS is within 1.1-1.2x of a resident-bf16 GEMM at prefill M.
+    Where the two cross is architecture- and N-dependent (64 on H100, 128 -- 256 for
+    lm_head-width weights -- on sm_120), so it lives in :data:`_ARCH_TUNING`.
 
 CUDA-graph safe on the decode paths: fixed shapes, no host sync.
 """
@@ -36,6 +38,7 @@ CUDA-graph safe on the decode paths: fixed shapes, no host sync.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass, replace
 
 import torch
 import triton
@@ -57,52 +60,154 @@ _TL_DTYPE = {torch.bfloat16: tl.bfloat16, torch.float16: tl.float16, torch.float
 # torch matmul reference (numeric A-B debugging). Evaluated once; the kernels are the default.
 _USE_REF = os.environ.get("FREETOKEN_DEBUG_DENSE_NVFP4_REF") == "1"
 
-# Decode GEMV tiles (H100-tuned; the fp16-trick dequant is ALU-cheap so wider K tiles win).
-# Two sets: the transposed K-major resident layout (coalesced along N; narrower K tiles win)
-# vs the legacy row-major layout (coalesced along K).
-_GEMV_BLOCK_N = 32
-_GEMV_BLOCK_KW_T = 16
-_GEMV_BLOCK_KW_ROW = 32
-_GEMV_WARPS = 4
-_GEMV_SPLITK_BLOCK_N_T = 32
-_GEMV_SPLITK_BLOCK_N_ROW = 16
-_GEMV_SPLITK_BLOCK_KW = 16
-_GEMV_SPLITK_TARGET = 1024  # target total programs for the split-K grid
+# ======================================================================================
+# Launch configuration, per GPU architecture.
+#
+# Every tile size, split-K target and dispatch threshold below is a measured choice, and
+# the measurements do not transfer between architectures: the H100 numbers these kernels
+# were first fitted on assume 132 SMs with 228 KB of smem each, while a consumer GB20x
+# part has ~84-170 SMs with 100 KB. So the constants live in one frozen ``_Tuning``
+# record, ``_ARCH_TUNING`` keys an override by ``(sm_major, sm_minor)``, and anything not
+# in the table keeps the original H100-fitted ``_DEFAULT_TUNING`` values.
+# ======================================================================================
+@dataclass(frozen=True)
+class _Tuning:
+    """Launch configuration for one GPU architecture (see :data:`_ARCH_TUNING`)."""
 
-# Small-M dot GEMM tiles (batched decode M=2..64 + lm_head last-token prefill batch).
-_GEMM_BLOCK_KW = 16
-_GEMM_SPLITK_TARGET = 1024  # target total programs for the split-K grid (M > 16)
-# M <= 16 (decode bsz 1-16) is pure weight streaming: the split-K grid must span the SMs
-# or bandwidth sits idle, so grid sizing works in units of one *wave* = SM count x this
-# kernel's resident blocks/SM. Residency is derived from the device against the kernel's
-# measured footprint (118 regs/thread x 128 threads, ~36 KB smem at 3 stages): H100
-# (132 SMs, 228 KB smem/SM) is register-bound at 4 blocks/SM -> wave 528; consumer parts
-# with ~100 KB smem/SM (e.g. RTX 5090 / GB202, 170 SMs) are smem-bound at 2 -> wave 340.
-_GEMM_BLOCK_REGS = 118 * 128
-_GEMM_BLOCK_SMEM = 36 << 10
-_GEMM_WAVE: dict = {}
+    # --- decode GEMV (M == 1). Two tile sets: the K-major resident layout (loads coalesce
+    # along N, so narrow K tiles win) vs the legacy row-major layout (coalesced along K).
+    gemv_block_n: int = 32
+    gemv_block_kw_t: int = 16
+    gemv_block_kw_row: int = 32
+    gemv_warps: int = 4
+    gemv_splitk_block_n_t: int = 32
+    gemv_splitk_block_n_row: int = 16
+    gemv_splitk_block_kw: int = 16
+    gemv_splitk_warps: int = 4
+    gemv_splitk_target: int = 1024  # target total programs for the split-K grid
+
+    # --- small-M dot GEMM (batched decode + the lm_head last-token batch). ``gemm_tiles``
+    # is scanned in order: the first entry whose ``m_max`` covers M gives
+    # ``(BLOCK_M, BLOCK_N, num_warps, num_stages)``.
+    gemm_tiles: tuple[tuple[int, int, int, int, int], ...] = (
+        (16, 16, 128, 4, 3),
+        (32, 32, 128, 4, 3),
+        (64, 64, 128, 8, 3),
+    )
+    gemm_block_kw: int = 16
+    gemm_splitk_target: int = 1024  # target total programs for the split-K grid (M > 16)
+    # Prefer a split that divides the tile count evenly, so every program runs the
+    # mask-free EVEN_K loop. Worth ~15-30% on H100; on sm_120 the K counts that matter
+    # (2688 and 3712 -> 21 and 29 word tiles) have no useful even split, and rounding the
+    # split down to 1 costs more in idle SMs than the mask costs in the loop.
+    gemm_splitk_prefer_even: bool = True
+    # Above this M the dequant-to-scratch + cuBLAS path wins (the in-K dot GEMM
+    # re-dequants each weight tile M/BLOCK_M times; cuBLAS is ~4x its per-tile FLOP
+    # efficiency). Wide-N weights are the exception -- their bf16 scratch is enormous --
+    # so ``gemm_wide_n`` weights stay in-kernel up to ``gemm_max_inkernel_m_wide``.
+    gemm_max_inkernel_m: int = 64
+    gemm_wide_n: int = 1 << 30
+    gemm_max_inkernel_m_wide: int = 64
+    # M <= 16 (decode bsz 1-16) is pure weight streaming: the split-K grid must span the
+    # SMs or bandwidth sits idle, so grid sizing works in units of one *wave* = SM count x
+    # this kernel's resident blocks/SM. Residency is derived from the device against the
+    # kernel's measured footprint (118 regs/thread x 128 threads, ~36 KB smem at 3
+    # stages): H100 (132 SMs, 228 KB smem/SM) is register-bound at 4 blocks/SM -> wave
+    # 528; consumer parts with ~100 KB smem/SM (e.g. RTX 5090 / GB202, 170 SMs) are
+    # smem-bound at 2 -> wave 340.
+    gemm_block_regs: int = 118 * 128
+    gemm_block_smem: int = 36 << 10
+    gemm_max_blocks_per_sm: int = 4
+
+    # --- split-K reduce for the dot GEMM: (block, warps) for narrow / wide N.
+    reduce_narrow: tuple[int, int] = (128, 2)
+    reduce_wide: tuple[int, int] = (512, 8)
+    reduce_wide_n: int = 8192
+
+    # --- dequant + cuBLAS scratch path: bf16 scratch chunk (bounds the transient alloc).
+    scratch_chunk_bytes: int = 128 << 20
+
+    # Filled in per device by :func:`_resolve_tuning` (SM count x resident blocks/SM).
+    wave: int = 0
 
 
-def _gemm_wave(device: torch.device) -> int:
+_DEFAULT_TUNING = _Tuning()
+
+#: Per-``(sm_major, sm_minor)`` overrides. Everything else falls back to the H100 values.
+#:
+#: sm_120 (GB20x: RTX 5080 84 SMs / 5090 170 SMs, 100 KB smem/SM, 64 MB L2, 960 GB/s on
+#: the 5080) was fitted on the Nemotron-3.5-Lightning dense shapes -- shared expert
+#: 3712x2688 and 2688x3712, lm_head 131072x2688 -- with the weight streamed cold from
+#: HBM (rotating replicas, since 64 MB of L2 would otherwise hold a whole shared expert)
+#: and the small-M points timed inside a CUDA graph, as decode runs in production.
+#: Net effect at M=64, the worst pre-tuning point (us, H100 constants -> this table):
+#: shared up 40.4 -> 22.3, shared down 29.6 -> 19.8, lm_head 612 -> 504. Ablated one field
+#: at a time (each ratio below is that field alone against the full table):
+#:   * M in (16, 64] took ``BLOCK_M = M`` on H100, one pass over the weight. Here that
+#:     tile is MMA-bound, not bandwidth-bound (the dots are [BN, 16] x [16, BM]), and its
+#:     fp32 accumulator costs enough occupancy that halving BLOCK_M -- paying a second
+#:     pass over the weight -- wins outright: 1.28x shared up, 1.25x shared down, 1.21x
+#:     lm_head, all at M=64. It is the only field the lm_head cares about at all.
+#:   * ``gemm_splitk_target`` 1024 was three waves too many at 84 SMs x 2 resident blocks
+#:     (it picked SPLIT_K=16 for the shared expert where 4 is right): 1.42x shared up /
+#:     1.17x shared down at M=64, 1.59x / 1.32x at M=128. 256 is the optimum over
+#:     {128, 256, 512, 1024} for every Lightning (M, N); the lm_head is at SPLIT_K=1
+#:     either way and does not move.
+#:   * The even-split preference rounds 21/29 word tiles (K = 2688 / 3712) down to
+#:     SPLIT_K=1; the masked loop is cheaper here than the idle SMs -- 1.20x shared up and
+#:     1.80x shared down at M=64.
+#:   * The dequant-to-scratch crossover moves past H100's 64, and by very different
+#:     amounts per weight width, because what the scratch path pays is one dequant of the
+#:     *whole* weight. For the shared expert that is 20 MB and cheap, so scratch takes
+#:     over as soon as the in-kernel re-reads outnumber it: in-kernel still wins at M=128
+#:     (47.7 vs 50.7 us up, 41.6 vs 45.0 down) and loses from M=192 on (78.7 vs 55.1 up).
+#:     The lm_head's scratch is 704 MB, which buys the in-kernel path a much longer run:
+#:     it wins by 1.2-1.8x all the way to M=256 (2286 vs 2773 us) and only ties at 384.
+#:     Hence the separate ``gemm_wide_n`` threshold. (Crossover points are within ~10% of
+#:     each other, so they have to be timed graph-captured against L2-overflowing weight
+#:     replicas; eager wall-clock at these M has a ~15% noise floor and reads the
+#:     crossover several hundred M too high.)
+#: The M == 1 GEMV and the M <= 16 dot GEMM were swept too (tiles, split-K, warps) and
+#: the H100 constants were already at the measured optimum (lm_head M=1 sits at 93% of
+#: the 960 GB/s roof), so they stay at the fallback values.
+_ARCH_TUNING: dict[tuple[int, int], _Tuning] = {
+    (12, 0): _Tuning(
+        gemm_tiles=(
+            (16, 16, 128, 4, 3),   # decode batches: split-K carries the grid
+            (64, 32, 128, 4, 3),   # lm_head last-token batch / small mixed batch
+            (256, 64, 128, 8, 3),  # up to the crossover, where re-reading the weight hurts
+        ),
+        gemm_splitk_target=256,
+        gemm_splitk_prefer_even=False,
+        gemm_max_inkernel_m=128,
+        gemm_wide_n=32768,
+        gemm_max_inkernel_m_wide=256,
+    ),
+}
+
+_TUNING_CACHE: dict[int, _Tuning] = {}
+
+
+def _resolve_tuning(idx: int, base: _Tuning) -> _Tuning:
+    """``base`` with ``wave`` filled in from the device's SM count and occupancy."""
+    props = torch.cuda.get_device_properties(idx)
+    blocks = max(1, min(
+        props.regs_per_multiprocessor // base.gemm_block_regs,
+        props.shared_memory_per_multiprocessor // base.gemm_block_smem,
+        base.gemm_max_blocks_per_sm,
+    ))
+    return replace(base, wave=props.multi_processor_count * blocks)
+
+
+def _tuning(device: torch.device) -> _Tuning:
     idx = device.index if device.index is not None else torch.cuda.current_device()
-    wave = _GEMM_WAVE.get(idx)
-    if wave is None:
+    t = _TUNING_CACHE.get(idx)
+    if t is None:
         props = torch.cuda.get_device_properties(idx)
-        blocks = max(1, min(
-            props.regs_per_multiprocessor // _GEMM_BLOCK_REGS,
-            props.shared_memory_per_multiprocessor // _GEMM_BLOCK_SMEM,
-            4,
-        ))
-        wave = props.multi_processor_count * blocks
-        _GEMM_WAVE[idx] = wave
-    return wave
+        t = _resolve_tuning(idx, _ARCH_TUNING.get((props.major, props.minor), _DEFAULT_TUNING))
+        _TUNING_CACHE[idx] = t
+    return t
 
-# Above this M the dequant-to-scratch + cuBLAS path wins (the in-K dot GEMM re-dequants
-# each weight tile M/BLOCK_M times; cuBLAS is ~4x its per-tile FLOP efficiency).
-_GEMM_MAX_INKERNEL_M = 64
-
-# bf16 scratch chunk for the dequant + cuBLAS path (bounds the transient allocation).
-_SCRATCH_CHUNK_BYTES = 128 << 20
 
 # Arrival counters for the GEMV's fused split-K reduction (one int32 per N-tile). The last
 # program to finish a tile's K-slices reduces the partials in-kernel, which removes the
@@ -121,6 +226,23 @@ def _splitk_counters(n: int, device: torch.device) -> torch.Tensor:
         c = torch.zeros(n, dtype=torch.int32, device=device)
         _SPLITK_COUNTERS[key] = c
     return c
+
+
+# Fused epilogues. ``relu2`` is Nemotron's ungated MLP activation: the shared expert runs
+# ``down(relu(up(x))**2)``, and unfused that is two extra full passes over the [M, 3712]
+# intermediate -- two kernel launches whose GPU time (~3.5 us at decode M) is a third of
+# the up-projection GEMV itself. Fusing costs nothing: the accumulator is already in
+# registers in fp32. Applying it there instead of to the rounded bf16 output is slightly
+# *more* accurate than the eager ``F.relu(y).square()``, not bit-identical to it.
+_ACT_CODE = {None: 0, "relu2": 1}
+
+
+@triton.jit
+def _act(v, ACT: tl.constexpr):
+    if ACT == 1:  # relu2
+        v = tl.maximum(v, 0.0)
+        v = v * v
+    return v
 
 
 @triton.jit
@@ -171,6 +293,7 @@ def _nvfp4_gemv_kernel(
     stride_pn, stride_pkw,
     stride_sn, stride_sblk,
     BLOCK_N: tl.constexpr, BLOCK_KW: tl.constexpr, OUT: tl.constexpr, EVEN_K: tl.constexpr,
+    ACT: tl.constexpr,
 ):
     pid_n = tl.program_id(0)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -225,7 +348,7 @@ def _nvfp4_gemv_kernel(
 
     acc = tl.sum(partial, axis=0)
     g = tl.load(gscale_ptr + offs_n, mask=n_mask, other=0.0).to(tl.float32)
-    tl.store(out_ptr + offs_n, (acc * g).to(OUT), mask=n_mask)
+    tl.store(out_ptr + offs_n, _act(acc * g, ACT).to(OUT), mask=n_mask)
 
 
 @triton.jit
@@ -242,7 +365,7 @@ def _nvfp4_gemv_splitk_kernel(
     stride_sn, stride_sblk,
     stride_partk, stride_partn,
     BLOCK_N: tl.constexpr, BLOCK_KW: tl.constexpr, SPLIT_K: tl.constexpr,
-    OUT: tl.constexpr, EVEN_K: tl.constexpr,
+    OUT: tl.constexpr, EVEN_K: tl.constexpr, ACT: tl.constexpr,
 ):
     """Split-K decode GEMV for small N: each ``(pid_n, pid_k)`` reduces ``tiles_per`` word-
     tiles of K into a partial sum; many more programs than the single-pass kernel -> fills
@@ -310,12 +433,13 @@ def _nvfp4_gemv_splitk_kernel(
                 part_ptr + k * stride_partk + offs_n * stride_partn, mask=n_mask, other=0.0
             )
         g = tl.load(gscale_ptr + offs_n, mask=n_mask, other=0.0).to(tl.float32)
-        tl.store(out_ptr + offs_n, (total * g).to(OUT), mask=n_mask)
+        tl.store(out_ptr + offs_n, _act(total * g, ACT).to(OUT), mask=n_mask)
         tl.store(counter_ptr + pid_n, 0)  # leave zeroed for the next launch/replay
 
 
 def _gemv(a: torch.Tensor, packed_i32: torch.Tensor, scale: torch.Tensor,
-          gscale: torch.Tensor, out_dtype: torch.dtype, transposed: bool) -> torch.Tensor:
+          gscale: torch.Tensor, out_dtype: torch.dtype, transposed: bool,
+          act: int = 0) -> torch.Tensor:
     """M==1 W4A16 GEMV. ``a`` [K] compute-dtype; ``packed_i32`` logical [N, K//8] int32
     (row-major or a K-major transposed view); ``scale`` logical [N, K//16] fp8; ``gscale``
     [N] fp16. Picks split-K so small ``N`` (shared expert) still fills the SMs; large ``N``
@@ -325,38 +449,39 @@ def _gemv(a: torch.Tensor, packed_i32: torch.Tensor, scale: torch.Tensor,
     K = packed_i32.shape[1] * 8
     scale = e4m3_kernel_view(scale)
     out = torch.empty(N, dtype=out_dtype, device=a.device)
-    block_kw = _GEMV_BLOCK_KW_T if transposed else _GEMV_BLOCK_KW_ROW
-    sk_block_n = _GEMV_SPLITK_BLOCK_N_T if transposed else _GEMV_SPLITK_BLOCK_N_ROW
+    t = _tuning(a.device)
+    block_kw = t.gemv_block_kw_t if transposed else t.gemv_block_kw_row
+    sk_block_n = t.gemv_splitk_block_n_t if transposed else t.gemv_splitk_block_n_row
 
     K_WORDS = K // 8
     n_blocks_n = triton.cdiv(N, sk_block_n)
-    num_tiles = triton.cdiv(K_WORDS, _GEMV_SPLITK_BLOCK_KW)
+    num_tiles = triton.cdiv(K_WORDS, t.gemv_splitk_block_kw)
     # Target ~a thousand blocks total; pow2 split_k -> stable reduction order.
-    split_k = max(1, min(_GEMV_SPLITK_TARGET // max(n_blocks_n, 1), num_tiles))
+    split_k = max(1, min(t.gemv_splitk_target // max(n_blocks_n, 1), num_tiles))
     split_k = 1 << (split_k.bit_length() - 1)
 
     if split_k == 1:  # large N (lm_head): single-pass full-K, direct global-scaled write
         even = K % (block_kw * 8) == 0
-        _nvfp4_gemv_kernel[(triton.cdiv(N, _GEMV_BLOCK_N),)](
+        _nvfp4_gemv_kernel[(triton.cdiv(N, t.gemv_block_n),)](
             a, packed_i32, scale, gscale, out, N, K,
             packed_i32.stride(0), packed_i32.stride(1), scale.stride(0), scale.stride(1),
-            BLOCK_N=_GEMV_BLOCK_N, BLOCK_KW=block_kw, OUT=out_tl, EVEN_K=even,
-            num_warps=_GEMV_WARPS,
+            BLOCK_N=t.gemv_block_n, BLOCK_KW=block_kw, OUT=out_tl, EVEN_K=even, ACT=act,
+            num_warps=t.gemv_warps,
         )
         return out
 
     tiles_per = triton.cdiv(num_tiles, split_k)
     # Even iff every (tile_start + t) word tile is fully in range for every pid_k.
-    even = (K % (_GEMV_SPLITK_BLOCK_KW * 8) == 0) and (num_tiles == tiles_per * split_k)
+    even = (K % (t.gemv_splitk_block_kw * 8) == 0) and (num_tiles == tiles_per * split_k)
     part = torch.empty((split_k, N), dtype=torch.float32, device=a.device)
     counters = _splitk_counters(n_blocks_n, a.device)
     _nvfp4_gemv_splitk_kernel[(n_blocks_n, split_k)](
         a, packed_i32, scale, gscale, part, counters, out, N, K, K_WORDS, tiles_per,
         packed_i32.stride(0), packed_i32.stride(1), scale.stride(0), scale.stride(1),
         part.stride(0), part.stride(1),
-        BLOCK_N=sk_block_n, BLOCK_KW=_GEMV_SPLITK_BLOCK_KW, SPLIT_K=split_k,
-        OUT=out_tl, EVEN_K=even,
-        num_warps=_GEMV_WARPS,
+        BLOCK_N=sk_block_n, BLOCK_KW=t.gemv_splitk_block_kw, SPLIT_K=split_k,
+        OUT=out_tl, EVEN_K=even, ACT=act,
+        num_warps=t.gemv_splitk_warps,
     )
     return out
 
@@ -406,7 +531,7 @@ def _nvfp4_gemm_kernel(
     stride_cm, stride_cn,
     stride_qk, stride_qm, stride_qn,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_KW: tl.constexpr,
-    SPLIT_K: tl.constexpr, OUT: tl.constexpr, EVEN_K: tl.constexpr,
+    SPLIT_K: tl.constexpr, OUT: tl.constexpr, EVEN_K: tl.constexpr, ACT: tl.constexpr,
 ):
     pid_mn = tl.program_id(0)
     pid_k = tl.program_id(1)
@@ -477,7 +602,7 @@ def _nvfp4_gemm_kernel(
     io_mask = m_mask[None, :] & n_mask[:, None]
     if SPLIT_K == 1:
         g = tl.load(gscale_ptr + offs_n, mask=n_mask, other=0.0).to(tl.float32) * 128.0
-        acc = acc * g[:, None]
+        acc = _act(acc * g[:, None], ACT)
         c_ptrs = c_ptr + offs_m[None, :] * stride_cm + offs_n[:, None] * stride_cn
         tl.store(c_ptrs, acc.to(OUT), mask=io_mask)
     else:
@@ -509,7 +634,7 @@ def _nvfp4_gemm_splitk_reduce_kernel(
     part_ptr, gscale_ptr, out_ptr, M, N, SPLIT_K: tl.constexpr,
     stride_qk, stride_qm, stride_qn,
     stride_om, stride_on,
-    BLOCK: tl.constexpr, OUT: tl.constexpr,
+    BLOCK: tl.constexpr, OUT: tl.constexpr, ACT: tl.constexpr,
 ):
     """Split-K reduce for the dot GEMM. Kept as a separate launch on purpose: fusing it
     into the GEMM (last-arriver pattern, as the GEMV does) costs more than it saves there
@@ -524,13 +649,14 @@ def _nvfp4_gemm_splitk_reduce_kernel(
         acc += tl.load(part_ptr + k * stride_qk + pid_m * stride_qm + offs * stride_qn,
                        mask=mask, other=0.0)
     g = tl.load(gscale_ptr + offs, mask=mask, other=0.0).to(tl.float32) * 128.0
-    tl.store(out_ptr + pid_m * stride_om + offs * stride_on, (acc * g).to(OUT), mask=mask)
+    tl.store(out_ptr + pid_m * stride_om + offs * stride_on,
+             _act(acc * g, ACT).to(OUT), mask=mask)
 
 
 def _pick_split_k_bm16(num_mn: int, num_tiles: int, wave: int) -> int:
     """Split-K for the M <= 16 (decode-batch) grid. At these M the op is pure weight
     streaming, so the grid must reach ~one wave of blocks (``wave`` = SM count x resident
-    blocks/SM, see :func:`_gemm_wave`) before bandwidth saturates -- but each program
+    blocks/SM, see :class:`_Tuning`) before bandwidth saturates -- but each program
     still needs >= ~3 K-tiles or the load pipeline never leaves its ramp. Thresholds
     fitted on H100 against Marlin (qkv/o_proj/gate_up/down + shared-expert shapes); the
     wave scaling is what carries them to other SM counts/occupancies."""
@@ -552,37 +678,41 @@ def _pick_split_k_bm16(num_mn: int, num_tiles: int, wave: int) -> int:
 
 def _gemm_inkernel(a: torch.Tensor, packed_i32: torch.Tensor, scale: torch.Tensor,
                    gscale: torch.Tensor, out_dtype: torch.dtype,
-                   transposed: bool) -> torch.Tensor:
-    """Batched-decode dot GEMM (M <= 64): weight read once, split-K keeps the SMs fed when
-    ``M x N`` alone yields too few programs (shared-expert N at small M)."""
+                   transposed: bool, act: int = 0) -> torch.Tensor:
+    """Small-M dot GEMM (up to :attr:`_Tuning.gemm_max_inkernel_m`): the packed weight is
+    read straight from its FP4 residence, and split-K keeps the SMs fed when ``M x N``
+    alone yields too few programs (shared-expert N at small M)."""
     M, K = a.shape
     N = packed_i32.shape[0]
     compute = out_dtype if out_dtype in _TL_DTYPE else torch.bfloat16
     scale = e4m3_kernel_view(scale)
     out = torch.empty((M, N), dtype=compute, device=a.device)
-    BLOCK_M = 16 if M <= 16 else (32 if M <= 32 else 64)
-    BLOCK_N = 128
-    num_warps = 8 if BLOCK_M == 64 else 4
-    num_stages = 3
+    t = _tuning(a.device)
+    _m_max, BLOCK_M, BLOCK_N, num_warps, num_stages = t.gemm_tiles[-1]
+    for tile in t.gemm_tiles:
+        if M <= tile[0]:
+            _m_max, BLOCK_M, BLOCK_N, num_warps, num_stages = tile
+            break
 
     K_WORDS = K // 8
     num_mn = triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N)
-    num_tiles = triton.cdiv(K_WORDS, _GEMM_BLOCK_KW)
+    num_tiles = triton.cdiv(K_WORDS, t.gemm_block_kw)
     if BLOCK_M == 16:
-        split_k = _pick_split_k_bm16(num_mn, num_tiles, _gemm_wave(a.device))
+        split_k = _pick_split_k_bm16(num_mn, num_tiles, t.wave)
     else:
-        split_k = max(1, min(_GEMM_SPLITK_TARGET // max(num_mn, 1), num_tiles))
+        split_k = max(1, min(t.gemm_splitk_target // max(num_mn, 1), num_tiles))
         split_k = 1 << (split_k.bit_length() - 1)
-        # Prefer a split that divides the tile count evenly: every program then runs the
-        # mask-free EVEN_K loop (~15-30% faster). Only fall back to the uneven split when
-        # evenness would collapse the grid (and with it SM occupancy).
-        even_k = split_k
-        while even_k > 1 and num_tiles % even_k != 0:
-            even_k //= 2
-        if even_k * 4 >= split_k:
-            split_k = even_k
+        if t.gemm_splitk_prefer_even:
+            # Prefer a split that divides the tile count evenly: every program then runs
+            # the mask-free EVEN_K loop (~15-30% faster). Only fall back to the uneven
+            # split when evenness would collapse the grid (and with it SM occupancy).
+            even_k = split_k
+            while even_k > 1 and num_tiles % even_k != 0:
+                even_k //= 2
+            if even_k * 4 >= split_k:
+                split_k = even_k
     tiles_per = triton.cdiv(num_tiles, split_k)
-    even = (K % (_GEMM_BLOCK_KW * 8) == 0) and (num_tiles == tiles_per * split_k)
+    even = (K % (t.gemm_block_kw * 8) == 0) and (num_tiles == tiles_per * split_k)
     part = (torch.empty((split_k, M, N), dtype=torch.float32, device=a.device)
             if split_k > 1 else out)  # unused dummy when split_k == 1
     _nvfp4_gemm_kernel[(num_mn, split_k)](
@@ -595,19 +725,20 @@ def _gemm_inkernel(a: torch.Tensor, packed_i32: torch.Tensor, scale: torch.Tenso
         part.stride(0) if split_k > 1 else 0,
         part.stride(1) if split_k > 1 else 0,
         part.stride(2) if split_k > 1 else 0,
-        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_KW=_GEMM_BLOCK_KW,
+        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_KW=t.gemm_block_kw,
         SPLIT_K=split_k, OUT=_TL_DTYPE[compute], EVEN_K=even,
+        ACT=0 if split_k > 1 else act,
         num_warps=num_warps, num_stages=num_stages,
     )
     if split_k > 1:
         # Small blocks spread the reduce over more SMs (it is latency-bound, ~2.5us);
         # very wide N amortizes better with fewer, fatter blocks.
-        r_block, r_warps = (128, 2) if N <= 8192 else (512, 8)
+        r_block, r_warps = t.reduce_narrow if N <= t.reduce_wide_n else t.reduce_wide
         _nvfp4_gemm_splitk_reduce_kernel[(M, triton.cdiv(N, r_block))](
             part, gscale, out, M, N, split_k,
             part.stride(0), part.stride(1), part.stride(2),
             out.stride(0), out.stride(1),
-            BLOCK=r_block, OUT=_TL_DTYPE[compute], num_warps=r_warps,
+            BLOCK=r_block, OUT=_TL_DTYPE[compute], ACT=act, num_warps=r_warps,
         )
     return out
 
@@ -722,7 +853,7 @@ def _dequant_rows(packed_i32: torch.Tensor, scale: torch.Tensor, gscale: torch.T
 
 def _gemm_scratch(a: torch.Tensor, packed_i32: torch.Tensor, scale: torch.Tensor,
                   gscale: torch.Tensor, out_dtype: torch.dtype,
-                  transposed: bool) -> torch.Tensor:
+                  transposed: bool, act: int = 0) -> torch.Tensor:
     """Dequant the weight to a bf16 scratch (N-chunked) and run cuBLAS. The dequant runs
     once at the memory roof, so at prefill M this sits within ~7% of a resident-bf16 GEMM
     while the weight stays FP4-resident."""
@@ -730,14 +861,14 @@ def _gemm_scratch(a: torch.Tensor, packed_i32: torch.Tensor, scale: torch.Tensor
     N = packed_i32.shape[0]
     compute = out_dtype if out_dtype in _TL_DTYPE else torch.bfloat16
     a = a.to(compute)
-    chunk = min(N, _SCRATCH_CHUNK_BYTES // (K * compute.itemsize))
+    chunk = min(N, _tuning(a.device).scratch_chunk_bytes // (K * compute.itemsize))
     # Keep the chunked GEMM's N dimension 256-aligned: an odd N (e.g. 13107) drops
     # cuBLAS onto a ~4x slower misaligned kernel.
     chunk = max(256, chunk - chunk % 256)
     if chunk >= N:
         w = torch.empty((N, K), dtype=compute, device=a.device)
         _dequant_rows(packed_i32, scale, gscale, w, transposed)
-        return torch.nn.functional.linear(a, w)
+        return _act_eager(torch.nn.functional.linear(a, w), act)
     out = torch.empty((M, N), dtype=compute, device=a.device)
     w = torch.empty((chunk, K), dtype=compute, device=a.device)
     tmp = torch.empty((M, chunk), dtype=compute, device=a.device)
@@ -749,19 +880,28 @@ def _gemm_scratch(a: torch.Tensor, packed_i32: torch.Tensor, scale: torch.Tensor
         # would fall back to a slow path if given the non-contiguous out[:, n0:n1] directly.
         tc = tmp[:, : n1 - n0]
         torch.matmul(a, wc.t(), out=tc)
-        out[:, n0:n1].copy_(tc)
+        out[:, n0:n1].copy_(_act_eager(tc, act))
     return out
 
 
+def _act_eager(y: torch.Tensor, act: int) -> torch.Tensor:
+    """Epilogue for the paths that hand the GEMM to cuBLAS (prefill M): two extra passes
+    over the output, which at prefill M is a rounding error next to the GEMM itself."""
+    return torch.relu(y).square() if act == 1 else y
+
+
 def _gemm(a: torch.Tensor, packed_i32: torch.Tensor, scale: torch.Tensor,
-          gscale: torch.Tensor, out_dtype: torch.dtype, transposed: bool) -> torch.Tensor:
+          gscale: torch.Tensor, out_dtype: torch.dtype, transposed: bool,
+          act: int = 0) -> torch.Tensor:
     """M>1 W4A16 GEMM dispatch. Small M (batched decode, lm_head last-token batch) reads
     the packed weight directly in the dot GEMM (split-K when needed); larger M (prefill)
     goes dequant-to-scratch + cuBLAS."""
     M = a.shape[0]
-    if M <= _GEMM_MAX_INKERNEL_M:
-        return _gemm_inkernel(a, packed_i32, scale, gscale, out_dtype, transposed)
-    return _gemm_scratch(a, packed_i32, scale, gscale, out_dtype, transposed)
+    t = _tuning(a.device)
+    wide = packed_i32.shape[0] >= t.gemm_wide_n
+    if M <= (t.gemm_max_inkernel_m_wide if wide else t.gemm_max_inkernel_m):
+        return _gemm_inkernel(a, packed_i32, scale, gscale, out_dtype, transposed, act)
+    return _gemm_scratch(a, packed_i32, scale, gscale, out_dtype, transposed, act)
 
 
 def _ref(a: torch.Tensor, packed: torch.Tensor, scale: torch.Tensor,
@@ -780,34 +920,41 @@ def _ref(a: torch.Tensor, packed: torch.Tensor, scale: torch.Tensor,
 def _linear_impl(
     x: torch.Tensor, packed_i32: torch.Tensor, scale: torch.Tensor,
     gscale: torch.Tensor, bias: torch.Tensor | None, out_dtype: torch.dtype,
-    transposed: bool,
+    transposed: bool, act: str | None = None,
 ) -> torch.Tensor:
     """Shared dispatch on a logical ``[N, K//8]`` int32 weight view (either storage order)."""
     *lead, K = x.shape
     N = packed_i32.shape[0]
+    # A bias has to land before the activation, and the kernels add none, so a biased
+    # layer keeps the epilogue eager (no NVFP4 dense layer in tree has both).
+    fused = _ACT_CODE[act] if bias is None else 0
     if x.numel() // K == 1:
         out = _gemv(x.reshape(K), packed_i32, scale, gscale, out_dtype,
-                    transposed).reshape(*lead, N)
+                    transposed, fused).reshape(*lead, N)
     else:
         out = _gemm(x.reshape(-1, K).contiguous(), packed_i32, scale, gscale, out_dtype,
-                    transposed).reshape(*lead, N)
+                    transposed, fused).reshape(*lead, N)
     if bias is not None:
-        out = out + bias.to(out.dtype)
+        out = _act_eager(out + bias.to(out.dtype), _ACT_CODE[act])
     return out
 
 
 def nvfp4_dense_linear(
     x: torch.Tensor, weight: torch.Tensor, weight_scale: torch.Tensor,
     weight_global: torch.Tensor, bias: torch.Tensor | None = None,
+    act: str | None = None,
 ) -> torch.Tensor:
     """``y = x @ dequant(weight)^T`` on the checkpoint-native row-major layout.
-    ``weight`` [N, K//2] uint8, ``weight_scale`` [N, K//16] fp8-e4m3, ``weight_global`` [N] fp16."""
+    ``weight`` [N, K//2] uint8, ``weight_scale`` [N, K//16] fp8-e4m3, ``weight_global`` [N] fp16.
+    ``act="relu2"`` fuses Nemotron's ungated MLP activation into the epilogue."""
     if _USE_REF:
         *lead, K = x.shape
         out = _ref(x, weight, weight_scale, weight_global, x.dtype).reshape(*lead, weight.shape[0])
-        return out + bias.to(out.dtype) if bias is not None else out
+        out = out + bias.to(out.dtype) if bias is not None else out
+        return _act_eager(out, _ACT_CODE[act])
     return _linear_impl(
-        x, weight.view(torch.int32), weight_scale, weight_global, bias, x.dtype, transposed=False
+        x, weight.view(torch.int32), weight_scale, weight_global, bias, x.dtype,
+        transposed=False, act=act,
     )
 
 
@@ -826,17 +973,20 @@ def nvfp4_transpose_resident(weight: torch.Tensor, weight_scale: torch.Tensor):
 def nvfp4_dense_linear_t(
     x: torch.Tensor, weight_t: torch.Tensor, scale_t: torch.Tensor,
     weight_global: torch.Tensor, bias: torch.Tensor | None = None,
+    act: str | None = None,
 ) -> torch.Tensor:
     """``y = x @ dequant(W)^T`` on the K-major resident layout from
-    :func:`nvfp4_transpose_resident` (``weight_t`` [K//8, N] int32, ``scale_t`` [K//16, N])."""
+    :func:`nvfp4_transpose_resident` (``weight_t`` [K//8, N] int32, ``scale_t`` [K//16, N]).
+    ``act="relu2"`` fuses Nemotron's ungated MLP activation into the epilogue."""
     if _USE_REF:
         out = _gemm_scratch(
             x.reshape(-1, x.shape[-1]).contiguous(), weight_t.t(), scale_t.t(),
             weight_global, x.dtype, transposed=True,
         ).reshape(*x.shape[:-1], weight_t.shape[1])
-        return out + bias.to(out.dtype) if bias is not None else out
+        out = out + bias.to(out.dtype) if bias is not None else out
+        return _act_eager(out, _ACT_CODE[act])
     return _linear_impl(
-        x, weight_t.t(), scale_t.t(), weight_global, bias, x.dtype, transposed=True
+        x, weight_t.t(), scale_t.t(), weight_global, bias, x.dtype, transposed=True, act=act
     )
 
 
@@ -852,10 +1002,13 @@ class Nvfp4DenseLinear(BaseOP):
     packed weight + block scales are repacked to K-major (:func:`nvfp4_transpose_resident`)
     so the decode kernels' weight loads coalesce along N (~2x batched-decode throughput)."""
 
-    def __init__(self, in_features: int, out_features: int, has_bias: bool = False):
+    def __init__(self, in_features: int, out_features: int, has_bias: bool = False,
+                 act: str | None = None):
         assert in_features % 16 == 0, f"NVFP4 in_features must be %16, got {in_features}"
+        assert act in _ACT_CODE, f"unknown fused activation {act!r}"
         self.in_features = in_features
         self.out_features = out_features
+        self.act = act
         self.weight = torch.empty(out_features, in_features // 2, dtype=torch.uint8)
         self.weight_scale = torch.empty(out_features, in_features // 16, dtype=FP8)
         self.weight_global = torch.empty(out_features, dtype=torch.float16)
@@ -878,9 +1031,11 @@ class Nvfp4DenseLinear(BaseOP):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self._transposed:
             return nvfp4_dense_linear_t(
-                x, self.weight, self.weight_scale, self.weight_global, self.bias
+                x, self.weight, self.weight_scale, self.weight_global, self.bias, self.act
             )
-        return nvfp4_dense_linear(x, self.weight, self.weight_scale, self.weight_global, self.bias)
+        return nvfp4_dense_linear(
+            x, self.weight, self.weight_scale, self.weight_global, self.bias, self.act
+        )
 
 
 class Nvfp4DenseColMerged(Nvfp4DenseLinear):
@@ -889,9 +1044,10 @@ class Nvfp4DenseColMerged(Nvfp4DenseLinear):
     own per-row ``weight_global`` (and block scales), so the fused weight is exact. The caller
     splits the output by ``output_sizes`` (e.g. shared-expert gate|up) as before."""
 
-    def __init__(self, in_features: int, output_sizes: list[int], has_bias: bool = False):
+    def __init__(self, in_features: int, output_sizes: list[int], has_bias: bool = False,
+                 act: str | None = None):
         self.output_sizes = list(output_sizes)
-        super().__init__(in_features, sum(output_sizes), has_bias)
+        super().__init__(in_features, sum(output_sizes), has_bias, act)
 
 
 class Nvfp4LMHead(BaseOP):
