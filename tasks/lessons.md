@@ -478,3 +478,42 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   filed a retention bug against the kernels. (Same shape as the 262K bisect's wrong "model/quant
   limit" verdict.) Also grade a control key that is absent: it separates "cannot retrieve" from
   "fabricates", and this checkpoint passed it (`No belfry ledger code found.`).
+
+## 2026-09-05 (Nemotron 3.5 decode launch config — a heuristic keyed on the wrong thing)
+- **A launch heuristic that matches on a head shape silently excludes every other model.**
+  `decode_launch_config` had four carefully measured branches, all requiring
+  `head_dim==256, 16 q heads, 2 kv heads`; the *fallback* they all shared was a flat
+  `kv_splits=8`, which on Nemotron's 32Q/2KV/D128 is a 16-CTA grid on 84 SMs — constant in
+  context, so decode slowed linearly with prompt length (8.3-9.7x off the achievable per-layer
+  time at 131K-1M). Write the fallback against the *machine* (`_grid_filling_splits`: CTAs per
+  SM given the kernel's own grid formula), not against a constant; keep the measured branches
+  as overrides. The general rule then reproduced the tuned Ornith split count independently,
+  which is the check that it is a rule and not a second curve fit.
+- **Derive the heuristic from the kernel's grid expression, not from intuition.** Stage 1
+  launches `batch * cdiv(num_q_heads, min(16, group)) * kv_splits`; once that is written down
+  it is obvious that splits is the only term that can scale with the GPU, and that two
+  different-looking geometries (16Q/2KV/D256 and 32Q/2KV/D128) have the *same* 2 head blocks
+  and therefore want the same split count.
+- **"Bit-exact before/after" is the wrong gate for a split-K kernel.** Changing the split
+  count changes the ORDER of the flash-decoding log-sum-exp reduction, so the outputs cannot
+  be bitwise equal and a bitwise gate would have rejected a correct 9x speedup. Gate on
+  agreement instead: max |Δ| vs the old config (1.22e-04 here, one sixtieth of a bf16 ulp)
+  *and* vs the dequantized-pool oracle — the new launch was no further from the oracle than
+  the old one, and at 131K closer.
+- **A tile that is optimal at head_dim 128 can be 43 % slower at 256.** `BLOCK_N=64` + 8 warps
+  won every Nemotron length and lost badly on the quantized D256 pool (0.500 vs 0.348 ms), so
+  the tile is keyed on `head_dim` while the split count is keyed on the grid. Sweep the second
+  geometry before generalizing from the first.
+- **Give a graph-captured constant an env override before you need to A/B it.** The split
+  count is baked into the CUDA-graph grid and the fp32 scratch at capture time, so it cannot
+  be varied inside a live process: `FREETOKEN_DECODE_KV_SPLITS/_BLOCK_N/_NUM_WARPS` made the
+  end-to-end before/after two runs of the SAME binary instead of a rebuild, and a one-line
+  startup log line (`Triton decode launch: ...`) is what proves which arm actually ran.
+- **A `/health` 200 does not mean the model is loaded.** FreeToken answers `/health` while the
+  weights are still streaming and then 503s the first real request (`model is still loading`).
+  Poll with an actual 1-token completion before starting a timed run.
+- Kernel microbenchmarks are cheap enough to sweep exhaustively: 204 configurations across
+  four contexts, three geometries and three batch sizes cost ~25 min of GPU with no weights
+  loaded, and they predicted the end-to-end decode rate to within a few percent
+  (`non-attention ms/token` inferred at one length extrapolated correctly to the others).
+  Do the kernel sweep first; the server run then only has to confirm it.

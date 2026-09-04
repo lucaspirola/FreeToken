@@ -153,6 +153,29 @@ Decode through `/v1/chat/completions`, `--moe-cache-auto`, Triton expert GEMM:
 | 16, `lru` | 1 063 | 99.6 % | 5.5 | 87.4 |
 | 16, **`lfu`** | 1 063 | 51.1 % | 10.5 | **168.2** |
 
+### Decode with context (2026-09-05)
+
+Single-stream decode used to fall off a cliff with context because
+`kernel/triton/attention.py::decode_launch_config` had no branch for this head shape
+(32 Q heads / 2 KV heads / head_dim 128) and took the `kv_splits = 8` fallback: a 16-CTA
+grid on an 84-SM RTX 5080, constant in context, so each CTA walked `seq_len / 8` tokens.
+The grid now scales with the GPU (64 splits / `BLOCK_N` 64 / 8 warps here). Same server
+twice, four turns per length, `ignore_eos`, 128 decode tokens, needle recalled every turn
+(`benchmarks/results/nemotron35_lightning_5080_decode_launch_2026-09-04.md`):
+
+| prompt tokens | decode before | decode after | prefill (unchanged) |
+|---:|---:|---:|---:|
+| 131,088 | 82.8 tok/s | **145.3** tok/s (1.75x) | 3 181 -> 3 290 tok/s |
+| 262,160 | 58.7 | **132.4** (2.26x) | 1 934 -> 1 965 |
+| 524,304 | 35.4 | **113.6** (3.21x) | 1 073 -> 1 063 |
+| 1,040,016 | ~20 (recorded 2026-09-04, unpaired) | **95.8** (single sample) | 575 tok/s, TTFT 1 810 s |
+
+Decode at 131K is now the same rate as the short-context single-stream figure in the table
+above (143.2 tok/s), i.e. the curve is flat rather than context-bound, and what remains is
+the KV read itself (the kernel sustains 609-722 GB/s of a ~960 GB/s part). To reproduce the
+old behaviour for an A/B, start the server with
+`FREETOKEN_DECODE_KV_SPLITS=8 FREETOKEN_DECODE_BLOCK_N=32 FREETOKEN_DECODE_NUM_WARPS=4`.
+
 ### 1M single-session profile
 
 Many long-lived agent sessions, each up to 1M tokens, few decoding at any instant.
@@ -254,12 +277,14 @@ ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   **VRAM is not the blocker for one 1M session.**
 - **Throughput** on a growing synthetic-needle prompt: 131K prefill 3 007 tok/s / decode
   72.6 tok/s; 262K 1 790 / 51.8; 524K 997 / 32.0. Prefill cost is quadratic in context
-  (526 s for a cold 524K prompt).
+  (526 s for a cold 524K prompt). **The decode half of that curve is superseded** — see
+  "Decode with context" below; prefill is unchanged.
 - ~~**Coherence caveat**: the needle passes at 131K but is missed at 262K and 524K.~~
   **Retracted 2026-09-04.** Those 2B4 runs predate both the chat-endpoint gate (`ec54e21`) and
   the Mamba-2 `dt`-floor fix (`3ac79ec`). Re-run through `/v1/chat/completions` at depth 0.50
   the needle **passes at 262,160 and at 524,304 tokens** (1,925 / 1,064 tok/s prefill, 56.3 /
-  34.5 tok/s decode), and a 1,040,080-token conversation recalls its needle as well —
+  34.5 tok/s decode — both decode figures predate the launch-config fix below), and a
+  1,040,080-token conversation recalls its needle as well —
   `benchmarks/results/nemotron35_lightning_5080_1m_sessions_2026-09-04.md`.
 - `--nvfp4-backend flashinfer` **cannot be combined with `--kv-grow-step-tokens`** (growable
   KV allocates the slot cache as VMM tensors; the b12x banks include an int32 bank

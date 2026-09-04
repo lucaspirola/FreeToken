@@ -11,9 +11,67 @@ import triton.language as tl
 _MAX_KV_SPLITS = 8
 _MIN_BLOCK_KV = 32
 
+# Grid-filling decode fallback. Stage 1 launches ``batch * head_blocks * kv_splits``
+# CTAs and ``head_blocks`` is fixed by the head geometry, so ``kv_splits`` is the only
+# term that scales the decode grid with the GPU. One CTA per SM at batch one is what the
+# 2026-09-04 RTX 5080 sweep measured (benchmarks/bench_decode_launch.py): for 32Q/2KV/D128
+# at 131K-1M, 64 splits (128 CTAs on 84 SMs) beat both 32 and 128 at every length.
+# ``_MAX_AUTO_KV_SPLITS`` caps the stage-2 reduction and the fp32 scratch.
+_DECODE_CTAS_PER_SM = 1
+_MAX_AUTO_KV_SPLITS = 128
+
 # The cache-native Q8 score path is independently switchable so its numerical and
 # performance gates can be compared against the dequantize-to-BF16 implementation.
 _Q8_NATIVE_QK = os.getenv("FREETOKEN_Q8_NATIVE_QK", "1").strip() != "0"
+
+
+@functools.lru_cache(maxsize=1)
+def _decode_launch_env_override() -> tuple[int | None, int | None, int | None]:
+    """``(kv_splits, block_n, num_warps)`` forced by the environment, or ``(None,)*3``.
+
+    Exists so a launch configuration can be A/B'd end to end against a live server
+    (``FREETOKEN_DECODE_KV_SPLITS=8`` reproduces the pre-2026-09-04 fallback) without
+    rebuilding: the split count is baked into the CUDA-graph grid and the fp32 scratch
+    at capture time, so it cannot be varied inside one process.
+    """
+    def _get(name: str) -> int | None:
+        raw = os.getenv(name, "").strip()
+        return int(raw) if raw else None
+
+    return (
+        _get("FREETOKEN_DECODE_KV_SPLITS"),
+        _get("FREETOKEN_DECODE_BLOCK_N"),
+        _get("FREETOKEN_DECODE_NUM_WARPS"),
+    )
+
+
+def _decode_head_blocks(num_q_heads: int, num_kv_heads: int) -> int:
+    """Stage-1 grid extent along the head axis -- ``cdiv(num_q_heads, valid_block_h)``.
+
+    Mirrors ``decode_paged_attention``'s ``valid_block_h = min(16, group)`` so the
+    launch heuristic reasons about the same grid the kernel is actually given. It is 2
+    for both tuned geometries here (16Q/2KV and 32Q/2KV), which is exactly why the
+    split count is the only free parameter left to fill the GPU with.
+    """
+    group = max(1, num_q_heads // max(1, num_kv_heads))
+    return -(-num_q_heads // min(16, group))
+
+
+def _grid_filling_splits(*, num_q_heads: int, num_kv_heads: int, sm_count: int) -> int:
+    """Split count that keeps every SM busy for a geometry with no measured tuning.
+
+    The historical fallback was a flat 8 splits. On a 32Q/2KV head shape that is a
+    16-CTA grid on an 84-SM part, with every CTA walking ``seq_len / 8`` tokens
+    serially -- so single-stream decode slows down roughly linearly with context
+    (Nemotron 3.5 Lightning: 72 tok/s at 131K, 32 at 524K) while 5/6 of the GPU idles.
+    Splitting the KV axis further is close to free: stage 1's total work is
+    ``batch * heads * seq_len`` regardless, empty splits exit before loading anything,
+    and only the stage-2 reduction (``splits`` fp32 rows per head) grows.
+    """
+    head_blocks = _decode_head_blocks(num_q_heads, num_kv_heads)
+    target = -(-(sm_count * _DECODE_CTAS_PER_SM) // head_blocks)
+    splits = 1 << max(0, (target - 1).bit_length())
+    return max(_MAX_KV_SPLITS, min(splits, _MAX_AUTO_KV_SPLITS))
 
 
 def decode_launch_config(
@@ -23,14 +81,41 @@ def decode_launch_config(
     num_q_heads: int,
     num_kv_heads: int,
     compute_capability: tuple[int, int] | None = None,
+    sm_count: int | None = None,
 ) -> tuple[int, int, int]:
     """Return ``(kv_splits, block_n, num_warps)`` for grouped decode attention.
 
     Quantized caches are dequantized before each tensor-core dot and need more
     parallel KV partitions than the bf16 path. The Ornith/Qwen3.5 geometry has
-    measured launch configurations for consumer Ada and Blackwell; other shapes
-    keep the conservative fallback.
+    measured launch configurations for consumer Ada and Blackwell; any other shape
+    falls back to ``_grid_filling_splits`` when the caller knows the GPU's SM count,
+    and to the historical conservative constant when it does not.
     """
+    splits, block_n, num_warps = _tuned_decode_launch_config(
+        quant_name=quant_name,
+        head_dim=head_dim,
+        num_q_heads=num_q_heads,
+        num_kv_heads=num_kv_heads,
+        compute_capability=compute_capability,
+        sm_count=sm_count,
+    )
+    env_splits, env_block_n, env_warps = _decode_launch_env_override()
+    return (
+        env_splits or splits,
+        env_block_n or block_n,
+        env_warps or num_warps,
+    )
+
+
+def _tuned_decode_launch_config(
+    *,
+    quant_name: str | None,
+    head_dim: int,
+    num_q_heads: int,
+    num_kv_heads: int,
+    compute_capability: tuple[int, int] | None,
+    sm_count: int | None,
+) -> tuple[int, int, int]:
     if (
         quant_name == "q8_q6"
         and head_dim == 256
@@ -84,6 +169,23 @@ def decode_launch_config(
             # four-warps geometry remain the fastest correct configuration.
             return 16, 64, 4
         return 64, 64, 4
+    if sm_count:
+        # Untuned geometry on a known GPU (Nemotron 3.5 Lightning's 32Q/2KV/D128 is the
+        # motivating one): size the grid to the part instead of to a constant. The tile
+        # follows head_dim -- at D128 the 64-token tile with 8 warps was fastest at every
+        # length measured (0.117/0.213/0.402/0.790 ms per layer at 131K/262K/524K/1M),
+        # while at D256 the same tile doubles the register/shared footprint and the
+        # 32-token/4-warp launch wins (bf16 Ornith 16Q/2KV/D256: 0.312 vs 0.332 ms).
+        block_n, num_warps = (64, 8) if head_dim <= 128 else (32, 4)
+        return (
+            _grid_filling_splits(
+                num_q_heads=num_q_heads,
+                num_kv_heads=num_kv_heads,
+                sm_count=sm_count,
+            ),
+            block_n,
+            num_warps,
+        )
     return _MAX_KV_SPLITS, 32, 4
 
 
@@ -353,6 +455,26 @@ def _load_kv(
     return vals.to(out_dtype)
 
 
+def _slot_offsets_need_int64(*pools) -> bool:
+    """True when ``slot_id * stride`` can overflow int32 for any of these pools.
+
+    Triton evaluates ``ptr + offset`` in the offset's own width, so the 32-bit
+    ``slots * stride_ks`` in the KV gathers wraps once a pool holds 2**31 elements or
+    more. That is 8.4M slots at Nemotron's 2 KV heads x 128 dim, but only 1.05M at
+    8 heads x 256 -- inside the 1M-token profile. The KV *store* path already widens
+    unconditionally (``kv_quant.py``); the load path pays 64-bit address math, so it
+    widens only when the pool is actually that large.
+    """
+    return any(pool is not None and pool.numel() >= 2**31 for pool in pools)
+
+
+@functools.cache
+def _sm_count(device_index: int) -> int:
+    """Streaming-multiprocessor count of a CUDA device (0 if unavailable)."""
+    props = torch.cuda.get_device_properties(device_index)
+    return int(getattr(props, "multi_processor_count", 0))
+
+
 @functools.lru_cache(maxsize=None)
 def _optin_smem_bytes(device_index: int) -> int:
     """Per-block opt-in shared-memory budget for a CUDA device (0 if unavailable)."""
@@ -419,6 +541,7 @@ def _paged_attention_kernel(
     K_FORMAT: tl.constexpr,
     V_FORMAT: tl.constexpr,
     QBLOCK: tl.constexpr,
+    SLOT_I64: tl.constexpr,
 ):
     q_tok = tl.program_id(0)
     q_head = tl.program_id(1)
@@ -461,6 +584,9 @@ def _paged_attention_kernel(
         skip_tile = tl.max(mask_n.to(tl.int32), axis=0) == 0
         if not skip_tile:
             slots = tl.load(indices_ptr + kv_start + offs_n, mask=offs_n < kv_len, other=0)
+            if SLOT_I64:
+                # Pools above 2**31 elements overflow a 32-bit slot*stride offset.
+                slots = slots.to(tl.int64)
             kv_mask = (offs_n[:, None] < kv_len) & mask_d[None, :]
             kv_scale_mask = (offs_n[:, None] < kv_len) & mask_nb[None, :]
             k = _load_kv(
@@ -558,6 +684,7 @@ def _decode_grouped_stage1_kernel(
     QBLOCK: tl.constexpr,
     KV_SPLITS: tl.constexpr,
     Q8_NATIVE_QK: tl.constexpr,
+    SLOT_I64: tl.constexpr,
 ):
     batch_id = tl.program_id(0)
     head_block_id = tl.program_id(1)
@@ -619,6 +746,9 @@ def _decode_grouped_stage1_kernel(
             mask_n = rel_offs < split_end
             logical_offs = effective_start + rel_offs
             slots = tl.load(indices_ptr + kv_start + logical_offs, mask=mask_n, other=0)
+            if SLOT_I64:
+                # Pools above 2**31 elements overflow a 32-bit slot*stride offset.
+                slots = slots.to(tl.int64)
 
             if Q8_NATIVE_QK:
                 # Q8 K is already in the integer domain. Quantize each 32-wide
@@ -880,6 +1010,7 @@ def decode_paged_attention(
     ks, vs, s_kss, s_ksh, s_vss, s_vsh, k_format, v_format, qblock = _kv_scale_args(
         k_cache, v_cache, k_scale, v_scale, head_dim
     )
+    slot_i64 = _slot_offsets_need_int64(k_cache, v_cache, k_scale, v_scale)
     num_kv_heads = k_cache.shape[1]
     assert batch == indptr.numel() - 1
     assert v_cache.shape[1] == num_kv_heads
@@ -924,6 +1055,7 @@ def decode_paged_attention(
         num_q_heads=num_q_heads,
         num_kv_heads=num_kv_heads,
         compute_capability=capability,
+        sm_count=_sm_count(q.device.index if q.device.index is not None else 0),
     )
     # Direct kernel callers and older capture buffers may provide less scratch;
     # retain correctness and use every split they made available. The backend
@@ -991,6 +1123,7 @@ def decode_paged_attention(
         K_FORMAT=k_format,
         V_FORMAT=v_format,
         QBLOCK=qblock,
+        SLOT_I64=slot_i64,
         KV_SPLITS=launch_splits,
         Q8_NATIVE_QK=q8_native_qk,
         num_warps=num_warps,
@@ -1062,6 +1195,7 @@ def _extend_attention_kernel(
     K_FORMAT: tl.constexpr,
     V_FORMAT: tl.constexpr,
     QBLOCK: tl.constexpr,
+    SLOT_I64: tl.constexpr,
 ):
     seq_id = tl.program_id(0)
     q_head = tl.program_id(1)
@@ -1117,6 +1251,9 @@ def _extend_attention_kernel(
         skip_tile = tl.max(tl.max(final_mask.to(tl.int32), axis=1), axis=0) == 0
         if not skip_tile:
             slots = tl.load(kv_indices_ptr + kv_start + kv_offsets, mask=mask_n, other=0)
+            if SLOT_I64:
+                # Pools above 2**31 elements overflow a 32-bit slot*stride offset.
+                slots = slots.to(tl.int64)
             k = _load_kv(
                 k_ptr,
                 ks_ptr,
@@ -1212,6 +1349,7 @@ def _extend_attention_split_kernel(
     K_FORMAT: tl.constexpr,
     V_FORMAT: tl.constexpr,
     QBLOCK: tl.constexpr,
+    SLOT_I64: tl.constexpr,
 ):
     seq_id = tl.program_id(0)
     q_head = tl.program_id(1)
@@ -1269,6 +1407,9 @@ def _extend_attention_split_kernel(
 
         if not skip_tile:
             slots = tl.load(kv_indices_ptr + kv_start + kv_offsets, mask=mask_n, other=0)
+            if SLOT_I64:
+                # Pools above 2**31 elements overflow a 32-bit slot*stride offset.
+                slots = slots.to(tl.int64)
             k = _load_kv(
                 k_cache_ptr,
                 ks_ptr,
@@ -1393,6 +1534,7 @@ def extend_paged_attention(
     ks, vs, s_kss, s_ksh, s_vss, s_vsh, k_format, v_format, qblock = _kv_scale_args(
         k_cache, v_cache, k_scale, v_scale, head_dim
     )
+    slot_i64 = _slot_offsets_need_int64(k_cache, v_cache, k_scale, v_scale)
     num_kv_heads = k_cache.shape[1]
     assert qo_indptr.numel() == kv_indptr.numel()
     assert prefix_lens.numel() == qo_indptr.numel() - 1
@@ -1484,6 +1626,7 @@ def extend_paged_attention(
             K_FORMAT=k_format,
             V_FORMAT=v_format,
             QBLOCK=qblock,
+            SLOT_I64=slot_i64,
             num_warps=num_warps,
             num_stages=num_stages,
         )
@@ -1525,6 +1668,7 @@ def extend_paged_attention(
         K_FORMAT=k_format,
         V_FORMAT=v_format,
         QBLOCK=qblock,
+        SLOT_I64=slot_i64,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -1560,6 +1704,7 @@ def paged_attention(
     ks, vs, s_kss, s_ksh, s_vss, s_vsh, k_format, v_format, qblock = _kv_scale_args(
         k_cache, v_cache, k_scale, v_scale, head_dim
     )
+    slot_i64 = _slot_offsets_need_int64(k_cache, v_cache, k_scale, v_scale)
     num_kv_heads = k_cache.shape[1]
     assert v_cache.shape[1] == num_kv_heads
     assert num_q_heads % num_kv_heads == 0
@@ -1607,6 +1752,7 @@ def paged_attention(
         K_FORMAT=k_format,
         V_FORMAT=v_format,
         QBLOCK=qblock,
+        SLOT_I64=slot_i64,
         num_warps=8 if head_dim >= 256 else 4,
         num_stages=2,
     )

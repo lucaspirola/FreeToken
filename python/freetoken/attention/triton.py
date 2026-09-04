@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, List
 
 import torch
 from freetoken.core import Batch, get_global_ctx
+from freetoken.utils.logger import init_logger
 
 from .base import AttentionSpec, BaseAttnBackend, BaseAttnMetadata
 from .utils import BaseCaptureData
@@ -94,7 +95,7 @@ class TritonAttentionBackend(BaseAttnBackend):
             (group.head_dim for group in kv_groups),
             default=int(getattr(config, "head_dim", 1)),
         )
-        from freetoken.kernel.triton.attention import decode_launch_config
+        from freetoken.kernel.triton.attention import _sm_count, decode_launch_config
 
         quant_k = getattr(self.kvcache, "quant_k", getattr(self.kvcache, "quant", None))
         quant_v = getattr(self.kvcache, "quant_v", getattr(self.kvcache, "quant", None))
@@ -111,13 +112,29 @@ class TritonAttentionBackend(BaseAttnBackend):
             if self.device.type == "cuda"
             else None
         )
-        self.max_kv_splits = decode_launch_config(
+        sm_count = (
+            _sm_count(self.device.index if self.device.index is not None else 0)
+            if self.device.type == "cuda"
+            else None
+        )
+        launch = decode_launch_config(
             quant_name=quant_name,
             head_dim=self.max_head_dim,
             num_q_heads=self.num_q_heads,
             num_kv_heads=int(getattr(config, "num_kv_heads", 1)),
             compute_capability=capability,
-        )[0]
+            sm_count=sm_count,
+        )
+        self.max_kv_splits = launch[0]
+        # The split count is baked into the CUDA-graph grid and the fp32 scratch at
+        # capture time, so it cannot be read back later: say it once at startup.
+        init_logger(__name__).info(
+            "Triton decode launch: kv_splits=%d block_n=%d warps=%d "
+            "(q_heads=%d kv_heads=%d head_dim=%d quant=%s sms=%s)",
+            launch[0], launch[1], launch[2], self.num_q_heads,
+            int(getattr(config, "num_kv_heads", 1)), self.max_head_dim,
+            quant_name, sm_count,
+        )
 
     def _ensure_decode_scratch(
         self,

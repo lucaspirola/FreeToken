@@ -17,7 +17,8 @@ restore) is implemented and unit-tested. Three things are NOT finished (below).
   sessions/parsers, soak harness, residency policy, prefetch, partial restore + prefill-time
   state capture), slot-reclaim crash fix (+ /health 503, bounded shutdown), MTP NO-GO.
 - Results: benchmarks/results/nemotron35_lightning_5080_{,mamba2_,cache_study_,switchyard_}2026-09-04.md
-- Numbers: 131K prefill ~3,000 tok/s, decode 63–73 tok/s single stream, 16-way aggregate
+- Numbers: 131K prefill ~3,000 tok/s, decode 63–73 tok/s single stream (**superseded
+  2026-09-05: 145.3 tok/s after the decode launch-config fix**), 16-way aggregate
   ~168 tok/s with LFU; 131K needle passes (chat endpoint); spill 2.7–3 GiB/s, RAM restore
   5–8 GiB/s, NVMe restore ~1.3 GiB/s.
 
@@ -33,9 +34,14 @@ restore) is implemented and unit-tested. Three things are NOT finished (below).
    `benchmarks/results/nemotron35_lightning_5080_262k_{rootcause,crossengine}_2026-09-04.md`.
    The bisect's "model/quant limit" verdict and its "gate mid-depth needles at depth <=0.1"
    acceptance bar are **retracted**; retest the 262K/524K rows in the cache study and the 1M
-   gate against the fix. Perf tickets from the bisect still open: `decode_launch_config` has no
-   Nemotron head-shape branch (kv_splits=8 fallback: 16 CTAs on 84 SMs at 262K); Triton KV
-   loaders widen slot ids to int64 on store but not load (safe here, a ceiling at head_dim 256).
+   gate against the fix. The two perf tickets from the bisect are **CLOSED 2026-09-05**:
+   `decode_launch_config` now sizes the decode grid to the GPU for untuned head shapes
+   (`_grid_filling_splits`: 64 splits / BLOCK_N 64 / 8 warps here instead of 8/32/4), and the
+   KV *load* path widens slot ids to int64 behind a compile-time `SLOT_I64` predicate. Result:
+   single-stream decode 82.8 -> 145.3 tok/s at 131K, 58.7 -> 132.4 at 262K, 35.4 -> 113.6 at
+   524K (paired arms of one A/B), and 95.8 at 1,040,016 against the ~20 recorded on
+   2026-09-04; prefill unchanged. Write-up:
+   `benchmarks/results/nemotron35_lightning_5080_decode_launch_2026-09-04.md`.
    Exonerated with evidence along the way: the FP8 W8A8 Mamba in/out projections (11 of 46
    saturate their calibrated `input_scale`, but by the same 1.8e-5 clipped fraction at the
    passing 131K and the failing 147K — see `FREETOKEN_DEBUG_FP8_ACT_STATS`) and the whole

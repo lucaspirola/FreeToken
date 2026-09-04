@@ -352,6 +352,131 @@ def test_decode_launch_config_selects_ornith_quantized_tuning_only():
     ) == (8, 32, 4)
 
 
+def test_decode_launch_config_keeps_tuned_branches_when_the_sm_count_is_known():
+    """The measured Ornith branches win on their own geometry; the grid rule must not eat them.
+
+    Pinned against the 2026-09-04 RTX 5080 sweep (benchmarks/bench_decode_launch.py):
+    at 16Q/2KV/D256 + q8_0 the tuned (64, 64, 4) was the fastest of 32 configurations at
+    both 131K and 262K, so passing ``sm_count`` may not change any tuned answer.
+    """
+    from freetoken.kernel.triton.attention import decode_launch_config
+
+    ornith = {"head_dim": 256, "num_q_heads": 16, "num_kv_heads": 2}
+    tuned = [
+        ("int4", (8, 9), (32, 32, 4)),
+        ("int4", (12, 0), (64, 64, 8)),
+        ("q8_0", (8, 9), (16, 64, 4)),
+        ("q8_0", (12, 0), (64, 64, 4)),
+        ("q8_q6", (12, 0), (64, 32, 8)),
+        ("q6_q5", (12, 0), (128, 32, 4)),
+    ]
+    for quant_name, capability, expected in tuned:
+        kwargs = {"quant_name": quant_name, "compute_capability": capability, **ornith}
+        assert decode_launch_config(**kwargs) == expected
+        assert decode_launch_config(sm_count=84, **kwargs) == expected
+
+
+def test_decode_launch_config_fills_the_gpu_for_untuned_head_shapes():
+    """Nemotron 3.5 Lightning (32Q/2KV/D128) is the shape that had no branch at all.
+
+    Stage 1's grid is ``batch * cdiv(num_q_heads, min(16, group)) * kv_splits``, i.e. two
+    head blocks for this geometry, so the old flat 8-split fallback put 16 CTAs on 84 SMs
+    and decode time grew linearly with context. 64 splits (128 CTAs) measured 8.3x/9.1x/
+    9.6x/9.7x faster per layer at 131K/262K/524K/1M on the RTX 5080.
+    """
+    from freetoken.kernel.triton.attention import (
+        _decode_head_blocks,
+        _grid_filling_splits,
+        decode_launch_config,
+    )
+
+    nemotron = {"quant_name": "q8_0", "head_dim": 128, "num_q_heads": 32, "num_kv_heads": 2}
+    assert _decode_head_blocks(32, 2) == 2
+    assert decode_launch_config(compute_capability=(12, 0), sm_count=84, **nemotron) == (64, 64, 8)
+    # No SM count (CPU device, direct kernel callers): the historical conservative answer.
+    assert decode_launch_config(compute_capability=(12, 0), **nemotron) == (8, 32, 4)
+
+    # head_dim > 128 keeps the narrow tile: the wide one doubles the register footprint
+    # and measured slower on the 16Q/2KV/D256 bf16 pool.
+    assert decode_launch_config(
+        quant_name=None, head_dim=256, num_q_heads=16, num_kv_heads=2, sm_count=84
+    ) == (64, 32, 4)
+
+    # More head blocks need fewer splits to fill the same GPU, and MHA-shaped grids
+    # (one head block per query head) never fall below the historical floor.
+    assert _decode_head_blocks(64, 8) == 8
+    assert _grid_filling_splits(num_q_heads=64, num_kv_heads=8, sm_count=84) == 16
+    assert _grid_filling_splits(num_q_heads=32, num_kv_heads=32, sm_count=84) == 8
+    assert _grid_filling_splits(num_q_heads=32, num_kv_heads=2, sm_count=2048) == 128
+
+
+def test_decode_launch_config_environment_override():
+    from freetoken.kernel.triton import attention as attn
+
+    attn._decode_launch_env_override.cache_clear()
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("FREETOKEN_DECODE_KV_SPLITS", "8")
+            attn._decode_launch_env_override.cache_clear()
+            assert attn.decode_launch_config(
+                quant_name="q8_0", head_dim=128, num_q_heads=32, num_kv_heads=2,
+                compute_capability=(12, 0), sm_count=84,
+            ) == (8, 64, 8)
+    finally:
+        attn._decode_launch_env_override.cache_clear()
+
+
+def test_slot_offsets_need_int64_only_for_pools_past_the_int32_ceiling():
+    """``slots * stride`` is 32-bit arithmetic in the kernels; widen only where it wraps."""
+    from freetoken.kernel.triton.attention import _slot_offsets_need_int64
+
+    # Nemotron's 2 KV heads x 128 dim: 1M slots is 268M elements, far inside int32.
+    small = torch.empty((1 << 20, 2, 128), device="meta", dtype=torch.int8)
+    assert not _slot_offsets_need_int64(small, small, None, None)
+    # 8 KV heads x 256 dim at 1M slots is 2**31 elements exactly -- the 1M profile.
+    big = torch.empty((1 << 20, 8, 256), device="meta", dtype=torch.int8)
+    assert big.numel() == 2**31
+    assert _slot_offsets_need_int64(small, big, None, None)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton attention needs CUDA")
+def test_decode_triton_attention_matches_reference_at_the_nemotron_head_shape():
+    """32Q/2KV/D128 over a context long enough that the auto split count really splits."""
+    from freetoken.kernel.triton.attention import decode_paged_attention
+
+    torch.manual_seed(3)
+    device = torch.device("cuda")
+    batch, num_q_heads, num_kv_heads, head_dim = 1, 32, 2, 128
+    ctx = 4096
+    q = torch.randn(batch, num_q_heads, head_dim, device=device, dtype=torch.bfloat16)
+    k_cache = torch.randn(ctx, num_kv_heads, head_dim, device=device, dtype=torch.bfloat16)
+    v_cache = torch.randn(ctx, num_kv_heads, head_dim, device=device, dtype=torch.bfloat16)
+    indptr = torch.tensor([0, ctx], dtype=torch.int32, device=device)
+    indices = torch.arange(ctx, dtype=torch.int32, device=device)
+    q_positions = torch.tensor([ctx - 1], dtype=torch.int64, device=device)
+    q_to_req = torch.zeros(batch, dtype=torch.int32, device=device)
+    sm_scale = head_dim**-0.5
+
+    def run(splits: int):
+        logits = torch.empty(
+            batch, num_q_heads, splits, head_dim, dtype=torch.float32, device=device
+        )
+        lse = torch.empty(batch, num_q_heads, splits, dtype=torch.float32, device=device)
+        counts = torch.full((batch,), splits, dtype=torch.int32, device=device)
+        return decode_paged_attention(
+            q, k_cache, v_cache, indptr, indices, q_positions, logits, lse, counts,
+            splits, sm_scale,
+        )
+
+    expected = _reference_paged_attention(
+        q, k_cache, v_cache, indptr, indices, q_to_req, q_positions, sm_scale, None
+    )
+    # 64 is what the grid rule asks for on an 84-SM part; 8 is the old fallback. Split-K
+    # reorders the log-sum-exp reduction, so these agree at bf16 tolerance, not bitwise.
+    torch.testing.assert_close(run(64).float(), expected.float(), atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(run(64).float(), run(8).float(), atol=2e-2, rtol=2e-2)
+
+
 def test_decode_runtime_splits_uses_measured_ada_batch_two_policy():
     from freetoken.kernel.triton.attention import decode_runtime_splits
 

@@ -258,20 +258,26 @@ Command: `ft serve --model ~/ai/models/Ornith-1.5-35B-Q4_K_M.gguf
   FAIL, 163,840 PASS, 180,224 PASS, 196,608 FAIL), so nothing keyed on 2^18 can explain it.
   Actions: gate mid-depth recall at 131K only; at >=196,608 gate a depth<=0.1 needle plus
   capacity/coherence. `bench_long_context.py` gained `--needle-depth` (+ tests).
-- [ ] Follow-up from that bisect (perf, not correctness): `decode_launch_config` has no
-  context-length key and every tuned branch needs the Ornith head shape, so Nemotron always takes
-  the `(kv_splits=8, block_n=32, warps=4)` fallback -- 16 CTAs on 84 SMs at 262K KV. Likely the
-  72.6 -> 51.8 -> 32.0 tok/s decode curve. `num_kv_splits_ptr` is passed to both decode kernels
-  and dereferenced in neither.
-- [ ] Follow-up from that bisect (1M blocker): Triton KV loaders widen slot ids to int64 on store
-  (`kv_quant.py:52,161`) but not on load (`attention.py:621,1119,1271`). Safe at Nemotron's
-  `stride_ks=256` (~8.4M slots) but ~1.05M at head_dim 256 / 8 kv heads.
+- [x] Follow-up from that bisect (perf, not correctness): `decode_launch_config` had no
+  context-length key and every tuned branch needed the Ornith head shape, so Nemotron always took
+  the `(kv_splits=8, block_n=32, warps=4)` fallback -- 16 CTAs on 84 SMs at 262K KV. **DONE
+  2026-09-05**: `_grid_filling_splits` sizes the split count to the SM count for untuned shapes
+  ((64, 64, 8) here), tuned branches pinned unchanged, `FREETOKEN_DECODE_KV_SPLITS/_BLOCK_N/
+  _NUM_WARPS` for A/B. Decode 82.8 -> 145.3 (131K) / 58.7 -> 132.4 (262K) / 35.4 -> 113.6 (524K)
+  tok/s, prefill unchanged;
+  `benchmarks/results/nemotron35_lightning_5080_decode_launch_2026-09-04.md`. Still open from the
+  same note: `num_kv_splits_ptr` is passed to both decode kernels and dereferenced in neither
+  (dead argument; the split count is a constexpr) -- delete it or use it.
+- [x] Follow-up from that bisect (1M blocker): Triton KV loaders widen slot ids to int64 on store
+  (`kv_quant.py:47,168`) but not on load. **DONE 2026-09-05**: compile-time `SLOT_I64` constexpr
+  in all four gather kernels, set from the pools' `numel()` by `_slot_offsets_need_int64`, so the
+  64-bit address math costs nothing on geometries inside the int32 ceiling.
 
 ## Queue (2026-09-04 evening, agreed with user)
 - [ ] Scheduler admission fix (R1 whole-prompt gate, R2 break→continue) + final stage soak
 - [ ] Combined GPU session: soak + one 1M prefill with 5 needles (depths .05/.25/.5/.75/.95),
       a control question, and one question combining two needles
-- [ ] decode_launch_config Nemotron head-shape branch (bisect ticket)
+- [x] decode_launch_config Nemotron head-shape branch (bisect ticket) -- done 2026-09-05
 - [ ] Q4: push the 101 unpushed commits to a branch; CI for CPU-only checks (scheduler replay,
       scheduler tests, parity probe CPU half)
   - [x] CI half: `.github/workflows/cpu-checks.yml` (push + PR, any branch, hosted runner,
