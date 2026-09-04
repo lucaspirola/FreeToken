@@ -1361,12 +1361,7 @@ class Scheduler(SchedulerIOMixin):
             return False
         # The store is the owner: a checkpoint outlives its lease (idle expiry, disconnect,
         # or a server restart), so look it up by id rather than through the lease object.
-        # The lease's own reference can be STALE: SessionSpillStore.discard() (capacity
-        # eviction) clears the record's chunks and marks it invalid while the lease keeps
-        # pointing at the object, so an unchecked reference both reports an eviction as a
-        # prefix divergence and shadows a newer valid record for the same session id.
-        spilled = session.spill if session.spill is not None and session.spill.valid else None
-        record = spilled or store.get(session_id)
+        record = session.spill or store.get(session_id)
         if record is None:
             return False
         # A look-ahead promotion of this very record is worth waiting out: it is reading

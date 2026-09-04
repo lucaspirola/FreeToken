@@ -208,7 +208,6 @@ class _SpillStore:
             num_pages=len(page_indices),
             tier="ram",
             byte_size=1 << 20,
-            valid=True,  # SessionSpillRecord.valid; discard() below clears it as the real store does
             token_ids=token_ids,
             state_boundaries=boundaries,
             restorable_length=lambda matched, _b=boundaries: max(
@@ -231,7 +230,6 @@ class _SpillStore:
     def discard(self, record) -> None:
         if record is None:
             return
-        record.valid = False
         self.discarded.append(record)
         self.records.pop(getattr(record, "session_id", None), None)
 
