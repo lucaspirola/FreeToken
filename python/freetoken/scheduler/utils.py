@@ -25,6 +25,9 @@ class PendingReq:
     hidden_states: HiddenStateSpec | None = None
     # Match against the empty prefix (see Req.no_prefix_cache).
     no_prefix_cache: bool = False
+    # This prompt exceeds the KV pool's maximum size, so it can never be admitted, and the
+    # admission loop skips it on every pass. Latches the one warning it is worth.
+    oversize_warned: bool = False
 
     @property
     def input_len(self) -> int:

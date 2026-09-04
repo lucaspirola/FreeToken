@@ -130,6 +130,18 @@ class CacheManager:
         future = (self.num_pages - self.committed_pages) * self.page_size
         return evictable + len(self.free_slots) * self.page_size + future
 
+    @property
+    def max_size(self) -> int:
+        """Every token slot the pool can EVER offer, committed or not.
+
+        ``available_size`` is what is free right now; this is the ceiling a request has to
+        fit under to be finishable at all. Admission needs both: the second decides what a
+        pass may write, the first decides whether a chunked prompt can ever reach its last
+        chunk (a prompt admitted above this ceiling would pin its forwarded pages forever
+        and never complete).
+        """
+        return self.num_pages * self.page_size
+
     def committed_pages_required(self, reqs: List[Req]) -> int:
         """Physical page ceiling needed to allocate ``reqs``' next forward.
 
