@@ -100,6 +100,9 @@ class Workload:
     activation: str = "silu"
     swiglu_alpha: float = 1.702
     swiglu_limit: float | None = None
+    # False = ungated experts (up+down only, no gate half): the gate_up-side banks are
+    # [I, H] instead of SwiGLU's [2I, H]. Nemotron-3.5's ReLU^2 experts are the case.
+    gated: bool = True
 
 
 # Preset workloads. Dims from the model configs / benchmarks/bench_offload_cache_copy.py.
@@ -115,6 +118,9 @@ WORKLOADS: dict[str, Workload] = {
     "dsv4": Workload("dsv4", 4096, 2048, 256, 6, ("ds_fp4",), swiglu_limit=7.0),
     "glm4.7-nvfp4": Workload("glm4.7-nvfp4", 5120, 1536, 160, 8, ("nvfp4",)),
     "minimax-m2.5": Workload("minimax-m2.5", 3072, 1536, 256, 8, ("nvfp4",)),
+    # Ungated (ReLU^2) routed experts: the gate_up banks are [I, H], not [2I, H].
+    "nemotron3.5-lightning": Workload("nemotron3.5-lightning", 2688, 1856, 128, 6, ("nvfp4",),
+                                      activation="relu2", gated=False),
 }
 
 # Per-dtype canonical geometries for the TUNING bench (`--dtype`). The hybrid-vs-offload choice is
@@ -270,38 +276,55 @@ def measure_pcie_bw(device: torch.device, nbytes: int = 256 << 20, iters: int = 
 # ============================== bank geometry ==============================
 
 
-def _offload_bank_specs(fmt: str, H: int, I: int) -> dict[str, tuple[int, torch.dtype]]:
+def _ungated_rows(fmt: str, inter: int, gated: bool) -> int:
+    """gate_up-side rows per expert: ``2 * I`` gated (gate|up), ``I`` ungated (up only).
+
+    Only bf16 and nvfp4 have a real ungated layout in the runtime (see
+    ``expert_banks.bank_bytes_estimate`` / ``cpu_executor._resolve_banks``'s ReLU^2 path);
+    refuse the others rather than invent a bank size nothing produces.
+    """
+    if gated:
+        return 2 * inter
+    if fmt not in ("bf16", "nvfp4"):
+        raise NotImplementedError(f"no ungated {fmt} expert layout")
+    return inter
+
+
+def _offload_bank_specs(fmt: str, H: int, I: int, gated: bool = True
+                        ) -> dict[str, tuple[int, torch.dtype]]:
     """Per-bank (elems_per_expert, dtype) for the flat offload host banks (the gather)."""
     u8, bf16, f16, f8 = torch.uint8, torch.bfloat16, torch.float16, torch.float8_e4m3fn
+    gu = _ungated_rows(fmt, I, gated)
     if fmt == "bf16":
-        return {"gate_up": (2 * I * H, bf16), "down": (H * I, bf16)}
+        return {"gate_up": (gu * H, bf16), "down": (H * I, bf16)}
     if fmt == "fp8_block":
         return {
-            "gate_up": (2 * I * H, f8), "gate_up_scale": ((2 * I // 128) * (H // 128), bf16),
+            "gate_up": (gu * H, f8), "gate_up_scale": ((gu // 128) * (H // 128), bf16),
             "down": (H * I, f8), "down_scale": ((H // 128) * (I // 128), bf16),
         }
     if fmt == "nvfp4":
         return {
-            "gate_up_packed": (2 * I * (H // 2), u8), "gate_up_scale": (2 * I * (H // 16), u8),
-            "gate_up_global": (2 * I, f16), "down_packed": (H * (I // 2), u8),
+            "gate_up_packed": (gu * (H // 2), u8), "gate_up_scale": (gu * (H // 16), u8),
+            "gate_up_global": (gu, f16), "down_packed": (H * (I // 2), u8),
             "down_scale": (H * (I // 16), u8), "down_global": (H, f16),
         }
     if fmt == "mxfp4_triton":
         return {
-            "gate_up_blocks": (2 * I * (H // 2), u8), "gate_up_scales": (2 * I * (H // 32), u8),
-            "gate_up_bias": (2 * I, bf16), "down_blocks": (H * (I // 2), u8),
+            "gate_up_blocks": (gu * (H // 2), u8), "gate_up_scales": (gu * (H // 32), u8),
+            "gate_up_bias": (gu, bf16), "down_blocks": (H * (I // 2), u8),
             "down_scales": (H * (I // 32), u8), "down_bias": (H, bf16),
         }
     if fmt == "ds_fp4":
         return {
-            "gate_up_packed": (2 * I * (H // 2), u8), "gate_up_scale": (2 * I * (H // 32), u8),
+            "gate_up_packed": (gu * (H // 2), u8), "gate_up_scale": (gu * (H // 32), u8),
             "down_packed": (H * (I // 2), u8), "down_scale": (H * (I // 32), u8),
         }
     raise NotImplementedError(fmt)
 
 
-def _expert_bytes(fmt: str, H: int, I: int) -> int:
-    return sum(elems * dt.itemsize for elems, dt in _offload_bank_specs(fmt, H, I).values())
+def _expert_bytes(fmt: str, H: int, I: int, gated: bool = True) -> int:
+    return sum(elems * dt.itemsize
+               for elems, dt in _offload_bank_specs(fmt, H, I, gated).values())
 
 
 def _synth_experts(E: int, expert_bytes: int) -> int:
@@ -312,7 +335,7 @@ def _synth_experts(E: int, expert_bytes: int) -> int:
     return min(E, max(1, _SYNTH_BANK_BUDGET // max(1, expert_bytes)))
 
 
-def _cpu_moe_bank_sources(fmt: str, H: int, I: int, E: int) -> dict:
+def _cpu_moe_bank_sources(fmt: str, H: int, I: int, E: int, gated: bool = True) -> dict:
     """3D pinned banks in the exact layout ``CpuMoeExecutor`` expects for ``fmt``.
 
     Scale banks that decode through an e8m0 exponent (mxfp4/ds_fp4) are set to a unit
@@ -323,16 +346,18 @@ def _cpu_moe_bank_sources(fmt: str, H: int, I: int, E: int) -> dict:
     def pin(*shape, dtype):
         return alloc_pinned_tensor(*shape, dtype=dtype)
 
+    gu = _ungated_rows(fmt, I, gated)
+
     if fmt == "bf16":
-        gate_up, down = pin(E, 2 * I, H, dtype=torch.bfloat16), pin(E, H, I, dtype=torch.bfloat16)
+        gate_up, down = pin(E, gu, H, dtype=torch.bfloat16), pin(E, H, I, dtype=torch.bfloat16)
         gate_up.fill_(0.02)  # uninitialized bf16 can be denormal -> x86 FP slowdown
         down.fill_(0.02)
         return {"gate_up": gate_up, "down": down}
     if fmt == "nvfp4":
         b = {
-            "gate_up_packed": pin(E, 2 * I, H // 2, dtype=torch.uint8),
-            "gate_up_scale": pin(E, 2 * I, H // 16, dtype=torch.uint8),
-            "gate_up_global": pin(E, 2 * I, dtype=torch.float16),
+            "gate_up_packed": pin(E, gu, H // 2, dtype=torch.uint8),
+            "gate_up_scale": pin(E, gu, H // 16, dtype=torch.uint8),
+            "gate_up_global": pin(E, gu, dtype=torch.float16),
             "down_packed": pin(E, H, I // 2, dtype=torch.uint8),
             "down_scale": pin(E, H, I // 16, dtype=torch.uint8),
             "down_global": pin(E, H, dtype=torch.float16),
@@ -342,9 +367,9 @@ def _cpu_moe_bank_sources(fmt: str, H: int, I: int, E: int) -> dict:
         return b
     if fmt == "mxfp4_triton":  # transposed split-K layout
         b = {
-            "gate_up_blocks": pin(E, H // 2, 2 * I, dtype=torch.uint8),
-            "gate_up_scales": pin(E, H // 32, 2 * I, dtype=torch.uint8),
-            "gate_up_bias": pin(E, 2 * I, dtype=torch.bfloat16),
+            "gate_up_blocks": pin(E, H // 2, gu, dtype=torch.uint8),
+            "gate_up_scales": pin(E, H // 32, gu, dtype=torch.uint8),
+            "gate_up_bias": pin(E, gu, dtype=torch.bfloat16),
             "down_blocks": pin(E, I // 2, H, dtype=torch.uint8),
             "down_scales": pin(E, I // 32, H, dtype=torch.uint8),
             "down_bias": pin(E, H, dtype=torch.bfloat16),
@@ -356,8 +381,8 @@ def _cpu_moe_bank_sources(fmt: str, H: int, I: int, E: int) -> dict:
         return b
     if fmt == "ds_fp4":
         b = {
-            "gate_up_packed": pin(E, 2 * I, H // 2, dtype=torch.uint8),
-            "gate_up_scale": pin(E, 2 * I, H // 32, dtype=torch.uint8),
+            "gate_up_packed": pin(E, gu, H // 2, dtype=torch.uint8),
+            "gate_up_scale": pin(E, gu, H // 32, dtype=torch.uint8),
             "down_packed": pin(E, H, I // 2, dtype=torch.uint8),
             "down_scale": pin(E, H, I // 32, dtype=torch.uint8),
         }
@@ -378,8 +403,8 @@ def _build_gather_rig(fmt: str, wl: Workload, device: torch.device):
     from freetoken.moe.offload_cache import OffloadMoeCache
 
     H, I = wl.hidden, wl.inter
-    E = _synth_experts(wl.experts, _expert_bytes(fmt, H, I))
-    specs = _offload_bank_specs(fmt, H, I)
+    E = _synth_experts(wl.experts, _expert_bytes(fmt, H, I, wl.gated))
+    specs = _offload_bank_specs(fmt, H, I, wl.gated)
     cache = OffloadMoeCache(num_layers=1, num_experts=E, cache_size=E, device=device, quant_format=fmt)
     total_bytes = 0
     for name, (elems, dtype) in specs.items():
@@ -409,7 +434,7 @@ def measure_pcie_gather_bw(fmt: str, wl: Workload, device: torch.device, iters: 
     (all synth experts, scattered sources). Reusing the cache gives the kernel-correct
     int64 ``num_indices``. Timed with CUDA events.
     """
-    eb = _expert_bytes(fmt, wl.hidden, wl.inter)
+    eb = _expert_bytes(fmt, wl.hidden, wl.inter, wl.gated)
     cache, total_bytes = _build_gather_rig(fmt, wl, device)
     E = cache.num_experts
 
@@ -502,9 +527,9 @@ def measure_cpu_moe_bw(fmt: str, wl: Workload, iters: int = 64, num_threads: int
     above the CPU's support clamp down and dedupe by the resulting isa name.
     """
     H, I = wl.hidden, wl.inter
-    eb = _expert_bytes(fmt, H, I)
+    eb = _expert_bytes(fmt, H, I, wl.gated)
     E = _synth_experts(wl.experts, eb)
-    banks = _cpu_moe_bank_sources(fmt, H, I, E)
+    banks = _cpu_moe_bank_sources(fmt, H, I, E, wl.gated)
 
     def run(isa: str | None) -> tuple[str, float]:
         with _forced_isa(isa):
@@ -541,9 +566,10 @@ def measure_overlap_bw(fmt: str, wl: Workload, device: torch.device,
     elapsed; the two windows differ by at most one CPU step + one gather.
     """
     H, I = wl.hidden, wl.inter
-    eb = _expert_bytes(fmt, H, I)
+    eb = _expert_bytes(fmt, H, I, wl.gated)
     E = _synth_experts(wl.experts, eb)
-    ex = _build_cpu_moe_executor(fmt, wl, _cpu_moe_bank_sources(fmt, H, I, E), num_threads, E)
+    ex = _build_cpu_moe_executor(
+        fmt, wl, _cpu_moe_bank_sources(fmt, H, I, E, wl.gated), num_threads, E)
     set_ids, run_step = _cpu_moe_step_fns(ex, wl, E)
     cache, gather_bytes = _build_gather_rig(fmt, wl, device)
 
@@ -615,7 +641,8 @@ def _bench_format(fmt: str, wl: Workload, device: torch.device, threshold: float
         entry["pcie_gather_gbs"] = round(g["bw_gbs"], 2)
         entry["expert_bytes"] = g["expert_bytes"]
         entry["synth_experts"] = g["synth_experts"]
-    except (ImportError, RuntimeError) as e:
+    except (ImportError, RuntimeError, NotImplementedError) as e:
+        # NotImplementedError: no synthetic bank layout for this (format, gated) pair.
         logger.warning(f"benchbw: PCIe gather bench failed for {wl.name}/{fmt}: {e}")
         _note(entry, f"pcie gather unavailable ({e})")
     finally:
@@ -640,7 +667,9 @@ def _bench_format(fmt: str, wl: Workload, device: torch.device, threshold: float
                                  "(3 real kernels: scalar/avx2/avx512, no bf16/VNNI variant)")
             entry["expert_bytes"] = entry["expert_bytes"] or c["expert_bytes"]
             entry["synth_experts"] = entry["synth_experts"] or c["synth_experts"]
-        except (ImportError, RuntimeError) as e:
+        except (ImportError, RuntimeError, NotImplementedError) as e:
+            # NotImplementedError: the executor refuses this format/activation pair
+            # (e.g. ReLU^2 experts on non-nvfp4 banks) -- offload still gets reported.
             logger.warning(f"benchbw: CPU MoE bench failed for {wl.name}/{fmt}: {e}")
             _note(entry, f"cpu moe unavailable ({e})")
 

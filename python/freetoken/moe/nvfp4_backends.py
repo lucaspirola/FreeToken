@@ -303,6 +303,17 @@ def select_nvfp4_backend(
     if cc >= (12, 0) and activation in _B12X_ACTIVATIONS:
         reason = _b12x_unusable_reason(cc)
         if reason is None:
+            if activation == "relu2":
+                # Ungated ReLU² experts (Nemotron-H) are served from offloaded banks
+                # that arrive by DMA and are read L2-warm; measured end-to-end on the
+                # RTX 5080 the Triton kernels beat b12x by 4-18% at decode and 19-24%
+                # at 32K prefill (benchmarks/results/nemotron35_lightning_5080_cache_
+                # study_2026-09-04.md). b12x stays available via --nvfp4-backend flashinfer.
+                logger.info(
+                    "NVFP4 auto backend: ungated relu2 experts use the Triton kernels "
+                    "(faster than b12x on the offload path; --nvfp4-backend flashinfer forces b12x)"
+                )
+                return "triton"
             thr = _b12x_min_intermediate()
             if intermediate_size is None or intermediate_size >= thr:
                 return "b12x"

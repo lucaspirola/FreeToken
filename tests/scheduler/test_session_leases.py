@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from types import SimpleNamespace
 
@@ -468,3 +469,35 @@ def test_resident_session_outlives_its_ttl_and_is_checkpointed_only_on_demand():
     scheduler.cache_manager.restore_hybrid_session_prefix = lambda _r, _s: "restored"
     assert scheduler._restore_cold_session("A", torch.tensor([1, 2, 3, 4, 5])) is True
     assert scheduler._sessions["A"].handle == "restored"
+
+
+def test_spill_and_restore_logs_report_sub_second_durations(caplog):
+    """The 1M-session gate reads spill/restore cost off these lines; the log formatter
+    only stamps whole seconds, so the duration has to be in the message itself."""
+    import logging
+
+    import torch
+
+    scheduler = _demand_scheduler()
+    tokens = torch.tensor([1, 2, 3, 4], dtype=torch.int32)
+    handle = SimpleNamespace(
+        node=SimpleNamespace(mamba_value=3), get_matched_indices=lambda: [0, 1, 2, 3]
+    )
+    lease = SessionLease(handle, 300.0, reclaimable=True)
+    lease.token_ids = tokens
+    scheduler._sessions["A"] = lease
+    scheduler.cache_manager.hybrid_session_restore_geometry = lambda _t: (0, 99)
+    scheduler.cache_manager.restore_hybrid_session_prefix = lambda _r, _s: "restored"
+
+    with caplog.at_level(logging.INFO, logger="freetoken.scheduler.scheduler"):
+        scheduler._spill_soft_session("A", lease)
+        assert scheduler._restore_cold_session("A", torch.tensor([1, 2, 3, 4, 5])) is True
+
+    spilled = [m for m in caplog.messages if m.startswith("Spilled soft session")]
+    restored = [m for m in caplog.messages if m.startswith("Restored cold session")]
+    assert len(spilled) == 1 and len(restored) == 1
+    for message in (spilled[0], restored[0]):
+        seconds = re.search(r"in (\d+\.\d{3}) s \((\d+\.\d\d) GiB/s\)", message)
+        assert seconds is not None, message
+        assert float(seconds.group(1)) >= 0.0
+    assert "1.00 GiB" not in spilled[0]  # the double's 1 MiB record, not a rounded stub

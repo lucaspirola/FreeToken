@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 import time
@@ -269,6 +270,12 @@ class Scheduler(SchedulerIOMixin):
             if calls > self._last_moe_stats_calls:
                 logger.info_rank0("MoE decode miss stats: %s", stats)
                 per_layer = moe.decode_miss_stats_per_layer()["per_layer"]
+                # One compact machine-readable line for every layer, pageable or not, so
+                # cache-sizing runs can scrape the whole profile: json.dumps, not repr.
+                logger.info_rank0(
+                    "MoE decode miss stats per layer: %s",
+                    json.dumps(per_layer, default=float),
+                )
                 pageable = [row for row in per_layer if row["pageable_stage_calls"]]
                 if pageable:
                     hottest = sorted(
@@ -1152,7 +1159,9 @@ class Scheduler(SchedulerIOMixin):
         if linear_slot is None or len(page_indices) != len(session.token_ids):
             return
         self._discard_session_spill(session)
+        started = time.perf_counter()
         record = store.spill(session_id, session.token_ids, page_indices, linear_slot)
+        elapsed = time.perf_counter() - started
         if record is None:
             logger.warning(
                 "Cold checkpoint for session %s did not fit RAM/disk budgets; "
@@ -1162,11 +1171,13 @@ class Scheduler(SchedulerIOMixin):
             return
         session.spill = record
         logger.info_rank0(
-            "Spilled soft session %s: %d tokens, %s, %.2f GiB",
+            "Spilled soft session %s: %d tokens, %s, %.2f GiB in %.3f s (%.2f GiB/s)",
             session_id,
             record.num_pages,
             record.tier,
             record.byte_size / (1 << 30),
+            elapsed,
+            record.byte_size / (1 << 30) / max(elapsed, 1e-9),
         )
 
     @torch.inference_mode()
@@ -1208,11 +1219,19 @@ class Scheduler(SchedulerIOMixin):
                         new_pages,
                         session_id,
                     )
+            tier, tokens, nbytes = record.tier, record.num_pages, record.byte_size
+            started = time.perf_counter()
             session.handle = cm.restore_hybrid_session_prefix(record, store)
-            tier, tokens = record.tier, record.num_pages
+            elapsed = time.perf_counter() - started
             self._discard_session_spill(session)
             logger.info_rank0(
-                "Restored cold session %s: %d tokens from %s", session_id, tokens, tier
+                "Restored cold session %s: %d tokens from %s, %.2f GiB in %.3f s (%.2f GiB/s)",
+                session_id,
+                tokens,
+                tier,
+                nbytes / (1 << 30),
+                elapsed,
+                nbytes / (1 << 30) / max(elapsed, 1e-9),
             )
             return True
         except Exception as exc:  # reuse is an optimization, never an admission gate

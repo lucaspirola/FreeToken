@@ -61,17 +61,40 @@ only, I=1856) plus one shared expert.
   the decode CUDA graphs). Raising `FREETOKEN_PIN_BUDGET_GB` to ≥ 17 (backed by a
   `.wslconfig` `memory=` large enough to hold it) pins every layer and keeps the
   graphs; the preflight script prints which side of the line this host is on.
-- **Expert GEMM**: `--nvfp4-backend auto` picks flashinfer's sm_120 W4A16 fused MoE
-  (`b12x`) for the ungated ReLU² experts — it fuses `relu(x)²` in the epilogue, so no
-  dequant round trip. Measured on the 5080 at H=2688 / I=1856 / E=128 / top-6
-  (`benchmarks/bench_nvfp4_moe_kernels.py`, per MoE layer, cold L2): prefill 0.85 ms vs
-  4.5 ms at M=256 and 12.6 ms vs 74.6 ms at M=8192 (≈5–6× Triton, 88% of the 960 GB/s
-  roofline), batched decode 1.6× Triton at M=8/16. Triton still wins single-stream
-  decode (M≤4) by ~1.3×, so a decode-only deployment can force `--nvfp4-backend triton`;
-  prefill dominates everywhere else. `--nvfp4-backend marlin` is rejected at config time
-  (its fused kernel assumes a gated `[2I, H]` bank and a silu epilogue), and
+- **Expert GEMM**: keep the **`triton`** default — do not pass `--nvfp4-backend auto`
+  or `flashinfer` for this checkpoint. In isolation flashinfer's sm_120 W4A16 fused MoE
+  (`b12x`) looks like the winner (`benchmarks/bench_nvfp4_moe_kernels.py`, per MoE layer,
+  cold L2: 2.3× Triton on an M=8192 prefill chunk, 1.6× on batched decode at M=8/16), and
+  `auto` therefore resolves to it here (sm_120, ungated relu2, `moe_intermediate_size`
+  1856 ≥ the 1024 threshold). **End to end on the offload path it loses**
+  (task 2B4, `benchmarks/results/nemotron35_lightning_5080_cache_study_2026-09-04.md`):
+  32K prefill 5 623–5 777 tok/s on Triton vs 4 528–4 843 on b12x (Triton +19–24 %, two
+  rounds), decode +4 % at bs=1, +18 % at bs=8, tied at bs=2/16. On the offload path the
+  experts arrive by DMA and are read L2-warm, and 25–88 % of every decode step is expert
+  PCIe traffic, so the tensor-core advantage applies only to the shrinking remainder while
+  b12x's launch overhead applies to every call. b12x also **cannot start with
+  `--kv-grow-step-tokens`**: growable KV allocates the slot cache as VMM tensors and the
+  repacked b12x banks include an int32 bank that `VMMTensor` does not support. Revisit if
+  the expert set ever becomes GPU-resident. `--nvfp4-backend marlin` is rejected at config
+  time (its fused kernel assumes a gated `[2I, H]` bank and a silu epilogue), and
   `--moe-backend cpu`/`hybrid` pins the layout back to `triton` because CPU decode reads
   the native ModelOpt rows.
+- **MoE backend**: `offload`. `cpu`/`hybrid` *are* available for this checkpoint — the
+  CPU MoE executor handles ungated ReLU² NVFP4 banks on plain AVX2+VNNI (no AVX-512
+  needed), and `ft bench bw --model nemotron3.5-lightning` measures the kernel at
+  66.9 GB/s against a 52.9 GB/s PCIe gather — but the 1.26× ratio is below the 2× hybrid
+  threshold, and measured end to end `hybrid` decodes **3.6× slower** than `offload`
+  (32.9 vs 118.1 tok/s at bs=1).
+- **Expert-cache policy**: `--moe-cache-policy lfu` for the 16-way profile,
+  the `lru` default for single-stream. At bs=16 the decode working set is ~61 distinct
+  experts per layer (~1 414 across 23 layers) against the ~1 063 slots left after the
+  4.45 GiB recurrent-state pool, and LRU degenerates to a **99.6 % miss rate**; LFU pins
+  the hot experts, halves that to 51 %, and is worth **1.80×** aggregate throughput
+  (93.7 → 168.2 tok/s). Rule of thumb: LFU above a ~15 % miss rate, LRU below it — read
+  the rate off the scheduler's idle `MoE decode miss stats` line under
+  `--moe-collect-stats`. `FREETOKEN_MAMBA_SSM_DTYPE=bfloat16` is **not** an option for
+  shrinking the state pool: the Mamba-2 SSD kernels require an fp32 state pool and reject
+  it at config time.
 
 ### Launch profiles
 
@@ -86,12 +109,18 @@ ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
 P2 — serving profile (16 concurrent, elastic KV, prefix cache, quantized KV):
 
 ```
+FREETOKEN_PIN_BUDGET_GB=17 \
 ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   --max-running-requests 16 --elastic-initial-requests 4 --kv-grow-step-tokens 65536 \
   --num-tokens 262144 --max-seq-len-override 131072 --kv-cache-dtype q8_0 \
-  --attention-backend triton --moe-backend offload --moe-pageable-gpu --moe-cache-auto \
+  --attention-backend triton --moe-backend offload --moe-cache-auto \
+  --moe-cache-policy lfu \
   --memory-ratio 0.85 --max-prefill-length 8192 --host-ram-reserve-gb 3 --enable-cache-report
 ```
+
+`--moe-cache-policy lfu` is the 2B4 recommendation and is worth 1.80× aggregate decode at
+16 concurrent requests. With `FREETOKEN_PIN_BUDGET_GB=17` every expert layer is pinned and
+`--moe-pageable-gpu` is not needed (keeping the decode CUDA graphs).
 
 Quantized KV requires `--attention-backend triton`; bf16 KV with the FlashInfer
 backend is the fallback (KV is only +0.75 GiB at 262K). `--tool-call-parser auto`
@@ -109,8 +138,20 @@ cached-prefix reuse 3/6 runs; equal VRAM and reasoning score. See
 
 ### Prefill chunk size
 
-Default `--max-prefill-length 4096` until the SSD kernels are wired in, then
-re-measure.
+`--max-prefill-length 8192` with `--memory-ratio 0.85`. The SSD kernels are in; a 32 768-token
+synthetic needle prefills at 5 623–5 777 tok/s end to end and decodes at ~115 tok/s.
+
+### Measured throughput (2026-09-04, task 2B4)
+
+Decode through `/v1/chat/completions`, `--moe-cache-auto`, Triton expert GEMM:
+
+| running requests | expert slots | decode miss rate | per-stream tok/s | aggregate tok/s |
+|---:|---:|---:|---:|---:|
+| 1 | 1 832 | 12.0 % | 143.2 | 143.2 |
+| 2 | 1 797 | 16.6 % | 87.9 | 175.3 |
+| 8 | 1 483 | 35.3 % | 21.2 | 169.7 |
+| 16, `lru` | 1 063 | 99.6 % | 5.5 | 87.4 |
+| 16, **`lfu`** | 1 063 | 51.1 % | 10.5 | **168.2** |
 
 ### 1M single-session profile
 
@@ -149,9 +190,38 @@ Residency policy (task 3E, decided 2026-09-04):
   spill root, adopts valid records, and deletes stale/foreign ones; shutdown no longer
   rmtrees. Restore still requires an exact prefix + fingerprint match.
 
-The gate (after the Phase 2 kernels, before Phase 4) runs the 1M profile
-`--max-seq-len-override 1048576 --num-tokens 1048576 --kv-cache-dtype fp8_e4m3
---attention-backend triton --kv-grow-step-tokens 131072 --max-running-requests 1
---linear-state-slots <minimum accepted> --session-spill-ram-gb 12 --session-spill-dir
-<nvme>`; three sessions grown to ~1M each with disjoint needles, one spilled and
-restored, all coherent, recording prefill/decode tok/s and spill/restore times.
+Measured sizing (task 2B4, 2026-09-04 — see
+`benchmarks/results/nemotron35_lightning_5080_cache_study_2026-09-04.md`):
+
+```
+FREETOKEN_PIN_BUDGET_GB=17 \
+ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
+  --max-running-requests 1 --max-seq-len-override 1048576 --num-tokens 1048576 \
+  --kv-grow-step-tokens 131072 --kv-cache-dtype q8_0 --attention-backend triton \
+  --moe-backend offload --moe-cache-auto --linear-state-slots 5 \
+  --memory-ratio 0.85 --max-prefill-length 8192 --host-ram-reserve-gb 3 \
+  --session-spill-ram-gb 12 --session-spill-dir <nvme>
+```
+
+- **`--linear-state-slots 5` is the accepted floor** at `--max-running-requests 1`
+  (`4·mr + 1` for `hybrid_radix`); 3 and 4 are rejected at startup. The default is 9, so
+  pinning 5 returns ~188 MiB (≈ 35 expert slots) to the MoE cache.
+- **Expert slots vs KV growth**: each committed 131 072-token KV step costs ~0.40 GiB and
+  ~76 expert slots. Auto starts at 1 786 slots and steps 1 663 (262K) → 1 586 (393K) →
+  1 510 (524K) → 1 434 (655K); a full 1M session extrapolates to ~1 180 slots (rate 0.40).
+  **VRAM is not the blocker for one 1M session.**
+- **Throughput** on a growing synthetic-needle prompt: 131K prefill 3 007 tok/s / decode
+  72.6 tok/s; 262K 1 790 / 51.8; 524K 997 / 32.0. Prefill cost is quadratic in context
+  (526 s for a cold 524K prompt).
+- **Coherence caveat**: the needle passes at 131K but is missed at 262K and 524K on the raw
+  `/v1/completions` continuation. 262 144 is exactly the tokenizer's `model_max_length`.
+  Treat **~131K–256K as the coherent ceiling** and re-verify the long end through
+  `/v1/chat/completions` before advertising 1M (`bench_long_context.py` asks through the chat
+  endpoint as of `ec54e21`; the 2B4 runs predate that).
+- `--nvfp4-backend flashinfer` **cannot be combined with `--kv-grow-step-tokens`** (growable
+  KV allocates the slot cache as VMM tensors; the b12x banks include an int32 bank
+  `VMMTensor` does not support). The `triton` default is required here, and is the
+  recommendation anyway.
+
+Still outstanding for the gate: three sessions grown to ~1M each with disjoint needles, one
+spilled and restored, all coherent, recording spill/restore times.

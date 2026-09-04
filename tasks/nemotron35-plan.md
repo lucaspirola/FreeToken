@@ -233,7 +233,8 @@ record JIT build time. Failure → Triton fallback only.
   config table keyed by (N,K,top_k,sm), prefill JSON config
   `moe/configs/triton_3_6_0/nvfp4,E=128,N=1856,K=2688,device_name=NVIDIA_GeForce_RTX_5080.json`
   via `benchmarks/tune_nvfp4_moe.py --write`.
-- **2B4** Cache sizing study: `ft bench bw` with real geometry (ungated support in benchbw),
+- **2B4** [DONE 2026-09-04 - `benchmarks/results/nemotron35_lightning_5080_cache_study_2026-09-04.md`]
+  Cache sizing study: `ft bench bw` with real geometry (ungated support in benchbw),
   `bench_decode_moe.py` at bs 1 and 16 with per-layer miss stats, sweep cache rate/policy,
   bf16 SSM state option; PCIe ceiling estimate ~85 ms/step at bs=16 with 50% hit rate. Record
   recommended launch line in `docs/models.md`.
@@ -314,7 +315,23 @@ fallback loses prefix reuse for that call); JSON mode is probabilistic without c
 
 ---
 
-## Phase 4 — MTP speculative decoding (behind a flag; START ONLY IF the 2B4 study shows headroom)
+## Phase 4 — MTP speculative decoding — **NO-GO, decided 2026-09-04 by task 2B4**
+
+**Phase 4 is skipped and the `--speculative-mtp-tokens` flag is not built.** 2B4's telemetry
+(`benchmarks/results/nemotron35_lightning_5080_cache_study_2026-09-04.md` §4) measured a
+2-token decode step directly: two tokens touch 11.61 of 12 possible experts per MoE layer
+(routing is ~97% disjoint), expert misses rise 2.68x, and the step costs **1.63x** a normal
+one. With lambda ~= 1.63 and a draft head costing ~7% of a step, the projected bs=1 gain is
+**0.96x** (upper bound with perfectly-correlated routing: 1.34x) against the >= 1.25x bar.
+The mechanism is the risk the plan flagged: on an offload MoE, 25-88% of every decode step is
+expert PCIe traffic, so a verify step touching ~2x the experts pays ~2x the PCIe and cancels
+the token amplification. Revisit only if the expert set becomes GPU-resident.
+Cheaper wins taken instead: `--moe-cache-policy lfu` at bs=16 (1.80x aggregate) and the
+`triton` NVFP4 backend / cache-rate defaults (bs=1 decode 95 -> 143 tok/s).
+
+The original design is kept below for reference only.
+
+### (reference) original Phase 4 plan
 
 Go/no-go BEFORE any Phase 4 work: from 2B4's per-step expert-miss telemetry, estimate the verify
 step cost with up to 6(k+1) experts per MoE layer touched. If the projected decode gain at bs=1 is

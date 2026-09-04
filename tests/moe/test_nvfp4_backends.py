@@ -862,15 +862,16 @@ def test_triton_relu2_fused_epilogue_matches_separate_activation(monkeypatch, re
 
 def test_nvfp4_backend_selection_activation_matrix(monkeypatch):
     """The relu2 selection matrix, driven off a faked capability so it runs on any host:
-    b12x on sm_120 (ungated relu2 is a b12x-fused activation), Triton elsewhere, and a
-    forced marlin/relu2 rejected loudly (its epilogue is gated silu only)."""
+    auto resolves ungated relu2 to Triton on sm_120 (faster than b12x on the offload path,
+    cache study 2026-09-04) while a forced flashinfer still gets b12x; Triton elsewhere; and
+    a forced marlin/relu2 rejected loudly (its epilogue is gated silu only)."""
     from freetoken.moe import nvfp4_backends as nb
 
     cuda_dev = torch.device("cuda", 0)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *a, **k: (12, 0))
     monkeypatch.setattr(nb, "_b12x_unusable_reason", lambda cc: None)
-    # sm_120 + a wide enough MoE -> b12x fuses relu2 itself (Lightning's I == 1856).
-    assert nb.select_nvfp4_backend(cuda_dev, LIGHTNING_I, "auto", activation="relu2") == "b12x"
+    # sm_120: auto keeps ungated relu2 on Triton; flashinfer forces the b12x fusion.
+    assert nb.select_nvfp4_backend(cuda_dev, LIGHTNING_I, "auto", activation="relu2") == "triton"
     assert nb.select_nvfp4_backend(cuda_dev, LIGHTNING_I, "flashinfer", activation="relu2") == "b12x"
     # narrow MoE keeps the Triton M=1 GEMV, same as for silu
     assert nb.select_nvfp4_backend(cuda_dev, 512, "auto", activation="relu2") == "triton"
