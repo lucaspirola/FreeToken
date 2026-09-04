@@ -261,3 +261,19 @@ Command: `ft serve --model ~/ai/models/Ornith-1.5-35B-Q4_K_M.gguf
 - [ ] Follow-up from that bisect (1M blocker): Triton KV loaders widen slot ids to int64 on store
   (`kv_quant.py:52,161`) but not on load (`attention.py:621,1119,1271`). Safe at Nemotron's
   `stride_ks=256` (~8.4M slots) but ~1.05M at head_dim 256 / 8 kv heads.
+
+## Queue (2026-09-04 evening, agreed with user)
+- [ ] Scheduler admission fix (R1 whole-prompt gate, R2 break→continue) + final stage soak
+- [ ] Combined GPU session: soak + one 1M prefill with 5 needles (depths .05/.25/.5/.75/.95),
+      a control question, and one question combining two needles
+- [ ] decode_launch_config Nemotron head-shape branch (bisect ticket)
+- [ ] Q4: push the 101 unpushed commits to a branch; CI for CPU-only checks (scheduler replay,
+      scheduler tests, parity probe CPU half)
+- [ ] Q5: profile the prefill curve (3,000 tok/s @131K → 1,064 @524K): attention vs SSD scan vs
+      KV grow; fix or file
+- [ ] Q1: standing cross-engine oracle — same prompts through llama.cpp and FreeToken,
+      compare top-k logits / per-layer hidden states at several lengths; runnable on demand
+
+## Backlog
+- [ ] Prompt-lookup (n-gram) speculative decoding for agent-session decode
+- [ ] Replay real Switchyard traces as the benchmark instead of synthetic soaks/needles
