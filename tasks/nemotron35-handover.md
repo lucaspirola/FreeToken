@@ -64,12 +64,23 @@ restore) is implemented and unit-tested. Three things are NOT finished (below).
    Growth to 524K×3 and spill/restore-on-demand were verified; driver:
    scratchpad/1m/{drive.py,serve.sh,summarize.py}. Retest 262K/524K needles via chat only
    AFTER item 1 resolves.
-4. **Phase 3H hidden-state export** is merged (1f2de67; docs/switchyard.md §6). Only the GPU
-   parity check remains: start a P1 server with `--hidden-states-dir /tmp/ft-hidden-states`
-   (mkdir first) then `scripts/gpu_lock.sh uv run benchmarks/probe_hidden_states_parity.py
-   --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 --base-url
-   http://127.0.0.1:1919 --hidden-states-dir /tmp/ft-hidden-states --prompt-tokens 300`
-   (per-layer cosine > 0.99 vs HF output_hidden_states on CPU).
+4. **Phase 3H hidden-state export — CLOSED 2026-09-04, parity PASS.** All 52 exported
+   layers match transformers' own `NemotronHBlock` stack at cosine **>= 0.998840** on the
+   mean-pooled residual (gate 0.99); median 0.999760. Write-up:
+   `benchmarks/results/nemotron35_lightning_5080_hidden_states_parity_2026-09-04.md`.
+   Two things had to be fixed in `benchmarks/probe_hidden_states_parity.py` first (only
+   file changed, uncommitted): (a) its `AutoModelForCausalLM.from_pretrained` reference is
+   impossible on this release — modelopt MIXED_PRECISION, which transformers 5.15 has no
+   quantizer for, `backbone.*` vs `model.*` names, per-expert NVFP4 tensors vs a fused 3-D
+   parameter (400 missing / 18 486 unexpected keys), and 58.8 GiB dense bf16 against a
+   34 GiB host. It now builds the model on `meta` and streams one block at a time
+   (dequant on the sibling scales, ~3.5 GiB VRAM, ~10-22 s for the whole forward), with
+   the per-block forward hook recording `residual + mixer` directly. (b) `--capture-only`
+   / `--artifact <path>` split the run into two phases (server up, then server stopped),
+   since the served model and the reference cannot be resident together.
+   **The reference needs `--reference-dt-min 0.0` (the default).** transformers hard-codes
+   the same 1e-3 `dt` floor that item 1 identified as a bug; leaving it in fails 12
+   shallow layers (worst 0.9406 at layer 3) — an independent confirmation of item 1.
 5. Ticket: `--kv-grow-step-tokens` + `--nvfp4-backend flashinfer` crashes (VMM int32 bank).
 6. Ticket: `_maybe_shrink_growable_kv` evicts all unlocked prefixes before checking whether a
    shrink is possible (wipes the prefix cache at idle above the initial KV step).

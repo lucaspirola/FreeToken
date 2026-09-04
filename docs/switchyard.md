@@ -357,14 +357,27 @@ CPU: `tests/server/test_hidden_states_probe.py` (wire + validation + writer roun
 `tests/models/test_nemotron_h_hidden_states.py` (the hook captures the post-block
 residual, not `norm_f`).
 
-GPU, against a running server (P1 profile plus `--hidden-states-dir`):
+GPU, against a running server (P1 profile plus `--hidden-states-dir`). The served model
+and the bf16 reference do not fit in host RAM at the same time, so the run is two-phase —
+capture while the server is up, score once it is stopped:
 
 ```bash
-scripts/gpu_lock.sh uv run benchmarks/probe_hidden_states_parity.py \
+# phase A, server up
+uv run benchmarks/probe_hidden_states_parity.py \
   --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   --base-url http://127.0.0.1:1919 --hidden-states-dir /tmp/ft-hidden-states \
-  --prompt-tokens 300
+  --prompt-tokens 300 --capture-only
+# phase B, server stopped
+scripts/gpu_lock.sh uv run benchmarks/probe_hidden_states_parity.py \
+  --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
+  --hidden-states-dir /tmp/ft-hidden-states --artifact /tmp/ft-hidden-states/<uuid>.safetensors
 ```
+
+The reference is transformers' own `NemotronHBlock` stack with the modelopt checkpoint
+streamed one block at a time (`from_pretrained` cannot load this release, and dense bf16
+NemotronH is 58.8 GiB). Result 2026-09-04 on the RTX 5080: all 52 layers ≥ 0.998840,
+median 0.999760 —
+[`benchmarks/results/nemotron35_lightning_5080_hidden_states_parity_2026-09-04.md`](../benchmarks/results/nemotron35_lightning_5080_hidden_states_parity_2026-09-04.md).
 
 It sends one 300-token probe, loads the artifact, and compares each layer's mean-pooled
 vector against `transformers.AutoModelForCausalLM(output_hidden_states=True)` on CPU in

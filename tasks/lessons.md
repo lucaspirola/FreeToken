@@ -345,3 +345,28 @@ check for `Discarded cold session ...: client token prefix changed` before blami
 - The soak's `health` column is the ROUTER's `/health`, not FreeToken's — it read `ok` through
   the entire outage. Poll the upstream's own `/health` separately (this run: 62 non-ok samples,
   first 503 eleven seconds after the death).
+
+## 2026-09-04 (Phase 3H hidden-state export — the parity check's own reference was the bug)
+- **A parity harness whose reference is `AutoModelForCausalLM.from_pretrained` must be run
+  once before it is merged.** `probe_hidden_states_parity.py` shipped with a reference that
+  cannot load this checkpoint on any host: modelopt `MIXED_PRECISION` (no `modelopt`
+  quantizer in transformers 5.15), `backbone.*` vs HF's `model.*`, per-expert NVFP4 2-D
+  tensors vs HF's fused 3-D parameter — a meta-device skeleton diffs 400 missing / 18 486
+  unexpected keys — and 58.8 GiB of dense bf16 against 34 GiB of host RAM. Diff the
+  checkpoint index against `AutoModel.from_config(...)` on `meta` (seconds, no GPU, no
+  RAM) before trusting any "HF reference" path.
+- **A meta-device model plus per-block load/free hooks is the cheap way to run a
+  too-large reference**: pre-hook `load_state_dict(..., assign=True)` from the shards,
+  post-hook record the output and assign the meta tensors back. transformers keeps
+  ownership of masks, position ids, the Mamba-2 scan and the residual adds; peak was
+  3.5 GiB VRAM and 10-22 s for a 52-block 316-token forward of a 30B model. The
+  post-block forward hook also *is* the definition FreeToken exports, so the check stops
+  depending on HF's `output_hidden_states` indexing.
+- **When a per-layer parity curve is worst at the SHALLOW end and improves monotonically
+  with depth, suspect a fixed absolute perturbation early, not accumulating quantization
+  error.** Here it was transformers' own `time_step_limit = (config.time_step_min, inf)`
+  (`modeling_nemotron_h.py:381`) — the exact 1e-3 `dt` floor whose removal fixed 262K
+  recall. The reference was wrong, not the engine: dropping the floor moved the worst
+  layer 0.9406 → 0.9988. Any HF-referenced Mamba-2 parity check on this stack must set
+  `dt_limit=(0.0, inf)` on the reference, and a reference's own hyperparameters deserve
+  the same "read the use site" scrutiny as the engine's.
