@@ -462,3 +462,22 @@ session (~3 GB) without starving the concurrent spill. Build only if NVMe restor
   stray `</think>`). Restore the longest matching prefix at a snapshot (×128) boundary and
   re-prefill only the tail. Also: the nemotron_v3 reasoning parser must swallow a stray
   `</think>` emitted outside a think block instead of streaming it as content.
+
+## Phase 3H (decided 2026-09-04) — hidden-state export for Switchyard's prefill probe
+Switchyard's hidden-state router (branch `prefill-complexity-router-v1-port`, doc
+docs/vllm-serve-hidden-state.md) calls a separate probe server: POST /v1/chat/completions with
+`max_tokens: 1` and top-level `kv_transfer_params: {hidden_states_path: <dir>, include_output_tokens:
+false}`; the response carries `kv_transfer_params.hidden_states_path = <dir>/<name>.safetensors`,
+a file with key `hidden_states` [prompt_tokens, layers, hidden] (F32 or BF16, little-endian) and
+optional `token_ids` I64 [prompt_tokens]; layers = vLLM `eagle_aux_hidden_state_layer_ids`,
+contiguous from 0, ascending; values are the raw post-decoder-layer residual stream (NOT after the
+final norm); Switchyard mean-pools over all prompt tokens client-side. The probe weights are
+per-encoder and trained outside the repo (not in scope).
+FreeToken scope: implement the contract (server flag `--hidden-states-dir` as the only allowed
+root; per-request opt-in; default layer ids = all 52 blocks in FreeToken block order, subset via
+`kv_transfer_params.layer_ids`; per-request cap `--hidden-states-max-tokens` default 4096; probe
+requests bypass prefix reuse and session leases so every prompt token is computed; capture per
+prefill chunk into host memory and concatenate; write with an exclusive flock and a unique name;
+no impact when the field is absent). Verify shape/dtype/layer count against the doc, and that the
+mean-pooled vector of a short prompt matches an HF transformers `output_hidden_states=True` run
+of the same checkpoint (cosine > 0.99 per layer, allowing NVFP4/bf16 drift).
