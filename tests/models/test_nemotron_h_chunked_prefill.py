@@ -199,3 +199,52 @@ def test_prefill_scan_splits_at_the_track_boundary():
     with ctx.forward_batch(batch2), torch.inference_mode():
         mixer.forward(hidden[:256])
     assert _relative_error(pool.recurrent_states[layer, 2], pool.recurrent_states[layer, 5]) < 1e-5
+
+
+def test_state_dump_hook_writes_only_the_last_chunk_of_a_real_request(tmp_path, monkeypatch):
+    """The FREETOKEN_MAMBA2_STATE_DUMP hook: what it captures and what it skips.
+
+    It is the in-server twin of the tests above -- it answers "does the same prompt
+    leave the same state behind under a different --max-prefill-length?" on the real
+    model instead of a 1024-token toy. Two things must hold or the comparison is
+    meaningless: the record is taken at the END of the prefill (a ChunkedReq
+    continuation carries a half-finished state), and the engine's warmup batches
+    (uid=-1) must not be mistaken for it. Off by default: STATE_DUMP_DIR is None
+    unless the env var is set, so the serving path pays one module-level `if`.
+    """
+    import freetoken.core as core
+    from freetoken.models.nemotron_h import state_dump
+
+    assert state_dump.STATE_DUMP_DIR is None
+
+    layers, slots, heads, head_dim, state_size, conv_dim, km1 = 2, 4, 3, 8, 16, 5, 3
+    pool = SimpleNamespace(
+        group=SimpleNamespace(layer_ids=[0, 2]),
+        recurrent_states=torch.randn(layers, slots, heads, head_dim, state_size),
+        conv_states=torch.randn(layers, slots, conv_dim, km1),
+    )
+
+    def req(uid, can_decode, slot):
+        return SimpleNamespace(
+            uid=uid, can_decode=can_decode, linear_slot_idx=slot, table_idx=0,
+            cached_len=8192, device_len=8320, extend_len=128,
+        )
+
+    reqs = [req(-1, True, 1), req(7, False, 2), req(9, True, 3)]
+    batch = SimpleNamespace(is_prefill=True, reqs=reqs)
+    monkeypatch.setattr(
+        state_dump, "STATE_DUMP_DIR", str(tmp_path), raising=False
+    )
+    monkeypatch.setattr(
+        core, "get_global_ctx",
+        lambda: SimpleNamespace(batch=batch, linear_state_pool=pool),
+    )
+    state_dump.dump_prefill_state(torch.randn(3, 64))
+
+    written = sorted(p.name for p in tmp_path.iterdir())
+    assert written == ["prefill_uid9_len8320.pt"]  # not the warmup, not the continuation
+    record = torch.load(tmp_path / written[0], map_location="cpu")
+    assert record["slot"] == 3 and record["layer_ids"] == [0, 2]
+    assert torch.equal(record["recurrent"], pool.recurrent_states[:, 3].float())
+    assert torch.equal(record["conv"], pool.conv_states[:, 3].float())
+    assert record["logits"].shape == (64,)

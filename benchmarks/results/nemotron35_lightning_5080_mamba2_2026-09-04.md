@@ -107,11 +107,14 @@ Elastic transitions observed, all clean: `4 -> 16` (GDN slots 25 -> 97, MoE 1 65
 | Prompt | Chunk | Prefill (end-to-end) | Prefill (engine avg) | Decode | Needle |
 |---|---:|---:|---:|---:|---|
 | 32 768 | 4 096 | **5 147 tok/s** | 4 174 tok/s | 72.5 tok/s | **PASS** |
-| 131 072 | 8 192 | **2 968 tok/s** | 2 887 tok/s | 53.8 tok/s | **FAIL** (see below) |
+| 131 072 | 8 192 | **2 968 tok/s** | 2 887 tok/s | 53.8 tok/s | raw probe **FAIL**, see below |
+| 131 072 | 8 192 | **3 014 tok/s** | 2 953 tok/s | 73.1 tok/s | **PASS** on the chat-endpoint gate |
 
 For scale, the Phase 1 pure-torch numbers on the same host were 1 098-1 202 tok/s at
 131 072/8 192 and 2 799 tok/s at 131 072/4 096, so the kernels are ~2.5x on the 131 072
-case even where the answer is wrong.
+case. The raw-completion "FAIL" row was the probe, not the engine -- see the section
+below; the second row is the same configuration re-measured after the gate moved to the
+chat endpoint.
 
 ## Prefill/decode A/B at 32 768 tokens, 4 096-token chunks, decode 64
 
@@ -133,35 +136,110 @@ difference -- the plain 32 K needle measured 72.5 tok/s on the same kernel build
 The scan-only speedup belongs to `benchmarks/bench_mamba2_ssd.py` (task 2A2), not to a
 serving benchmark.
 
-## Open: the 131 072-token needle at 8 192-token chunks
+## Closed: the 131 072-token needle at 8 192-token chunks
 
-`bench_long_context.py` misses the needle at 131 072/8 192 on the kernel path,
-reproducibly (3/3 runs, byte-identical degenerate output). It is **not** state
-corruption, and the standing gate (32 768 tokens, 4 096-token chunks) is unaffected:
+`bench_long_context.py` missed the needle at 131 072/8 192 on the kernel path,
+reproducibly (3/3, byte-identical), while the same build answered the same prompt at
+4 096-token chunks, and through the chat endpoint at 8 192. The 2026-09-04 write-up
+called that a marginal-continuation artifact but did not prove it. It is now proved,
+by comparing the live state *inside* the server.
 
-| Probe | Result |
+### The instrument
+
+`FREETOKEN_MAMBA2_STATE_DUMP=<dir>` (`models/nemotron_h/state_dump.py`, called from
+`NemotronHForCausalLM.forward`) saves, on the **last** prefill forward of each real
+request, that request's live slot for every Mamba-2 layer -- recurrent `[23, 64, 64,
+128]` and conv `[23, 6144, 3]`, fp32 -- plus the sampled position's logits. Warmup
+batches (`uid=-1`) and `ChunkedReq` continuations are skipped. Unset, it costs one
+module-level `if` per forward.
+
+### The runs
+
+One prompt (the synthetic needle trimmed to exactly 131 072 tokens, needle at token
+67 630, depth 0.516), four servers, identical flags but for the two variables, each
+under `scripts/gpu_lock.sh`: `--max-running-requests 1 --num-tokens 262144 --kv-cache-dtype
+q8_0 --attention-backend triton --memory-ratio 0.85 --host-ram-reserve-gb 3`,
+`FREETOKEN_PIN_BUDGET_GB=17`, probed with the *old* raw `/v1/completions` greedy
+continuation (`ignore_eos`, 48 tokens).
+
+| Run | scan | `--max-prefill-length` | raw-completion needle |
+|---|---|---:|---|
+| kernel-4k | Triton SSD | 4 096 | **found** |
+| kernel-8k | Triton SSD | 8 192 | **absent** (the failure, reproduced) |
+| ref-4k | `FREETOKEN_MAMBA2_REF=1` | 4 096 | **found** |
+| ref-8k | `FREETOKEN_MAMBA2_REF=1` | 8 192 | **found** |
+
+### State comparison
+
+Per-layer relative RMS of the end-of-prefill state, `‖a-b‖ / ‖b‖`:
+
+| layer | kernel-4k vs kernel-8k | ref-4k vs ref-8k | kernel-8k vs ref-8k |
+|---:|---:|---:|---:|
+| 0 (recurrent) | **0.000e+00** | 1.696e-09 | 5.128e-04 |
+| 0 (conv) | **0.000e+00** | 0.000e+00 | 0.000e+00 |
+| 2 (recurrent) | 7.226e-07 | 9.399e-08 | 1.822e-02 |
+| 2 (conv) | 0.000e+00 | 0.000e+00 | 2.096e-02 |
+| 4 (recurrent) | 1.389e-03 | 2.520e-04 | 1.014e-02 |
+| 7 | 8.464e-03 | 7.099e-03 | 3.227e-02 |
+| 14 | 2.540e-02 | 4.686e-02 | 1.009e-01 |
+| 21 | 1.029e-01 | **1.543e-01** | **3.030e-01** |
+| 28 | **1.126e-01** | 1.364e-01 | 2.654e-01 |
+| 35 | 1.102e-01 | 8.472e-02 | 1.384e-01 |
+| 48 | 1.234e-02 | 3.579e-02 | 6.514e-02 |
+| worst recurrent | 1.126e-01 (L28) | 1.543e-01 (L21) | 3.030e-01 (L21) |
+| worst conv | 2.130e-01 | 2.428e-01 | 3.642e-01 |
+| final logits | 2.390e-01 | 2.806e-01 | 2.552e-01 |
+| top-1 next token | `11` = `11` | `11` = `11` | `11` = `11` |
+
+### Verdict: no chunk-boundary bug
+
+Four facts, in order of weight:
+
+1. **Layer 0 is bit-exact across the two chunkings on the kernel path** -- recurrent
+   *and* conv, `0.000e+00` on both max-abs and relative RMS, after 131 072 tokens.
+   Layer 0 is the only Mamba-2 layer whose inputs are identical by construction in both
+   runs (it consumes the embeddings), so it is the one layer that isolates the
+   integration: `build_fla_metadata` / `_build_track_metadata`, the conv-window write at
+   `track_dst`, `has_initial_state` on chunk 2+, the ×128 snapshot row and the state-pool
+   round trip all reproduce a 32-chunk prefill from a 16-chunk one *exactly*, at real
+   geometry and full length. Every one of the plan's suspects is cleared by that zero.
+2. **The known-good reference path diverges more across the same two chunkings than the
+   kernels do** (worst recurrent 1.543e-01 vs 1.126e-01) -- and finds the needle at both.
+   Divergence magnitude therefore carries no information about the needle outcome.
+3. **The two implementations at the *same* chunking differ more than either differs
+   across chunkings** (3.030e-01), yet ref-8k answers and kernel-8k does not. The needle
+   outcome is not a function of state fidelity.
+4. **All four runs agree on the top-1 next token** (id `11`, the `<|im_end|>` the model
+   wants to emit after the 131 072-token prompt), with a comfortable 0.75-1.63 logit
+   margin. Nothing is marginal at the first token: the raw probe sets `ignore_eos`, so
+   generation is forced *past* the model's chosen end-of-text into an unanchored
+   continuation of the haystack, and that is where the four runs part company.
+
+Where the divergence does enter: layer 2's conv state (a function of the last three
+tokens only) is still exactly zero while its recurrent state -- a decayed sum over all
+131 072 positions -- is 7.2e-07, so layer 2's inputs differ at interior positions. Layer
+1 is the first MoE layer, and NVFP4 expert GEMMs are not bit-invariant to the number of
+rows in the batch, which *is* the prefill chunk size. (The NVFP4 *dense* linear is
+invariant -- 4 096/4 096 rows bit-identical whether run as `M=4096` or as the head of
+`M=8192` -- so the entry point is the routed fused-MoE path, not the dense GEMMs.) 52
+layers and 131 072 tokens then amplify 1e-7 into 1e-1, on both scans equally.
+
+### The gate
+
+The 131 072-token needle probe now asks its question through
+`/v1/chat/completions` with `enable_thinking: False` instead of continuing the haystack
+through `/v1/completions` (`benchmarks/bench_long_context.py:stream_completion`,
+pinned by `test_stream_completion_asks_the_question_through_the_chat_endpoint`).
+`ignore_eos` is kept so the decode-rate sample stays a fixed number of steps.
+Re-measured on the kernel path at the configuration that used to fail:
+
+| | 131 072 tokens, 8 192-token chunks, kernel path |
 |---|---|
-| kernel, 131 072, **4 096**-token chunks, raw completion | needle found |
-| `FREETOKEN_MAMBA2_REF=1`, 131 072, 8 192, raw completion | needle found |
-| kernel, 131 072, **8 192**, raw completion | needle absent (x3) |
-| kernel, 131 072, **8 192**, `/v1/chat/completions`, same server flags | **needle found** -- `'The secret passcode is 5663623.'` |
-| `mamba2_prefill` at H=64/P=64/N=128, 32 768 tokens fed as 2 048 / 4 096 / **8 192** / 16 384-token extends vs one pass | relative error **0.000e+00** on both the output and the carried state |
-| same, first (autotuning) call vs warm calls at T=8 192 | 0.000e+00 -- not an autotune artifact |
-| the kernels at the crashing shapes under `compute-sanitizer memcheck` | 0 errors |
-
-So the scan is exactly chunk-invariant, and the same build answers the same 131 072-token
-prompt at 8 192-token chunks through the chat endpoint. What the bench probes is a *raw*
-`/v1/completions` greedy continuation with `ignore_eos`, whose first token differs between
-any two chunkings (the conv and the scan tile differently, so 4 096 and 8 192 are
-bit-different for *every* implementation, the Phase 1 reference included) -- and at 131 072
-tokens of filler that continuation is a coin flip: the reference won it at 8 192 and lost
-nothing by it, the kernels won it at 4 096 and at 8 192 through the chat template.
-
-**Not closed.** Recommended follow-up before leaning on the 131 072 needle as a gate:
-compare the live recurrent state inside one server across `--max-prefill-length` values
-(a GPU test in the style of `tests/models/test_nemotron_h_chunked_prefill.py` but at real
-geometry and 8 192-token extends), and switch the long-needle gate to the chat endpoint so
-it stops depending on an unanchored raw continuation.
+| prompt | 131 088 tokens (chat template adds 16) |
+| prefill | **3 013.9 tok/s** end-to-end, 2 952.9 tok/s engine average |
+| decode | 73.1 tok/s |
+| needle | **PASS** -- `'The secret passcode is 5663623.'` |
+| VRAM | 13.42 GiB |
 
 ## Verification summary
 
@@ -170,6 +248,9 @@ it stops depending on an unanchored raw continuation.
   pre-existing `tests/models/test_laguna_modules.py` errors (`RuntimeError: TP info has been
   set`), a cross-directory ordering artifact reproduced unchanged at `dc795ec`.
 - `tests/models/test_nemotron_h_chunked_prefill.py` (the chunked-vs-single-pass gate on the
-  real mixer): passes on the kernel path.
+  real mixer, plus the new `test_state_dump_hook_writes_only_the_last_chunk_of_a_real_request`):
+  8 passed on the kernel path.
+- `tests/benchmarks/test_bench_long_context.py`: 8 passed, including the new
+  `test_stream_completion_asks_the_question_through_the_chat_endpoint`.
 - ruff: no new findings in the touched files.
 

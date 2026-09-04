@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -146,3 +147,51 @@ def test_trim_filler_rejects_a_target_that_cannot_hold_the_protected_regions():
     tokenizer = _CharTokenizer()
     with pytest.raises(ValueError):
         bench.trim_filler(tokenizer, _needle_document(3_000, 3_000), "5663623", 1_024)
+
+
+def test_stream_completion_asks_the_question_through_the_chat_endpoint(monkeypatch):
+    """The needle gate must stay anchored to a question.
+
+    A raw /v1/completions continuation of the haystack is decided by its first sampled
+    token, which legitimately differs between prefill chunkings for every Mamba-2
+    implementation -- that turned the 131,072-token needle into a coin flip. Pin the
+    endpoint, the chat wrapper, and the thinking-off toggle so it cannot drift back.
+    """
+    captured = {}
+    events = [
+        b'data: {"choices":[{"delta":{"content":"The secret "}}]}',
+        b"",
+        b'data: {"choices":[{"delta":{"content":"passcode is 5663623."}}]}',
+        b'data: {"usage":{"prompt_tokens":11,"completion_tokens":2},"choices":[]}',
+        b"data: [DONE]",
+    ]
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def __iter__(self):
+            return iter(events)
+
+    def fake_urlopen(request, timeout=None):
+        captured["url"] = request.full_url
+        captured["body"] = json.loads(request.data)
+        return FakeResponse()
+
+    monkeypatch.setattr(bench.urllib.request, "urlopen", fake_urlopen)
+    result = bench.stream_completion("http://x", "m", "prompt", 8)
+
+    assert captured["url"].endswith("/v1/chat/completions")
+    body = captured["body"]
+    assert body["messages"] == [{"role": "user", "content": "prompt"}]
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
+    assert body["max_completion_tokens"] == 8 and body["ignore_eos"] is True
+    assert body["temperature"] == 0.0 and "prompt" not in body
+    # Pieces are joined before anything greps them: a token split across two events
+    # must not read as a miss.
+    assert result["text"] == "The secret passcode is 5663623."
+    assert len(result["stamps"]) == 2
+    assert result["usage"]["prompt_tokens"] == 11

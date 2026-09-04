@@ -27,6 +27,7 @@ from freetoken.models.blocks import BaseLLMModel
 from freetoken.utils import nvtx_annotate
 
 from .mamba2_reference import reference_enabled
+from .state_dump import STATE_DUMP_DIR
 
 if TYPE_CHECKING:
     from freetoken.models.config import ModelConfig
@@ -397,7 +398,13 @@ class NemotronHForCausalLM(BaseLLMModel):
 
     def forward(self) -> torch.Tensor:
         hidden = self.backbone.forward(get_global_ctx().batch.input_ids)
-        return self.lm_head.forward(hidden)
+        logits = self.lm_head.forward(hidden)
+        if STATE_DUMP_DIR is not None:
+            # Debug A/B only (FREETOKEN_MAMBA2_STATE_DUMP=<dir>); see state_dump.py.
+            from .state_dump import dump_prefill_state
+
+            dump_prefill_state(logits)
+        return logits
 
 
 __all__ = ["NemotronHForCausalLM"]

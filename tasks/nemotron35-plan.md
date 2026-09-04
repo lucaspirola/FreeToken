@@ -359,7 +359,12 @@ amplifying PCIe fetches.
 - GPU work runs one job at a time via `scripts/gpu_lock.sh`; CPU-only agents may overlap.
 - Implementer subagents use `isolation: worktree`.
 - Standing gates after any Mamba/prefill change: chunked-vs-single-pass equality test (GPU unit
-  test) and a 32,768-token synthetic needle with `--max-prefill-length 4096`.
+  test) and a 32,768-token synthetic needle with `--max-prefill-length 4096`. The 131,072-token
+  needle is a gate again as of 2026-09-04: `bench_long_context` now asks its question through
+  `/v1/chat/completions` instead of continuing the haystack through `/v1/completions`, and passes
+  at `--max-prefill-length 8192` on the kernel path.
+- Long-context needle failures must be reproduced through the chat endpoint before they are
+  believed. A raw completion with `ignore_eos` is an unanchored continuation, not a retrieval test.
 - Prefill chunk 8192 with `--memory-ratio 0.85`: the 4K-vs-8K gap was allocator thrash from too little free VRAM at 0.90 (2026-09-04), not chunk size.
 - Nemotron docs live in `docs/nemotron.md` (split out of models.md once 2B1/3E land).
 
@@ -422,3 +427,10 @@ Decided scope (all three):
    deletes stale/foreign ones; shutdown no longer rmtrees. Restore still requires exact prefix +
    fingerprint match.
 - Mamba-2 decode default: Triton port (state err 3e-7) over flashinfer (1e-3, bf16 dt_bias); flashinfer opt-in via FREETOKEN_MAMBA2_DECODE=flashinfer. Decided 2026-09-04 for 1M-session accuracy.
+
+## Candidate 3F (2026-09-04, user idea) — prefetch the next queued session's checkpoint
+When a request is waiting and its session checkpoint sits on NVMe, promote it to the RAM tier
+(pinned staging) in the background while the resident session decodes, so admission restores at
+H2D speed. Depends on: measured NVMe-vs-RAM restore time for a ~3 GB (1M) checkpoint in the 1M
+gate (disk restore is already layer-pipelined); RAM-tier budget must cover one look-ahead
+session (~3 GB) without starving the concurrent spill. Build only if NVMe restore stays > ~0.5 s.

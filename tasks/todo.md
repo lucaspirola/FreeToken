@@ -16,7 +16,7 @@ Full plan: tasks/nemotron35-plan.md
 - [x] 2A4 integrate (P1 smoke + all 4 P2 serving gates + 32K needle + A/B vs FREETOKEN_MAMBA2_REF=1;
       fixed a CUDA-graph use-after-free in the decode out-buffer; 131K needle at 8K chunks still open --
       benchmarks/results/nemotron35_lightning_5080_mamba2_2026-09-04.md)
-  - [x] 2B2 triton fallback tuning  - [ ] 2B4 cache sizing study  - [ ] 1M multi-session spill gate
+  - [x] 2B2 triton fallback tuning  - [ ] 2B4 cache sizing study  - [ ] 1M single-session spill gate (also measures restore NVMe vs RAM for candidate 3F prefetch)
 
 ## Phase 3 — Switchyard
 - [x] 3A wire/errors  - [x] 3B JSON mode  - [x] 3C sessions+parsers  - [ ] 3D soak run (prep done)  - [x] 3E residency: spill on demand + capacity/age retention + restart-persistent checkpoints

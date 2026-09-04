@@ -23,6 +23,9 @@ import urllib.request
 import bench_decode_moe as common
 
 
+# Tokens reserved for the chat template's wrapper around the trimmed prompt.
+CHAT_TEMPLATE_ALLOWANCE = 128
+
 DEFAULT_RULER = (
     "/home/lucas/ai/bench/ruler_data/ruler/nemotron_256k/"
     "niah_single_1/test.jsonl"
@@ -51,7 +54,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mem-ratio", type=float, default=0.97)
     p.add_argument("--kv-grow-step-tokens", type=int)
     p.add_argument("--linear-state-slots", type=int)
+    p.add_argument("--cache-rate", type=float, default=None,
+                   help="expert-cache slots as a fraction of L*E; default auto-sizes")
     p.add_argument("--cache-policy", choices=("lru", "lfu"), default="lfu")
+    # --nvfp4-backend / --moe-collect-stats / --server-arg, shared with bench_decode_moe.
+    common.add_server_passthrough_args(p)
     p.add_argument("--server-timeout", type=float, default=1800)
     p.add_argument("--moe-pageable-gpu", action="store_true")
     p.add_argument("--host-ram-reserve-gb", type=float, default=3.0)
@@ -70,7 +77,6 @@ def parse_args() -> argparse.Namespace:
     p.set_defaults(
         backend="offload",
         cache=0,
-        cache_rate=None,
         hybrid_fetch=-1,
         no_graph=False,
         prefill_hit_d2d=False,
@@ -186,10 +192,27 @@ def trim_filler(
 def stream_completion(
     origin: str, model_id: str, prompt: str, decode: int
 ) -> dict:
+    """One streamed greedy *chat* completion of the needle prompt.
+
+    Deliberately the chat endpoint and not ``/v1/completions``. A raw completion is an
+    unanchored continuation of the haystack: nothing in it asks the model to answer, so
+    whether the needle reappears is decided by the first sampled token -- and that token
+    differs between any two prefill chunkings for *every* implementation, since the
+    conv window and the SSD scan tile differently at 4096 and at 8192. That made the
+    131,072-token gate a coin flip (2026-09-04: the Triton SSD build "missed" at
+    8192-token chunks and answered the identical prompt correctly through the chat
+    endpoint on the same server). Wrapping the prompt in the chat template anchors the
+    question, so the gate measures retrieval instead of the continuation lottery.
+
+    ``ignore_eos`` is kept so the decode-rate sample is always ``decode`` steps long
+    regardless of how short the answer is, and thinking is turned off so the budget is
+    not spent inside a reasoning block.
+    """
     body = {
         "model": model_id,
-        "prompt": prompt,
-        "max_tokens": decode,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_completion_tokens": decode,
+        "chat_template_kwargs": {"enable_thinking": False},
         "ignore_eos": True,
         "temperature": 0.0,
         "top_p": 1.0,
@@ -198,7 +221,7 @@ def stream_completion(
         "stream_options": {"include_usage": True},
     }
     req = urllib.request.Request(
-        f"{origin}/v1/completions",
+        f"{origin}/v1/chat/completions",
         data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json"},
     )
@@ -225,7 +248,16 @@ def stream_completion(
             if chunk.get("usage"):
                 usage = chunk["usage"]
             for choice in chunk.get("choices", []):
-                piece = choice.get("text", "")
+                # Concatenate the JSON fields before anything inspects them: a token is
+                # split across `data:` events, so grepping the raw stream reports false
+                # misses. Reasoning deltas count as generated tokens for the rate, and
+                # are searched too in case a checkpoint ignores enable_thinking=False.
+                delta = choice.get("delta") or {}
+                piece = "".join(
+                    str(delta[key])
+                    for key in ("content", "reasoning_content", "reasoning")
+                    if delta.get(key)
+                )
                 if piece:
                     stamps.append(now)
                     pieces.append(piece)
@@ -365,10 +397,12 @@ def main() -> int:
     prompt, original_tokens, trimmed_tokens = trim_filler(
         tokenizer, question, expected, args.target_prompt_tokens
     )
-    if trimmed_tokens + args.decode > args.max_context:
+    # The prompt is served through the chat template (see stream_completion), which
+    # wraps it in a system/user preamble the trimmer never sees.
+    budget = trimmed_tokens + args.decode + CHAT_TEMPLATE_ALLOWANCE
+    if budget > args.max_context:
         raise SystemExit(
-            f"prompt+decode={trimmed_tokens + args.decode} exceeds context "
-            f"{args.max_context}"
+            f"prompt+decode+template={budget} exceeds context {args.max_context}"
         )
 
     port = common.free_port()
@@ -455,6 +489,9 @@ def main() -> int:
         "prefill_chunk": args.prefill_chunk,
         "memory_ratio": args.mem_ratio,
         "kv_grow_step_tokens": args.kv_grow_step_tokens,
+        "nvfp4_backend": args.nvfp4_backend,
+        "cache_rate": args.cache_rate,
+        "cache_policy": args.cache_policy,
         "output_sha1": hashlib.sha1(result["text"].encode()).hexdigest()[:12],
         "output": result["text"],
         "server_log": log_path,

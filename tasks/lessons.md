@@ -105,3 +105,30 @@
   an hour of reading.
 - `/health` returns 200 with `{"status": "loading"}` while weights load; a readiness
   poll must require `"status": "ok"`, otherwise every gate request 503s.
+
+## 2026-09-04 (Nemotron 3.5 Lightning, 131K needle at 8192 chunks — closed)
+- **Prove chunk invariance on the ONE layer whose inputs are identical by construction.**
+  On a hybrid, layer 0 (Mamba) consumes the embeddings, so its end-of-prefill state must
+  be bit-identical between two `--max-prefill-length` values. It was (0.000e+00 after
+  131 072 tokens), which clears the whole Mamba integration in one number. Every deeper
+  layer's divergence is about its *inputs*, not its scan — comparing those is comparing
+  amplification, not correctness.
+- A per-layer state diff of 1e-1 at depth is NOT evidence of a bug on a 52-layer hybrid at
+  131K tokens. Controls first: the known-good reference scan diverged *more* between the
+  same two chunkings (1.5e-1 vs 1.1e-1) and answered correctly at both; the two scans at
+  the *same* chunking differed most of all (3.0e-1). Magnitude of state divergence carried
+  zero signal about the needle outcome. Always take the A/B of the A/B.
+- Non-Mamba layers are not bit-invariant to the prefill chunk size: chunk size *is* the
+  GEMM's M. The NVFP4 dense linear is invariant (bit-identical at M=4096 vs the head of
+  M=8192), the routed fused-MoE path is not — that is where the 1e-7 seed enters, and 52
+  layers turn it into 1e-1. Expect this on every chunked-prefill A/B; it is not a bug.
+- **Never gate long-context retrieval on a raw `/v1/completions` continuation with
+  `ignore_eos`.** All four runs agreed on the top-1 next token (`<|im_end|>`, margin
+  0.75-1.63); `ignore_eos` then forces generation *past* the model's chosen end-of-text
+  into an unanchored continuation of the haystack, and whether the needle reappears there
+  is a coin flip. Ask the question through the chat template instead. (`bench_long_context`
+  now does; the 131 072/8 192 case that "failed" 3/3 passes.)
+- An env-gated in-server state dump (`FREETOKEN_MAMBA2_STATE_DUMP`) is cheap to build and
+  settles in one afternoon what a week of reasoning about metadata cannot. Dump at the last
+  prefill forward (`ChunkedReq.can_decode` is False on continuations) and skip the engine's
+  warmup batches (`uid == -1`) or the record is the wrong forward.
