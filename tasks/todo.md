@@ -16,13 +16,13 @@ Full plan: tasks/nemotron35-plan.md
 - [x] 2A4 integrate (P1 smoke + all 4 P2 serving gates + 32K needle + A/B vs FREETOKEN_MAMBA2_REF=1;
       fixed a CUDA-graph use-after-free in the decode out-buffer; 131K needle at 8K chunks still open --
       benchmarks/results/nemotron35_lightning_5080_mamba2_2026-09-04.md)
-  - [x] 2B2 triton fallback tuning  - [ ] 2B4 cache sizing study  - [ ] 1M single-session spill gate (also measures restore NVMe vs RAM for candidate 3F prefetch)
+  - [x] 2B2 triton fallback tuning  - [x] 2B4 cache sizing study (triton default, LFU for 16-way, hybrid rejected)  - [ ] 1M single-session spill gate (also measures restore NVMe vs RAM for candidate 3F prefetch)
 
 ## Phase 3 — Switchyard
 - [x] 3A wire/errors  - [x] 3B JSON mode  - [x] 3C sessions+parsers  - [ ] 3D soak run (prep done)  - [x] 3E residency: spill on demand + capacity/age retention + restart-persistent checkpoints
 
 ## Phase 4 — MTP (time-boxed, flagged)
-- [ ] 1 mtp.py  - [ ] 2 sampler  - [ ] 3 mamba verify  - [ ] 4 scheduler  - [ ] 5 engine  - [ ] 6 gate
+- [x] NO-GO (2026-09-04 cache study: verify step 1.63× cost, projected 0.96× gain; flag not built)
 
 ---
 # Ornith RTX 5080 full-context optimization
@@ -198,3 +198,5 @@ Command: `ft serve --model ~/ai/models/Ornith-1.5-35B-Q4_K_M.gguf
   responses without a crash. Worker environments proved the fallback leg had
   `FREETOKEN_GGUF_DISABLE_MMA=1` and the optimized leg did not.
 - tests/moe/test_prefill_hit_d2d.py::test_batch_memcpy_roundtrip is a pre-existing order-dependent flake (dst produced on the default stream, probe syncs its own stream). Ticket it; not Nemotron work.
+- Ticket: `--kv-grow-step-tokens` + `--nvfp4-backend flashinfer` crashes at init (b12x banks include an int32 bank that `kernel/vmm.py` `_DTYPE_NAMES` lacks). Not blocking (triton is the default).
+- 1M gate must retest the 262K/524K needle through the chat endpoint (cache study saw misses on the raw completions probe, the known artifact).

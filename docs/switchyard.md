@@ -305,11 +305,15 @@ switchyard-soak --base-url http://127.0.0.1:4000 --model switchyard/passthrough 
   --context-window-tokens 131072 \
   --scenario prefix-reuse --scenario growing-conversation \
   --scenario tool-call-burst --scenario large-tool-catalog --scenario long-context \
-  --max-error-rate 0 --results-dir <workdir>/results-...
+  --max-error-rate 0 --request-timeout 600 --results-dir <workdir>/results-...
 ```
 
 Note the flag spellings: `--context-window-tokens` and `--max-error-rate` (not
-`--context-window` / `--max-error-fraction`). Then the resilience group:
+`--context-window` / `--max-error-fraction`). `--request-timeout` is the soak's own
+client timeout; its 120 s default is shorter than a 118K-token `long-context` or
+`context-overflow` prefill queued behind fifteen siblings on one 16 GiB card, so
+`switchyard_e2e.py soak` raises it to 600 s (`--request-timeout`) — otherwise the
+run reports client timeouts as upstream errors. Then the resilience group:
 
 ```bash
 scripts/switchyard_e2e.sh soak --duration 10m --scenario-set resilience \
@@ -350,4 +354,5 @@ Claude Code points `ANTHROPIC_BASE_URL` at the router (`switchyard-server` serve
 | Soak reports metrics-check failures | It is scraping the *router's* `/metrics`, not FreeToken's; the router must be the `--base-url`. |
 | Empty assistant messages on the efficient tier | `force_nonempty_content` not set (server flag or `chat_template_kwargs`). |
 | Overflow answered 500 or with a bare message | Check `error.code`; only `context_length_exceeded` makes the route retarget. |
+| Soak intervals go `status=STALLED` with `health=ok` | The FreeToken backend scheduler died; `/health` keeps answering `{"status":"ok"}` and in-flight requests hang until the client timeout. Check the FreeToken log for `Backend supervisor: backend worker … exited`. |
 | `unknown scenario "x"` | Valid ids: `short-interactive`, `long-context`, `decode-heavy`, `prefix-reuse`, `mixed-traffic`, `growing-conversation`, `large-tool-catalog`, `tool-call-burst`, `stage-transitions`, `classifier-mix`, `context-overflow`, `failure-pressure`, `client-cancellation`. Sets: `core`, `agentic`, `resilience`, `standard`, `all`. |

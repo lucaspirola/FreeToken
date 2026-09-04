@@ -628,7 +628,11 @@ def check_context_overflow(
     400 -- the frontend preflight rejects before the stream opens -- or an error
     SSE event ahead of any role chunk). Anything else makes a Switchyard route
     fall through instead of retargeting."""
-    filler = "token " * ((served_max + 4096) // 2)
+    # One repetition of "token " is ONE token for every tokenizer this targets, so
+    # the count is the token count -- halving it (as an earlier version did) builds a
+    # prompt that fits and the server correctly answers 200, which reads as a
+    # contract failure that is really a test bug.
+    filler = "token " * (served_max + 4096)
     body = {
         "model": model,
         "messages": [{"role": "user", "content": filler}],
@@ -929,6 +933,8 @@ def cmd_soak(args: argparse.Namespace) -> int:
                 str(args.context_window_tokens),
                 "--max-error-rate",
                 str(args.max_error_rate),
+                "--request-timeout",
+                str(args.request_timeout),
                 "--results-dir",
                 results_dir,
             ]
@@ -1038,13 +1044,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--router-port", type=int, default=4000)
     p.add_argument("--switchyard-dir", default=SWITCHYARD_DIR)
+
+    # The same four connection options again, accepted *after* the subcommand:
+    # `switchyard_e2e.sh contract --base-url ...` is the spelling docs/switchyard.md
+    # and everyone's muscle memory use. argparse.SUPPRESS keeps the top-level value
+    # (or its default) whenever the subcommand does not set one.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--base-url", default=argparse.SUPPRESS)
+    common.add_argument("--model", default=argparse.SUPPRESS)
+    common.add_argument("--router-port", type=int, default=argparse.SUPPRESS)
+    common.add_argument("--switchyard-dir", default=argparse.SUPPRESS)
+
     sub = p.add_subparsers(dest="command", required=True)
 
-    c = sub.add_parser("contract", help="wire-contract checks against FreeToken")
+    c = sub.add_parser(
+        "contract",
+        parents=[common],
+        help="wire-contract checks against FreeToken",
+    )
     c.add_argument("--timeout", type=float, default=300.0)
     c.set_defaults(func=cmd_contract)
 
-    s = sub.add_parser("soak", help="run switchyard-server + switchyard-soak")
+    s = sub.add_parser(
+        "soak", parents=[common], help="run switchyard-server + switchyard-soak"
+    )
     s.add_argument("--config", default=None, help="existing routes.toml (else generated)")
     s.add_argument("--workdir", default=None)
     s.add_argument("--duration", default="20m")
@@ -1053,6 +1076,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--prompt-bytes", type=int, default=16384)
     s.add_argument("--context-window-tokens", type=int, default=131072)
     s.add_argument("--max-error-rate", type=float, default=0.0)
+    # The soak's own client timeout (seconds), not a server promise. Its default of
+    # 120 s is shorter than a 118K-token prefill queued behind others on one 16 GiB
+    # card, so the long-context / context-overflow scenarios need it raised or they
+    # report client timeouts as upstream errors.
+    s.add_argument("--request-timeout", type=float, default=600.0)
     s.add_argument("--health-timeout", type=float, default=60.0)
     s.add_argument("--scenario", action="append", default=None)
     s.add_argument("--scenario-set", default=None)
@@ -1064,7 +1092,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.set_defaults(func=cmd_soak)
 
-    a = sub.add_parser("agents", help="print the manual agent smoke-test env")
+    a = sub.add_parser(
+        "agents", parents=[common], help="print the manual agent smoke-test env"
+    )
     a.set_defaults(func=cmd_agents)
     return p
 
