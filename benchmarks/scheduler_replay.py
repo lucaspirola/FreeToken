@@ -495,8 +495,13 @@ GATE_TICKS = 20_000
 GATE_SEED = 7
 GATE_CASES = [
     # profile, min prefilled_tokens, min completed
-    ("stage",    6_500_000, 350),
-    ("pressure", 8_500_000,  85),
+    # Floors = current main (d685e99 behaviour) minus ~5 %. The 81ab30e admission-gate
+    # rewrite scored 7.1M/383 here but stalled the live 16-way soak (its finishability gate
+    # ignored decode-held and retained-session pages, which this replay does not model yet).
+    # Raise these only after a change passes the live soak, and extend the replay to model
+    # those pages first. See benchmarks/results/nemotron35_lightning_5080_switchyard_soak_2026-09-04.md §S.
+    ("stage",    2_650_000, 170),
+    ("pressure", 4_750_000,  57),
 ]
 
 
