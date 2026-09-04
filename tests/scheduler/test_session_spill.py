@@ -345,7 +345,7 @@ def test_record_larger_than_the_whole_cap_is_refused(tmp_path):
     store.shutdown()
 
 
-# ------------------------------------------------------------- look-ahead prefetch (3F)
+# --------------------------------------------------------------- boundary states (3G)
 
 
 def _boundary_pools(tmp_path, **overrides):
@@ -358,6 +358,90 @@ def _boundary_pools(tmp_path, **overrides):
     )
     kwargs.update(overrides)
     return kv, linear, manager, SessionSpillStore(kv, linear, **kwargs)
+
+
+def _seeded_session(kv, linear, manager, tokens):
+    """Random KV for ``tokens`` plus two distinguishable recurrent states."""
+    pages = manager._page_to_token(manager._allocate(len(tokens)))
+    final_slot, boundary_slot = linear.alloc(2)
+    torch.manual_seed(5)
+    kv._k_buffer[:, pages] = torch.randint(
+        -128, 127, kv._k_buffer[:, pages].shape, dtype=torch.int8
+    )
+    for slot in (final_slot, boundary_slot):
+        linear.recurrent_states[:, slot] = torch.randn_like(linear.recurrent_states[:, slot])
+    return pages, final_slot, boundary_slot
+
+
+def test_partial_restore_resumes_at_the_deepest_stored_boundary(tmp_path):
+    kv, linear, manager, store = _boundary_pools(tmp_path)
+    tokens = torch.tensor([11, 12, 13, 14, 15, 16], dtype=torch.int32)
+    pages, final_slot, boundary_slot = _seeded_session(kv, linear, manager, tokens)
+    expected_k = kv._k_buffer[:, pages[:4]].clone()
+    expected_state = linear.recurrent_states[:, boundary_slot].clone()
+
+    record = store.spill(
+        "agent-a", tokens, pages, final_slot, extra_states=[(4, boundary_slot)]
+    )
+    assert record is not None and record.state_boundaries == [4, 6]
+
+    # A drift in the last two tokens: only the prefix through boundary 4 is reusable.
+    assert record.restorable_length(5) == 4
+    restored = manager.restore_hybrid_session_prefix(record, store, 4)
+    assert restored.cached_len == 4
+    assert torch.equal(kv._k_buffer[:, restored.get_matched_indices().long()], expected_k)
+    # The installed state is the one snapshotted AT the cut, not the checkpoint's end.
+    assert torch.equal(linear.recurrent_states[:, restored.node.mamba_value], expected_state)
+    manager.unlock(restored)
+    store.shutdown()
+
+
+def test_exact_match_still_restores_the_whole_checkpoint(tmp_path):
+    kv, linear, manager, store = _boundary_pools(tmp_path)
+    tokens = torch.tensor([21, 22, 23, 24, 25, 26], dtype=torch.int32)
+    pages, final_slot, boundary_slot = _seeded_session(kv, linear, manager, tokens)
+    expected_k = kv._k_buffer[:, pages].clone()
+    expected_state = linear.recurrent_states[:, final_slot].clone()
+
+    record = store.spill(
+        "agent-a", tokens, pages, final_slot, extra_states=[(4, boundary_slot)]
+    )
+    assert record is not None and record.restorable_length(len(tokens)) == len(tokens)
+
+    restored = manager.restore_hybrid_session_prefix(record, store)
+    assert restored.cached_len == len(tokens)
+    assert torch.equal(kv._k_buffer[:, restored.get_matched_indices().long()], expected_k)
+    assert torch.equal(linear.recurrent_states[:, restored.node.mamba_value], expected_state)
+    manager.unlock(restored)
+    store.shutdown()
+
+
+def test_a_drift_before_the_first_boundary_leaves_nothing_to_restore(tmp_path):
+    kv, linear, manager, store = _boundary_pools(tmp_path)
+    tokens = torch.tensor([31, 32, 33, 34, 35, 36], dtype=torch.int32)
+    pages, final_slot, boundary_slot = _seeded_session(kv, linear, manager, tokens)
+    record = store.spill(
+        "agent-a", tokens, pages, final_slot, extra_states=[(4, boundary_slot)]
+    )
+    assert record is not None
+    assert record.restorable_length(3) == 0  # full recompute, no half state to install
+    with pytest.raises(ValueError):
+        manager.restore_hybrid_session_prefix(record, store, 3)
+    store.shutdown()
+
+
+def test_boundary_states_are_thinned_to_the_stride_then_to_the_freshest(tmp_path):
+    _kv, _linear, _manager, store = _boundary_pools(tmp_path, state_stride_tokens=100)
+    store.max_states = 3
+    # Stride-spaced coverage first, newest end backwards, and the budget stops it at 3.
+    assert store._select_state_boundaries([200, 700, 800, 900], 1000) == [800, 900, 1000]
+    # A session whose candidates are all closer than one stride still keeps them: the
+    # second pass spends what the first could not.
+    assert store._select_state_boundaries([2, 4], 6) == [2, 4, 6]
+    store.shutdown()
+
+
+# ------------------------------------------------------------- look-ahead prefetch (3F)
 
 
 def _disk_record(store, linear, session_id, monkeypatch):

@@ -188,9 +188,9 @@ Residency policy (task 3E, decided 2026-09-04):
 - **Survive restart.** Checkpoints are keyed on disk by session id + prompt-prefix
   hash + K/V layout fingerprint (manifest JSON next to chunks); startup scans the
   spill root, adopts valid records, and deletes stale/foreign ones; shutdown no longer
-  rmtrees. Restore still requires an exact prefix + fingerprint match.
+  rmtrees. Restore requires a fingerprint match and a matching token prefix.
 
-Decisions from the 1M gate (task 3F, 2026-09-04):
+Decisions from the 1M gate (tasks 3F/3G, 2026-09-04):
 
 - **Look-ahead promotion.** NVMe restore measured ~1.3 GiB/s (0.98 s at 393K, ~2.5 s
   projected at 1M) against ~0.13 s from RAM, so while the resident session decodes, a
@@ -199,8 +199,19 @@ Decisions from the 1M gate (task 3F, 2026-09-04):
   the RAM budget and the host reserve, and makes room by demoting other RAM checkpoints
   to disk (LRU) -- never the resident or restoring session's own. `--session-spill-ram-gb`
   now defaults to **4** so one 1M look-ahead fits beside the checkpoint being written.
+- **Partial-prefix restore.** A checkpoint carries the recurrent state at several prefix
+  boundaries, not only its end: the final state plus the earlier x`track_chunk_size`
+  snapshots the radix tree still holds for that session (so the count follows
+  `--linear-state-slots`), thinned to at most 8 entries spaced by
+  `--session-spill-state-stride` (65536) at ~47 MiB each. A restore installs the longest
+  matching prefix that ends on a stored boundary and re-prefills the tail, instead of
+  discarding 1.24 GiB over one retokenized `</think>`. Records written before this
+  (manifest v1) are deleted on adoption.
 - **A restore blocked by the resident session is retried, not discarded**, at the
   admission-failure point that spills its competitor.
+- The `nemotron_v3` reasoning parser now drops a `<think>`/`</think>` that arrives
+  outside a reasoning block instead of streaming it as content -- that stray token is
+  what echoed back into the next turn's prompt and broke the prefix match.
 
 Measured sizing (task 2B4, 2026-09-04 — see
 `benchmarks/results/nemotron35_lightning_5080_cache_study_2026-09-04.md`):

@@ -82,6 +82,18 @@ class ForwardInput(NamedTuple):
 ForwardData: TypeAlias = "Tuple[ForwardInput, ForwardOutput]"
 
 
+def _common_prefix_len(record_tokens: torch.Tensor, input_ids, limit: int) -> int:
+    """Length of the common prefix of a checkpoint and a client prompt, capped at ``limit``."""
+    if limit <= 0:
+        return 0
+    ours = record_tokens[:limit].to(device="cpu", dtype=torch.int32)
+    theirs = torch.as_tensor(input_ids[:limit]).to(device="cpu", dtype=torch.int32)
+    if ours.numel() < limit or theirs.numel() < limit:
+        return 0
+    differing = (ours != theirs).nonzero()
+    return limit if differing.numel() == 0 else int(differing[0])
+
+
 @dataclass
 class SessionLease:
     handle: object | None
@@ -1169,7 +1181,15 @@ class Scheduler(SchedulerIOMixin):
             return
         self._discard_session_spill(session)
         started = time.perf_counter()
-        record = store.spill(session_id, session.token_ids, page_indices, linear_slot)
+        record = store.spill(
+            session_id,
+            session.token_ids,
+            page_indices,
+            linear_slot,
+            # Earlier x``track_chunk_size`` states the tree still holds: they are what a
+            # later restore cuts at when the client's tokens drifted near the end.
+            extra_states=self.cache_manager.hybrid_session_state_boundaries(handle),
+        )
         elapsed = time.perf_counter() - started
         if record is None:
             logger.warning(
@@ -1205,21 +1225,29 @@ class Scheduler(SchedulerIOMixin):
         store.collect_prefetch(session_id, wait=True)
         session.spill = record
         store.touch(record)
-        # The final prompt token must still run through prefill. Never install a checkpoint
-        # that reaches beyond the client's exact reusable prefix.
-        if record.num_pages > max(0, len(input_ids) - 1) or not torch.equal(
-            record.token_ids,
-            input_ids[: record.num_pages].to(device="cpu", dtype=torch.int32),
-        ):
+        # The final prompt token must still run through prefill, so the usable prefix stops
+        # one short of the client's input. Restore the longest matching prefix that ends on
+        # a stored recurrent-state boundary; the tail (a retokenized turn, typically) is
+        # re-prefilled instead of the whole context being thrown away.
+        matched = _common_prefix_len(
+            record.token_ids, input_ids, min(record.num_pages, max(0, len(input_ids) - 1))
+        )
+        length = record.restorable_length(matched)
+        if length <= 0:
             self._discard_session_spill(session)
             logger.info_rank0(
-                "Discarded cold session %s: client token prefix changed", session_id
+                "Discarded cold session %s: client tokens diverge at %d, before the "
+                "first stored state boundary",
+                session_id,
+                matched,
             )
             return False
 
         cm = self.cache_manager
         try:
-            missing, allocatable = cm.hybrid_session_restore_geometry(record.token_ids)
+            missing, allocatable = cm.hybrid_session_restore_geometry(
+                record.token_ids[:length]
+            )
             if missing > allocatable:
                 required = cm.committed_pages + missing - allocatable
                 old_pages, new_pages = self.engine.grow_runtime_kv(required)
@@ -1231,15 +1259,19 @@ class Scheduler(SchedulerIOMixin):
                         new_pages,
                         session_id,
                     )
-            tier, tokens, nbytes = record.tier, record.num_pages, record.byte_size
+            tier, total = record.tier, record.num_pages
+            # Byte cost scales with what is actually installed, not with the record.
+            nbytes = record.byte_size * length / max(1, total)
             started = time.perf_counter()
-            session.handle = cm.restore_hybrid_session_prefix(record, store)
+            session.handle = cm.restore_hybrid_session_prefix(record, store, length)
             elapsed = time.perf_counter() - started
             self._discard_session_spill(session)
             logger.info_rank0(
-                "Restored cold session %s: %d tokens from %s, %.2f GiB in %.3f s (%.2f GiB/s)",
+                "Restored cold session %s: %d/%d tokens from %s, %.2f GiB in %.3f s "
+                "(%.2f GiB/s)",
                 session_id,
-                tokens,
+                length,
+                total,
                 tier,
                 nbytes / (1 << 30),
                 elapsed,

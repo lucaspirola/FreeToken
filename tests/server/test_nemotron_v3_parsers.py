@@ -100,6 +100,117 @@ def test_streaming_tool_call_without_a_closer():
 
 
 # ---------------------------------------------------------------------------
+# Stray think markers outside a reasoning block are dropped
+# ---------------------------------------------------------------------------
+def test_a_second_closer_is_dropped_non_stream():
+    """The block already closed, so a further `</think>` closes nothing: it must
+    not reach `content` (it poisons the conversation the client echoes back and
+    breaks cold-checkpoint prefix matching)."""
+    p = NemotronV3ReasoningParser(force_reasoning=True)
+    r = p.detect_and_parse("weigh it</think>The answer is 4.</think> Really.")
+    assert r.reasoning_text == "weigh it"
+    assert r.normal_text == "The answer is 4. Really."
+
+
+def test_a_closer_with_no_block_open_is_dropped_non_stream():
+    """thinking off: the template pre-closed the block, so a `</think>` the model
+    emits anyway is stray from the very first token."""
+    p = NemotronV3ReasoningParser(force_reasoning=False)
+    r = p.detect_and_parse("The answer is 4.</think> Really.")
+    assert r.reasoning_text == ""
+    assert r.normal_text == "The answer is 4. Really."
+
+
+def test_a_stray_opener_after_the_block_is_dropped_non_stream():
+    """A `<think>` once the answer started opens nothing: dropped, not content and
+    not reasoning."""
+    p = NemotronV3ReasoningParser(force_reasoning=True)
+    r = p.detect_and_parse("weigh it</think>The answer <think>is 4.")
+    assert r.reasoning_text == "weigh it"
+    assert r.normal_text == "The answer is 4."
+
+
+def _stream(parser, chunks):
+    reasoning, content = [], []
+    for chunk in chunks:
+        r = parser.parse_streaming_increment(chunk)
+        reasoning.append(r.reasoning_text)
+        content.append(r.normal_text)
+    r = parser.flush()
+    reasoning.append(r.reasoning_text)
+    content.append(r.normal_text)
+    return "".join(reasoning), "".join(content)
+
+
+def test_a_second_closer_is_dropped_streaming():
+    p = NemotronV3ReasoningParser(force_reasoning=True)
+    reasoning, content = _stream(
+        p, ["weigh it", "</think>", "The answer is 4.", "</think>", " Really."]
+    )
+    assert reasoning == "weigh it"
+    assert content == "The answer is 4. Really."
+
+
+def test_a_closer_split_across_chunks_is_dropped_streaming():
+    """The marker's leading `<` arrives glued to the preceding token; the existing
+    partial-hold reassembles it, and the whole marker is then dropped."""
+    p = NemotronV3ReasoningParser(force_reasoning=True)
+    reasoning, content = _stream(
+        p, ["weigh it", "</think>", "The answer is 4.", "</th", "ink> Really."]
+    )
+    assert reasoning == "weigh it"
+    assert content == "The answer is 4. Really."
+
+
+def test_a_closer_with_no_block_open_is_dropped_streaming():
+    p = NemotronV3ReasoningParser(force_reasoning=False)
+    reasoning, content = _stream(p, ["The answer is 4.", "</think>", " Really."])
+    assert reasoning == ""
+    assert content == "The answer is 4. Really."
+
+
+def test_a_stray_opener_after_the_block_is_dropped_streaming():
+    """Dropped outright -- crucially it must NOT re-open a reasoning block and
+    swallow the rest of the answer into `reasoning_content`."""
+    p = NemotronV3ReasoningParser(force_reasoning=True)
+    reasoning, content = _stream(
+        p, ["weigh it", "</think>", "The answer ", "<think>", "is 4."]
+    )
+    assert reasoning == "weigh it"
+    assert content == "The answer is 4."
+    assert p.in_reasoning is False
+
+
+def test_a_stray_opener_split_across_chunks_is_dropped_streaming():
+    p = NemotronV3ReasoningParser(force_reasoning=True)
+    reasoning, content = _stream(
+        p, ["weigh it", "</think>", "The answer ", "<thi", "nk>is 4."]
+    )
+    assert reasoning == "weigh it"
+    assert content == "The answer is 4."
+
+
+def test_a_real_opening_think_still_opens_a_block():
+    """The normal `<think>...</think>` turn is untouched: a thinking-off gear where
+    the model opens a block of its own still yields reasoning, not content."""
+    p = NemotronV3ReasoningParser(force_reasoning=False)
+    reasoning, content = _stream(p, ["<think>", "a thought", "</think>", "an answer"])
+    assert reasoning == "a thought"
+    assert content == "an answer"
+
+
+def test_stray_closer_never_reaches_the_client_end_to_end():
+    state = nemotron_state([reply("a thought</think>an answer"), reply("</think>!"), done()])
+    request = chat_request(tools=None)
+    response = run(
+        handle_chat_completion(request, request=None, state=state, model_sampling={})
+    )
+    message = response["choices"][0]["message"]
+    assert message["content"] == "an answer!"
+    assert message["reasoning_content"] == "a thought"
+
+
+# ---------------------------------------------------------------------------
 # End to end: the malformed turn must still produce a tool call
 # ---------------------------------------------------------------------------
 def test_missing_closer_still_yields_a_tool_call_non_stream():

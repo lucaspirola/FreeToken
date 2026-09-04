@@ -357,6 +357,16 @@ def parse_args(
         help="Wipe cold session checkpoints on exit instead of keeping them.",
     )
     parser.set_defaults(session_spill_persist=ServerArgs.session_spill_persist)
+    parser.add_argument(
+        "--session-spill-state-stride",
+        type=int,
+        default=ServerArgs.session_spill_state_stride,
+        help=(
+            "Spacing (tokens) of the extra recurrent-state boundaries a cold checkpoint "
+            "carries. A restore resumes at the deepest boundary the client's tokens still "
+            "match, so this bounds the re-prefill a retokenization drift costs."
+        ),
+    )
 
     parser.add_argument(
         "--max-seq-len-override",
@@ -945,6 +955,8 @@ def parse_args(
         parser.error("--session-spill-ram-gb must be >= 0")
     if kwargs["session_spill_disk_gb"] < 0:
         parser.error("--session-spill-disk-gb must be >= 0")
+    if kwargs["session_spill_state_stride"] < 1:
+        parser.error("--session-spill-state-stride must be >= 1")
     if kwargs["session_spill_limit_gb"] < 0:
         parser.error("--session-spill-limit-gb must be >= 0")
     if isinstance(kwargs["session_spill_dir"], str) and kwargs[

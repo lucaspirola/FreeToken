@@ -54,6 +54,10 @@ class EngineConfig:
     # K/V layout fingerprint and prompt-prefix hash; startup adopts the matching ones and
     # deletes the rest). False restores the old wipe-on-exit behavior.
     session_spill_persist: bool = True
+    # Look-ahead spacing of the extra recurrent-state boundaries a checkpoint carries. A
+    # restore cuts at the deepest stored boundary the client's tokens still match, so this
+    # bounds the re-prefill a retokenization drift costs -- at ~47 MiB per boundary.
+    session_spill_state_stride: int = 65_536
     attention_backend: str = "auto"
     moe_backend: str = "auto"
     # NVFP4 routed-expert GEMM backend (--nvfp4-backend): auto|marlin|flashinfer|triton.

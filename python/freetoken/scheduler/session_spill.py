@@ -10,6 +10,14 @@ Retention is by capacity and age, never by lease lifetime: a spill that would ex
 total byte cap (or the filesystem guard) evicts least-recently-used checkpoints until it
 fits, and only a single record larger than the whole cap is refused.
 
+A record carries the recurrent (conv + SSM) state at SEVERAL prefix boundaries, not just at
+its end: the final one plus whatever earlier x``track_chunk_size`` snapshots the caller can
+still reach.  A restore then cuts at the deepest stored boundary that still matches the
+client's tokens, so one retokenized assistant turn costs the tail, not the whole context.
+The set is thinned to ``max_states`` entries -- coarse ``state_stride_tokens`` coverage
+first, then the freshest boundaries -- because each one costs ``bytes_per_slot`` (47 MiB on
+Nemotron 3.5 Lightning) of the same RAM/disk budget as the KV itself.
+
 A queued session's disk record can be promoted to the RAM tier ahead of its admission
 (:meth:`start_prefetch`): the read runs on one background thread, and the main thread
 installs the result, so the look-ahead never races the store's accounting.
@@ -26,7 +34,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Iterable, Iterator, Sequence
 
 import torch
 
@@ -36,7 +44,12 @@ logger = init_logger(__name__)
 
 MANIFEST_NAME = "manifest.json"
 TOKENS_NAME = "tokens.pt"
-MANIFEST_VERSION = 1
+# v2 added the per-boundary recurrent states; v1 records are discarded on adoption.
+MANIFEST_VERSION = 2
+STATE_FAMILIES = ("gdn_conv", "gdn_recurrent")
+# Look-ahead spacing of the extra boundary states, and their hard count bound.
+DEFAULT_STATE_STRIDE_TOKENS = 65_536
+MAX_STATE_SNAPSHOTS = 8
 
 
 @dataclass
@@ -62,6 +75,16 @@ class SessionSpillRecord:
     created_at: float = 0.0
     last_used_at: float = 0.0
     directory: Path | None = field(default=None)
+
+    @property
+    def state_boundaries(self) -> list[int]:
+        """Ascending prefix lengths whose recurrent state this record carries."""
+        return sorted({c.start for c in self.chunks if c.family == "gdn_recurrent"})
+
+    def restorable_length(self, matched_len: int) -> int:
+        """Deepest stored boundary at or below ``matched_len`` (0 = nothing usable)."""
+        usable = [b for b in self.state_boundaries if b <= matched_len]
+        return max(usable) if usable else 0
 
 
 @dataclass
@@ -136,6 +159,8 @@ class SessionSpillStore:
         limit_bytes: int | None = None,
         persist: bool = True,
         model_id: str = "",
+        state_stride_tokens: int = DEFAULT_STATE_STRIDE_TOKENS,
+        max_states: int = MAX_STATE_SNAPSHOTS,
     ) -> None:
         self.kv_pool = kv_pool
         self.linear_state_pool = linear_state_pool
@@ -150,6 +175,8 @@ class SessionSpillStore:
         )
         self.persist = bool(persist)
         self.model_id = str(model_id)
+        self.state_stride_tokens = max(1, int(state_stride_tokens))
+        self.max_states = max(1, int(max_states))
         self._prefetch: _Prefetch | None = None
         self.ram_bytes = 0
         self.disk_bytes = 0
@@ -186,6 +213,9 @@ class SessionSpillStore:
             limit_bytes=int(config.session_spill_limit_gb * (1 << 30)),
             persist=bool(getattr(config, "session_spill_persist", True)),
             model_id=str(getattr(config, "model_path", "")),
+            state_stride_tokens=int(
+                getattr(config, "session_spill_state_stride", DEFAULT_STATE_STRIDE_TOKENS)
+            ),
         )
 
     # ------------------------------------------------------------------ layout
@@ -193,10 +223,12 @@ class SessionSpillStore:
     def _record_dir(self, session_id: str) -> Path:
         return self.root / hashlib.sha256(session_id.encode("utf-8")).hexdigest()
 
-    def _payload_bytes(self, num_pages: int, token_ids: torch.Tensor) -> int:
+    def _payload_bytes(
+        self, num_pages: int, token_ids: torch.Tensor, num_states: int = 1
+    ) -> int:
         return (
             self.kv_pool.session_spill_bytes(num_pages)
-            + self.linear_state_pool.bytes_per_slot()
+            + self.linear_state_pool.bytes_per_slot() * max(1, int(num_states))
             + token_ids.numel() * 4
         )
 
@@ -267,9 +299,16 @@ class SessionSpillStore:
             chunks.append(SpillChunk(str(family), int(layer), int(start), file=path))
         if not chunks:
             return None
+        num_pages = int(manifest.get("num_pages", 0))
+        conv = {c.start for c in chunks if c.family == "gdn_conv"}
+        recurrent = {c.start for c in chunks if c.family == "gdn_recurrent"}
+        # Every boundary needs BOTH halves of the recurrent state, and the record's own
+        # end must be one of them, or a full-prefix restore could not be served.
+        if not conv or conv != recurrent or num_pages not in recurrent:
+            return None
         return SessionSpillRecord(
             token_ids=tokens,
-            num_pages=int(manifest.get("num_pages", 0)),
+            num_pages=num_pages,
             byte_size=int(manifest.get("byte_size", 0)),
             fingerprint=live,
             tier="disk",
@@ -395,6 +434,26 @@ class SessionSpillStore:
 
     # ------------------------------------------------------------------ spill
 
+    def _select_state_boundaries(self, candidates: Iterable[int], final: int) -> list[int]:
+        """Thin ``candidates`` to at most ``max_states`` boundaries, ``final`` always kept.
+
+        Two passes over the candidates, newest first: the first spends the budget on
+        ``state_stride_tokens``-spaced coverage of the whole prefix, the second gives what is
+        left to the freshest boundaries -- which is where a retokenization drift almost
+        always is, and is all a short session has to offer.
+        """
+        kept = [int(final)]
+        for gap in (self.state_stride_tokens, 0):
+            for boundary in sorted({int(c) for c in candidates}, reverse=True):
+                if len(kept) >= self.max_states:
+                    return sorted(kept)
+                if boundary <= 0 or boundary >= final or boundary in kept:
+                    continue
+                if gap and min(abs(boundary - k) for k in kept) < gap:
+                    continue
+                kept.append(boundary)
+        return sorted(kept)
+
     @torch.inference_mode()
     def spill(
         self,
@@ -402,10 +461,18 @@ class SessionSpillStore:
         token_ids: torch.Tensor,
         page_indices: torch.Tensor,
         linear_slot: int,
+        *,
+        extra_states: Sequence[tuple[int, int]] = (),
     ) -> SessionSpillRecord | None:
+        """Checkpoint one session. ``extra_states`` are ``(prefix length, pool slot)`` pairs
+        for earlier boundaries the caller can still reach (live radix snapshots), and are
+        what lets a later restore cut before a client-side token drift."""
         tokens = token_ids.detach().to(device="cpu", dtype=torch.int32).clone()
         num_pages = int(len(page_indices))
-        byte_size = self._payload_bytes(num_pages, tokens)
+        slots = {int(b): int(slot) for b, slot in extra_states}
+        slots[num_pages] = int(linear_slot)
+        boundaries = self._select_state_boundaries(slots, num_pages)
+        byte_size = self._payload_bytes(num_pages, tokens, len(boundaries))
         # Drop any previous checkpoint for this session first: its directory is the same
         # deterministic path this spill is about to write.
         self.discard(self.get(session_id))
@@ -448,24 +515,21 @@ class SessionSpillStore:
                     path.chmod(0o600)
                     chunks.append(SpillChunk(family, layer, start, file=path))
 
-            for family, value in (
-                (
-                    "gdn_conv",
-                    self.linear_state_pool.conv_states[:, linear_slot].cpu().clone(),
-                ),
-                (
-                    "gdn_recurrent",
-                    self.linear_state_pool.recurrent_states[:, linear_slot].cpu().clone(),
-                ),
-            ):
-                value = value.contiguous()
-                if tier == "ram":
-                    chunks.append(SpillChunk(family, -1, 0, value=value))
-                else:
-                    path = target / f"{len(chunks):06d}.pt"
-                    torch.save(value, path)
-                    path.chmod(0o600)
-                    chunks.append(SpillChunk(family, -1, 0, file=path))
+            pool = self.linear_state_pool
+            for boundary in boundaries:
+                slot = slots[boundary]
+                for family, source in (
+                    ("gdn_conv", pool.conv_states),
+                    ("gdn_recurrent", pool.recurrent_states),
+                ):
+                    value = source[:, slot].cpu().clone().contiguous()
+                    if tier == "ram":
+                        chunks.append(SpillChunk(family, -1, boundary, value=value))
+                    else:
+                        path = target / f"{len(chunks):06d}.pt"
+                        torch.save(value, path)
+                        path.chmod(0o600)
+                        chunks.append(SpillChunk(family, -1, boundary, file=path))
             if tier == "disk":
                 self._write_manifest(record)
         except Exception:
@@ -543,17 +607,31 @@ class SessionSpillStore:
                 dropped += 1
         return demoted, dropped
 
-    def iter_chunks(self, record: SessionSpillRecord) -> Iterator[tuple[SpillChunk, torch.Tensor]]:
+    @staticmethod
+    def _chunk_needed(chunk: SpillChunk, num_pages: int | None, boundary: int | None) -> bool:
+        """A partial restore reads only the KV below its cut and the state AT the cut."""
+        if chunk.family in STATE_FAMILIES:
+            return boundary is None or chunk.start == boundary
+        return num_pages is None or chunk.start < num_pages
+
+    def iter_chunks(
+        self,
+        record: SessionSpillRecord,
+        *,
+        num_pages: int | None = None,
+        state_boundary: int | None = None,
+    ) -> Iterator[tuple[SpillChunk, torch.Tensor]]:
         if not record.valid or record.fingerprint != self.kv_pool.session_spill_fingerprint():
             raise ValueError("stale or incompatible session checkpoint")
+        wanted = [c for c in record.chunks if self._chunk_needed(c, num_pages, state_boundary)]
         if record.tier == "ram":
-            for chunk in record.chunks:
+            for chunk in wanted:
                 if chunk.value is None:
                     raise ValueError("RAM session checkpoint chunk has no payload")
                 yield chunk, chunk.value
             return
 
-        disk_chunks = list(record.chunks)
+        disk_chunks = wanted
         if not disk_chunks:
             return
 

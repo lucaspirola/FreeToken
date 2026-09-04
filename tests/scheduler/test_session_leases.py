@@ -184,13 +184,18 @@ class _SpillStore:
         self.cancelled: str | None = None
         self.protected: set[str] = set()
 
-    def spill(self, session_id, token_ids, page_indices, linear_slot):
+    def spill(self, session_id, token_ids, page_indices, linear_slot, *, extra_states=()):
+        boundaries = sorted({len(page_indices), *(int(b) for b, _slot in extra_states)})
         record = SimpleNamespace(
             session_id=session_id,
             num_pages=len(page_indices),
             tier="ram",
             byte_size=1 << 20,
             token_ids=token_ids,
+            state_boundaries=boundaries,
+            restorable_length=lambda matched, _b=boundaries: max(
+                [b for b in _b if b <= matched], default=0
+            ),
         )
         self.records[session_id] = record
         return record
@@ -240,6 +245,9 @@ class _SessionCache(_Cache):
     """Cache whose KV is exhausted until a session lease is released."""
 
     is_hybrid = False
+
+    def hybrid_session_state_boundaries(self, _handle):
+        return []
 
     def __init__(self) -> None:
         super().__init__()
@@ -426,7 +434,7 @@ def test_restore_finds_a_checkpoint_left_behind_by_a_closed_lease():
     # A fresh lease (reconnect, or a restarted server) carries no record of its own.
     scheduler._sessions["A"] = SessionLease(None, 300.0, reclaimable=True)
     scheduler.cache_manager.hybrid_session_restore_geometry = lambda _t: (0, 99)
-    scheduler.cache_manager.restore_hybrid_session_prefix = lambda _r, _s: "restored"
+    scheduler.cache_manager.restore_hybrid_session_prefix = lambda _r, _s, _n=None: "restored"
 
     assert scheduler._restore_cold_session("A", torch.tensor([1, 2, 3, 4, 5])) is True
     assert scheduler._sessions["A"].handle == "restored"
@@ -493,7 +501,7 @@ def test_resident_session_outlives_its_ttl_and_is_checkpointed_only_on_demand():
 
     scheduler._sessions["A"] = SessionLease(None, 300.0, reclaimable=True)
     scheduler.cache_manager.hybrid_session_restore_geometry = lambda _t: (0, 99)
-    scheduler.cache_manager.restore_hybrid_session_prefix = lambda _r, _s: "restored"
+    scheduler.cache_manager.restore_hybrid_session_prefix = lambda _r, _s, _n=None: "restored"
     assert scheduler._restore_cold_session("A", torch.tensor([1, 2, 3, 4, 5])) is True
     assert scheduler._sessions["A"].handle == "restored"
 
@@ -514,7 +522,7 @@ def test_spill_and_restore_logs_report_sub_second_durations(caplog):
     lease.token_ids = tokens
     scheduler._sessions["A"] = lease
     scheduler.cache_manager.hybrid_session_restore_geometry = lambda _t: (0, 99)
-    scheduler.cache_manager.restore_hybrid_session_prefix = lambda _r, _s: "restored"
+    scheduler.cache_manager.restore_hybrid_session_prefix = lambda _r, _s, _n=None: "restored"
 
     with caplog.at_level(logging.INFO, logger="freetoken.scheduler.scheduler"):
         scheduler._spill_soft_session("A", lease)
@@ -598,6 +606,62 @@ def test_an_aborted_request_cancels_its_in_flight_look_ahead():
     assert record.tier == "disk"  # and the checkpoint survives for the reconnect
 
 
+# ------------------------------------------- partial-prefix cold restore (task 3G)
+
+
+def _restoring_scheduler(record_tokens, extra_states=()):
+    import torch
+
+    scheduler = _demand_scheduler()
+    store = scheduler._session_spill_store
+    tokens = torch.tensor(record_tokens, dtype=torch.int32)
+    store.spill("A", tokens, list(range(len(tokens))), 3, extra_states=extra_states)
+    scheduler._sessions["A"] = SessionLease(None, 300.0, reclaimable=True)
+    scheduler.cache_manager.hybrid_session_restore_geometry = lambda _t: (0, 99)
+    return scheduler, store
+
+
+def test_restore_resumes_at_the_deepest_boundary_the_client_tokens_still_match():
+    import torch
+
+    scheduler, store = _restoring_scheduler([1, 2, 3, 4, 5, 6], extra_states=[(4, 7)])
+    installed = []
+    scheduler.cache_manager.restore_hybrid_session_prefix = lambda _r, _s, n=None: (
+        installed.append(n) or "restored"
+    )
+
+    # The client echoed its own turn back with one token retokenized at index 4.
+    assert scheduler._restore_cold_session("A", torch.tensor([1, 2, 3, 4, 99, 6, 7])) is True
+
+    assert installed == [4]  # 4 restored, the drifting tail re-prefilled
+    assert scheduler._sessions["A"].handle == "restored"
+    assert store.get("A") is None  # consumed
+
+
+def test_an_unchanged_prompt_still_restores_the_whole_checkpoint():
+    import torch
+
+    scheduler, _store = _restoring_scheduler([1, 2, 3, 4, 5, 6], extra_states=[(4, 7)])
+    installed = []
+    scheduler.cache_manager.restore_hybrid_session_prefix = lambda _r, _s, n=None: (
+        installed.append(n) or "restored"
+    )
+
+    assert scheduler._restore_cold_session("A", torch.tensor([1, 2, 3, 4, 5, 6, 7])) is True
+    assert installed == [6]
+
+
+def test_a_drift_before_the_first_boundary_discards_the_checkpoint():
+    import torch
+
+    scheduler, store = _restoring_scheduler([1, 2, 3, 4, 5, 6], extra_states=[(4, 7)])
+    scheduler.cache_manager.restore_hybrid_session_prefix = lambda _r, _s, _n=None: "restored"
+
+    assert scheduler._restore_cold_session("A", torch.tensor([1, 99, 3, 4, 5, 6, 7])) is False
+    assert scheduler._sessions["A"].handle is None
+    assert store.get("A") is None  # nothing reusable: full recompute
+
+
 def test_a_restore_blocked_by_the_resident_session_is_retried_before_admission():
     """The pools the restore needs are the ones the resident lease still owns."""
     import torch
@@ -617,8 +681,8 @@ def test_a_restore_blocked_by_the_resident_session_is_retried_before_admission()
 
     attempts = []
 
-    def _restore(_record, _store):
-        attempts.append(len(attempts))
+    def _restore(_record, _store, num_tokens=None):
+        attempts.append(num_tokens)
         if len(attempts) == 1:
             raise RuntimeError("no GDN snapshot slot available for cold session restore")
         return "restored"
@@ -632,6 +696,6 @@ def test_a_restore_blocked_by_the_resident_session_is_retried_before_admission()
 
     # The blocked admission checkpoints A and retries B's restore in the same pass.
     assert scheduler._schedule_next_batch() is None
-    assert attempts == [0, 1]
+    assert attempts == [4, 4]
     assert scheduler._sessions["B"].handle == "restored"
     assert store.get("B") is None

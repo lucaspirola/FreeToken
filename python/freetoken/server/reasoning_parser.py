@@ -446,6 +446,60 @@ class NemotronV3ReasoningParser(ThinkReasoningParser):
             tool_start_token="<tool_call>",
         )
 
+    def _drop_stray_markers(self, text: str) -> str:
+        """Delete think markers that fall *outside* a reasoning block.
+
+        Nemotron's template pre-opens (thinking on) or pre-closes (thinking off)
+        the block, so a marker the model emits once the block is over -- a second
+        ``</think>``, or a ``<think>`` after the answer started -- closes or opens
+        nothing. Leaking it into ``content`` poisons the conversation the client
+        echoes back and breaks cold-checkpoint prefix matching, so it is dropped:
+        never content, never reasoning.
+        """
+        return text.replace(self.think_start_token, "").replace(
+            self.think_end_token, ""
+        )
+
+    def _without_stray_markers(
+        self, result: ReasoningParseResult
+    ) -> ReasoningParseResult:
+        if not result.normal_text:
+            return result
+        return ReasoningParseResult(
+            reasoning_text=result.reasoning_text,
+            normal_text=self._drop_stray_markers(result.normal_text),
+        )
+
+    def detect_and_parse(self, text: str) -> ReasoningParseResult:
+        return self._without_stray_markers(super().detect_and_parse(text))
+
+    def parse_streaming_increment(self, new_text: str) -> ReasoningParseResult:
+        was_reasoning = self._in_reasoning
+        result = super().parse_streaming_increment(new_text)
+        if was_reasoning and not self._in_reasoning:
+            # Reasoning is over for good: pin the base's "opener already seen"
+            # flag so a stray <think> can never re-open a block (it is dropped
+            # below instead). ``_split_trailing_partial`` keeps holding its
+            # partials regardless -- see the override.
+            self._stripped_think_start = True
+        return self._without_stray_markers(result)
+
+    def flush(self) -> ReasoningParseResult:
+        return self._without_stray_markers(super().flush())
+
+    def _split_trailing_partial(self, text: str) -> tuple[str, str]:
+        safe, held = super()._split_trailing_partial(text)
+        if held:
+            return safe, held
+        # The base stops tracking ``<think>`` once one has been consumed. A stray
+        # opener still has to be recognised whole before it can be dropped, so
+        # keep holding its partials across the chunk boundary.
+        tok = self.think_start_token
+        for k in range(min(len(tok) - 1, len(text)), 0, -1):
+            if text.endswith(tok[:k]):
+                return text[:-k], text[-k:]
+        return text, ""
+
 
 class MiniMaxM3ReasoningParser(BaseReasoningParser):
     """Reasoning parser for MiniMax-M3's ``<mm:think>...</mm:think>`` protocol.

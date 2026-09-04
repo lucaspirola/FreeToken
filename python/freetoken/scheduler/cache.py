@@ -468,9 +468,37 @@ class CacheManager:
         self.lock(handle)
         return handle
 
+    def hybrid_session_state_boundaries(self, handle) -> list[tuple[int, int]]:
+        """``(prefix length, snapshot slot)`` for every snapshot ABOVE ``handle``'s node.
+
+        These are the exact x``track_chunk_size`` boundaries the radix tree still holds for
+        this session (the end of each committed prefill chunk, and the end of every earlier
+        turn that was restored into the tree). Checkpointing them alongside the final state
+        is what lets a later restore cut *before* a client-side retokenization drift instead
+        of discarding the whole record. How many survive is bounded by the state pool, so
+        this is best-effort: an empty list only costs the old whole-or-nothing behavior.
+        """
+        node = getattr(handle, "node", None)
+        if not self.is_hybrid or node is None or node.is_root():
+            return []
+        boundaries: list[tuple[int, int]] = []
+        cur = node.parent
+        while cur is not None and not cur.is_root():
+            if cur.mamba_value is not None:
+                boundaries.append((self.prefix_cache._path_len(cur), int(cur.mamba_value)))
+            cur = cur.parent
+        return boundaries
+
     @torch.inference_mode()
-    def restore_hybrid_session_prefix(self, record, store) -> BaseCacheHandle:
-        """Import an exact cold KV/GDN checkpoint and return it as a locked radix handle.
+    def restore_hybrid_session_prefix(
+        self, record, store, num_tokens: int | None = None
+    ) -> BaseCacheHandle:
+        """Import a cold KV/GDN checkpoint and return it as a locked radix handle.
+
+        ``num_tokens`` restores only the record's first ``num_tokens`` tokens -- it must be
+        one of ``record.state_boundaries``, so the installed recurrent state is the exact
+        state at the cut and the caller re-prefills the tail. It defaults to the whole
+        checkpoint.
 
         The cold tier is intentionally limited to page-size-one HybridRadixCache. Duplicate
         pages are reconciled by ``insert`` exactly like a normal finished request, so shared
@@ -480,9 +508,12 @@ class CacheManager:
             raise RuntimeError("cold session restore requires hybrid radix with page_size=1")
         from freetoken.kvcache.hybrid_radix_cache import HybridCacheHandle
 
-        tokens = record.token_ids
+        length = record.num_pages if num_tokens is None else int(num_tokens)
+        if length <= 0 or length > record.num_pages or length not in record.state_boundaries:
+            raise ValueError(f"no stored recurrent state at session prefix {length}")
+        tokens = record.token_ids[:length]
         existing = self.prefix_cache.match_prefix(tokens)
-        if existing.cached_len == record.num_pages:
+        if existing.cached_len == length:
             handle = HybridCacheHandle(existing.cached_len, existing.node, existing.kv_indices)
             self.lock(handle)
             return handle
@@ -496,7 +527,7 @@ class CacheManager:
         if resident_locked:
             self.prefix_cache.inc_lock(kv_node)
         try:
-            allocated = self._page_to_token(self._allocate(record.num_pages - resident_len))
+            allocated = self._page_to_token(self._allocate(length - resident_len))
         except Exception:
             if resident_locked:
                 self.prefix_cache.dec_lock(kv_node)
@@ -508,7 +539,9 @@ class CacheManager:
             slot = self.acquire_mamba_slot()
             if slot is None:
                 raise RuntimeError("no GDN snapshot slot available for cold session restore")
-            for chunk, value in store.iter_chunks(record):
+            for chunk, value in store.iter_chunks(
+                record, num_pages=length, state_boundary=length
+            ):
                 if chunk.family == "gdn_conv":
                     self.linear_state_pool.conv_states[:, slot].copy_(value.to(
                         device=self.device, dtype=self.linear_state_pool.conv_states.dtype))
@@ -516,6 +549,7 @@ class CacheManager:
                     self.linear_state_pool.recurrent_states[:, slot].copy_(value.to(
                         device=self.device, dtype=self.linear_state_pool.recurrent_states.dtype))
                 else:
+                    value = value[: length - chunk.start]  # the cut can split a KV chunk
                     stop = chunk.start + value.shape[0]
                     if stop <= resident_len:
                         continue
@@ -531,9 +565,9 @@ class CacheManager:
             if mamba_exist:
                 self.linear_state_pool.free(slot)
             matched = self.prefix_cache.match_prefix(tokens)
-            if matched.cached_len != record.num_pages:
+            if matched.cached_len != length:
                 raise RuntimeError(
-                    f"restored session matched {matched.cached_len}/{record.num_pages} tokens"
+                    f"restored session matched {matched.cached_len}/{length} tokens"
                 )
             handle = HybridCacheHandle(matched.cached_len, matched.node, matched.kv_indices)
             self.lock(handle)
