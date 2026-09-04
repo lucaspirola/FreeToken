@@ -346,15 +346,70 @@ def test_dense_nvfp4_modules_and_lm_head_are_native():
     assert state["lm_head.weight_global"].shape == (131072,)
 
 
-def test_mamba_mixer_clamps_dt_on_prefill_only():
+def test_mamba_mixer_does_not_floor_dt():
+    """No lower clamp on dt, in prefill or decode.
+
+    ``time_step_min`` is HF's *initializer* range for ``dt_bias``; HF's forward reuses it
+    as a runtime floor and FreeToken copied that. A 1e-3 floor caps every head's memory
+    horizon at ``1/(|A|*1e-3)`` tokens and cost the 147K/262K mid-depth needle
+    (benchmarks/results/nemotron35_lightning_5080_262k_rootcause_2026-09-04.md)."""
     config = parse_config(_hf_config())
     mixer = _meta_model(config).backbone.layers.op_list[0].mixer
-    assert mixer.dt_limit == (0.001, float("inf"))
+    assert mixer.dt_limit == (0.0, float("inf"))
     # The single-step update must stay unclamped (HF reference + flashinfer parity).
     import inspect
 
     src = inspect.getsource(type(mixer)._decode_scan)
     assert "dt_limit" not in src
+
+
+def test_dt_min_env_restores_the_floor(monkeypatch):
+    """``FREETOKEN_NEMOTRON_DT_MIN`` is the A/B escape hatch that reinstates a floor."""
+    monkeypatch.setenv("FREETOKEN_NEMOTRON_DT_MIN", "0.001")
+    config = parse_config(_hf_config())
+    assert config.nemotron_h_args.time_step_min == 0.001
+    mixer = _meta_model(config).backbone.layers.op_list[0].mixer
+    assert mixer.dt_limit == (0.001, float("inf"))
+
+
+def test_dt_floor_would_erase_a_long_memory_head():
+    """Why the floor matters, measured on the scan rather than argued from a constant.
+
+    One head with ``|A| = 0.3`` and ``dt = 1e-5`` -- the regime the checkpoint's own
+    ``dt_bias`` reaches (its softplus goes down to 1.1e-6) -- is given a unit impulse at
+    token 0 and read out 32 768 tokens later. Retention is ``exp(-|A| * dt * T)``, so
+    flooring dt at 1e-3 multiplies the decay exponent by 100: 91% of the impulse survives
+    without the floor, 0.005% with it. The two runs differ only in ``dt_limit``."""
+    import math
+
+    import torch
+
+    from freetoken.models.nemotron_h.chunk_scan import mamba2_chunk_scan
+
+    tokens, dt_value, decay = 32768, 1e-5, 0.3
+    x = torch.zeros(1, tokens, 1, 1, dtype=torch.float32)
+    x[0, 0, 0, 0] = 1.0
+    dt = torch.full((1, tokens, 1), math.log(math.expm1(dt_value)), dtype=torch.float32)
+    A = torch.tensor([-decay], dtype=torch.float32)
+    B = torch.ones(1, tokens, 1, 1, dtype=torch.float32)
+    C = torch.ones(1, tokens, 1, 1, dtype=torch.float32)
+
+    def retention(dt_limit):
+        # y[0] is the impulse the head just absorbed (dt * B * C * x), y[-1] the same
+        # impulse after the whole sequence has decayed it -- so the ratio is the decay
+        # alone, with dt's effect on the *input* gain divided out.
+        out, _ = mamba2_chunk_scan(
+            x, dt, A, B, C, chunk_size=128, dt_softplus=True, dt_limit=dt_limit,
+            return_final_states=True,
+        )
+        y = out.reshape(-1)
+        return float(y[-1] / y[0])
+
+    free = retention((0.0, float("inf")))
+    floored = retention((1e-3, float("inf")))
+    assert free == pytest.approx(math.exp(-decay * dt_value * (tokens - 1)), rel=1e-3)
+    assert floored == pytest.approx(math.exp(-decay * 1e-3 * (tokens - 1)), rel=1e-2)
+    assert free > 0.9 and floored < 1e-4
 
 
 def test_registry_entry():
@@ -538,7 +593,7 @@ def test_real_lightning_config_parses_and_builds_on_meta():
     assert config.attn_quant == "none"
     assert config.dense_quant == "nvfp4" and config.lm_head_quant == "nvfp4"
     assert not config.single_stream_only
-    assert config.nemotron_h_args.time_step_min == 0.001
+    assert config.nemotron_h_args.time_step_min == 0.0
 
     state = _meta_model(config).state_dict()
     assert not any(".experts." in key for key in state)

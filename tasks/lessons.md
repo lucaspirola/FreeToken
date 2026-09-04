@@ -287,3 +287,37 @@ check for `Discarded cold session ...: client token prefix changed` before blami
 - `scripts/gpu_lock.sh`'s exit trap `pkill -9 -g $$` kills the whole process group, i.e. the
   pipeline that invoked it: every `gpu_lock.sh ... | tail` returns 137 with the output lost.
   Have the wrapped script `exec >` its own log file and read that afterwards.
+
+## 2026-09-04 (Nemotron 3.5 Lightning, 262K needle — ROOT CAUSE: the Mamba-2 dt floor)
+- **The bug was one number**: `dt_limit = (config.time_step_min, inf)` in the prefill scan.
+  `time_step_min`/`time_step_max`/`time_step_floor` are HF's *initializer* range for
+  `dt_bias`, not runtime bounds; HF's `NemotronHMamba2Mixer.forward` reuses one of them as a
+  clamp and FreeToken copied it. A 1e-3 floor caps every head's memory horizon at
+  `1/(|A|*1e-3)` tokens whatever the network computes. 147,456 @ depth 0.52 and 262,144 @
+  depth 0.52 go FAIL -> PASS on `dt_limit=(0.0, inf)` alone, at identical TTFT.
+- **Read a hyperparameter's *use site* in the reference implementation before copying it.**
+  Names ending in `_min`/`_max`/`_floor` on a Mamba config are almost always init ranges.
+  vLLM passes `dt_limit=(0.0, inf)`; llama.cpp does not clamp; FreeToken's own *decode*
+  kernel never clamped either — the prefill/decode disagreement was the tell, and it sat in
+  a code comment ("Prefill only: ... keeps parity with both") that rationalized it instead of
+  questioning it.
+- **Non-monotonic ⇒ marginal, not "not a code path".** The bisect's rule ("nothing keyed on a
+  power of two can pass at 180K and fail at 147K") was right but the *conclusion* drawn from it
+  was wrong. A defect that erodes a resource continuously — here, the set of heads that can
+  still carry information across the prompt — produces exactly a ragged pass/fail band. Rule
+  out *thresholds*, not *defects*.
+- **A per-length A/B of one suspected term beats any amount of state diffing.** Two servers,
+  ~20 GPU minutes, one env var. The three previous rounds (state dumps, 8-variant matrix,
+  cross-engine) cost hours and their value was entirely in narrowing *which* term to A/B —
+  the llama.cpp source read that found it took one subagent and no GPU at all.
+- Exonerated with evidence, not argument: the FP8 W8A8 Mamba `in_proj`/`out_proj` (a new
+  env-gated hook, `FREETOKEN_DEBUG_FP8_ACT_STATS`, shows 11 of 46 matrices saturate their
+  calibrated `input_scale`, but by the *same* 1.8e-5 clipped fraction at the passing 131K and
+  the failing 147K — a constant tax, not a length term); and the NVFP4 path, which is W4A16
+  end to end and quantizes no activation anywhere.
+- `torch.save`/`.tolist()` in a debug hook must be gated on `batch.is_prefill`: the engine
+  captures CUDA graphs on decode batches and any device->host copy inside capture raises
+  "Cannot copy between CPU and CUDA tensors during CUDA graph capture". Also skip `uid < 0`
+  (warmup) batches or the recorded amax is dummy-token magnitude.
+- `set -e` + `[ -n "$X" ] && export ...` as a statement kills the script when `$X` is empty
+  (the AND-list returns 1). Use `if ... then ... fi` in any `serve.sh` an unset variable can reach.

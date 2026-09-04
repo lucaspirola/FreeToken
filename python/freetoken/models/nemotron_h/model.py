@@ -26,12 +26,25 @@ from freetoken.layers import (
 from freetoken.models.blocks import BaseLLMModel
 from freetoken.utils import nvtx_annotate
 
+from .fp8_act_stats import ACT_STATS_PATH
 from .mamba2_reference import reference_enabled
 from .state_dump import STATE_DUMP_DIR
 
 if TYPE_CHECKING:
     from freetoken.models.config import ModelConfig
     from .config import NemotronHArgs
+
+
+def _act_stats_on(batch) -> bool:
+    """FP8 activation statistics are collected on real prefill batches only: decode
+    batches are CUDA-graph captured (a host sync inside capture is illegal) and the
+    engine's warmup/profiling batches (``uid < 0``) carry dummy tokens whose magnitudes
+    would pollute the recorded amax."""
+    return (
+        ACT_STATS_PATH is not None
+        and not batch.is_decode
+        and all(req.uid >= 0 for req in batch.reqs)
+    )
 
 
 def _linear(args: "NemotronHArgs", name: str, in_f: int, out_f: int):
@@ -86,9 +99,9 @@ class NemotronHMamba2Mixer(BaseOP):
         self.intermediate_size = args.mamba_intermediate_size
         self.conv_dim = self.intermediate_size + 2 * self.n_groups * self.state_size
         self.chunk_size = args.chunk_size
-        # HF clamps the discretized timestep to [time_step_min, inf) in the chunk scan.
-        # Prefill only: neither HF's single-step reference nor the flashinfer decode
-        # kernel clamps, so leaving decode unclamped keeps parity with both.
+        # No lower clamp on the discretized timestep (args.time_step_min is 0.0 unless
+        # FREETOKEN_NEMOTRON_DT_MIN overrides it): see config._dt_floor. Decode never
+        # clamped, so prefill and decode now agree, as do vLLM and llama.cpp.
         self.dt_limit = (args.time_step_min, float("inf"))
         prefix = f"backbone.layers.{layer_id}.mixer"
         self.in_proj = _linear(
@@ -203,6 +216,14 @@ class NemotronHMamba2Mixer(BaseOP):
         if fla is None:
             fla = build_fla_metadata(batch, hidden_states.device)
             batch.fla_metadata = fla
+        if _act_stats_on(batch):
+            from .fp8_act_stats import record
+
+            record(
+                f"backbone.layers.{self.layer_id}.mixer.in_proj",
+                hidden_states,
+                getattr(self.in_proj, "input_scale", None),
+            )
         proj = self.in_proj.forward(hidden_states)
         gate, conv_in, dt = torch.split(
             proj, [self.intermediate_size, self.conv_dim, self.num_heads], dim=-1
@@ -240,6 +261,14 @@ class NemotronHMamba2Mixer(BaseOP):
         out = self.norm.forward(
             scanned.reshape(-1, self.intermediate_size).to(gate.dtype), gate
         )
+        if _act_stats_on(batch):
+            from .fp8_act_stats import record
+
+            record(
+                f"backbone.layers.{self.layer_id}.mixer.out_proj",
+                out,
+                getattr(self.out_proj, "input_scale", None),
+            )
         return self.out_proj.forward(out)
 
 
@@ -421,6 +450,13 @@ class NemotronHForCausalLM(BaseLLMModel):
             from .state_dump import dump_prefill_state
 
             dump_prefill_state(logits)
+        if _act_stats_on(get_global_ctx().batch):
+            # Debug only (FREETOKEN_DEBUG_FP8_ACT_STATS=<file>); see fp8_act_stats.py.
+            # Prefill only: a flush syncs the accumulators to the host, which is illegal
+            # inside CUDA graph capture (the engine captures decode batches).
+            from .fp8_act_stats import flush
+
+            flush()
         return logits
 
 

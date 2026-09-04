@@ -22,18 +22,24 @@ restore) is implemented and unit-tested. Three things are NOT finished (below).
   5–8 GiB/s, NVMe restore ~1.3 GiB/s.
 
 ## Not finished — do these in order, ONE GPU job at a time under scripts/gpu_lock.sh
-1. **262K recall — cross-engine check.** The bisect (benchmarks/results/
-   nemotron35_lightning_5080_262k_bisect_2026-09-04.md) found no engine fault: 8/8 variants fail
-   identically at 262K, growable==static KV bit-exact, recall depends on needle depth (exact at
-   0.06, misses at ≥0.27) with a non-monotonic length sweep. Decisive remaining test: the SAME
-   prompt on llama.cpp (~/ai/llama.cpp) with the official GGUF
-   (ggml-org/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF:Q4_K_M, needs download) at 262K, and/or
-   the BF16 checkpoint via HF on CPU for a 200K prompt. If llama.cpp recalls → reopen as an
-   engine bug (compare per-layer states with FREETOKEN_MAMBA2_STATE_DUMP); if it also fails →
-   model/quant limit, gate long needles at depth ≤0.1 (bench now has --needle-depth).
-   Perf tickets from the bisect: `decode_launch_config` has no Nemotron head-shape branch
-   (falls back to kv_splits=8: 16 CTAs on 84 SMs at 262K → decode 72→32 tok/s curve); Triton KV
-   loaders widen slot ids to int64 on store but not load (fine here, a ceiling for other shapes).
+1. **262K recall — CLOSED 2026-09-04, root cause fixed.** The Mamba-2 prefill scan floored
+   the discretized timestep at `dt >= config.time_step_min` (1e-3). `time_step_min` is HF's
+   *initializer* range for `dt_bias`, not a runtime bound; the floor caps every head's memory
+   horizon at `1/(|A|*1e-3)` tokens. `dt_limit=(0.0, inf)` — vLLM's value, and what llama.cpp
+   and FreeToken's own decode kernel always did — turns 147,456 and 262,144 @ depth 0.52 from
+   FAIL to PASS at identical TTFT. Fix: `models/nemotron_h/config.py::_dt_floor`
+   (`FREETOKEN_NEMOTRON_DT_MIN=<float>` restores a floor for A/B) + 3 tests in
+   `tests/models/test_nemotron_h.py`. Write-ups:
+   `benchmarks/results/nemotron35_lightning_5080_262k_{rootcause,crossengine}_2026-09-04.md`.
+   The bisect's "model/quant limit" verdict and its "gate mid-depth needles at depth <=0.1"
+   acceptance bar are **retracted**; retest the 262K/524K rows in the cache study and the 1M
+   gate against the fix. Perf tickets from the bisect still open: `decode_launch_config` has no
+   Nemotron head-shape branch (kv_splits=8 fallback: 16 CTAs on 84 SMs at 262K); Triton KV
+   loaders widen slot ids to int64 on store but not load (safe here, a ceiling at head_dim 256).
+   Exonerated with evidence along the way: the FP8 W8A8 Mamba in/out projections (11 of 46
+   saturate their calibrated `input_scale`, but by the same 1.8e-5 clipped fraction at the
+   passing 131K and the failing 147K — see `FREETOKEN_DEBUG_FP8_ACT_STATS`) and the whole
+   NVFP4 path (W4A16 end to end, no activation quantization anywhere).
 2. **16-way Switchyard soak against the slot-reclaim fix** (dcb617a): docs/switchyard.md
    commands; previous run stalled on the now-fixed crash. Pass = 0 errors, no STALLED.
    Driver scripts: scratchpad/fix/{run.sh,serve.sh}.

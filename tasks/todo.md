@@ -226,7 +226,21 @@ Command: `ft serve --model ~/ai/models/Ornith-1.5-35B-Q4_K_M.gguf
   *before* computing whether a shrink is possible, so once KV is above its initial step every
   idle moment wipes the whole prefix cache and often shrinks nothing (`server.gen1.log`
   09:44-09:47 shows dozens of "teardown evicted N ... keep 262144 tokens committed").
-- [x] 262K recall bisect (2026-09-04) -- **no FreeToken bug**; the limit is the checkpoint's.
+- [x] **262K recall ROOT CAUSE (2026-09-04) -- the Mamba-2 dt floor.** `dt_limit` was
+  `(config.time_step_min, inf)` = `(1e-3, inf)` in the prefill scan; `time_step_min` is HF's
+  *initializer* range for `dt_bias`, not a runtime bound, and the floor caps every head's
+  memory horizon at `1/(|A|*1e-3)` tokens. `dt_limit=(0.0, inf)` (vLLM's value; llama.cpp and
+  FreeToken's own decode kernel never clamped) turns 147,456 and 262,144 @ depth 0.52 from FAIL
+  to PASS at identical TTFT. Write-up:
+  `benchmarks/results/nemotron35_lightning_5080_262k_rootcause_2026-09-04.md`; fix in
+  `models/nemotron_h/config.py::_dt_floor` (+ `FREETOKEN_NEMOTRON_DT_MIN` A/B hatch) with three
+  tests in `tests/models/test_nemotron_h.py`. **This retracts the bisect entry below and its
+  "gate mid-depth recall at 131K only" recommendation.**
+- [x] ~~262K recall bisect (2026-09-04) -- **no FreeToken bug**; the limit is the checkpoint's.~~
+  **RETRACTED** by the root-cause entry above (and, before it, by the cross-engine check):
+  all eight variants shared the dt floor, so the matrix proved only that the fault was common
+  to every cell. The exonerations it does establish (growable-vs-static KV bit-identical, KV
+  dtype, attention backend, chunk size, dense dequant) still stand.
   Write-up: `benchmarks/results/nemotron35_lightning_5080_262k_bisect_2026-09-04.md`.
   One fixed 262,144-token prompt (needle depth 0.52) + the same prompt at 131,072, fresh server
   per row, chat endpoint, greedy, thinking off. All eight variants fail at 262K and pass at 131K:

@@ -52,6 +52,25 @@ def dense_dequant_enabled() -> bool:
     return _env_true("FREETOKEN_NEMOTRON_DENSE_DEQUANT")
 
 
+def _dt_floor() -> float:
+    """Lower clamp on the discretized Mamba-2 timestep -- **zero**, i.e. no clamp.
+
+    ``config.time_step_min`` is an *initializer* range for ``dt_bias`` (HF samples it in
+    ``[log time_step_min, log time_step_max]`` at init), not a runtime bound. HF's
+    ``NemotronHMamba2Mixer`` nonetheless reuses it as ``time_step_limit =
+    (time_step_min, inf)`` in the forward, and FreeToken copied that. Flooring dt at
+    1e-3 caps every head's memory horizon at ``1 / (|A| * 1e-3)`` tokens no matter what
+    the network computes: harmless below ~131 K, and it destroys mid-depth needle recall
+    above it (benchmarks/results/nemotron35_lightning_5080_262k_rootcause_2026-09-04.md
+    -- 147 K depth 0.52 goes FAIL -> PASS on this one number). vLLM passes
+    ``dt_limit=(0.0, inf)`` and llama.cpp does not clamp at all; FreeToken's own decode
+    kernel never clamped either, so zero also makes prefill and decode agree.
+
+    ``FREETOKEN_NEMOTRON_DT_MIN=<float>`` restores a floor (A/B escape hatch)."""
+    raw = os.getenv("FREETOKEN_NEMOTRON_DT_MIN", "").strip()
+    return float(raw) if raw else 0.0
+
+
 def multi_stream_forced() -> bool:
     """``FREETOKEN_NEMOTRON_MULTI_STREAM=1`` clears ``single_stream_only`` regardless of
     the per-slot Mamba state size (measurement escape hatch)."""
@@ -72,7 +91,8 @@ class NemotronHArgs:
     # Nemotron-3.5-Lightning has no latent MoE (``moe_latent_size: null``).
     moe_latent_size: int | None
     shared_intermediate_size: int
-    # Lower clamp on the discretized Mamba-2 timestep (HF ``time_step_min``).
+    # Lower clamp on the discretized Mamba-2 timestep; 0.0 (none) unless
+    # FREETOKEN_NEMOTRON_DT_MIN overrides it. See _dt_floor.
     time_step_min: float
     fp8_modules: frozenset[str]
     nvfp4_dense_modules: frozenset[str]
@@ -223,7 +243,7 @@ def parse_config(hf_config: Any) -> ModelConfig:
         mamba_intermediate_size=int(hf_config.mamba_num_heads * hf_config.mamba_head_dim),
         moe_latent_size=moe_latent_size,
         shared_intermediate_size=int(hf_config.moe_shared_expert_intermediate_size),
-        time_step_min=float(getattr(hf_config, "time_step_min", 0.0)),
+        time_step_min=_dt_floor(),
         fp8_modules=fp8_modules,
         nvfp4_dense_modules=nvfp4_dense,
         nvfp4_lm_head_modules=nvfp4_lm_head,
