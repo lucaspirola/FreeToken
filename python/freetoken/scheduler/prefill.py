@@ -128,6 +128,26 @@ class PrefillAdder:
         chunk_size = min(self.token_budget, remain_len)
         if chunk_limit is not None:
             chunk_size = min(chunk_size, chunk_limit)
+        # First currency (full KV pages), charged per WHOLE page like the swa cap below. A
+        # CONTINUATION never passes through _try_allocate_one, so until here nothing had checked
+        # that the pool can back its NEXT chunk: it owns its table slot, its GDN slots and its
+        # already-forwarded pages, but the pages this chunk writes are allocated later, in
+        # allocate_paged -- after committed_pages_required has already found the batch
+        # unbackable and killed the scheduler. ``available_size`` (evictable prefix + free
+        # slots + the not-yet-committed growable suffix) is exactly the ceiling
+        # committed_pages_required tests against, and ``reserved_size`` is what the reqs
+        # admitted earlier in this pass have already claimed of it. On a fresh admit this is a
+        # no-op: _try_allocate_one just reserved the WHOLE remainder plus output_len against
+        # the same budget, which is never smaller than this chunk.
+        kv_ps = self.cache_manager.page_size
+        kv_pages = max(0, self.cache_manager.available_size - self.reserved_size) // kv_ps
+        max_kv_end = (div_ceil(cached_len, kv_ps) + kv_pages) * kv_ps
+        chunk_size = min(chunk_size, max(max_kv_end - cached_len, 0))
+        if chunk_size <= 0:
+            # The pool cannot back one page for this request right now. Defer instead of
+            # raising: the request keeps its place at the head of the pending list and the
+            # scheduler back-pressures (_reclaim_for_blocked_prefill) until pages return.
+            return None
         if self.cache_manager.swa_paged:
             # Cap this chunk by the swa the pool can back this pass. swa is allocated per token in
             # allocate_paged, and token_budget (max_extend_tokens, default 8192) won't chunk a

@@ -1485,8 +1485,15 @@ class Scheduler(SchedulerIOMixin):
             pending, getattr(msg, "session_id", None)
         )
 
-    def _reclaim_soft_sessions_for_pending(self, pending, session_id: str | None) -> bool:
-        """Checkpoint the least-recently-used idle soft leases blocking ``pending``."""
+    def _reclaim_soft_sessions_for_pending(
+        self, pending, session_id: str | None, cached_len: int | None = None
+    ) -> bool:
+        """Checkpoint the least-recently-used idle soft leases blocking ``pending``.
+
+        ``cached_len`` overrides the prefix match: an in-flight chunked prompt already knows
+        how much of itself is forwarded, and matching its full prompt against the tree would
+        both cost a lookup and under-report what it still needs.
+        """
         candidates = sorted(
             (
                 (lease.last_used_at, sid)
@@ -1501,12 +1508,13 @@ class Scheduler(SchedulerIOMixin):
         if not candidates:  # cheap gate: skip the prefix match when nothing can be freed
             return False
         cm = self.cache_manager
-        try:
-            cached_len = cm.match_req(pending).cuda_handle.cached_len
-        except (
-            Exception
-        ):  # matching is repeated by admission; stay conservative on failure
-            cached_len = 0
+        if cached_len is None:
+            try:
+                cached_len = cm.match_req(pending).cuda_handle.cached_len
+            except (
+                Exception
+            ):  # matching is repeated by admission; stay conservative on failure
+                cached_len = 0
         needed = max(0, pending.input_len - cached_len) + pending.output_len
 
         def pressured() -> bool:
@@ -1559,13 +1567,23 @@ class Scheduler(SchedulerIOMixin):
         This is the demand signal that replaces the idle grace timer. A session that was
         mid-turn when its competitor arrived becomes a candidate the instant its turn ends,
         so the queued request is admitted on the next scheduler iteration.
+
+        A chunked prompt's continuation is a blocker like any other: it owns its table slot,
+        its GDN slots and its forwarded pages, but NOT the pages of its next chunk, so a full
+        pool defers it (see ``PrefillAdder._add_one_req``) and it sits at the head of the
+        queue. Skipping it here would leave that head permanently unserviced.
         """
         self._prefetch_queued_session()
         for pending in getattr(self.prefill_manager, "pending_list", ()):
-            if pending.chunked_req is not None:
-                continue  # a continuation already owns its resources
-            released = self._reclaim_soft_sessions_for_pending(pending, pending.session_id)
-            if released and pending.session_id:
+            chunked = pending.chunked_req
+            released = self._reclaim_soft_sessions_for_pending(
+                pending,
+                pending.session_id,
+                cached_len=None if chunked is None else chunked.cached_len,
+            )
+            # Only a fresh admit may install a checkpoint: a continuation is mid-prefill with
+            # live state, and restoring over it would strand the chunks already forwarded.
+            if released and pending.session_id and chunked is None:
                 # The competitor's KV and state slot are free now, so a checkpoint that
                 # could not be installed at message receipt gets its second chance -- from
                 # RAM if the look-ahead above finished in time.
