@@ -19,7 +19,7 @@ Full plan: tasks/nemotron35-plan.md
   - [x] 2B2 triton fallback tuning  - [x] 2B4 cache sizing study (triton default, LFU for 16-way, hybrid rejected)  - [ ] 1M single-session spill gate (also measures restore NVMe vs RAM for candidate 3F prefetch)
 
 ## Phase 3 — Switchyard
-- [x] 3A wire/errors  - [x] 3B JSON mode  - [x] 3C sessions+parsers  - [ ] 3D soak run (prep done)  - [x] 3E residency: spill on demand + capacity/age retention + restart-persistent checkpoints
+- [x] 3A wire/errors  - [x] 3B JSON mode  - [x] 3C sessions+parsers  - [ ] 3D soak run (prep done)  - [x] 3E residency: spill on demand + capacity/age retention + restart-persistent checkpoints  - [ ] 3F prefetch next queued checkpoint to RAM (GO)  - [ ] 3G partial-prefix restore + stray `</think>` handling
 
 ## Phase 4 — MTP (time-boxed, flagged)
 - [x] NO-GO (2026-09-04 cache study: verify step 1.63× cost, projected 0.96× gain; flag not built)

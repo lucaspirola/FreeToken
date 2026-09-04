@@ -212,3 +212,16 @@ then freed that KV, so the session lost its whole 262 K prefix and the next turn
 bug in the logs. Before stopping a driver, wait for it to be idle (no in-flight request), or
 give it an explicit stop-after-this-turn flag. A checkpoint survives a *disconnect*, but not a
 disconnect that lands after the restore.
+
+## 2026-09-04 — cold-restore is all-or-nothing, so any client retokenization drift costs the whole checkpoint
+Three separate harness details each silently destroyed a multi-GiB session checkpoint in the 1M
+gate, all through the same mechanism: `_restore_cold_session` requires
+`record.token_ids == input_ids[:record.num_pages]` exactly, so ONE divergent token in the
+assistant turn discards the entire record and forces a full re-prefill (up to 521 s at 524 K).
+The three triggers were (1) `ignore_eos=True`, whose forced tail no resend can reproduce;
+(2) a stray `</think>` the model emits at long context, which FreeToken streams as ordinary
+content and which retokenizes differently when echoed back; (3) killing the driver after a
+restore had already consumed the record. When driving a multi-turn session gate, sanitize every
+chat-control marker out of the assistant text before resending it, never force the reply length,
+and expect `cached_tokens == 0` to mean "prefix diverged", not "spill/restore is broken" --
+check for `Discarded cold session ...: client token prefix changed` before blaming the store.

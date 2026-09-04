@@ -451,3 +451,14 @@ When a request is waiting and its session checkpoint sits on NVMe, promote it to
 H2D speed. Depends on: measured NVMe-vs-RAM restore time for a ~3 GB (1M) checkpoint in the 1M
 gate (disk restore is already layer-pipelined); RAM-tier budget must cover one look-ahead
 session (~3 GB) without starving the concurrent spill. Build only if NVMe restore stays > ~0.5 s.
+
+## 2026-09-04 — decisions from the 1M gate
+- 3F prefetch: GO. NVMe restore ≈ 1.3 GiB/s (0.98 s at 393K; ~2.5 s projected at 1M) vs RAM
+  ≈ 0.13 s. Build: when a request is queued and its checkpoint is on disk, promote it to the RAM
+  tier in the background while the resident session decodes; raise `--session-spill-ram-gb`
+  default so one look-ahead checkpoint fits.
+- 3G partial-prefix restore: cold restore requires an exact whole-checkpoint token match; any
+  retokenization drift in an echoed assistant turn discards the record (1.24 GiB lost to one
+  stray `</think>`). Restore the longest matching prefix at a snapshot (×128) boundary and
+  re-prefill only the tail. Also: the nemotron_v3 reasoning parser must swallow a stray
+  `</think>` emitted outside a think block instead of streaming it as content.
