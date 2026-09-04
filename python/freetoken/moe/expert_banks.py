@@ -171,18 +171,17 @@ def _nvfp4_banks(model_path, model_config, device, dtype, dummy, parallel=False,
     )
 
     # Backend pick is a pure hardware/config decision, independent of the loaded data, so
-    # it's resolved up front. The native "nvfp4" layout (decode_target=="cpu", or the
-    # "triton" backend) is written as-loaded straight through the sink. marlin/b12x repack
-    # per expert: when converting (layer_sink given), a wrapper sink repacks each layer as
-    # it completes and forwards the renamed banks to the outer sink; serving (no sink)
-    # repacks the whole materialized bank set in place after load.
-    native = decode_target == "cpu"
-    backend = None
-    if not native:
-        backend = select_nvfp4_backend(device, getattr(model_config, "moe_intermediate_size", None),
-                                       getattr(model_config, "nvfp4_backend", "auto"),
-                                       activation=getattr(model_config, "hidden_act", "silu"))
-        native = backend == "triton"
+    # it's resolved up front (select_nvfp4_backend also pins cpu/hybrid decode to the
+    # native rows, which is what their CPU-side GEMV reads). The native "nvfp4" layout
+    # (the "triton" backend) is written as-loaded straight through the sink. marlin/b12x
+    # repack per expert: when converting (layer_sink given), a wrapper sink repacks each
+    # layer as it completes and forwards the renamed banks to the outer sink; serving
+    # (no sink) repacks the whole materialized bank set in place after load.
+    backend = select_nvfp4_backend(device, getattr(model_config, "moe_intermediate_size", None),
+                                   getattr(model_config, "nvfp4_backend", "auto"),
+                                   activation=getattr(model_config, "hidden_act", "silu"),
+                                   decode_target=decode_target)
+    native = backend == "triton"
 
     repack_sink = None
     if not native and not dummy and layer_sink is not None:

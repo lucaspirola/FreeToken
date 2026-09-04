@@ -58,6 +58,23 @@ _NATIVE_NVFP4_BANKS = (
 )
 _POST_NVFP4_BANKS = ("gate_up_packed", "gate_up_scale", "down_packed", "down_scale")
 
+# Routed-expert activations each borrowed kernel can fuse. Marlin's epilogue is
+# hard-wired to gated silu. flashinfer's SM12x W4A16 kernel is parameterised
+# (``moe_w4a16_activations.SUPPORTED_MOE_ACTIVATIONS``): gated ``silu`` (2I gate|up
+# rows) or ungated ``relu2`` == ``relu(x)**2`` (I up rows, Nemotron-3.5-Lightning).
+# Mirrored here rather than imported: selection must work -- and reject loudly -- on
+# hosts where flashinfer is not installed at all.
+_MARLIN_ACTIVATIONS = frozenset({"silu"})
+_B12X_ACTIVATIONS = frozenset({"silu", "relu2"})
+_B12X_GATED_ACTIVATIONS = frozenset({"silu"})
+
+
+def _b12x_is_gated(activation: str) -> bool:
+    """Mirror of ``flashinfer...moe_w4a16_activations.is_gated_moe_activation``."""
+    if activation not in _B12X_ACTIVATIONS:
+        raise ValueError(f"b12x backend does not support activation {activation!r}")
+    return activation in _B12X_GATED_ACTIVATIONS
+
 # ---------------------------------------------------------------------------
 # Backend selection
 # ---------------------------------------------------------------------------
@@ -168,7 +185,14 @@ def _b12x_min_intermediate() -> int:
 
     b12x always wins *batched* decode (M>=~4) thanks to tensor cores, so a throughput
     deployment of a small-I model should force it with ``--nvfp4-backend flashinfer``.
-    Override the threshold with ``FREETOKEN_NVFP4_B12X_MIN_I``."""
+    Override the threshold with ``FREETOKEN_NVFP4_B12X_MIN_I``.
+
+    Caveat measured on RTX 5080 for the ungated relu2 Lightning geometry (I=1856,
+    E=128, top-6, cold L2 -- ``benchmarks/bench_nvfp4_moe_kernels.py``): b12x is *behind*
+    Triton at M<=4 decode (0.72-0.77x) and only pulls ahead from M=8 (1.6x), so the M=1
+    crossover above is optimistic for a wide-but-ungated MoE. b12x still wins the pick
+    because it is 5-6x on prefill (88% of roofline at M=256) and prefill dominates
+    wall-clock for long contexts; a decode-only deployment can force ``triton``."""
     raw = os.environ.get("FREETOKEN_NVFP4_B12X_MIN_I")
     if raw is None:
         return 1024
@@ -185,6 +209,7 @@ def select_nvfp4_backend(
     intermediate_size: int | None = None,
     requested: str = "auto",
     activation: str = "silu",
+    decode_target: str = "gpu",
 ) -> str:
     """Pick the NVFP4 expert-GEMM backend for ``device`` (and, in ``auto``, ``intermediate_size``).
 
@@ -198,10 +223,17 @@ def select_nvfp4_backend(
     * ``marlin`` / ``flashinfer`` / ``triton`` -- force that backend (and its bank layout),
       raising if it cannot run rather than degrading.
 
-    ``activation`` is the model's routed-expert activation: the borrowed marlin/b12x
-    kernels hard-code silu (their fused epilogue), so any other activation (MiniMax-M3's
-    ``swigluoai``) resolves ``auto`` to the Triton kernels -- which dispatch the
-    activation as a separate elementwise op -- and rejects a forced marlin/flashinfer.
+    ``activation`` is the model's routed-expert activation, and it is what each fused
+    epilogue can do: Marlin is gated-silu only, while flashinfer's b12x kernel also
+    fuses ungated ``relu2`` (``relu(x)**2``, Nemotron-3.5-Lightning). Anything else
+    (MiniMax-M3's ``swigluoai``) resolves ``auto`` to the Triton kernels -- which
+    dispatch the activation as a separate elementwise op -- and rejects a forced
+    marlin/flashinfer.
+
+    ``decode_target`` is the engine's MoE decode placement (``gpu`` / ``cpu`` /
+    ``hybrid``). cpu and hybrid decode read the experts on the CPU, straight out of the
+    native ModelOpt rows, so they pin the layout to ``triton``: the marlin/b12x banks
+    hold GPU-tiled blocks no CPU kernel can read.
 
     Returns the internal backend name (``marlin`` / ``b12x`` / ``triton``); ``flashinfer``
     maps to ``b12x``.
@@ -215,13 +247,28 @@ def select_nvfp4_backend(
         )
     if requested == "triton":
         return "triton"
-    if activation != "silu":
+    if decode_target != "gpu":
         if requested != "auto":
             raise RuntimeError(
-                f"--nvfp4-backend={requested} only supports silu routed experts (its fused "
-                f"epilogue); this model's experts use {activation!r} -- use "
+                f"--nvfp4-backend={requested} needs GPU expert decode, but the MoE decode "
+                f"target is {decode_target!r}: CPU-side decode reads the native ModelOpt "
+                f"rows and cannot read {requested}'s GPU-tiled banks -- use "
                 "--nvfp4-backend triton (or auto)."
             )
+        logger.info(
+            f"NVFP4 auto backend: MoE decode target is {decode_target!r} (experts read on "
+            "the CPU); using the native-layout Triton inline-dequant kernels"
+        )
+        return "triton"
+    if requested != "auto":
+        allowed = _MARLIN_ACTIVATIONS if requested == "marlin" else _B12X_ACTIVATIONS
+        if activation not in allowed:
+            raise RuntimeError(
+                f"--nvfp4-backend={requested} does not support {activation!r} routed "
+                f"experts (its fused epilogue handles {sorted(allowed)}) -- use "
+                "--nvfp4-backend triton (or auto)."
+            )
+    elif activation not in (_MARLIN_ACTIVATIONS | _B12X_ACTIVATIONS):
         logger.info(
             f"NVFP4 auto backend: routed experts use {activation!r}, which only the "
             "Triton kernels support; using the Triton inline-dequant kernels"
@@ -248,11 +295,12 @@ def select_nvfp4_backend(
     cc = torch.cuda.get_device_capability(device)
     if (
         (8, 0) <= cc < (10, 0)
+        and activation in _MARLIN_ACTIVATIONS
         and importlib.util.find_spec("vllm") is not None
         and _donor_symbols_ok("marlin")
     ):
         return "marlin"
-    if cc >= (12, 0):
+    if cc >= (12, 0) and activation in _B12X_ACTIVATIONS:
         reason = _b12x_unusable_reason(cc)
         if reason is None:
             thr = _b12x_min_intermediate()
@@ -512,7 +560,12 @@ def marlin_fused_experts(
 #   * prepare() reorders the w13 rows with reorder_w13_to_gate_up == cat([second, first]),
 #     i.e. it expects the merged proj as [up, gate] and emits [gate, up]. FreeToken stores
 #     [gate, up], so the halves are swapped before prepare() to come out [gate, up] again
-#     (the kernel computes silu(first) * second == silu(gate) * up).
+#     (the kernel computes silu(first) * second == silu(gate) * up). Ungated experts
+#     (relu2, Nemotron-3.5-Lightning) have a single I-row up projection: prepare() applies
+#     no row rotation at all, so the pre-swap must be skipped.
+#   * the block-scale swizzle pads N up to a multiple of 128 (Lightning's ungated N == I ==
+#     1856 is not), which is exactly what prepare() unswizzles back -- the *output*
+#     w13_scale is [E, K/16, N] and still byte-identical to the native [E, N, K/16] bank.
 #   * modelopt globals are passed straight through (no 1/g inversion).
 # The fused forward reconstructs the W4A16PackedWeights from the banks and uses the
 # prepared-weights launch (_launch_sm120_w4a16_moe) directly, so weights are prepared
@@ -557,6 +610,12 @@ def b12x_repack_layer(
     )
 
     I = config.moe_intermediate_size
+    activation = getattr(config, "hidden_act", "silu")
+    is_gated = _b12x_is_gated(activation)
+    assert is_gated == bool(getattr(config, "expert_gated", True)), (
+        f"config disagrees with the activation: expert_gated="
+        f"{getattr(config, 'expert_gated', True)} but hidden_act={activation!r}"
+    )
     gu_packed_l = layer_banks["gate_up_packed"]
     gu_scale_l = layer_banks["gate_up_scale"]
     gu_global_l = layer_banks["gate_up_global"]
@@ -564,6 +623,11 @@ def b12x_repack_layer(
     dn_scale_l = layer_banks["down_scale"]
     dn_global_l = layer_banks["down_global"]
     E = gu_packed_l.size(0)
+    gu_rows = (2 if is_gated else 1) * I
+    assert gu_packed_l.size(1) == gu_rows, (
+        f"b12x pack expects {'gate|up' if is_gated else 'up'} rows == {gu_rows} for "
+        f"{activation!r} experts, got {gu_packed_l.size(1)}"
+    )
 
     gate_up_alpha = torch.empty(E, dtype=torch.float32, device=device)
     down_alpha = torch.empty(E, dtype=torch.float32, device=device)
@@ -573,8 +637,9 @@ def b12x_repack_layer(
         end = min(start + chunk, E)
         n = end - start
         gu_g = gu_global_l[start:end].to(device)
-        # The merged gate_up rows carry w1/w3 globals; b12x also takes one alpha per
-        # expert, so fold any ratio into the block scales like the Marlin pack does.
+        # The merged gate_up rows carry w1/w3 globals (ungated experts carry a single
+        # broadcast up global); b12x takes one alpha per expert, so fold any ratio into
+        # the block scales like the Marlin pack does.
         g = gu_g.float()
         g_max = g.max(dim=1, keepdim=True).values
         gu_s_native = gu_scale_l[start:end].to(device).to(torch.float16)
@@ -592,10 +657,11 @@ def b12x_repack_layer(
         # so swap FreeToken's native [gate, up] halves here; swap the (ratio-folded)
         # block scales identically to keep weight/scale rows aligned.
         gu_p = gu_packed_l[start:end].to(device)
-        gu_p = torch.cat([gu_p[:, I:], gu_p[:, :I]], dim=1).contiguous()
-        gu_s_native = torch.cat(
-            [gu_s_native[:, I:], gu_s_native[:, :I]], dim=1
-        ).contiguous()
+        if is_gated:
+            gu_p = torch.cat([gu_p[:, I:], gu_p[:, :I]], dim=1).contiguous()
+            gu_s_native = torch.cat(
+                [gu_s_native[:, I:], gu_s_native[:, :I]], dim=1
+            ).contiguous()
         prepared = prepare_w4a16_packed_weights(
             gu_p,
             _b12x_swizzle_block_scales(gu_s_native.to(torch.float8_e4m3fn)),
@@ -603,7 +669,7 @@ def b12x_repack_layer(
             dn_packed_l[start:end].to(device),
             _b12x_swizzle_block_scales(dn_scale_l[start:end].to(device)),
             dn_g[:, 0].float(),
-            activation="silu",
+            activation=activation,
             params_dtype=torch.bfloat16,
             source_format="modelopt",
         )
@@ -717,6 +783,10 @@ def b12x_fused_experts(
     :func:`marlin_fused_experts`). Requires sm_120/121 + a CUDA>=13 driver; reached only
     when :func:`select_nvfp4_backend` has confirmed the runtime supports it.
 
+    ``activation`` is gated ``silu`` (2I gate|up banks) or ungated ``relu2`` (I up banks);
+    the banks were packed for exactly that activation by :func:`b12x_repack_layer`, so
+    ``is_gated`` is re-derived from it rather than stored.
+
     The banks already hold flashinfer's prepared (tiled) layout from
     :func:`b12x_repack_sources_inplace`, so this wraps them back into a
     ``W4A16PackedWeights`` and calls the prepared-weights launch directly -- the public
@@ -734,7 +804,9 @@ def b12x_fused_experts(
         W4A16PackedWeights,
     )
 
-    assert activation == "silu", "b12x backend supports gated silu only"
+    assert activation in _B12X_ACTIVATIONS, (
+        f"b12x backend supports {sorted(_B12X_ACTIVATIONS)} routed experts, got {activation!r}"
+    )
     assert not apply_router_weight_on_input
     num_experts = gate_up_q.size(0)
     hidden_size = hidden_states.size(-1)
@@ -751,7 +823,7 @@ def b12x_fused_experts(
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
         num_experts=num_experts,
-        is_gated=True,
+        is_gated=_b12x_is_gated(activation),
         params_dtype=hidden_states.dtype,
         source_format="modelopt",
     )
@@ -772,7 +844,7 @@ def b12x_fused_experts(
         top_k=topk_ids.size(1),
         num_local_experts=num_experts,
         scatter_output=out,
-        activation="silu",
+        activation=activation,
         source_format="modelopt",
         _prepared_weights=prepared,
     )
