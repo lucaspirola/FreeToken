@@ -1,6 +1,6 @@
 # Nemotron 3.5 Lightning on FreeToken — handover
 
-State as of 2026-09-04 ~14:00, HEAD e50bc22 on `main` (not pushed). Read this, then
+State as of 2026-09-04 ~14:40, HEAD 1f2de67+ on `main` (not pushed). Read this, then
 `tasks/nemotron35-plan.md` (spec + decisions), `tasks/todo.md` (checklist), `tasks/lessons.md`
 (rules), `docs/nemotron.md` (profiles), `docs/switchyard.md` (router contract + e2e harness).
 Memory notes: host embedder service, host-OOM rules, plan pointer.
@@ -42,11 +42,12 @@ restore) is implemented and unit-tested. Three things are NOT finished (below).
    Growth to 524K×3 and spill/restore-on-demand were verified; driver:
    scratchpad/1m/{drive.py,serve.sh,summarize.py}. Retest 262K/524K needles via chat only
    AFTER item 1 resolves.
-4. **Phase 3H hidden-state export** (Switchyard prefill-probe contract, spec in plan): an
-   implementer was working in worktree .claude/worktrees/agent-a9f7e950fa977e22d (branch
-   worktree-agent-a9f7e950fa977e22d). Check `git -C <worktree> log/status`; if a commit
-   "Export prompt hidden states…" exists, cherry-pick onto main and run its GPU parity script
-   (benchmarks/probe_hidden_states_parity.py) under the lock; else re-dispatch from the spec.
+4. **Phase 3H hidden-state export** is merged (1f2de67; docs/switchyard.md §6). Only the GPU
+   parity check remains: start a P1 server with `--hidden-states-dir /tmp/ft-hidden-states`
+   (mkdir first) then `scripts/gpu_lock.sh uv run benchmarks/probe_hidden_states_parity.py
+   --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 --base-url
+   http://127.0.0.1:1919 --hidden-states-dir /tmp/ft-hidden-states --prompt-tokens 300`
+   (per-layer cosine > 0.99 vs HF output_hidden_states on CPU).
 5. Ticket: `--kv-grow-step-tokens` + `--nvfp4-backend flashinfer` crashes (VMM int32 bank).
 6. Ticket: `_maybe_shrink_growable_kv` evicts all unlocked prefixes before checking whether a
    shrink is possible (wipes the prefix cache at idle above the initial KV step).

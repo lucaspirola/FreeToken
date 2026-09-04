@@ -22,7 +22,7 @@ Full plan: tasks/nemotron35-plan.md
 - [x] 3A wire/errors  - [x] 3B JSON mode  - [x] 3C sessions+parsers  - [ ] 3D soak run (prep done)  - [x] 3E residency: spill on demand + capacity/age retention + restart-persistent checkpoints  - [x] 3F prefetch next queued checkpoint to RAM  - [x] 3G partial-prefix restore + stray `</think>` + prefill-time boundary capture
 
 ## Phase 3H — hidden-state export (Switchyard probe contract)
-- [ ] 3H implement + HF parity check
+- [x] 3H implement (1f2de67)  - [ ] 3H GPU parity check
 
 ## Phase 4 — MTP (time-boxed, flagged)
 - [x] NO-GO (2026-09-04 cache study: verify step 1.63× cost, projected 0.96× gain; flag not built)
