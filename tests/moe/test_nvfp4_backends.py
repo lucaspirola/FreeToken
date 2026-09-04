@@ -738,6 +738,92 @@ def test_b12x_relu2_matches_triton_backend():
     assert float(cos) > 0.999, f"b12x vs triton cosine {float(cos)}"
 
 
+def _ungated_gpu_banks(device, seed: int = 31):
+    """Layer-0 ungated banks on the GPU, in ``fused_experts_*`` argument order."""
+    sources = _make_ungated_sources(seed)
+    banks = tuple(
+        sources[name][0].to(device)
+        for name in (
+            "gate_up_packed", "gate_up_scale", "gate_up_global",
+            "down_packed", "down_scale", "down_global",
+        )
+    )
+    return sources, banks
+
+
+def _ungated_routing(m: int, device, seed: int = 31):
+    g = torch.Generator(device=device).manual_seed(seed)
+    ids = torch.randint(0, E, (m, TOPK6), dtype=torch.int32, device=device, generator=g)
+    weights = torch.rand(m, TOPK6, dtype=torch.float32, device=device, generator=g)
+    return ids, weights
+
+
+def _assert_close_relu2(out: torch.Tensor, ref: torch.Tensor) -> None:
+    """ReLU^2 squares the gemm1 intermediate, so the relative error of the routed output
+    is roughly twice the gated path's 3%."""
+    tol = 0.06 * float(ref.abs().max())
+    torch.testing.assert_close(out.float(), ref, rtol=6e-2, atol=tol)
+
+
+@cuda
+def test_triton_relu2_prefill_matches_dequant_reference():
+    """Prefill grouped GEMM with relu(x)**2 fused into gemm1's ``ACT`` epilogue, top-6."""
+    from freetoken.moe.fused_nvfp4 import fused_experts_nvfp4
+
+    device = torch.device("cuda")
+    sources, banks = _ungated_gpu_banks(device)
+    hidden = torch.randn(17, H, dtype=torch.bfloat16, device=device) / 8
+    ids, weights = _ungated_routing(17, device)
+
+    out = fused_experts_nvfp4(hidden, *banks, weights, ids, E, "relu2", False)
+    _assert_close_relu2(out, _ref_moe_relu2(sources, 0, hidden, weights, ids))
+
+
+@cuda
+def test_triton_relu2_decode_matches_dequant_reference():
+    """Marlin-style decode GEMV with the fused relu2 epilogue, top-6."""
+    from freetoken.moe.fused_nvfp4 import fused_experts_decode_nvfp4_marlin
+
+    device = torch.device("cuda")
+    sources, banks = _ungated_gpu_banks(device)
+    hidden = torch.randn(3, H, dtype=torch.bfloat16, device=device) / 8
+    ids, weights = _ungated_routing(3, device)
+
+    out = fused_experts_decode_nvfp4_marlin(hidden, *banks, weights, ids, "relu2", False)
+    _assert_close_relu2(out, _ref_moe_relu2(sources, 0, hidden, weights, ids))
+
+
+@cuda
+@pytest.mark.parametrize("regime", ["decode", "prefill"])
+def test_triton_relu2_fused_epilogue_matches_separate_activation(monkeypatch, regime):
+    """The fused ``ACT`` epilogue and the separate ``torch.square(torch.relu(...))`` pass
+    it replaces must describe the same MoE. Not bitwise: unfused, gemm1 rounds the
+    intermediate to bf16 in HBM *before* the activation squares it, so the two agree to a
+    relative 1e-2 (tolerance taken against the output's own magnitude)."""
+    from freetoken.moe import fused_nvfp4 as fn
+
+    device = torch.device("cuda")
+    _sources, banks = _ungated_gpu_banks(device)
+    m = 5 if regime == "decode" else 33
+    hidden = torch.randn(m, H, dtype=torch.bfloat16, device=device) / 8
+    ids, weights = _ungated_routing(m, device)
+
+    def run():
+        if regime == "decode":
+            return fn.fused_experts_decode_nvfp4_marlin(
+                hidden, *banks, weights, ids, "relu2", False
+            ).float()
+        return fn.fused_experts_nvfp4(hidden, *banks, weights, ids, E, "relu2", False).float()
+
+    fused = run()
+    monkeypatch.setattr(fn, "_FUSED_ACT_CODE", {})  # force the separate _run_act pass
+    separate = run()
+
+    scale = float(separate.abs().max())
+    assert scale > 0
+    torch.testing.assert_close(fused / scale, separate / scale, rtol=1e-2, atol=1e-2)
+
+
 def test_nvfp4_backend_selection_activation_matrix(monkeypatch):
     """The relu2 selection matrix, driven off a faked capability so it runs on any host:
     b12x on sm_120 (ungated relu2 is a b12x-fused activation), Triton elsewhere, and a

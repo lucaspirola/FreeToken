@@ -19,6 +19,14 @@ the original LUT-gather variant kept for A/B comparison. The marlin-style wide l
 MiniMax-M2 decode toward the RTX 5090 read-bandwidth ceiling (~87%); the residual gap is FP4
 dequant ALU, which a swizzled-layout tensor-core path (marlin / flashinfer b12x) closes but
 those need sm_80-99 / CUDA>=13 respectively.
+
+All three kernels carry an ``ACT`` constexpr epilogue (0 = none, 1 = ReLU^2) so the
+ungated ReLU^2 geometries (Nemotron 3.5 Lightning) skip the separate activation pass
+and its bf16 store/load round trip of the whole ``[M*top_k, I]`` intermediate. ReLU^2
+is applied *last*, after the global scale and the routed weight, which is exactly
+where ``_run_act`` sat, so the fused form is the (slightly more accurate) same math.
+Gated activations (silu/gelu/swigluoai) mix the two halves of ``gate_up`` and cannot
+be fused into a per-tile epilogue; they keep ``ACT=0`` plus the separate op.
 """
 
 from __future__ import annotations
@@ -42,6 +50,17 @@ def _e2m1_lut(device_index: int) -> torch.Tensor:
     return torch.tensor(
         _E2M1_VALUES, dtype=torch.float32, device=torch.device("cuda", device_index)
     )
+
+
+@triton.jit
+def _apply_act(acc, ACT: tl.constexpr):
+    """gemm1 epilogue activation. ``ACT`` 0 = identity, 1 = ReLU^2 (``relu(x)**2``).
+
+    Runs after the per-row global scale and the routed weight, i.e. on exactly the value
+    :func:`freetoken.moe.fused_nvfp4._run_act` used to read back from HBM."""
+    if ACT == 1:
+        acc = tl.where(acc > 0, acc * acc, 0.0)
+    return acc
 
 
 @triton.jit
@@ -69,6 +88,7 @@ def _decode_nvfp4_moe_kernel(
     TOP_K: tl.constexpr,
     A_ROW_IS_ROUTE: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
+    ACT: tl.constexpr,
     compute_type: tl.constexpr,
 ):
     """Original LUT-gather serial-K decode GEMV. Kept as the A/B baseline; the production
@@ -126,6 +146,8 @@ def _decode_nvfp4_moe_kernel(
         weight = tl.load(topk_weights_ptr + token_id * stride_tw_m + route_k * stride_tw_k)
         accumulator = accumulator * weight
 
+    accumulator = _apply_act(accumulator, ACT)
+
     c_ptrs = c_ptr + token_id * stride_cm + route_k * stride_ck + offs_n * stride_cn
     tl.store(c_ptrs, accumulator.to(compute_type), mask=(route_id < total_routes) & n_mask)
 
@@ -155,6 +177,7 @@ def _decode_nvfp4_marlin_kernel(
     TOP_K: tl.constexpr,
     A_ROW_IS_ROUTE: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
+    ACT: tl.constexpr,
     compute_type: tl.constexpr,
 ):
     """Marlin-style NVFP4 decode GEMV: wide int32 weight loads + deferred reduction.
@@ -223,6 +246,8 @@ def _decode_nvfp4_marlin_kernel(
         weight = tl.load(topk_weights_ptr + token_id * stride_tw_m + route_k * stride_tw_k)
         accumulator = accumulator * weight
 
+    accumulator = _apply_act(accumulator, ACT)
+
     c_ptrs = c_ptr + token_id * stride_cm + route_k * stride_ck + offs_n * stride_cn
     tl.store(c_ptrs, accumulator.to(compute_type), mask=(route_id < total_routes) & n_mask)
 
@@ -255,6 +280,7 @@ def _prefill_nvfp4_moe_kernel(
     GROUP_SIZE_M: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
     top_k: tl.constexpr,
+    ACT: tl.constexpr,
     compute_type: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
@@ -318,6 +344,7 @@ def _prefill_nvfp4_moe_kernel(
         moe_weight = tl.load(topk_weights_ptr + offs_token * stride_tw, mask=token_mask, other=0)
         accumulator = accumulator * moe_weight[:, None]
 
+    accumulator = _apply_act(accumulator, ACT)
     accumulator = accumulator.to(compute_type)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
@@ -326,6 +353,7 @@ def _prefill_nvfp4_moe_kernel(
 
 
 __all__ = [
+    "_apply_act",
     "_decode_nvfp4_moe_kernel",
     "_decode_nvfp4_marlin_kernel",
     "_prefill_nvfp4_moe_kernel",

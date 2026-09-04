@@ -36,6 +36,18 @@ M=8/16 -- while prefill is 5-6x Triton at 88% of roofline. The M=1 target was se
 that regime and reports b12x at 85% of roofline at M=1. b12x stays the auto pick for the
 ungated geometry on prefill and batched decode.
 
+After 2B2 (ReLU^2 fused into gemm1's epilogue + the tuned decode/prefill configs that
+``benchmarks/tune_nvfp4_moe.py`` produces), the Triton column moved a long way at the same
+--routings 8: decode M=1 67.9 -> 57.7 us (52% -> 61% of roofline), M=4 234 -> 168 us
+(55% -> 77%), M=8 430 -> 299 us (54% -> 78%, now within 9% of b12x), M=16 723 -> 558 us;
+prefill 8192 74.6 -> 48.4 ms. Prefill stays ~4x off b12x and no tile choice closes it: at
+48.4 ms the pair runs at ~20 TFLOP/s, 9% of the 5080's ~225 TFLOP/s bf16-with-fp32-accum
+tensor peak, because the grouped GEMM dequantizes through a per-element 16-entry E2M1 LUT
+*gather* -- one indexed load per element of the [BLOCK_KB, BLOCK_N] operand, more LSU
+traffic than the tl.dot it feeds. Replacing that gather with arithmetic bit construction
+(bit-identical values) measures 1.41x on the M=8192 gate_up GEMM; that is the next lever,
+and it is a kernel change rather than a tuning one.
+
 Run (always take the GPU lock for timing):
   CUDA_VISIBLE_DEVICES=0 scripts/gpu_lock.sh \
       uv run python benchmarks/bench_nvfp4_moe_kernels.py \
