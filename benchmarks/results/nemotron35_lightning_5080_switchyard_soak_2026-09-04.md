@@ -261,3 +261,232 @@ Scratchpad (survives Claude restarts, not a WSL restart):
 * `driver.log`, `health_bad.log` — 62 non-ok `/health` samples, the first at 16:02:27
 * `soakA.log`, `soakA/results-switchyard_passthrough/{summary,config}.json`,
   `intervals.csv`, `errors.jsonl`
+
+---
+
+# Rerun against `fad1fc4` (chunked-prefill KV back-pressure)
+
+2026-09-04 16:32–17:29 · FreeToken at `befcde6` (working tree clean; the fix under test
+is `fad1fc4`, its parent `c4486b6` is the run above) · same RTX 5080 / WSL2 / 30 GiB
+available at launch · GPU held for the whole server lifetime through
+`scripts/gpu_lock.sh` · `piro-board-embedder.service` inactive.
+
+**Verdict: FAIL overall — but the defect this rerun was written for is closed.**
+
+* `fad1fc4` **holds**. 50 minutes of load, 1,941 successful requests, **zero**
+  `committed_pages_required`, zero `LinearStatePool exhausted`, zero tracebacks. The
+  scheduler never died; `/health` answered `{"status":"ok"}` on every one of ~300
+  watchdog samples (`health_bad.log` was never created).
+* Soak A / `switchyard/passthrough` (20 m) **PASS**, soak B / resilience set (10 m)
+  **PASS** — the 10 m set that never ran last time.
+* Soak A / `switchyard/stage` (20 m) **FAIL**: 4 `timeout` errors (the soak's 600 s
+  client timeout) on `long-context`, and 4 `STALLED` intervals. No crash, no error from
+  the server — it simply could not drain the queue.
+* Diagnosed in §R5: the *cap* `fad1fc4` added is charged against `reserved_size`, which
+  books each admitted request's **whole remaining prompt**, while the batch it gates only
+  allocates its **chunk**. One long in-flight prompt therefore reserved the pool away from
+  every other continuation in the pass. Fixed (§R6) and re-run: the stage route then
+  **passes** with 2.0x the requests.
+
+---
+
+## R1. Exact commands
+
+Identical server line to §1 above (`scratchpad/soak2/serve.sh` is a byte copy of
+`scratchpad/soak/serve.sh`), started under the GPU lock and held for all three soaks:
+
+```bash
+systemctl --user stop piro-board-embedder.service   # already inactive
+
+FREETOKEN_GPU_LOCK_WAIT=300 scripts/gpu_lock.sh scratchpad/soak2/run.sh
+```
+
+`scratchpad/soak2/run.sh` = the previous `run.sh` plus a 5 s resource sampler
+(`sample.sh` → `resources.csv`: per-process CPU, RSS, GPU MiB), and with soak A left on
+its **default route list**, so the stage route that was never reached last time runs:
+
+```bash
+# soak A -- 20 m PER ROUTE: switchyard/passthrough, then switchyard/stage
+scripts/switchyard_e2e.sh soak --base-url http://127.0.0.1:1919 \
+  --model nemotron-3.5-lightning --duration 20m --workdir <scratch>/soak2/soakA
+
+# soak B -- 10 m, resilience set (context-overflow, failure-pressure,
+#           client-cancellation), passthrough
+scripts/switchyard_e2e.sh soak --base-url http://127.0.0.1:1919 \
+  --model nemotron-3.5-lightning --duration 10m \
+  --scenario-set resilience --route switchyard/passthrough --workdir <scratch>/soak2/soakB
+```
+
+## R2. Timeline
+
+| | |
+|---|---|
+| server start → `{"status":"ok"}` | **37 s** |
+| soak A `switchyard/passthrough` | 1,207 s, **PASS** |
+| soak A `switchyard/stage` | 1,310 s, **FAIL** (`error rate 1.4388% > 0%`) |
+| soak B resilience / passthrough | 635 s, **PASS** |
+| scheduler deaths | **0** |
+| `/health` non-ok samples | **0** (over ~50 min at 10 s) |
+| driver stop of a live server | `shutdown_seconds=4` |
+| GPU at end | **0 MiB**, no leftover venv python |
+
+## R3. Request counts
+
+| | passthrough (20 m) | **stage (20 m)** | resilience (10 m) |
+|---|---|---|---|
+| requests | 1,219 | 278 | 448 |
+| successes | 1,219 | 274 | 448 |
+| failures | **0** | **4** (`timeout`) | **0** |
+| error rate | 0 % | 1.4388 % | 0 % |
+| p50 / p95 / p99 ms | 8,717 / 62,613 / 121,217 | 32,033 / 392,867 / 600,001 | 15,568 / 88,458 / 89,135 |
+| STALLED intervals | 0 | **4** (t=720–960 s) | 1 (the first, warm-up) |
+| health / metrics checks failed | 0 / 0 | 0 / 0 | 0 / 0 |
+| invalid-request canaries failed | 0 / 3 | 0 / 3 | 0 / 1 |
+| detected server restarts | 0 | 0 | 0 |
+
+Per scenario — passthrough: prefix-reuse 256, growing-conversation 242, tool-call-burst
+241, large-tool-catalog 240, long-context 240. Stage: prefix-reuse 60, growing-conversation
+59, tool-call-burst 59, large-tool-catalog 54, long-context 42 **+ 4 failures, all
+long-context**. Resilience: context-overflow 160, client-cancellation 144,
+failure-pressure 144.
+
+## R4. Throughput (server batch log)
+
+| phase | decode batches | aggregate tok/s @ `#running-req == 16` | per-stream tok/s | prefill instant tok/s (median) |
+|---|---|---|---|---|
+| passthrough | 180 | median **161.4**, mean 172.6, max 441.4 (n=77) | **10.09** | 1,496 |
+| stage | 134 | median 81.6, mean 80.3 (n=8) | 5.10 | 1,637 |
+| resilience | 191 | median **319.5**, mean 313.1 (n=155) | **19.97** | 1,499 |
+
+The passthrough figure (161 tok/s at 16-way, 10.1 per stream) is the like-for-like
+comparison with the previous run's 150.5 / 9.41 and with the 2B4 decode-only bench's
+168.2 — the fix costs nothing on this workload (1.010 rps vs 1.017 rps pre-fix).
+KV grew 65,536 → 131,072 → 196,608 → 262,144 tokens and stayed there.
+
+## R5. Back-pressure: did the new path engage?
+
+**Yes for the reclaim half, and the fatal is gone — but the cap half was too tight.**
+
+* Reclaim: 749 `Released soft session … KV protection (admission pressure)` (the KV-shaped
+  reclaim `_reclaim_for_blocked_prefill` drives, which `fad1fc4` newly reaches *for a
+  blocked continuation*) plus 186 `(GDN state-slot pressure)`. The previous run logged 52
+  and 104 in its 602 healthy seconds; per second that is 0.25/s vs 0.086/s — the demand
+  signal fires roughly 3x more often now that a continuation can raise it.
+* Pressure survived: 44 batches at `#mamba-slot: 96/96` (`mamba usage 1.00`), token usage
+  peaking at 1.00 on the prefill gauge, and **no** `committed_pages_required`. The
+  pre-fix run died the first time this combination appeared under a full pool.
+* **No spin.** `resources.csv` (5 s samples of every FreeToken venv process): the busiest
+  process sits at **median 106 % CPU in every phase** — 106.3 % while passthrough is
+  healthy, 106.1 % through the stage collapse (17:04–17:12, when whole 60 s intervals
+  completed 0 requests), 108.8 % during resilience. A deferred prefill does **not** burn
+  the loop: the pass falls through to decode and the scheduler's cost is unchanged.
+* The deferral itself is **not observable in the log** — `_add_one_req` returns `None`
+  silently and `/v1/stats` has no scheduler counter. Everything above is circumstantial
+  plus the CPU-only A/B in §R6. A `deferred_prefill_chunks` counter on `/v1/stats` would
+  make the next soak decisive; ticket it.
+
+### The stage route's failure
+
+Not a crash and not KV exhaustion: **prefill starvation**. Through the collapse the log is
+a monotonous run of
+
+```
+Prefill batch, #new-seq: 1, #new-token: 512, #cached-token: 0, token usage: 0.49,
+  #mamba-slot: 7/96, mamba usage: 0.07, #running-req: 0, #queue-req: 16,
+  input throughput (token/s): 1782.21 instant
+```
+
+— one lane, 512 tokens per pass, **with half the KV pool free**. Two mechanisms compose:
+
+1. `chunk_limit = adder.token_budget // min(waiting, available_lanes)`
+   (`prefill.py:337`, interleaved mode) is **8192 // 16 = 512** whenever 16 requests are
+   queued. That is per-lane fair sharing and only pays off if the pass actually admits 16
+   lanes. *(Pre-existing; present in the pre-fix run too — 60 of its 348 prefill batches
+   are `#new-seq: 1, #new-token: 512`.)*
+2. `fad1fc4`'s cap then stopped the pass at the first or second lane — see below. Mean
+   lanes per prefill batch in the stage phase: **1.56**.
+
+The stage route is where this bites because it doubles the prefill demand: 2.19 M new
+prompt tokens for 278 requests (7,876 new tokens each) against 1.99 M for 1,219 requests
+(1,637 each) on passthrough — the `stage_router` posts a classifier call per user turn,
+whose prompt (schema appended, thinking off) is a different prefix, so its prefix reuse is
+73.6 % against passthrough's 87.6 %. A 118 K-token `long-context` prompt advancing 512
+tokens per pass at ~1,780 tok/s needs ~230 passes; sixteen of them do not fit in 600 s.
+
+## R6. Follow-up fix: charge the cap in pages, not in reserved prompt
+
+`fad1fc4` capped the chunk with
+
+```python
+kv_pages = max(0, cache_manager.available_size - self.reserved_size) // kv_ps
+```
+
+`reserved_size` is the sum over reqs admitted this pass of **`remain_len + output_len`** —
+the whole rest of the prompt. That figure is the right one for `_try_allocate_one`'s
+admission policy (don't admit a fresh prompt the pool cannot finish), but it is the wrong
+currency for this cap, whose only job is to keep `committed_pages_required` satisfiable —
+and that check demands exactly the batch's **per-chunk page deltas**. So the first long
+continuation booked the whole pool and every peer behind it was capped to nothing.
+
+CPU-only A/B (`scratchpad/soak2/lane_ab.py`, no GPU, 6 chunked continuations, 700 free
+pages, a full 6-lane batch needing 600):
+
+| tree | lanes admitted | tokens forwarded |
+|---|---|---|
+| `c4486b6` (before `fad1fc4`) | 6 / 6 | 600 |
+| `befcde6` (`fad1fc4`) | **2 / 6** | **200** |
+| `befcde6` + this fix | 6 / 6 | 600 |
+
+The fix adds `PrefillAdder.reserved_pages` — initialised to the decode in-flight tokens
+and charged one **page span per admitted chunk** — and caps against that instead. It is
+strictly tighter than what `committed_pages_required` tests, so the fatal stays closed;
+`tests/scheduler/test_chunked_prefill_kv_backpressure.py` grows a sixth case
+(`test_one_long_continuation_does_not_reserve_the_pool_away_from_its_peers`, which fails
+with 2 lanes / 12 tokens on the old cap). Files: `python/freetoken/scheduler/prefill.py`,
+`tests/scheduler/test_chunked_prefill_kv_backpressure.py`.
+
+### Stage route re-run with the fix (17:37–18:03, `scratchpad/soak3/`)
+
+Same server line, `--route switchyard/stage --duration 20m`:
+
+| | `befcde6` | `befcde6` + fix |
+|---|---|---|
+| verdict | **FAIL** (1.4388 % errors) | **PASS** (0 errors) |
+| requests / successes / failures | 278 / 274 / **4** | **471 / 471 / 0** |
+| STALLED intervals | 4 | 1 (t=480 s) |
+| p50 / p95 / p99 ms | 32,033 / 392,867 / 600,001 | 29,104 / 200,742 / 257,441 |
+| mean lanes per prefill batch | 1.56 | **2.37** |
+| new prompt tokens prefilled | 2.19 M (1,814 tok/s) | 2.72 M (1,877 tok/s) |
+| prefix reuse (cached / (new+cached)) | 73.6 % | **83.8 %** |
+| batches at `#mamba-slot: 96/96` | 27 | 34 |
+| pressure episodes (usage ≥ 0.98, queue > 0) | 0 | **13** |
+| `committed_pages_required` / tracebacks | 0 | **0** |
+| busiest process CPU (median) | 106.0 % | 106.7 % |
+
+2.0x the requests served, the timeouts gone, and the back-pressure path exercised
+*harder* (13 near-full-pool episodes, 34 batches at 96/96) without a fatal.
+
+## R7. What is still open
+
+* `chunk_limit = token_budget // waiting` divides the 8,192-token budget by the **queue
+  depth**, not by the lanes the pass can actually admit, so 16 queued requests cost a 16x
+  smaller chunk even when only two lanes are admitted. Pre-existing, and it is what leaves
+  the stage route's p95 at 200 s. Ticket: size the interleave share by the lanes the pass
+  will really seat, or floor it (a chunk below ~2 K tokens is pure launch overhead).
+* No scheduler-side observability for the deferral: add a `deferred_prefill_chunks` /
+  `capped_prefill_chunks` counter to `/v1/stats` so a soak can prove engagement directly.
+* `_try_allocate_one` charges a fresh admit `remain_len + output_len` against
+  `available_size`, so at 118 K-token prompts only one or two can be in flight in a 262 K
+  pool regardless of how much of the prompt this pass would forward. Same "reserve the
+  whole prompt" shape as R6, one layer up; worth revisiting for long-context concurrency.
+
+## R8. Artifacts
+
+`/tmp/claude-1000/-home-lucas-ai-FreeToken/f4e2e9e3-f4f5-40d0-9980-b3b09d1ef47d/scratchpad/`
+
+* `soak2/{run.sh,serve.sh,sample.sh}` — driver; `soak2/server.log`, `driver.log`,
+  `resources.csv`, `soakA.log`, `soakB.log`, `soakA/results-switchyard_{passthrough,stage}/`,
+  `soakB/results-switchyard_passthrough/`
+* `soak2/analyze.py` — the batch-log parser behind §R4/§R5; `soak2/lane_ab.py` — the
+  CPU-only lane A/B of §R6
+* `soak3/` — the stage-route re-run with the fix (same layout)

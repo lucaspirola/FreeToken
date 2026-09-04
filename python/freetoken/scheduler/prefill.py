@@ -47,6 +47,25 @@ class PrefillAdder:
     # allocated only in allocate_paged (after the pass), so swa_available_size does not decrement
     # across the admission loop -- without this, successive admits all see the full pool.
     reserved_swa: int = 0
+    # KV pages this pass will actually ALLOCATE: in-flight decode growth plus one chunk per
+    # admitted req. The chunk cap below must be charged against this and NOT against
+    # ``reserved_size``, which books every admitted req's WHOLE remaining prompt. That
+    # reservation is an admission policy (it keeps a fresh prompt from being admitted into a
+    # pool that cannot finish it); the cap exists only to keep ``committed_pages_required``
+    # satisfiable, and that check demands exactly the batch's per-chunk page deltas. Charging
+    # the whole remainder let one long in-flight prompt reserve the pool away from every other
+    # continuation in the pass (6 lanes -> 2 with 700 free pages and a 600-page batch).
+    # Negative means "start from reserved_size" (i.e. the decode in-flight tokens).
+    reserved_pages: int = -1
+
+    def __post_init__(self) -> None:
+        if self.reserved_pages < 0:
+            self.reserved_pages = self.reserved_size
+
+    def _page_span(self, start: int, end: int) -> int:
+        """Fresh pages the extend ``[start, end)`` pulls, charged per WHOLE page."""
+        ps = self.cache_manager.page_size
+        return (div_ceil(end, ps) - div_ceil(start, ps)) * ps
 
     def _try_allocate_one(self, req: PendingReq):
         if self.table_manager.available_size == 0:
@@ -135,12 +154,12 @@ class PrefillAdder:
         # allocate_paged -- after committed_pages_required has already found the batch
         # unbackable and killed the scheduler. ``available_size`` (evictable prefix + free
         # slots + the not-yet-committed growable suffix) is exactly the ceiling
-        # committed_pages_required tests against, and ``reserved_size`` is what the reqs
-        # admitted earlier in this pass have already claimed of it. On a fresh admit this is a
-        # no-op: _try_allocate_one just reserved the WHOLE remainder plus output_len against
-        # the same budget, which is never smaller than this chunk.
+        # committed_pages_required tests against, and ``reserved_pages`` is the page demand the
+        # reqs admitted earlier in this pass have already placed on it. On a fresh admit this
+        # is a no-op: _try_allocate_one just reserved the WHOLE remainder plus output_len
+        # against the same budget, which is never smaller than this chunk.
         kv_ps = self.cache_manager.page_size
-        kv_pages = max(0, self.cache_manager.available_size - self.reserved_size) // kv_ps
+        kv_pages = max(0, self.cache_manager.available_size - self.reserved_pages) // kv_ps
         max_kv_end = (div_ceil(cached_len, kv_ps) + kv_pages) * kv_ps
         chunk_size = min(chunk_size, max(max_kv_end - cached_len, 0))
         if chunk_size <= 0:
@@ -184,6 +203,7 @@ class PrefillAdder:
         CLS = ChunkedReq if is_chunked else Req
         self.token_budget -= chunk_size
         self.reserved_size += remain_len + pending_req.output_len
+        self.reserved_pages += self._page_span(cached_len, cached_len + chunk_size)
         # NOTE: update the tokens ids only; new pages will be allocated in the scheduler
         _slice = slice(cached_len, cached_len + chunk_size)
         device_ids = self.table_manager.token_pool[table_idx, _slice]

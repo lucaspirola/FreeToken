@@ -183,8 +183,15 @@ def test_continuation_chunk_is_capped_to_what_the_pool_can_back():
     _forward(cm, batch)
     assert len(cm.free_slots) == 0
 
+    from freetoken.scheduler.prefill import ChunkedReq
+
     _finish(cm, tm, neighbour)
-    _drain_prompt(cm, tm, pm)
+    while pm.runnable:  # all three prompts run to completion behind the freed neighbour
+        nxt = pm.schedule_next_batch(3 * CHUNK)
+        assert nxt is not None, "a continuation never made progress"
+        for req in _forward(cm, nxt):
+            if not isinstance(req, ChunkedReq):
+                _finish(cm, tm, req)
     cm.check_integrity()
 
 
@@ -272,3 +279,50 @@ def test_reclaim_still_restores_a_checkpoint_for_a_fresh_admit():
 
     assert scheduler._reclaim_for_blocked_prefill() is True
     assert scheduler.restored == ["talker"]
+
+
+def test_one_long_continuation_does_not_reserve_the_pool_away_from_its_peers():
+    """The cap must charge the pages the pass will ALLOCATE, not the whole remainders.
+
+    ``reserved_size`` books every admitted request's entire remaining prompt plus its
+    output -- an admission policy that keeps a fresh prompt out of a pool that cannot
+    finish it. The chunk cap has a different job: keep ``committed_pages_required``
+    satisfiable, and that check only ever demands the batch's per-chunk page deltas.
+    Charging the chunk against ``reserved_size`` let the first long continuation reserve
+    the pool away from its peers, so a pass that could back three 8-token chunks in 24
+    free pages forwarded 12 tokens across two lanes instead of 24 across three.
+    """
+    cm, tm, _dm, pm = _build_managers(num_pages=84)
+    pm.interleave_chunks = True  # the elastic/multi-agent serving mode the soak runs
+
+    prompts = [_pending(uid=i, first_token=i * 1000, length=3 * CHUNK) for i in range(3)]
+    pm.pending_list = list(prompts)
+    batch = pm.schedule_next_batch(3 * CHUNK)  # chunk_limit = budget // waiting = CHUNK
+    assert batch is not None and len(batch.reqs) == 3
+    _forward(cm, batch)
+    assert all(p.chunked_req is not None for p in pm.pending_list)
+
+    # Spend the slack the way live traffic does between two chunks of the same prompt.
+    held = pm.pending_list
+    pm.pending_list = [_pending(uid=9, first_token=500_000, length=36)]
+    (neighbour,) = _forward(cm, pm.schedule_next_batch(WIDTH))
+    pm.pending_list = held
+    assert cm.available_size == 3 * CHUNK  # exactly what the next pass wants to allocate
+
+    batch = pm.schedule_next_batch(3 * CHUNK)
+    assert batch is not None
+    assert len(batch.reqs) == 3, "a peer continuation was starved by a bookkeeping figure"
+    assert batch.log_new_tokens == 3 * CHUNK
+    _forward(cm, batch)  # backable: the pass allocated exactly the pool's free pages
+    assert cm.available_size == 0
+
+    from freetoken.scheduler.prefill import ChunkedReq
+
+    _finish(cm, tm, neighbour)
+    while pm.runnable:  # all three prompts run to completion behind the freed neighbour
+        nxt = pm.schedule_next_batch(3 * CHUNK)
+        assert nxt is not None, "a continuation never made progress"
+        for req in _forward(cm, nxt):
+            if not isinstance(req, ChunkedReq):
+                _finish(cm, tm, req)
+    cm.check_integrity()

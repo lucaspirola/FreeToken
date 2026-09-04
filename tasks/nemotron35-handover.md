@@ -40,25 +40,36 @@ restore) is implemented and unit-tested. Three things are NOT finished (below).
    saturate their calibrated `input_scale`, but by the same 1.8e-5 clipped fraction at the
    passing 131K and the failing 147K — see `FREETOKEN_DEBUG_FP8_ACT_STATS`) and the whole
    NVFP4 path (W4A16 end to end, no activation quantization anywhere).
-2. **16-way Switchyard soak against the slot-reclaim fix — RUN 2026-09-04, FAIL (new defect).**
-   Write-up: `benchmarks/results/nemotron35_lightning_5080_switchyard_soak_2026-09-04.md`.
-   dcb617a **holds**: 41 batches at `#mamba-slot: 96/96` with 0 `LinearStatePool exhausted`
-   (pre-fix died on the first one), `/health` 503 in 11 s, bounded shutdown, **no STALLED
-   interval**. 612 requests / 0 errors over the first 602 s, ~150 tok/s aggregate at 16-way
-   (9.4 tok/s per stream). Then at t≈611 s the scheduler died on a *different* fatal:
-   `RuntimeError: batch needs 6061 pages but only 3605 are physically allocatable and 0
-   logical pages remain` (`scheduler/cache.py:159`, `committed_pages_required`), so the soak
-   ends 12 418/13 030 failed. Root cause: `PrefillAdder.try_add_one` gates a *fresh* admit on
-   `available_size` but admits a **chunked-prefill continuation with no KV check at all**
-   (`prefill.py:203`), and continuations are scheduled first (`prefill.py:347-351`); the
-   remainder of an in-flight chunked prompt carries no standing reservation across passes, so
-   later admits/decode spend its pages and the shortage surfaces as a fatal instead of
-   back-pressure. Fix shape (not implemented): standing KV reservation for the unforwarded
-   remainder + cap/defer a continuation through `_reclaim_for_blocked_prefill` (which today
-   `continue`s past every continuation, `scheduler.py:1566`), mirroring what `reserved_swa`
-   already does for the SWA currency. Re-soak after that; the stage route and the 10 m
-   resilience set were never reached. Driver: scratchpad/soak/{run.sh,serve.sh} under
-   /tmp/claude-1000/-home-lucas-ai-FreeToken/f4e2e9e3-.../scratchpad/.
+2. **16-way Switchyard soak — RERUN 2026-09-04 against `fad1fc4`. The KV fatal is CLOSED;
+   the soak's own gate needs one more fix (uncommitted, in the tree).** Write-up:
+   `benchmarks/results/nemotron35_lightning_5080_switchyard_soak_2026-09-04.md` §"Rerun
+   against fad1fc4". 50 min of load at `befcde6`, 1,941 successful requests, **0**
+   `committed_pages_required`, 0 `LinearStatePool exhausted`, 0 tracebacks, `/health` ok on
+   every sample, clean 4 s shutdown, GPU 0 MiB. Soak A/`switchyard/passthrough` 20 m PASS
+   (1,219 req / 0 err; 161 tok/s aggregate at 16-way, 10.1 per stream) and soak B/resilience
+   10 m PASS (448 / 0) — both routes the previous attempt never reached. Soak
+   A/`switchyard/stage` 20 m **FAILED**: 4 long-context `timeout`s (600 s client limit) and
+   4 STALLED intervals, no crash — **prefill starvation**, one 512-token lane per pass with
+   half the KV pool free. Cause: `fad1fc4`'s chunk cap subtracts `reserved_size` (each
+   admitted req's WHOLE remaining prompt) although the batch only allocates its *chunk*, so
+   one long continuation reserves the pool away from its peers (CPU-only A/B, no GPU:
+   6/6 lanes at `c4486b6`, **2/6** at `befcde6`, 6/6 with the fix —
+   `scratchpad/soak2/lane_ab.py`). **Fix is in the working tree, NOT committed**:
+   `PrefillAdder.reserved_pages` (decode in-flight + one page span per admitted chunk) is
+   what the cap charges against — strictly tighter than `committed_pages_required`, so the
+   fatal stays closed — plus a sixth case in
+   `tests/scheduler/test_chunked_prefill_kv_backpressure.py` (fails on the old cap).
+   Verified end to end: the stage route re-run with it **PASSES** — 471 req / 0 err vs
+   278 / 4, 1 STALLED vs 4, p95 201 s vs 393 s, mean 2.37 lanes/prefill batch vs 1.56
+   (`scratchpad/soak3/`). Still open (tickets in §R7): `chunk_limit = token_budget //
+   waiting` divides the 8 K budget by QUEUE DEPTH not by admissible lanes (pre-existing; it
+   is what leaves stage p95 at 200 s); no `/v1/stats` counter for deferred/capped chunks, so
+   engagement can only be shown circumstantially; `_try_allocate_one` reserves a fresh
+   admit's whole prompt, capping long-context concurrency at 1-2 in a 262 K pool. Also
+   measured: a blocked prefill does **not** spin — the busiest process holds median 106 %
+   CPU in every phase, including 60 s intervals that completed 0 requests. Drivers:
+   scratchpad/soak2/{run.sh,serve.sh,sample.sh,analyze.py,lane_ab.py} and scratchpad/soak3/
+   under /tmp/claude-1000/-home-lucas-ai-FreeToken/f4e2e9e3-.../scratchpad/.
 3. **1M gate remainder**: restart persistence, capacity/age eviction, a ≥1M-size NVMe restore
    timing, results file benchmarks/results/nemotron35_lightning_5080_1m_sessions_<date>.md.
    Growth to 524K×3 and spill/restore-on-demand were verified; driver:

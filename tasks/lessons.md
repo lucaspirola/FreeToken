@@ -370,3 +370,36 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   layer 0.9406 → 0.9988. Any HF-referenced Mamba-2 parity check on this stack must set
   `dt_limit=(0.0, inf)` on the reference, and a reference's own hyperparameters deserve
   the same "read the use site" scrutiny as the engine's.
+
+## 2026-09-04 (Switchyard 16-way soak rerun vs. the KV back-pressure fix)
+- **Charge a resource cap in the currency of the check it protects.** `fad1fc4`'s chunk cap
+  subtracted `reserved_size` — the sum of admitted requests' WHOLE remaining prompts, which is
+  the right figure for `_try_allocate_one`'s admission *policy* — while the thing it exists to
+  keep satisfiable (`committed_pages_required`) demands only the batch's per-chunk page deltas.
+  One 118 K-token continuation therefore reserved the entire pool and starved every peer in the
+  pass: 6/6 lanes before the fix, 2/6 after, with 700 free pages and a 600-page batch. Fatal
+  closed, throughput halved. Read what the guarded check actually sums before picking the budget.
+- **A fix that closes a fatal can open a starvation.** The retest passed on "no crash" and still
+  failed the soak's gate, on a route the previous run never reached. Grade a resource fix on
+  *throughput under the same pressure*, not only on the absence of the traceback.
+- **Run every route.** `switchyard_e2e.py soak` defaults to passthrough THEN stage and returns
+  early on the first failing route, so a crash in route 1 silently skips route 2 — the stage
+  route and the 10 m resilience set went untested for a whole run. The stage route is the harder
+  test: its classifier doubles prefill demand (7,876 new prompt tokens/request vs 1,637) and
+  drops prefix reuse from 88 % to 74 %, which is what exposed the lane starvation.
+- **A CPU-only A/B against the parent commit settles a scheduler-policy regression in seconds.**
+  `git worktree add --detach <parent>` + `PYTHONPATH=<wt>/python` and a 90-line script that
+  builds a CacheManager/PrefillManager and counts admitted lanes: three data points (parent,
+  HEAD, HEAD+fix), no GPU, no model. Do this before spending 25 GPU minutes on a re-soak.
+- **"Did the back-pressure path engage?" needs a counter, not a grep.** The deferral returns
+  `None` silently and `/v1/stats` has no scheduler counters, so engagement could only be argued
+  from `Released soft session … (admission pressure)` rates (0.25/s vs 0.086/s pre-fix) and from
+  batches surviving at `#mamba-slot: 96/96`. Add the counter when you add the back-pressure.
+- A deferred prefill does **not** spin the loop: sampling every FreeToken venv process every 5 s
+  showed the busiest at median 106 % CPU in all phases, including 60 s intervals that completed
+  zero requests. Sample per-process CPU during a soak; it costs nothing and it retires that
+  whole class of worry with a number.
+- `#new-seq: 1, #new-token: 512` with `token usage: 0.49` is a *scheduling* symptom, not a
+  memory one: `chunk_limit = token_budget // waiting` (interleaved mode) divides the 8 K budget
+  by the QUEUE DEPTH, so 16 queued requests cost a 512-token chunk even when the pass seats one
+  lane. Compare the `#new-seq`/`#new-token` histogram between two runs before blaming a pool.
