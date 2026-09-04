@@ -152,16 +152,27 @@ def trim_filler(
         gaps.append((cursor, original))
 
     remove = original - target
-    cuts: list[tuple[int, int]] = []
-    for begin, end in sorted(gaps, key=lambda pair: pair[1] - pair[0], reverse=True):
-        count = min(remove, end - begin)
-        if count:
-            cuts.append((begin, begin + count))
-            remove -= count
-        if remove == 0:
-            break
-    if remove:
+    capacity = sum(end - begin for begin, end in gaps)
+    if remove > capacity:
         raise ValueError("target is smaller than the protected RULER regions")
+    # Trim every gap in proportion to its size, so the needle keeps its RELATIVE depth in
+    # the trimmed prompt. Largest-gap-first drained the whole pre-needle gap before
+    # touching the one after it, which pinned the needle at token ~1024 for every
+    # --target-prompt-tokens: the 64K/128K/256K sweep then varied only the amount of text
+    # AFTER the needle, turning a needle-in-the-middle gate into a retention gate at an
+    # ever-growing retrieval distance.
+    taken = [min(end - begin, remove * (end - begin) // capacity) for begin, end in gaps]
+    left = remove - sum(taken)
+    index = 0
+    while left > 0:  # integer-division remainder: hand it to whichever gap still has slack
+        slack = (gaps[index][1] - gaps[index][0]) - taken[index]
+        step = min(slack, left)
+        taken[index] += step
+        left -= step
+        index = (index + 1) % len(gaps)
+    cuts = [
+        (begin, begin + count) for (begin, _end), count in zip(gaps, taken) if count
+    ]
     for begin, end in sorted(cuts, reverse=True):
         del ids[begin:end]
 

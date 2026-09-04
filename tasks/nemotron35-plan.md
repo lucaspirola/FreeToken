@@ -421,3 +421,4 @@ Decided scope (all three):
    fingerprint (manifest JSON next to chunks); startup scans the spill root, adopts valid records,
    deletes stale/foreign ones; shutdown no longer rmtrees. Restore still requires exact prefix +
    fingerprint match.
+- Mamba-2 decode default: Triton port (state err 3e-7) over flashinfer (1e-3, bf16 dt_bias); flashinfer opt-in via FREETOKEN_MAMBA2_DECODE=flashinfer. Decided 2026-09-04 for 1M-session accuracy.

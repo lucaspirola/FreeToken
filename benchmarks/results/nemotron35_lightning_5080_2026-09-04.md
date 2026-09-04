@@ -95,13 +95,17 @@ Identical server flags apart from `--kv-cache-dtype` (both with
 | prefix-cache equality (repeat runs) | **4 / 4 PASS** | **3 / 6 PASS** |
 | needle 65 536, chunk 8192 | PASS (first answer correct) | PASS (first answer correct) |
 | needle 131 072, chunk 8192 | **FAIL** — emitted `5663616` | PASS by substring only — first answer `5666363`, a later repetition is correct |
+
+The two `needle 131 072` rows were produced by the broken `trim_filler` (see
+"Resolved" below); with the fixed trim, `q8_0` answers `5663623` exactly at both
+8192- and 4096-token prefill chunks. The rest of the table stands.
 | needle prefill / decode at 65 K | 1 118 / 61.0 tok/s | 1 119 / 67.0 tok/s |
 | needle prefill / decode at 131 K | 1 098 / 52.8 tok/s | 1 202 / 57.3 tok/s |
 | reasoning suite (5 exact-answer problems, greedy, thinking on) | **5 / 5** | **5 / 5** |
 
 `bf16` KV (`--kv-cache-dtype auto`, FlashInfer) at 131 072 also **fails** the
 needle (`566363623`), which rules KV quantization *out* as the cause of the
-128 K miss — see "Open issue" below.
+128 K miss — see "Resolved" below.
 
 **Recommendation: `q8_0`.** Both dtypes cost the same VRAM, score the same on
 reasoning, and pass every short-context gate, but q8_0 reproduces cached-prefix
@@ -122,26 +126,64 @@ Parity (`benchmarks/parity_nemotron_h_layers.py --layers 0,1,5 --tokens 512`) an
 the serving gates are appended below by their own scripts. Summary: parity PASS
 (cosine ≥ 0.9998, routed-expert ids 100 %); serving gates PASS under q8_0.
 
-## Open issue — 131 072-token needle
+## Resolved — the "131 072-token needle" was a benchmark bug (2026-09-04, later)
 
-64 K retrieval is exact under both KV dtypes. At 131 072 the model finds the
-needle sentence but corrupts its digits, in a way that is **not** explained by KV
-quantization (bf16 fails too) and that **is** sensitive to the prefill chunk size:
+The 128 K miss was **not** a Mamba-2 state-handoff regression. `trim_filler` in
+`benchmarks/bench_long_context.py` removed filler *largest gap first*, and the
+synthetic needle's two filler blocks are the same size, so the first cut drained
+the **entire** span before the needle. At every `--target-prompt-tokens` the
+needle therefore landed at token ~1 000 (depth 0.008–0.016) and the sweep varied
+only the amount of near-identical filler *after* it. "64 K passes, 128 K fails"
+meant "retrieval at 64 K distance works, at 130 K distance it does not" — a model
+retention property on degenerate repeated text, measured by a gate that claimed
+to be needle-in-the-middle.
+
+`trim_filler` now trims every gap in proportion to its size, which keeps the
+needle's relative depth (measured with the real tokenizer: depth 0.510 at 65 536
+and 0.516 at 131 072, vs 0.008 before). Same-session A/B, identical server flags
+(`q8_0`, `--attention-backend triton`, `--max-prefill-length 8192`,
+`--memory-ratio 0.90`, 131 072 tokens, 16 prefill chunks), only the prompt's
+needle position differs:
 
 | 131 072-token needle | prefill chunk | first answer | verdict |
 |---|---:|---|---|
-| `q8_0` | 8192 | `5663616` | wrong |
-| `fp8_e4m3` | 8192 | `5666363` | wrong (later repetition correct) |
-| `auto` (bf16) | 8192 | `566363623` | wrong |
-| `auto` (bf16) | 4096 | needle sentence not reproduced at all; output degrades into repeated filler lines | much worse |
+| pre-fix trim (needle at depth 0.008) | 8192 | `5663616` | FAIL (reproduces the original row exactly) |
+| fixed trim (depth 0.516) | 8192 | `5663623` | **PASS** |
+| fixed trim (depth 0.516) | 4096 (32 chunks) | `5663623` | **PASS** |
+| fixed trim (depth 0.510), 65 536 tokens | 8192 | `5663623` | **PASS** |
 
-More chunk boundaries ⇒ worse output (8 chunks at 64 K: exact; 16 chunks at
-128 K: digit corruption; 32 chunks at 128 K: collapse). That points at the
-Mamba-2 state handoff across chunked-prefill boundaries rather than at attention
-or at the KV cache, and it is the first thing Phase 2 (2A1/2A2, the vendored SSD
-kernels and the `mamba2` state layout) should be validated against. Chunk 4096
-is also 2.4x *faster* than chunk 8192 at the same prompt length, which is itself
-worth explaining.
+Chunk count was never the variable: 65 536 passes at 8 *and* 32 chunks, and
+131 072 fails at 16 *and* 32 chunks with the old prompt. Supporting evidence that
+the chunked-prefill path is exact:
+
+- `python/freetoken/models/nemotron_h/chunk_scan.py` matches a sequential fp64
+  recurrence to 2.5e-7 relative at T = 131 072, and is identical to the last
+  printed digit for chunk ∈ {T, 8192, 4096}.
+- `tests/models/test_nemotron_h_chunked_prefill.py` (new, GPU-marked) drives the
+  real `NemotronHMamba2Mixer` through `Context` + `LinearStatePool` + per-chunk
+  `Batch`es and pins chunked prefill == single-pass prefill: layer output within
+  2e-3 (the bf16 rounding floor), carried recurrent state within 1e-5, conv state
+  bit-identical, for chunk ∈ {512, 256, 128} with and without the hybrid-radix
+  ×64 track split; plus an exactness check on the frozen mid-chunk snapshot.
+- Growable KV was exonerated by disabling it: committing the whole pool up front
+  produced the byte-identical wrong answer.
+
+### The 4096-vs-8192 prefill speed anomaly
+
+Also a measurement artifact, of `--memory-ratio`, not of scheduling. The
+pure-Torch Mamba scan's fp32 transients are ~1.8 GiB for an 8192-token chunk and
+~0.9 GiB for a 4096-token one; at `--memory-ratio 0.90` only ~1.4 GiB of VRAM is
+free after init, so the 8192 case thrashes the caching allocator:
+
+| 131 072 tokens, `q8_0` | prefill chunk | `--memory-ratio` | average prefill |
+|---|---:|---:|---:|
+| baseline | 8192 | 0.90 | 961 tok/s |
+| smaller chunks | 4096 | 0.90 | 1 910 tok/s |
+| same chunk, more headroom | 8192 | **0.80** | 1 769 tok/s |
+
+Halving the chunk and loosening the ratio buy the same ~1.9x, so the chunk size
+was standing in for free VRAM. Keep `--memory-ratio` at ~0.80–0.85 whenever
+`--max-prefill-length` is 8192 on this 16 GB card.
 
 ## Code changes made during this run
 

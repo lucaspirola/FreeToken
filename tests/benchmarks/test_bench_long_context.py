@@ -4,6 +4,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "benchmarks"))
 import bench_long_context as bench  # noqa: E402
 
@@ -87,3 +89,60 @@ def test_acceptance_rejects_mismatched_baseline_identity(tmp_path):
     assert failures == [
         "incompatible performance baseline: model='q6.gguf' vs 'q4.gguf'"
     ]
+
+
+class _CharTokenizer:
+    """Round-trip-exact stand-in: one token per character, so token offsets == char offsets."""
+
+    def encode(self, text, add_special_tokens=False):  # noqa: ARG002 - HF signature
+        return [ord(character) for character in text]
+
+    def decode(self, ids, skip_special_tokens=False):  # noqa: ARG002 - HF signature
+        return "".join(chr(token) for token in ids)
+
+
+def _needle_document(before: int, after: int, expected: str = "5663623") -> str:
+    return "head. " * 200 + "a" * before + f" {expected} " + "b" * after + " tail?" * 400
+
+
+def _depth(text: str, expected: str) -> float:
+    return text.index(expected) / len(text)
+
+
+def test_trim_filler_preserves_the_needle_depth():
+    """The needle must keep its relative depth, or the long-context sweep stops being a
+    needle-in-the-middle test: draining the largest gap first removes all the filler BEFORE
+    the needle and pins it near token 0 at every target, so the sweep only grows the text
+    after it (a retention test at an ever-larger retrieval distance, not retrieval at depth).
+    The residual drift is the fixed protected head/needle/tail windows, which do not shrink
+    with the target."""
+    tokenizer = _CharTokenizer()
+    expected = "5663623"
+    text = _needle_document(300_000, 300_000, expected)
+    source_depth = _depth(text, expected)
+
+    for target, tolerance in ((16_384, 0.05), (65_536, 0.02), (262_144, 0.01)):
+        trimmed, seen_original, actual = bench.trim_filler(tokenizer, text, expected, target)
+        assert seen_original == len(text)
+        assert actual == target
+        assert trimmed.count(expected) == 1
+        assert trimmed.endswith(text[-512:])
+        assert abs(_depth(trimmed, expected) - source_depth) < tolerance
+
+
+def test_trim_filler_keeps_an_off_center_needle_off_center():
+    tokenizer = _CharTokenizer()
+    expected = "5663623"
+    text = _needle_document(450_000, 150_000, expected)
+    source_depth = _depth(text, expected)
+    assert source_depth > 0.7
+
+    trimmed, _original, actual = bench.trim_filler(tokenizer, text, expected, 65_536)
+    assert actual == 65_536
+    assert abs(_depth(trimmed, expected) - source_depth) < 0.05
+
+
+def test_trim_filler_rejects_a_target_that_cannot_hold_the_protected_regions():
+    tokenizer = _CharTokenizer()
+    with pytest.raises(ValueError):
+        bench.trim_filler(tokenizer, _needle_document(3_000, 3_000), "5663623", 1_024)
