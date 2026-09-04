@@ -321,3 +321,27 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   (warmup) batches or the recorded amax is dummy-token magnitude.
 - `set -e` + `[ -n "$X" ] && export ...` as a statement kills the script when `$X` is empty
   (the AND-list returns 1). Use `if ... then ... fi` in any `serve.sh` an unset variable can reach.
+
+## 2026-09-04 (Switchyard 16-way soak vs. the slot-reclaim fix — a second currency, same anti-pattern)
+- A fix that closes one pool's fatal exposes the next pool's. `dcb617a` made the GDN slot
+  shortage recoverable (41 batches at 96/96, zero `LinearStatePool exhausted`); the soak then
+  ran 602 s and died on the KV *page* pool instead, in `committed_pages_required`. When
+  re-testing a resource-exhaustion fix, expect the queue to move to the next scarce currency
+  and grep the new traceback before concluding "the fix did not work".
+- **Gate every admission path, not the one you were looking at.** `PrefillAdder.try_add_one`
+  has two branches; only the fresh-admit branch checks `available_size`. A chunked-prefill
+  *continuation* is admitted unconditionally on the premise that "a continuation already owns
+  its resources" — it owns its table slot and state slots, but not the pages for its **next**
+  chunk. Continuations are also scheduled first, so the ungated path runs first.
+- **A per-pass reservation is not a reservation.** `PrefillAdder` is rebuilt every scheduling
+  pass, so `reserved_size` protects a prompt's remaining pages only within the pass that
+  admitted it. Between chunks those pages are invisible to `available_size` and other traffic
+  spends them. The SWA currency already solved this shape (`reserved_swa` + `max_end` cap);
+  the KV currency did not.
+- A soak whose failures come back in 755 ms instead of at the 600 s client timeout is a *good*
+  sign, not a worse one: it means the bounded-shutdown fix closed the port instead of leaving
+  requests hanging. Read `error_kinds` (`http_502` = connection refused) before reading the
+  error *rate*.
+- The soak's `health` column is the ROUTER's `/health`, not FreeToken's — it read `ok` through
+  the entire outage. Poll the upstream's own `/health` separately (this run: 62 non-ok samples,
+  first 503 eleven seconds after the death).
