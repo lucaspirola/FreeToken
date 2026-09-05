@@ -123,6 +123,28 @@ what identified the original starvation.
 If a deliberate scheduling change moves these numbers, update `GATE_CASES` in the script
 **and** the measured values in the comment above it, in the same commit that moves them.
 
+### The `ornith-ada` profile (not gated)
+
+The four gated profiles all run with `PrefillManager.max_batch_seqs == 0`, because
+`_resolve_max_prefill_seqs` only caps prefill lanes for growable *quantized-GGUF MoE*
+serving — the Ornith path, not Nemotron. `--profile ornith-ada` is that geometry: four
+agents, a 4,096-token chunk and a 65,536-token pool (the configuration of
+`benchmarks/results/ornith_ada_prefill_chunk_2026-08-31.md` and
+`ornith_ada_multi_agent_scheduler_2026-08-31.md`), with the one-lane cap and the
+short-prompt grouping crossover that lifts it.
+
+```bash
+uv run --no-project python benchmarks/scheduler_replay.py \
+  --ticks 20000 --seed 7 --profile ornith-ada
+```
+
+It exists to show that the seatable-lanes divisor and the GGUF lane cap compose: at seed 7
+the grouping arm fires (`lanes_max` 2 against 1 with the crossover at 0) and halves the
+error rate, 0.0079 against 0.0159, with `invariant_violations` 0 and `deadlock` false
+either way. It is deliberately **not** in `--gate`: no live Ornith soak has been run
+against this tree, so there is no measured floor to set — only this tree's own numbers,
+which is exactly the mistake the floors above are documented as avoiding.
+
 ## Running the checks locally
 
 The workflow does not `pip install -e .`: `setup.py` links

@@ -15,6 +15,26 @@ _HYBRID_FETCH_BY_RECENCY = (
     os.getenv("FREETOKEN_HYBRID_FETCH", "recency").strip().lower() != "lowest_id"
 )
 
+# LFU/LRU blend. A small frequency bonus for experts used in the recent decode window
+# can protect a temporally-local route without letting recency dominate the long-term
+# LFU histogram. Zero preserves the pure lexicographic LFU policy.
+_LFU_RECENCY_TOKENS_OVERRIDE = os.getenv("FREETOKEN_LFU_RECENCY_TOKENS")
+_LFU_RECENCY_BONUS_OVERRIDE = os.getenv("FREETOKEN_LFU_RECENCY_BONUS")
+
+
+def _lfu_recency_config(cache) -> tuple[int, int]:
+    tokens = (
+        int(_LFU_RECENCY_TOKENS_OVERRIDE)
+        if _LFU_RECENCY_TOKENS_OVERRIDE is not None
+        else cache.lfu_recency_tokens
+    )
+    bonus = (
+        int(_LFU_RECENCY_BONUS_OVERRIDE)
+        if _LFU_RECENCY_BONUS_OVERRIDE is not None
+        else cache.lfu_recency_bonus
+    )
+    return max(0, tokens), max(0, bonus)
+
 
 def ensure_experts(cache, layer_id: int, expert_ids: torch.Tensor) -> None:
     """Make this layer's routed experts resident; rewrite ``expert_ids`` to slot ids.
@@ -52,6 +72,7 @@ def ensure_experts(cache, layer_id: int, expert_ids: torch.Tensor) -> None:
 def _ensure_experts_sized_gpu(cache, layer_id, expert_ids, begin, end) -> None:
     block_e = triton.next_power_of_2(cache.num_experts)
     block_c = triton.next_power_of_2(cache.cache_size)
+    recency_tokens, recency_bonus = _lfu_recency_config(cache)
     _ensure_experts_sized_kernel[(1,)](
         expert_ids,
         cache.slot_for_id,
@@ -74,12 +95,15 @@ def _ensure_experts_sized_gpu(cache, layer_id, expert_ids, begin, end) -> None:
         BLOCK_C=block_c,
         COLLECT_STATS=cache.collect_stats,
         POLICY_LFU=cache.cache_policy_id == 1,
+        LFU_RECENCY_CALLS=recency_tokens * cache.num_layers,
+        LFU_RECENCY_BONUS=recency_bonus,
         num_warps=8 if block_c >= 2048 else 4,
     )
 
 
 def _ensure_experts_sized_cpu(cache, layer_id, expert_ids, begin, end) -> None:
     """Reference implementation for compact-cache unit tests."""
+    recency_tokens, recency_bonus = _lfu_recency_config(cache)
     seen = []
     for expert in expert_ids.view(-1).tolist():
         if expert not in seen:
@@ -111,7 +135,13 @@ def _ensure_experts_sized_cpu(cache, layer_id, expert_ids, begin, end) -> None:
             def victim_key(slot):
                 owner = int(cache.id_of_slot[slot])
                 freq = -1 if owner < 0 else int(cache.expert_frequency.view(-1)[owner])
-                return (freq, usage[slot], slot)
+                recent = (
+                    recency_bonus
+                    if recency_tokens
+                    and step - usage[slot] <= recency_tokens * cache.num_layers
+                    else 0
+                )
+                return (freq + recent, usage[slot], slot)
         else:
             def victim_key(slot):
                 return (usage[slot], slot)
@@ -376,6 +406,8 @@ def _ensure_experts_sized_kernel(
     BLOCK_C: tl.constexpr,
     COLLECT_STATS: tl.constexpr,
     POLICY_LFU: tl.constexpr,
+    LFU_RECENCY_CALLS: tl.constexpr,
+    LFU_RECENCY_BONUS: tl.constexpr,
 ):
     """Timestamp LRU constrained to one compact GGUF row-size class.
 
@@ -434,6 +466,12 @@ def _ensure_experts_sized_kernel(
                 mask=allowed & (oid >= 0),
                 other=-1,
             )
+            if LFU_RECENCY_CALLS > 0:
+                owner_frequency += tl.where(
+                    (step - usage) <= LFU_RECENCY_CALLS,
+                    LFU_RECENCY_BONUS,
+                    0,
+                )
             owner_frequency = tl.where(
                 owner_active | (~allowed), 2147483647, owner_frequency
             )

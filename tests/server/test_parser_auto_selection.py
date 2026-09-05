@@ -139,6 +139,21 @@ def test_swa_full_tokens_ratio_cli_surface():
     assert args.swa_full_tokens_ratio == pytest.approx(0.006)
 
 
+def test_prefill_chunk_is_auto_only_when_cli_does_not_override_it():
+    config = _Config({"architectures": ["LlamaForCausalLM"], "torch_dtype": "bfloat16"})
+    with patch("freetoken.utils.cached_load_hf_config", lambda _path: config):
+        automatic, _ = parse_args(["--model", ANON_PATH])
+        explicit, _ = parse_args(
+            ["--model", ANON_PATH, "--max-prefill-length=8192"]
+        )
+        alias, _ = parse_args(
+            ["--model", ANON_PATH, "--max-extend-length", "4096"]
+        )
+    assert automatic.auto_prefill_chunk is True
+    assert explicit.auto_prefill_chunk is False
+    assert alias.auto_prefill_chunk is False
+
+
 @pytest.mark.parametrize("ratio", ["0", "-0.1", "1.1", "not-a-number"])
 def test_swa_full_tokens_ratio_rejects_invalid_values(ratio):
     with pytest.raises(SystemExit):

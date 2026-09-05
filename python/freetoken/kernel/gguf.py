@@ -83,15 +83,38 @@ _MMA_TYPES = frozenset({12, 14})
 def shared_vec_multiwarp(
     compute_capability: tuple[int, int], *, gate_up: bool
 ) -> bool:
-    """Whether four output-row warps beat the legacy one-warp shared MMVQ.
+    """Whether multiple output-row warps beat the legacy one-warp shared MMVQ.
 
     RTX 5080 measurements favor four warps for both projections. RTX 2000 Ada
-    favors them only for down; its larger broadcast gate/up rows remain faster
-    with the original one-warp launch.
+    uses two for gate/up and four for down.
     """
-    return compute_capability >= (12, 0) or (
-        not gate_up and compute_capability == (8, 9)
+    return shared_vec_warps(compute_capability, gate_up=gate_up) > 1
+
+
+def shared_vec_warps(
+    compute_capability: tuple[int, int], *, gate_up: bool
+) -> int:
+    """Output-row warps for fused routed+shared decode MMVQ.
+
+    The environment overrides are process-start A/B controls. They are parsed
+    before CUDA graph capture, and leave the measured architecture defaults
+    unchanged when absent.
+    """
+    override = os.getenv(
+        "FREETOKEN_GGUF_SHARED_GATE_WARPS"
+        if gate_up
+        else "FREETOKEN_GGUF_SHARED_DOWN_WARPS"
     )
+    if override is not None:
+        value = int(override)
+        if value not in (1, 2, 4):
+            raise ValueError("shared GGUF MMVQ warps must be 1, 2, or 4")
+        return value
+    if compute_capability >= (12, 0):
+        return 4
+    if compute_capability == (8, 9):
+        return 2 if gate_up else 4
+    return 1
 
 
 @functools.cache
@@ -290,12 +313,14 @@ def ggml_moe_shared_a8_vec(
         device_index = x.device.index
         if device_index is None:
             device_index = torch.cuda.current_device()
-        multiwarp = shared_vec_multiwarp(
+        warps = shared_vec_warps(
             torch.cuda.get_device_capability(device_index), gate_up=broadcast
         )
+    else:
+        warps = 4 if multiwarp else 1
     return _module().ggml_moe_shared_a8_vec(
         x, weight, shared_weight, routed_ids, routed_top_k, quant_type,
-        row, tokens, expert_stride_bytes, broadcast, multiwarp,
+        row, tokens, expert_stride_bytes, broadcast, warps,
     )
 
 
@@ -319,7 +344,7 @@ def ggml_moe_shared_silu_down_a8_vec(
     device_index = gate_up.device.index
     if device_index is None:
         device_index = torch.cuda.current_device()
-    multiwarp = shared_vec_multiwarp(
+    warps = shared_vec_warps(
         torch.cuda.get_device_capability(device_index), gate_up=False
     )
     return _module().ggml_moe_shared_silu_down_a8_vec(
@@ -332,7 +357,7 @@ def ggml_moe_shared_silu_down_a8_vec(
         row,
         tokens,
         expert_stride_bytes,
-        multiwarp,
+        warps,
     )
 
 

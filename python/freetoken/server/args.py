@@ -91,6 +91,11 @@ def parse_args(
     Returns:
         EngineConfig instance with parsed arguments
     """
+    explicit_prefill_chunk = any(
+        option.split("=", 1)[0]
+        in {"--max-prefill-length", "--max-extend-length"}
+        for option in args
+    )
     from freetoken.attention import validate_attn_backend
     from freetoken.kvcache import SUPPORTED_CACHE_MANAGER
     from freetoken.kvcache.quant import KV_CACHE_DTYPES
@@ -486,7 +491,10 @@ def parse_args(
         type=int,
         dest="max_extend_tokens",
         default=ServerArgs.max_extend_tokens,
-        help="Chunk Prefill maximum chunk size in tokens.",
+        help=(
+            "Chunk prefill maximum in tokens. If omitted, hardware-tuned defaults may "
+            "apply (4K for Qwen3.5-MoE GGUF on sm_89; otherwise 8K)."
+        ),
     )
 
     parser.add_argument(
@@ -513,7 +521,7 @@ def parse_args(
         dest="adaptive_scheduler",
         default=ServerArgs.adaptive_scheduler,
         help=(
-            "Use the legacy fixed 8192-token prefill / 32-step decode slices when "
+            "Use the fixed configured prefill chunk / 32-step decode slices when "
             "growable KV has simultaneous prefill and decode work."
         ),
     )
@@ -1089,6 +1097,7 @@ def parse_args(
 
     if kwargs.get("kv_grow_step_tokens") is None:
         kwargs["kv_grow_step_tokens"] = 0
+    kwargs["auto_prefill_chunk"] = not explicit_prefill_chunk
     result = ServerArgs(**kwargs)
     logger = init_logger(__name__)
     logger.info(f"Parsed arguments:\n{result}")

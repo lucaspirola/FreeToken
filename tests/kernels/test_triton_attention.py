@@ -335,7 +335,15 @@ def test_decode_launch_config_selects_ornith_quantized_tuning_only():
     ) == (64, 64, 4)
     assert decode_launch_config(
         quant_name="q8_q6", head_dim=256, num_q_heads=16, num_kv_heads=2,
+        compute_capability=(8, 9),
+    ) == (32, 32, 4)
+    assert decode_launch_config(
+        quant_name="q8_q6", head_dim=256, num_q_heads=16, num_kv_heads=2,
         compute_capability=(12, 0),
+    ) == (64, 32, 8)
+    assert decode_launch_config(
+        quant_name="q6_q5", head_dim=256, num_q_heads=16, num_kv_heads=2,
+        compute_capability=(8, 9),
     ) == (64, 32, 8)
     assert decode_launch_config(
         quant_name="q6_q5", head_dim=256, num_q_heads=16, num_kv_heads=2,
@@ -495,6 +503,27 @@ def test_decode_runtime_splits_uses_measured_ada_batch_two_policy():
     assert decode_runtime_splits(batch=2, **(common | {"scratch_splits": 8})) == 8
     assert decode_runtime_splits(
         batch=2, **(common | {"compute_capability": (12, 0)})
+    ) == 32
+
+
+def test_decode_runtime_splits_uses_measured_ada_q8_q6_batch_four_policy():
+    from freetoken.kernel.triton.attention import decode_runtime_splits
+
+    common = dict(
+        preferred_splits=32,
+        scratch_splits=32,
+        quant_name="q8_q6",
+        head_dim=256,
+        num_q_heads=16,
+        num_kv_heads=2,
+        compute_capability=(8, 9),
+    )
+    assert decode_runtime_splits(batch=1, **common) == 32
+    assert decode_runtime_splits(batch=2, **common) == 32
+    assert decode_runtime_splits(batch=3, **common) == 32
+    assert decode_runtime_splits(batch=4, **common) == 16
+    assert decode_runtime_splits(
+        batch=4, **(common | {"compute_capability": (12, 0)})
     ) == 32
 
 

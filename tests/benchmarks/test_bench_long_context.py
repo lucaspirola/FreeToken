@@ -11,6 +11,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "benchmarks"))
 import bench_long_context as bench  # noqa: E402
 
 
+class _IdentityTokenizer:
+    def encode(self, text, add_special_tokens=False):
+        _ = add_special_tokens
+        return [ord(char) for char in text]
+
+    def decode(self, ids, skip_special_tokens=False):
+        _ = skip_special_tokens
+        return "".join(chr(value) for value in ids)
+
+
 def test_synthetic_needle_sample_is_unambiguous_and_long():
     question, expected = bench.synthetic_needle_sample()
     assert expected == "5663623"
@@ -45,6 +55,26 @@ def test_synthetic_needle_depth_places_the_needle(depth):
 def test_synthetic_needle_rejects_a_depth_outside_the_haystack(depth):
     with pytest.raises(ValueError):
         bench.synthetic_needle_sample(depth)
+
+
+def test_trim_filler_supports_compact_multi_agent_protection():
+    tokenizer = _IdentityTokenizer()
+    expected = "7319041"
+    text = "start " + "a" * 2000 + expected + "b" * 2000 + " final question"
+    trimmed, original, actual = bench.trim_filler(
+        tokenizer,
+        text,
+        expected,
+        1024,
+        protected_prefix_tokens=128,
+        protected_needle_context_tokens=128,
+        protected_tail_tokens=256,
+    )
+
+    assert original == len(text)
+    assert actual == 1024
+    assert expected in trimmed
+    assert trimmed.endswith(" final question")
 
 
 def test_prefill_rates_reads_last_scheduler_sample(tmp_path):

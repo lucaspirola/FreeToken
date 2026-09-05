@@ -14,6 +14,9 @@ def _get_pid_suffix() -> str:
 @dataclass(frozen=True)
 class SchedulerConfig(EngineConfig):
     max_extend_tokens: int = 8192
+    # CLI requests without an explicit chunk size may apply a measured
+    # architecture/model-specific value after the CUDA device is selected.
+    auto_prefill_chunk: bool = False
     # Independent prompt lanes per prefill forward. None auto-selects one for growable quantized
     # GGUF MoE with concurrency; zero explicitly keeps normal aggregate-token batching.
     max_prefill_seqs: int | None = None

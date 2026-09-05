@@ -253,6 +253,20 @@ def test_prefill_sequence_limit_auto_scope():
         assert _resolve_max_prefill_seqs(config) == expected
 
 
+def test_auto_small_prompt_group_tokens_uses_measured_ada_crossover():
+    from types import SimpleNamespace
+
+    from freetoken.scheduler.scheduler import _auto_small_prompt_group_tokens
+
+    auto = SimpleNamespace(max_prefill_seqs=None)
+    explicit = SimpleNamespace(max_prefill_seqs=1)
+
+    assert _auto_small_prompt_group_tokens(auto, 1, (8, 9)) == 1536
+    assert _auto_small_prompt_group_tokens(auto, 1, (12, 0)) == 1280
+    assert _auto_small_prompt_group_tokens(explicit, 1, (8, 9)) == 0
+    assert _auto_small_prompt_group_tokens(auto, 0, (8, 9)) == 0
+
+
 def test_interleaved_prefill_does_not_queue_blocked_agent_before_active_lane():
     """An agent that cannot reserve KV must not head-of-line block an admitted continuation."""
     from freetoken.core import SamplingParams

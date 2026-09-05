@@ -50,6 +50,44 @@ from freetoken.kvcache.linear_state_pool import (
 logger = init_logger(__name__)
 
 
+def _resolve_auto_prefill_chunk(
+    config: EngineConfig, compute_capability: tuple[int, int]
+) -> int:
+    """Resolve measured CLI prefill defaults without overriding explicit values."""
+    requested = int(config.max_extend_tokens)
+    if not getattr(config, "auto_prefill_chunk", False):
+        return requested
+    architecture = config.hf_config.architectures[0]
+    is_qwen35_gguf_moe = (
+        architecture == "Qwen3_5MoeGGUFForConditionalGeneration"
+        and config.model_config.gguf_expert_types is not None
+    )
+    # On the 70 W RTX 2000 Ada, Ornith's 8K expert prefill is both slower and
+    # larger than 4K. Keep the 5080/global 8K default for every other target.
+    if compute_capability == (8, 9) and is_qwen35_gguf_moe:
+        return min(requested, 4096)
+    return requested
+
+
+def _ornith_ada_q6_lfu_recency_tokens(
+    model_config, compute_capability: tuple[int, int]
+) -> int:
+    """Measured LFU/LRU blend for the uniform Q6_K Ornith checkpoint on Ada."""
+    types = getattr(model_config, "gguf_expert_types", None) or ()
+    if (
+        compute_capability == (8, 9)
+        and getattr(model_config, "model_type", None) == "qwen3_5_moe"
+        and getattr(model_config, "num_layers", None) == 40
+        and getattr(model_config, "num_experts", None) == 256
+        and getattr(model_config, "hidden_size", None) == 2048
+        and getattr(model_config, "moe_intermediate_size", None) == 512
+        and types
+        and all(pair == (14, 14) for pair in types)  # GGML Q6_K
+    ):
+        return 2
+    return 0
+
+
 def _require_offload_cache_size(cache_size: int, num_experts: int) -> None:
     """The offload MoE cache needs at least one slot per expert per layer. A too-small size
     (e.g. a bare offload run with moe_cache_size unset and auto disabled) must fail loudly."""
@@ -392,6 +430,19 @@ class Engine:
 
         self.device = torch.device(f"cuda:{config.tp_info.rank}")
         torch.cuda.set_device(self.device)
+        requested_prefill_chunk = config.max_extend_tokens
+        resolved_prefill_chunk = _resolve_auto_prefill_chunk(
+            config, torch.cuda.get_device_capability(self.device)
+        )
+        if resolved_prefill_chunk != requested_prefill_chunk:
+            object.__setattr__(config, "max_extend_tokens", resolved_prefill_chunk)
+            logger.info_rank0(
+                "Auto prefill chunk: %d -> %d tokens for %s on sm_%d%d",
+                requested_prefill_chunk,
+                resolved_prefill_chunk,
+                config.hf_config.architectures[0],
+                *torch.cuda.get_device_capability(self.device),
+            )
         torch.manual_seed(42)
         self.stream = torch.cuda.Stream()
         torch.cuda.set_stream(self.stream)
@@ -843,6 +894,13 @@ class Engine:
                 or config.model_config.hidden_size
             )
             cache.expert_intermediate_size = config.model_config.moe_intermediate_size
+            cache.lfu_recency_tokens = _ornith_ada_q6_lfu_recency_tokens(
+                config.model_config, torch.cuda.get_device_capability(self.device)
+            )
+            if cache.cache_policy_id == 1 and cache.lfu_recency_tokens:
+                logger.info_rank0(
+                    "Ada Q6 expert cache: applying a two-token recency bonus to aging LFU"
+                )
             cache.pageable_gpu = config.moe_pageable_gpu
             cache.direct_device_banks = bool(config.kv_grow_step_tokens)
             # before set_bank_sources: the residency validation and the copy plan's skip of non-pinned layers key on the CPU-layer set
@@ -1619,7 +1677,9 @@ class Engine:
         batch_logits = logits[: batch.size]
         next_tokens_gpu = self.sampler.sample(batch_logits, args).to(torch.int32)
         next_tokens_cpu = next_tokens_gpu.to("cpu", non_blocking=True)
-        copy_done_event = torch.cuda.Event()
+        copy_done_event = torch.cuda.Event(
+            enable_timing=self.config.moe_collect_stats
+        )
         copy_done_event.record(self.stream)
         return ForwardOutput(next_tokens_gpu, next_tokens_cpu, copy_done_event)
 

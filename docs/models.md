@@ -51,13 +51,19 @@ work too.
   floor: `--max-running-requests 1 --max-seq-len-override 200000 --num-tokens 200000
   --kv-cache-dtype int4 --moe-cache-size 256 --disable-moe-prefill-overlap
   --swa-full-tokens-ratio 0.006 --memory-ratio 0.95`.
-- For Ornith Q4_K_M at 200K on a 16 GB GPU, use one request, Q4_0 KV, 5,000
-  expert slots, and the default 8K prefill chunks: `--max-running-requests 1
+- For Ornith Q4_K_M at 200K on a 16 GB GPU, use one request, Q4_0 KV, and 5,000
+  expert slots: `--max-running-requests 1
   --max-seq-len-override 200000 --num-tokens 200000 --kv-cache-dtype q4_0
-  --moe-backend offload --moe-cache-size 5000 --max-prefill-length 8192
-  --memory-ratio 0.95`. On the RTX 2000 Ada/WSL test host, cold 32K TTFT was
-  51.1 s at 8K chunks versus 54.6 s at 16K; `--moe-prefill-hit-d2d` was slower
-  on this stack and should remain disabled. Install the optional SGLang kernel
+  --moe-backend offload --moe-cache-size 5000 --memory-ratio 0.95`. When the
+  prefill size is omitted, sm_89 Qwen3.5-MoE GGUF now auto-selects 4K chunks;
+  explicit values remain authoritative and other GPUs retain 8K. On the RTX 2000
+  Ada/WSL test host, an identical cold 32K Q4/INT4 gate rose from 556.76 tok/s
+  end-to-end at 8K to 1,336.02 tok/s at 4K, while Q6/Q8 rose from 427.90 to
+  1,251.40 tok/s on a cold 16K gate. Both recovered the exact needle and decode
+  speed was unchanged. The 4K working set also used about 0.9 GiB less peak VRAM.
+  See `benchmarks/results/ornith_ada_prefill_chunk_2026-08-31.md`.
+  `--moe-prefill-hit-d2d` was slower on this stack and should remain disabled.
+  Install the optional SGLang kernel
   (`freetoken[sgl]`) for faster expert-route alignment. FreeToken's Q4_0 path matches
   llama.cpp's block quantizer and is validated with normal answers, OpenAI tool calls,
   and a 55.6K-token Claude Code Bash-tool round trip. The sm_89 attention tuning reduces
@@ -71,7 +77,34 @@ work too.
   272--16384 tokens. Larger dense chunks return to transient dequant+cuBLAS, which is
   faster on this 70 W GPU. In a cold, identical 96,026-token server A/B, TTFT fell from
   176.91 s (`FREETOKEN_GGUF_DISABLE_MMA=1`) to 125.26 s (29.2% lower, 1.41x faster).
-  `int4` remains an alias for `q4_0`.
+  `int4` remains an alias for `q4_0`. The independently quantized Q8-K/Q6-V and
+  Q6-K/Q5-V tiers are also architecture-tuned on sm_89: the conservative eight-split
+  fallback left long batch-one attention under-parallelized, while measured 32-split
+  Q8/Q6 and 64-split Q6/Q5 launches reduce an isolated near-262K full-attention layer
+  by 58.6% and 60.3%, respectively. Both passed live Q6_K 32K needle and growable-KV
+  gates; see `benchmarks/results/ornith_ada_asymmetric_kv_2026-08-31.md`.
+  The automatic growable-GGUF prefill policy is also measured separately on Ada:
+  fresh prompts of at most 1,536 templated tokens may share one prefill forward,
+  while larger prompts stay serialized. Four-way Q4/INT4 tests favored grouping at
+  1,024 and 1,536 tokens but serialization at 2,048 and 4,096; the Q6/Q8 control at
+  1,536 tokens agreed. Explicit `--max-prefill-sequences` values still override the
+  automatic policy. See
+  `benchmarks/results/ornith_ada_multi_agent_scheduler_2026-08-31.md`.
+  Elastic agent graphs and recurrent state are also live-validated on sm_89 for
+  both production pairs: starting at two agents, four-way demand expands exact
+  graph/state capacity to four and teardown shrinks directly back to two while
+  restoring the surrendered MoE slots. On this 103 GiB WSL host, even Q6's expert
+  banks fit the CUDA pin budget, so `--moe-pageable-gpu` correctly selects no
+  pageable layers; the RTX 5080 low-RAM placement profile should not be enabled.
+  See `benchmarks/results/ornith_ada_elastic_multiagent_2026-08-31.md`.
+  Final cold full-context gates also pass with the production growable layouts.
+  At 262K, Q4_K_M/INT4 reaches 357.06 tok/s prefill and 28.76 tok/s full-tail
+  decode; Q6_K/Q8_0 reaches 404.05 and 22.92 tok/s. Q6_K/Q8_0 additionally passes
+  a 524K YaRN-2x gate after three 128K live KV commits, at 222.01 tok/s prefill
+  and 15.34 tok/s decode. All three runs recover the exact long-range needle and
+  leave 0.66 GiB free after final graph capture. Use 64K growth for Q4/INT4 and
+  128K for Q6/Q8 on this host; see
+  `benchmarks/results/ornith_ada_final_long_context_2026-08-31.md`.
 - On Blackwell (sm_120, e.g. RTX 5080 16 GB) the same command serves the **full
   262,144-token window**: `--attention-backend triton --max-seq-len-override 262144
   --num-tokens 262144 --kv-cache-dtype q4_0 --max-running-requests 1

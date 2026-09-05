@@ -178,8 +178,21 @@ def main() -> int:
     expected: list[str] = []
     for agent in range(args.agents):
         raw, needle = synthetic_agent_sample(agent)
+        compact_protection = (
+            {
+                "protected_prefix_tokens": 128,
+                "protected_needle_context_tokens": 128,
+                "protected_tail_tokens": 256,
+            }
+            if args.prompt_tokens < 4096
+            else {}
+        )
         prompt, _original, actual = long_context.trim_filler(
-            tokenizer, raw, needle, args.prompt_tokens
+            tokenizer,
+            raw,
+            needle,
+            args.prompt_tokens,
+            **compact_protection,
         )
         if actual != args.prompt_tokens:
             raise SystemExit(

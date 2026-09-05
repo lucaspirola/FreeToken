@@ -157,6 +157,44 @@ SCENARIOS_SWITCHYARD = [
 SCENARIOS_DEADLOCK = [
     ("chunked-mid", 40_000, 100),
 ]
+# "ornith-ada" profile: the growable-GGUF SINGLE-LANE geometry, which none of the profiles
+# above reach. ``_resolve_max_prefill_seqs`` returns 1 -- and therefore
+# ``PrefillManager.max_batch_seqs = 1`` -- only for growable quantized-GGUF MoE
+# (``model_config.gguf_expert_types is not None``) with ``max_running_req > 1``; every
+# Nemotron tree the four profiles above model runs with ``max_batch_seqs == 0``, so the
+# lane cap and the short-prompt grouping escape hatch beside it (fork/main's
+# ``_auto_small_prompt_group_tokens``: 1,536 tokens on sm_89, 1,280 elsewhere) are
+# untested here.
+#
+# That matters after the seatable-lanes divisor (812bc57): the divisor is
+# ``_seatable_lanes(adder, lane_cap, ...)``, which STOPS at ``lane_cap`` -- so on this path
+# it is 1 whenever the cap holds and the whole budget goes to the one lane, while a group of
+# short fresh prompts lifts the cap to 0 and the divisor becomes the real seat count again.
+# Both arms are exercised here.
+#
+# Prompt mix and sizing: benchmarks/results/ornith_ada_multi_agent_scheduler_2026-08-31.md
+# (four concurrent agents; 1,024/1,536 group, 2,048/4,096 serialize) and
+# ornith_ada_prefill_chunk_2026-08-31.md (the 32,768-token cold gate). Four agents, a
+# 4,096-token chunk (fork/main's Ada auto-resolution) and a 65,536-token pool are that
+# report's own configuration, so this profile measures the tree at the geometry the Ada
+# numbers were taken at rather than at the Switchyard soak's.
+SCENARIOS_ORNITH = [
+    ("agent-1k",       1_024, 25),
+    ("agent-1k5",      1_536, 25),
+    ("agent-2k",       2_048, 25),
+    ("agent-4k",       4_096, 15),
+    ("agent-32k",     32_768, 10),
+]
+# Per-profile overrides of the module-level Switchyard constants. Absent keys keep them.
+PROFILE_KNOBS = {
+    "ornith-ada": {
+        "agents": 4,                         # --max-running-requests on the Ada runs
+        "prefill_budget": 4_096,             # Engine._resolve_auto_prefill_chunk on sm_89
+        "pool_pages": 65_536,                # --num-tokens
+        "max_batch_seqs": 1,                 # _resolve_max_prefill_seqs for growable GGUF
+        "small_prompt_group_tokens": 1_536,  # _auto_small_prompt_group_tokens on sm_89
+    },
+}
 # Session geometry, from the soak driver (S1) and the server's session defaults.
 SESSION_TTL = 300.0       # UserMsg.session_ttl_seconds default (scheduler.py:875)
 CLIENT_TIMEOUT = 600.0    # switchyard soak --request-timeout; a starved request is abandoned
@@ -166,7 +204,9 @@ FAMILIES = 4
 REUSE_FRAC = 0.75  # stage route measured 73.6% prefix reuse pre-fix
 
 
-def build_pool(pool_pages: int = POOL, interleave: bool = True):
+def build_pool(pool_pages: int = POOL, interleave: bool = True,
+               max_running: int = MAX_RUNNING, max_batch_seqs: int = 0,
+               small_prompt_group_tokens: int = 0):
     from freetoken.core import Context, get_global_ctx, set_global_ctx
     try:
         get_global_ctx()
@@ -178,7 +218,7 @@ def build_pool(pool_pages: int = POOL, interleave: bool = True):
     from freetoken.scheduler.prefill import PrefillManager
     from freetoken.scheduler.table import TableManager
 
-    pt = torch.zeros((MAX_RUNNING + 1, WIDTH), dtype=torch.int32, device="cpu")
+    pt = torch.zeros((max_running + 1, WIDTH), dtype=torch.int32, device="cpu")
     kw = {}
     sig = inspect.signature(CacheManager.__init__).parameters
     grows = "committed_pages" in sig
@@ -189,15 +229,22 @@ def build_pool(pool_pages: int = POOL, interleave: bool = True):
         kw["committed_pages"] = min(GROW_STEP, pool_pages)
     cm = CacheManager(num_pages=pool_pages, page_size=PAGE_SIZE, page_table=pt,
                       type="radix", **kw)
-    tm = TableManager(max_running_reqs=MAX_RUNNING, page_table=pt)
+    tm = TableManager(max_running_reqs=max_running, page_table=pt)
     dm = DecodeManager(page_size=PAGE_SIZE)
     pm = PrefillManager(cm, tm, dm)
     caps = {"committed_pages": grows,
             "interleave_chunks": hasattr(pm, "interleave_chunks"),
             "max_batch_seqs": hasattr(pm, "max_batch_seqs"),
+            "small_prompt_group_tokens": hasattr(pm, "small_prompt_group_tokens"),
             "committed_pages_required": hasattr(cm, "committed_pages_required")}
     if caps["interleave_chunks"]:
         pm.interleave_chunks = interleave   # growable multi-agent mode, as the soak ran
+    # The GGUF lane cap and its short-prompt escape hatch; both absent on older trees, and
+    # both no-ops at their defaults, so every existing profile stays bit-identical.
+    if caps["max_batch_seqs"]:
+        pm.max_batch_seqs = max_batch_seqs
+    if caps["small_prompt_group_tokens"]:
+        pm.small_prompt_group_tokens = small_prompt_group_tokens
     return cm, tm, dm, pm, caps
 
 
@@ -216,7 +263,8 @@ class Traffic:
         self.uid = 0
         table = {"pressure": SCENARIOS_PRESSURE, "fanout": SCENARIOS_FANOUT,
                  "switchyard-stage": SCENARIOS_SWITCHYARD,
-                 "switchyard-deadlock": SCENARIOS_DEADLOCK}.get(profile, SCENARIOS)
+                 "switchyard-deadlock": SCENARIOS_DEADLOCK,
+                 "ornith-ada": SCENARIOS_ORNITH}.get(profile, SCENARIOS)
         self.sessions = profile.startswith("switchyard")
         self.reuse = 0.0 if profile == "fanout" else REUSE_FRAC
         self.jitter = (0.95, 1.05) if profile == "fanout" else (0.8, 1.2)
@@ -446,7 +494,19 @@ def run(ticks: int, seed: int, verbose: bool = False, profile: str = "stage",
     # profiles' recorded floors were measured under.
     if abort_inflight is None:
         abort_inflight = profile != "switchyard-deadlock"
-    cm, tm, dm, pm, caps = build_pool(pool_pages, interleave)
+    knobs = PROFILE_KNOBS.get(profile, {})
+    max_running = knobs.get("agents", MAX_RUNNING)
+    prefill_budget = knobs.get("prefill_budget", PREFILL_BUDGET)
+    # An explicit --pool still wins; the profile's own pool applies only at the default.
+    if pool_pages == POOL:
+        pool_pages = knobs.get("pool_pages", POOL)
+    cm, tm, dm, pm, caps = build_pool(
+        pool_pages,
+        interleave,
+        max_running=max_running,
+        max_batch_seqs=knobs.get("max_batch_seqs", 0),
+        small_prompt_group_tokens=knobs.get("small_prompt_group_tokens", 0),
+    )
     traffic = Traffic(seed, profile)
     match_stats = install_match_counter(cm)
     stop = gate_evidence = None
@@ -472,7 +532,7 @@ def run(ticks: int, seed: int, verbose: bool = False, profile: str = "stage",
     finished = {}      # uid -> total latency
     scenario = {}      # uid -> name
     slot_of = {}
-    free_slots = list(range(MAX_RUNNING))
+    free_slots = list(range(max_running))
 
     lanes_hist, util_hist, newtok_hist = [], [], []
     margin_prefill, margin_decode = [], []
@@ -703,7 +763,7 @@ def run(ticks: int, seed: int, verbose: bool = False, profile: str = "stage",
             free_slots.append(slot_of[uid])
 
     def admit_new():
-        while free_slots and len(pm.pending_list) + len(dm.running_reqs) < MAX_RUNNING:
+        while free_slots and len(pm.pending_list) + len(dm.running_reqs) < max_running:
             slot = free_slots.pop()
             uid, name, ids, sid = traffic.next(slot)
             slot_of[uid] = slot
@@ -739,13 +799,13 @@ def run(ticks: int, seed: int, verbose: bool = False, profile: str = "stage",
                     batch = dm.schedule_next_batch()
                     growable_decode_steps += 1
                 else:
-                    batch = pm.schedule_next_batch(PREFILL_BUDGET)
+                    batch = pm.schedule_next_batch(prefill_budget)
                     growable_decode_steps = 0
                     if batch is None:
                         empty_prefill_passes += 1
                         batch = dm.schedule_next_batch()
             elif prefill_runnable:
-                batch = pm.schedule_next_batch(PREFILL_BUDGET)
+                batch = pm.schedule_next_batch(prefill_budget)
                 growable_decode_steps = 0
                 if batch is None:
                     empty_prefill_passes += 1
@@ -837,7 +897,7 @@ def run(ticks: int, seed: int, verbose: bool = False, profile: str = "stage",
                     r.extend_len for r in batch.reqs)
                 lanes_hist.append(n)
                 newtok_hist.append(new_tok)
-                util_hist.append(new_tok / PREFILL_BUDGET)
+                util_hist.append(new_tok / prefill_budget)
                 state["clock"] += new_tok / PREFILL_TPS
                 for r in batch.reqs:
                     if r.uid not in first_chunk:
@@ -1137,7 +1197,7 @@ if __name__ == "__main__":
     ap.add_argument("--label", default="")
     ap.add_argument("--profile", default="stage",
                     choices=["stage", "pressure", "fanout", "switchyard-stage",
-                             "switchyard-deadlock"])
+                             "switchyard-deadlock", "ornith-ada"])
     ap.add_argument("--diagnose", action="store_true")
     ap.add_argument("--abort-inflight", dest="abort_inflight",
                     action="store_true", default=None,
@@ -1158,6 +1218,11 @@ if __name__ == "__main__":
               not a.no_interleave, a.abort_inflight)
     out["label"] = a.label
     out["profile"] = a.profile
-    out["pool"] = a.pool
+    # The EFFECTIVE pool: a profile with its own geometry (PROFILE_KNOBS) overrides POOL
+    # when --pool was left at the default, and the JSON line has to say what actually ran.
+    out["pool"] = (
+        a.pool if a.pool != POOL
+        else PROFILE_KNOBS.get(a.profile, {}).get("pool_pages", POOL)
+    )
     out["interleave"] = not a.no_interleave
     print(json.dumps(out))

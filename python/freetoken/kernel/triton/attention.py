@@ -122,11 +122,37 @@ def _tuned_decode_launch_config(
         and num_q_heads == 16
         and num_kv_heads == 2
         and compute_capability is not None
+        and compute_capability == (8, 9)
+    ):
+        # RTX 2000 Ada: the generic eight-way split leaves a single long
+        # context badly under-parallelized.  A full 16/32/64 split, tile and
+        # warp sweep at 16K--262K selected 32/32/4: at 262K batch one it cuts
+        # attention from 3.30 to 1.48 ms while retaining the dequantized oracle.
+        return 32, 32, 4
+    if (
+        quant_name == "q8_q6"
+        and head_dim == 256
+        and num_q_heads == 16
+        and num_kv_heads == 2
+        and compute_capability is not None
         and compute_capability >= (12, 0)
     ):
         # Mixed formats increase register pressure. At 262K on RTX 5080, 32-token
         # tiles / 8 warps cut the Q6-value attention toll by 25% versus Q8's 64/4
         # launch (0.492 vs 0.655 ms per layer); 128 splits regressed.
+        return 64, 32, 8
+    if (
+        quant_name == "q6_q5"
+        and head_dim == 256
+        and num_q_heads == 16
+        and num_kv_heads == 2
+        and compute_capability is not None
+        and compute_capability == (8, 9)
+    ):
+        # Q6/Q5 unpacking needs twice Q8/Q6's long-context parallelism and
+        # benefits from eight warps on Ada.  Sixty-four splits are the robust
+        # choice across 16K--262K and batches 1--4 (3.95 -> 1.80 ms at 262K,
+        # batch one); 128 is narrowly faster only for some large batches.
         return 64, 32, 8
     if (
         quant_name == "q6_q5"
@@ -211,13 +237,17 @@ def decode_runtime_splits(
     splits = min(preferred_splits, scratch_splits)
     if (
         compute_capability == (8, 9)
-        and batch == 2
-        and quant_name == "int4"
         and head_dim == 256
         and num_q_heads == 16
         and num_kv_heads == 2
     ):
-        splits = min(splits, 16)
+        if batch == 2 and quant_name == "int4":
+            splits = min(splits, 16)
+        # Four concurrent Q8/Q6 streams already expose enough stage-one work;
+        # 16 splits match or beat 32 from 16K through 262K and reduce stage-two
+        # scratch/reduction overhead.  Batches one through three retain 32.
+        if batch == 4 and quant_name == "q8_q6":
+            splits = min(splits, 16)
     return max(splits, 1)
 
 

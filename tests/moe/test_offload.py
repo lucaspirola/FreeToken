@@ -433,6 +433,33 @@ def test_aging_lfu_keeps_frequent_expert_over_more_recent_one():
     assert int(cache.expert_frequency[0, 1]) == 1
 
 
+def test_aging_lfu_optional_recency_bonus_protects_short_reuse():
+    """One frequency point can be offset by the measured short-reuse bonus."""
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    cache = OffloadMoeCache(
+        num_layers=2,
+        num_experts=2,
+        cache_size=2,
+        cache_policy="lfu",
+        device=torch.device("cpu"),
+        lfu_recency_tokens=1,
+    )
+    cache._size_class_enabled = True
+    cache._class_ranges = [(0, 2)]
+    cache._layer_cache_class = [0, 0]
+
+    cache.ensure_experts(0, torch.tensor([[0]], dtype=torch.int32))
+    cache.ensure_experts(0, torch.tensor([[1]], dtype=torch.int32))
+    cache.expert_frequency[0, 0] = 2
+    cache.expert_frequency[0, 1] = 1
+    cache.usage[int(cache.slot_for_id[0, 0])] = 0
+    cache.ensure_experts(1, torch.tensor([[0]], dtype=torch.int32))
+
+    assert int(cache.slot_for_id[0, 0]) == -1
+    assert int(cache.slot_for_id[0, 1]) >= 0
+
+
 def test_adjust_config_converts_moe_cache_rate_to_cache_size():
     from types import SimpleNamespace
 

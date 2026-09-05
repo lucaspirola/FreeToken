@@ -113,6 +113,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"local jsonl instead of downloading {AIME_REPO}; default $FREETOKEN_AIME25_JSONL",
     )
     p.add_argument("--problem", type=int, default=0, help="0-based AIME problem index")
+    p.add_argument(
+        "--warm-problem",
+        type=int,
+        default=None,
+        help="optional different 0-based problem used only to warm the expert cache",
+    )
     p.add_argument("--decode", type=int, default=256, help="decode tokens to measure (D)")
     p.add_argument(
         "--concurrency",
@@ -698,6 +704,13 @@ def run_one(args: argparse.Namespace, backend: str) -> dict:
     streams = concurrency_of(args)
     problems = load_problems(args.aime, args.problem, streams)
     problem, answer = problems[0]
+    # fork/main's --warm-problem: warm on a *different* problem, so a stickier cache
+    # policy cannot win merely by replaying the measured request's own routing trace.
+    warm_problem = (
+        load_problem(args.aime, args.warm_problem)[0]
+        if getattr(args, "warm_problem", None) is not None
+        else None
+    )
     sampling, sampling_src = resolve_sampling(args.model, args.greedy)
     port = free_port()
     origin = f"http://127.0.0.1:{port}"
@@ -747,7 +760,8 @@ def run_one(args: argparse.Namespace, backend: str) -> dict:
             seen = scrape_moe_stats(log_path)[2] if args.moe_collect_stats else 0
 
             # Warm the expert cache to a steady-state decode working set.
-            run_streams(origin, model_id, texts, sampling, args)
+            warm_texts = [warm_problem] * streams if warm_problem is not None else texts
+            run_streams(origin, model_id, warm_texts, sampling, args)
             snap_a: tuple[dict, list] | None = None
             if args.moe_collect_stats:
                 # The scheduler only dumps counters at an idle boundary, i.e. once a
@@ -762,6 +776,11 @@ def run_one(args: argparse.Namespace, backend: str) -> dict:
                 stats_b, layers_b, seen = wait_for_moe_stats(log_path, seen)
                 if stats_b is not None and layers_b is not None:
                     snap_b = (stats_b, layers_b)
+            else:
+                # Nothing to wait for on the stats line, but run_when_idle() also emits
+                # fork/main's CUDA-event GPU batch profile; tearing the server down at the
+                # last SSE chunk loses it. Let the scheduler cross its idle boundary.
+                time.sleep(1.0)
             stats = get_json(f"{origin}/v1/stats")
         finally:
             stop_server(proc)
