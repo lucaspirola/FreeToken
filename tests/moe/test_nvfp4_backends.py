@@ -816,6 +816,66 @@ def test_triton_relu2_prefill_matches_dequant_reference():
 
 
 @cuda
+@pytest.mark.parametrize("block_kb", [16, 32, 64])
+def test_triton_relu2_prefill_matches_reference_at_every_block_kb(monkeypatch, block_kb):
+    """The prefill K-loop loads ONE e4m3 scale per 8 packed bytes and broadcasts it over
+    the ``[BLOCK_SIZE_KB, BLOCK_SIZE_N]`` dequant tile (the tile used to be loaded 8x
+    redundantly -- 1.73x at the Nemotron geometry). ``NGRP = BLOCK_SIZE_KB // 8`` is 2, 4
+    and 8 here, so a wrong group index would show up in exactly one of these arms."""
+    from freetoken.moe.fused_nvfp4 import fused_experts_nvfp4
+
+    monkeypatch.setenv("FREETOKEN_NVFP4_PREFILL_BLOCK_KB", str(block_kb))
+    monkeypatch.setenv("FREETOKEN_NVFP4_PREFILL_BLOCK_M", "16")
+    monkeypatch.setenv("FREETOKEN_NVFP4_PREFILL_BLOCK_N", "64")
+    device = torch.device("cuda")
+    sources, banks = _ungated_gpu_banks(device)
+    hidden = torch.randn(17, H, dtype=torch.bfloat16, device=device) / 8
+    ids, weights = _ungated_routing(17, device)
+
+    out = fused_experts_nvfp4(hidden, *banks, weights, ids, E, "relu2", False)
+    _assert_close_relu2(out, _ref_moe_relu2(sources, 0, hidden, weights, ids))
+
+
+@cuda
+def test_e2m1_native_cvt_matches_the_arithmetic_decode_exactly():
+    """``cvt.rn.f16x2.e2m1x2`` (the sm_100+/sm_120 hardware FP4 decode the prefill K-loop
+    uses) against ``_e2m1_decode``'s bit construction, for all 256 packed bytes -- bitwise,
+    with a separate signbit check because code 8 must stay ``-0.0``. This is what makes the
+    branch in :func:`e2m1_native_cvt_cx` a pure scheduling choice."""
+    import triton
+    import triton.language as tl
+
+    from freetoken.kernel.triton.nvfp4_fused_moe import (
+        _e2m1_decode,
+        _e2m1_decode_pair_native,
+        e2m1_native_cvt_cx,
+    )
+
+    if torch.cuda.get_device_capability() < (10, 0):
+        pytest.skip("cvt.rn.f16x2.e2m1x2 needs Blackwell (sm_100+ / sm_120)")
+    assert e2m1_native_cvt_cx()
+
+    @triton.jit
+    def _both(src_ptr, nat_ptr, ref_ptr, n, BLOCK: tl.constexpr):
+        offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < n
+        b = tl.load(src_ptr + offs, mask=mask, other=0).to(tl.int32)
+        lo, hi = _e2m1_decode_pair_native(b)
+        tl.store(nat_ptr + 2 * offs, lo.to(tl.float32), mask=mask)
+        tl.store(nat_ptr + 2 * offs + 1, hi.to(tl.float32), mask=mask)
+        tl.store(ref_ptr + 2 * offs, _e2m1_decode(b & 0xF), mask=mask)
+        tl.store(ref_ptr + 2 * offs + 1, _e2m1_decode((b >> 4) & 0xF), mask=mask)
+
+    device = torch.device("cuda")
+    src = torch.arange(256, dtype=torch.uint8, device=device)
+    nat = torch.empty(512, dtype=torch.float32, device=device)
+    ref = torch.empty(512, dtype=torch.float32, device=device)
+    _both[(1,)](src, nat, ref, src.numel(), BLOCK=256)
+    assert torch.equal(nat, ref)
+    assert torch.equal(torch.signbit(nat), torch.signbit(ref))
+
+
+@cuda
 def test_triton_relu2_decode_matches_dequant_reference():
     """Marlin-style decode GEMV with the fused relu2 epilogue, top-6."""
     from freetoken.moe.fused_nvfp4 import fused_experts_decode_nvfp4_marlin

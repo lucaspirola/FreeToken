@@ -55,6 +55,11 @@ class VMMTensor:
         # NVFP4 expert-bank scales (see parse_dtype in csrc/vmm_tensor.cpp).
         torch.float8_e4m3fn: "float8_e4m3fn",
         torch.float8_e5m2: "float8_e5m2",
+        # b12x/flashinfer packs its NVFP4 codes into an int32 bank; growable KV makes the
+        # MoE device banks VMM-backed, so that pairing needs the integer dtypes too.
+        torch.int16: "int16",
+        torch.int32: "int32",
+        torch.int64: "int64",
     }
 
     def __init__(

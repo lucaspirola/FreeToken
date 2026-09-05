@@ -48,9 +48,13 @@ DECODE_BLOCK_N = (8, 16, 32, 64)
 DECODE_BLOCK_KW = (8, 16, 32)
 DECODE_WARPS = (2, 4, 8)
 
+# BLOCK_N=256 and BLOCK_KB=16 were added 2026-09-05 with the scale-broadcast K-loop
+# (benchmarks/results/nemotron35_lightning_5080_moe_prefill_gemm_2026-09-05.md): once the
+# scale tile stops being loaded 8x redundantly the register budget buys a much wider N and
+# a much shorter K step, and 64/256/16 is 1.77x the tile this grid used to be able to pick.
 PREFILL_BLOCK_M = (16, 32, 64, 128)
-PREFILL_BLOCK_N = (32, 64, 128)
-PREFILL_BLOCK_KB = (32, 64)
+PREFILL_BLOCK_N = (32, 64, 128, 256)
+PREFILL_BLOCK_KB = (16, 32, 64)
 PREFILL_GROUP_M = (1, 8)
 PREFILL_WARPS = (4, 8)
 PREFILL_STAGES = (3, 4)
@@ -78,6 +82,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--warmup", type=int, default=2)
     p.add_argument("--iters", type=int, default=7)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--merge", action="store_true",
+                   help="keep buckets of an existing table that this run did not tune")
     p.add_argument(
         "--write", action="store_true", help="write the tuned prefill JSON configs in-tree"
     )
@@ -322,10 +328,16 @@ def _write_configs(tables: dict, args, device) -> list[Path]:
         if not buckets:
             continue
         path = out_dir / nvfp4_config_filename(args.experts, n, k, device_name)
-        payload = {
+        payload = {}
+        if args.merge and path.exists():
+            # Keep buckets this run did not tune, so a table can be rebuilt in several
+            # passes (the M=8192 sweep alone is ~15 minutes of Triton compiles).
+            payload.update(json.loads(path.read_text()))
+        payload.update({
             str(m): {key: int(cfg[key]) for key in PREFILL_CONFIG_KEYS}
             for m, cfg in sorted(buckets.items())
-        }
+        })
+        payload = {k2: payload[k2] for k2 in sorted(payload, key=int)}
         path.write_text(json.dumps(payload, indent=2) + "\n")
         written.append(path)
         print(f"wrote {path}")

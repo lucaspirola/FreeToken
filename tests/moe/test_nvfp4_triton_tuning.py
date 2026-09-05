@@ -90,3 +90,44 @@ def test_decode_marlin_config_falls_back_and_finds_tuned_entries():
         assert set(cfg) == set(generic)
         # a different SM count is a different GPU -> must not borrow the tuned tile
         assert fn.decode_marlin_config(n, k, top_k, sm + 1) == generic
+
+
+def test_prefill_launch_env_override_forces_every_key(monkeypatch):
+    """``FREETOKEN_NVFP4_PREFILL_*`` are the twins of ``FREETOKEN_EXTEND_*`` /
+    ``FREETOKEN_DECODE_*``: they make a tile A/B two invocations of one binary. Every key
+    the kernel takes must be reachable, and an unset variable must not disturb the table."""
+    from freetoken.moe import fused_nvfp4 as fn
+
+    base = fn.nvfp4_moe_config(8192, I, H, "No_Such_GPU_9999")
+    forced = dict(BLOCK_SIZE_M=64, BLOCK_SIZE_N=256, BLOCK_SIZE_KB=16,
+                  GROUP_SIZE_M=4, num_warps=8, num_stages=2)
+    assert set(forced) == set(fn.PREFILL_CONFIG_KEYS)
+    for key, var in fn._PREFILL_ENV_KEYS.items():
+        monkeypatch.setenv(var, str(forced[key]))
+    assert fn.nvfp4_moe_config(8192, I, H, "No_Such_GPU_9999") == forced
+    for var in fn._PREFILL_ENV_KEYS.values():
+        monkeypatch.delenv(var)
+    assert fn.nvfp4_moe_config(8192, I, H, "No_Such_GPU_9999") == base
+
+
+def test_shipped_prefill_block_kb_is_kernel_legal():
+    """Two hard constraints of ``_prefill_nvfp4_moe_kernel``'s K-loop, neither of which
+    raises until a launch: the scale broadcast needs ``BLOCK_SIZE_KB % 8 == 0`` (one e4m3
+    scale covers 8 packed bytes) and ``tl.dot`` needs ``K >= 16``, and the dot's K is
+    ``BLOCK_SIZE_KB``. The same holds for the heuristic fallback."""
+    import json
+    from pathlib import Path
+
+    from freetoken.moe import fused_nvfp4 as fn
+
+    def check(cfg, where):
+        kb = cfg["BLOCK_SIZE_KB"]
+        assert kb % 8 == 0, f"{where}: BLOCK_SIZE_KB={kb} is not a multiple of 8"
+        assert kb >= 16, f"{where}: BLOCK_SIZE_KB={kb} is below tl.dot's K>=16"
+
+    configs = Path(fn.__file__).with_name("configs")
+    for path in sorted(configs.glob("triton_*/nvfp4,*.json")):
+        for bucket, cfg in json.loads(path.read_text()).items():
+            check(cfg, f"{path.name}[{bucket}]")
+    for m in (1, 16, 65, 8192):
+        check(fn._prefill_config_default(m), f"_prefill_config_default({m})")

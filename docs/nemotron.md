@@ -62,20 +62,27 @@ only, I=1856) plus one shared expert.
   `.wslconfig` `memory=` large enough to hold it) pins every layer and keeps the
   graphs; the preflight script prints which side of the line this host is on.
 - **Expert GEMM**: keep the **`triton`** default — do not pass `--nvfp4-backend auto`
-  or `flashinfer` for this checkpoint. In isolation flashinfer's sm_120 W4A16 fused MoE
-  (`b12x`) looks like the winner (`benchmarks/bench_nvfp4_moe_kernels.py`, per MoE layer,
-  cold L2: 2.3× Triton on an M=8192 prefill chunk, 1.6× on batched decode at M=8/16), and
-  `auto` therefore resolves to it here (sm_120, ungated relu2, `moe_intermediate_size`
-  1856 ≥ the 1024 threshold). **End to end on the offload path it loses**
+  or `flashinfer` for this checkpoint. Since the 2026-09-05 prefill-GEMM rewrite
+  (`benchmarks/results/nemotron35_lightning_5080_moe_prefill_gemm_2026-09-05.md`) Triton
+  wins the kernel microbenchmark outright at every width except the widest prefill chunk
+  (per MoE layer, cold L2, `--routings 8`): decode **1.64× b12x at M=1, 1.85× at M=8**,
+  prefill **1.43× at M=256**, and b12x keeps only 1.29× at M=2048 and **1.34× at M=8192**
+  (was 2.3×). `auto` still resolves to b12x here (sm_120, ungated relu2,
+  `moe_intermediate_size` 1856 ≥ the 1024 threshold) and that resolution is now wrong on
+  this geometry. End to end on the offload path b12x already lost before the rewrite
   (task 2B4, `benchmarks/results/nemotron35_lightning_5080_cache_study_2026-09-04.md`):
   32K prefill 5 623–5 777 tok/s on Triton vs 4 528–4 843 on b12x (Triton +19–24 %, two
   rounds), decode +4 % at bs=1, +18 % at bs=8, tied at bs=2/16. On the offload path the
   experts arrive by DMA and are read L2-warm, and 25–88 % of every decode step is expert
   PCIe traffic, so the tensor-core advantage applies only to the shrinking remainder while
-  b12x's launch overhead applies to every call. b12x also **cannot start with
-  `--kv-grow-step-tokens`**: growable KV allocates the slot cache as VMM tensors and the
-  repacked b12x banks include an int32 bank that `VMMTensor` does not support. Revisit if
-  the expert set ever becomes GPU-resident. `--nvfp4-backend marlin` is rejected at config
+  b12x's launch overhead applies to every call. The backend is chosen once, at bank-load
+  time (`moe/expert_banks.py`), because it pins the on-GPU weight layout — you cannot take
+  b12x for prefill and Triton for decode. (b12x's remaining prefill lead is its
+  pre-swizzled tensor-core fragment layout; the ablation that removes the NVFP4 scale from
+  the Triton kernel *entirely* is slower than the shipped kernel, so the gap is the operand
+  path, not the dequant.) `--nvfp4-backend flashinfer` **can** now be combined with
+  `--kv-grow-step-tokens` (the b12x int32 bank was rejected by `VMMTensor`; the integer
+  dtypes were added 2026-09-05). `--nvfp4-backend marlin` is rejected at config
   time (its fused kernel assumes a gated `[2I, H]` bank and a silu epilogue), and
   `--moe-backend cpu`/`hybrid` pins the layout back to `triton` because CPU decode reads
   the native ModelOpt rows.
@@ -205,9 +212,11 @@ of the 1M run) against `836 + 25.8e-3` before — the **intercept does not move*
 is confined to attention, and the non-attention position-dependent term solves to
 **0 ± 0.2e-3 ms/token, i.e. ±13 s of a 1M prefill**: KV grow, page allocation and the
 `O(prefix)` page-index build are not measurable. The Mamba-2 SSD scan is flat in position by
-construction (1.068 ms/layer/8K chunk, 0.2 % of a 1M prefill); the flat term is **79 % MoE
-expert GEMMs** (23 layers x 29.5 ms at M=8192), which is now what a short-prompt prefill
-costs. Attention is still 91 % of the last chunk at 1M.
+construction (1.068 ms/layer/8K chunk, 0.2 % of a 1M prefill); the flat term was **79 % MoE
+expert GEMMs** (23 layers x 29.5 ms at M=8192), which is what a short-prompt prefill costs.
+Attention is still 91 % of the last chunk at 1M. The MoE half of that flat term was cut on
+2026-09-05 — see *MoE prefill GEMM* below — taking the per-chunk flat cost from ~861 to
+~586 ms.
 
 The follow-up ticket — *"the extend kernel is at 31 % of peak, dequantizes q8_0 in the inner
 loop, and a native-Q8 QK is worth another 1.5–2x"* — was measured on 2026-09-05 and **closed
@@ -221,13 +230,51 @@ cannot reach it: q8_0's scale is per 32 elements of `head_dim`, so folding it af
 costs `BLOCK_M * BLOCK_N * D/QBLOCK` multiplies against `BLOCK_D * BLOCK_N` for dequantizing in
 place — cheaper only when `BLOCK_M < QBLOCK`, which is why decode's `_Q8_NATIVE_QK`
 (`BLOCK_M = 16` heads) pays and extend's 64-token tile does not; and the V scale sits on the
-PV *reduction* axis, where no fold exists. The kernel is unchanged. The next prefill target is
-the MoE (33 TFLOP/s of the same 123, i.e. 3.7x off, against attention's 1.7x).
+PV *reduction* axis, where no fold exists. The kernel is unchanged. The next prefill target was
+the MoE (33 TFLOP/s of the same 123, i.e. 3.7x off, against attention's 1.7x) — closed below.
 
 To reproduce the old behaviour for an A/B, start the server with
 `FREETOKEN_EXTEND_BLOCK_M=128 FREETOKEN_EXTEND_BLOCK_N=64 FREETOKEN_EXTEND_NUM_WARPS=4
 FREETOKEN_EXTEND_NUM_STAGES=1`. Both the decode and the extend launch are logged once at
 startup (`Triton decode launch: ...`, `Triton extend launch: ...`).
+
+### MoE prefill GEMM — 1.74x on the kernel, 1.20x end to end at 131K (2026-09-05)
+
+Ticket §9.2 of the prefill profile ("MoE prefill is the flat term and it is 33 TFLOP/s")
+is closed: **29.47 -> 16.95 ms per MoE layer at M=8192, 57.9 TFLOP/s = 49 % of the card's
+118 TFLOP/s Triton `tl.dot` ceiling** (was 28 %).
+`benchmarks/results/nemotron35_lightning_5080_moe_prefill_gemm_2026-09-05.md`.
+
+It was **not** the tile — the whole tuner grid was worth 1.12x. `_prefill_nvfp4_moe_kernel`
+loaded one e4m3 block scale **per packed byte**, and one scale covers 16 k-values = 8 bytes,
+so every value was fetched eight times through 16 KB of shared memory per CTA. Loading the
+distinct `[BLOCK_SIZE_KB/8, BLOCK_SIZE_N]` rows and broadcasting is **1.73x on its own** and
+drops the kernel's shared memory 28 KB -> 12 KB, which is what makes `BLOCK_N = 256`
+affordable; the retuned M=8192 tile is `64/256/16/8/4/3`. A second term, `cvt.rn.f16x2.e2m1x2`
+(the Blackwell hardware FP4 decode, gated by `e2m1_native_cvt_cx()`), replaces the ~14-op bit
+construction for a further 1.04x. Both are **exact**: the output is bit-identical
+(`0.000e+00`) to the old kernel at every tile swept, and the native decode matches
+`_e2m1_decode` on all 256 packed byte values including `-0.0`.
+
+The general rule, worth carrying to any other block-quantized kernel: **a per-block scale is
+a `K/QBLOCK`-sized tensor — load it at that size and broadcast, never at the tile's K.**
+
+Two servers, same flags, same needle prompts, the before arm a worktree at `e4070da`:
+
+| prompt tokens | TTFT before -> after | prefill before -> after | speedup |
+|---:|---|---|---:|
+| 131,088 | 26.69 s -> **22.29 s** | 4,911 -> **5,882 tok/s** | **1.198x** |
+| 262,160 | 75.31 s -> **66.60 s** | 3,481 -> **3,936 tok/s** | **1.131x** |
+
+The needle is recalled in every run of both arms and the answers are byte-identical, as is a
+64-token greedy continuation of a short prompt. Δ TTFT per chunk is 275 / 272 ms against the
+microbench's predicted `23 x (29.47 - 16.95) = 288` ms — the engine sees 95 % of the kernel.
+Because the MoE GEMM is the *flat* term the win scales inversely with prompt length:
+~1.47x projected on a single 8K chunk, 1.20x at 131K, 1.13x at 262K, ~1.05x at 1M.
+
+`FREETOKEN_NVFP4_PREFILL_{BLOCK_M,BLOCK_N,BLOCK_KB,GROUP_M,NUM_WARPS,NUM_STAGES}` force the
+prefill tile (the twins of `FREETOKEN_EXTEND_*` / `FREETOKEN_DECODE_*`), and
+`FREETOKEN_NVFP4_NO_NATIVE_CVT=1` forces the arithmetic FP4 decode.
 
 ### Speculative decoding — `--speculative ngram`, shipped 2026-09-05
 
@@ -467,10 +514,11 @@ ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   34.5 tok/s decode — both decode figures predate the launch-config fix below), and a
   1,040,080-token conversation recalls its needle as well —
   `benchmarks/results/nemotron35_lightning_5080_1m_sessions_2026-09-04.md`.
-- `--nvfp4-backend flashinfer` **cannot be combined with `--kv-grow-step-tokens`** (growable
-  KV allocates the slot cache as VMM tensors; the b12x banks include an int32 bank
-  `VMMTensor` does not support). The `triton` default is required here, and is the
-  recommendation anyway.
+- `--nvfp4-backend flashinfer` + `--kv-grow-step-tokens` used to die at init with
+  `unsupported VMM tensor dtype: torch.int32` (growable KV allocates the slot cache as VMM
+  tensors; the b12x banks include an int32 bank). **Fixed 2026-09-05** — `int16`/`int32`/
+  `int64` added to `VMMTensor._DTYPE_NAMES` and `parse_dtype`, verified by an actual server
+  start. `triton` is still the recommendation, on speed.
 
 Gate closed 2026-09-04
 (`benchmarks/results/nemotron35_lightning_5080_1m_sessions_2026-09-04.md`): three sessions

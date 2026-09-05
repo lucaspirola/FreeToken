@@ -635,3 +635,63 @@ the clock. A live 16-way soak on both routes remains the acceptance test.
       fixed-width verify forward; (g) sampling (non-greedy) speculation needs `Sampler.prepare` to
       repeat-interleave its per-request parameter rows by k; (h) the drafter indexes the whole
       prompt on first engagement (~0.1-0.2 s at 131K).
+
+## MoE prefill GEMM (ticket §9.2 of the prefill profile) — 2026-09-05
+
+Ticket: *"MoE prefill is now the flat term and it is 33 TFLOP/s"* — 29.5 ms per layer at
+M=8192, 23 layers, 79 % of the position-independent per-chunk cost.
+
+- [x] Read the prefill profile / q8 ceiling / extend-MoE / cache-study write-ups first, and
+      re-derive the denominators: the honest ceilings are **123 TFLOP/s** (cuBLAS bf16) and
+      **118 TFLOP/s** (Triton `tl.dot`), not the 225 spec sheet.
+- [x] **The "b12x returned nan at M=8192" ticket is a reporting artifact, not a bug.**
+      `bench_nvfp4_moe_kernels.py`'s summary prints `nan` for every column when a backend
+      produced no rows; re-run on this host, b12x runs clean and is 12.60 ms at M=8192
+      (78 TFLOP/s) against Triton's 29.47. Nothing to fix; the number is the target.
+- [x] `benchmarks/bench_moe_prefill_gemm.py` (new): the prefill grouped GEMM alone, TFLOP/s
+      against the measured ceiling (not the HBM roofline, which is the wrong figure of merit
+      at M=8192), with a tile-grid sweep, a routing-skew knob and a real-`topk_ids` replay.
+- [x] Tile sweep at M=8192: the tuner's grid is exhausted — best in it is 26.4 ms (1.12x).
+      **The kernel structure, not the tile, was the limit.**
+- [x] Root cause, by ablation: the K-loop loaded ONE e4m3 scale **per packed byte**, i.e.
+      every value 8 times (one scale covers 16 k-values = 8 bytes). Loading the distinct
+      `[BLOCK_KB/8, BLOCK_N]` rows and broadcasting is **1.73x** on its own and drops the
+      kernel's shared memory 28 KB -> 12 KB, which is what unlocks the wider tile.
+- [x] Second term: `cvt.rn.f16x2.e2m1x2`, the Blackwell hardware FP4 decode (the same
+      instruction flashinfer's b12x kernel uses), replaces `_e2m1_decode`'s ~14-op bit
+      construction — bit-identical for all 256 packed bytes, worth a further 1.04x.
+- [x] Result: **29.47 -> 16.67 ms per layer at M=8192, 1.77x, 58.8 TFLOP/s = 50 % of the
+      Triton `tl.dot` ceiling** (was 28 %), on the tile `64/256/16/1/4/3`. Bit-identical
+      (`0.000e+00`) to the old kernel at every tile swept.
+- [x] `FREETOKEN_NVFP4_PREFILL_{BLOCK_M,BLOCK_N,BLOCK_KB,GROUP_M,NUM_WARPS,NUM_STAGES}` —
+      the twins of `FREETOKEN_EXTEND_*` / `FREETOKEN_DECODE_*`, so a tile A/B is two
+      invocations of one binary.
+- [x] `benchmarks/tune_nvfp4_moe.py`: `BLOCK_N=256` and `BLOCK_KB=16` added to the grid
+      (unreachable before the scale fix), plus `--merge` so a table can be rebuilt in passes.
+- [x] VMM int32/int64 dtypes (`csrc/vmm_tensor.cpp` + `kernel/vmm.py`): growable KV plus
+      `--nvfp4-backend flashinfer` died at startup on the b12x int32 bank.
+- [x] Re-tuned per-M-bucket tables (the tuner picks `64/256/16/8/4/3` at M=4096/8192
+      independently of the hand sweep): 256 1.82 -> 1.275 ms, 2048 8.47 -> 5.107,
+      **8192 29.47 -> 16.95 ms (57.9 TFLOP/s)**. Routing skew is worth 0.7 % at this M
+      (Dirichlet alpha 0.25/1.0/4.0), so the real-`topk_ids` capture the ticket asked for is
+      not the discriminator here — the harness keeps `--routing-file` for the small buckets.
+- [x] e2e A/B, two servers (before arm = worktree at `e4070da`), same prompts:
+      **131,088 tokens 26.69 -> 22.29 s TTFT (1.198x), 262,160 75.31 -> 66.60 s (1.131x)**,
+      needle recalled in all four runs, answers byte-identical, greedy short prompt
+      byte-identical. Δ per chunk 275/272 ms vs the microbench's predicted 288.
+- [x] `--nvfp4-backend flashinfer --kv-grow-step-tokens` starts and serves (was a startup
+      `ValueError`); `tests/kernels/test_vmm_tensor.py` pins int16/int32/int64.
+- [x] 193 tests pass (`tests/moe` + `tests/kernels/test_vmm_tensor.py`), 5 skipped.
+- [ ] Follow-ups, in measured order (§10 of the write-up): (a) b12x is still 1.34x on the
+      M=8192 grouped GEMM and the gap is the **operand path**, not the dequant — the
+      no-scale-at-all ablation is *slower* than the shipped kernel — so closing it means
+      adopting a swizzled bank layout, which is a load-time global decision that costs
+      decode 1.6-1.9x; (b) `a_ptrs_lo`/`a_ptrs_hi` read the same span at a 2-element stride
+      so neither activation load vectorizes — a one-off deinterleave of `A` per GEMM is
+      ~0.5 ms of HBM and is the most likely remaining Triton-side win; (c) the decode GEMVs
+      load their block scale the same redundant way and were not touched (decode is
+      HBM-bound, so it may be worth nothing — but it is the same three lines);
+      (d) `bench_nvfp4_moe_kernels.py --gate` still asserts the 2B1 targets ("b12x >= 2x
+      triton at M=8/16"), which are now inverted and fail on a healthy tree; (e) the M=256
+      bucket runs at 20 % of the ceiling with +53 % padding waste at `BLOCK_M=16`, and the
+      scheduler's interleave share really does produce 512-token chunks.

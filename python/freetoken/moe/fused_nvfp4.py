@@ -345,6 +345,27 @@ def _prefill_config_default(M: int) -> Dict[str, int]:
                 GROUP_SIZE_M=8, num_warps=8, num_stages=4)
 
 
+# Env overrides for the prefill tile, the twins of ``FREETOKEN_EXTEND_*`` /
+# ``FREETOKEN_DECODE_*``: they make a launch-config A/B two invocations of one binary
+# instead of a rebuild, which is how the tuned tables below were graded end to end.
+_PREFILL_ENV_KEYS = {
+    "BLOCK_SIZE_M": "FREETOKEN_NVFP4_PREFILL_BLOCK_M",
+    "BLOCK_SIZE_N": "FREETOKEN_NVFP4_PREFILL_BLOCK_N",
+    "BLOCK_SIZE_KB": "FREETOKEN_NVFP4_PREFILL_BLOCK_KB",
+    "GROUP_SIZE_M": "FREETOKEN_NVFP4_PREFILL_GROUP_M",
+    "num_warps": "FREETOKEN_NVFP4_PREFILL_NUM_WARPS",
+    "num_stages": "FREETOKEN_NVFP4_PREFILL_NUM_STAGES",
+}
+
+
+def _prefill_launch_env_override(cfg: Dict[str, int]) -> Dict[str, int]:
+    for key, var in _PREFILL_ENV_KEYS.items():
+        raw = os.environ.get(var)
+        if raw:
+            cfg[key] = int(raw)
+    return cfg
+
+
 def nvfp4_config_filename(num_experts: int, N: int, K: int, device_name: str) -> str:
     """``configs/triton_<ver>/`` basename for a tuned prefill table.
 
@@ -396,12 +417,15 @@ def nvfp4_moe_config(
     ``torch.device``, a device index, a literal device name, or ``None`` (current
     device)."""
     name = _device_name(device)
+    cfg = None
     if name is not None:
         configs = _load_nvfp4_moe_configs(num_experts, N, K, name, triton.__version__)
         if configs:
             bucket = min(configs, key=lambda b: abs(b - M))
-            return dict(configs[bucket])
-    return _prefill_config_default(M)
+            cfg = dict(configs[bucket])
+    if cfg is None:
+        cfg = _prefill_config_default(M)
+    return _prefill_launch_env_override(cfg)
 
 
 def _prefill_gemm(
@@ -506,6 +530,7 @@ def fused_experts_nvfp4(
 
 __all__ = [
     "PREFILL_M_BUCKETS",
+    "PREFILL_CONFIG_KEYS",
     "decode_marlin_config",
     "nvfp4_config_filename",
     "nvfp4_moe_config",

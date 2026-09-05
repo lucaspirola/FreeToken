@@ -46,6 +46,14 @@ at::ScalarType parse_dtype(const std::string& name) {
   // is VMM-backed whenever elastic capacity is on, so the mapping needs this dtype.
   if (name == "float8_e4m3fn") return at::kFloat8_e4m3fn;
   if (name == "float8_e5m2") return at::kFloat8_e5m2;
+  // The flashinfer/b12x NVFP4 expert layout keeps its packed codes in an int32 bank, and
+  // ``--kv-grow-step-tokens`` makes the MoE device banks VMM-backed, so growable KV plus
+  // ``--nvfp4-backend flashinfer`` reaches this function with int32 (and, for symmetry,
+  // int64 index banks). Without these the pairing dies at startup with
+  // "unsupported VMM tensor dtype: torch.int32".
+  if (name == "int16") return at::kShort;
+  if (name == "int32") return at::kInt;
+  if (name == "int64") return at::kLong;
   throw std::invalid_argument("unsupported VMM tensor dtype: " + name);
 }
 

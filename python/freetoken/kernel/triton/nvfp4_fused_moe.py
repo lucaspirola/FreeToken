@@ -33,10 +33,13 @@ be fused into a per-tile epilogue; they keep ``ACT=0`` plus the separate op.
 from __future__ import annotations
 
 import functools
+import os
 
 import torch
 import triton
 import triton.language as tl
+from triton.language import target_info
+from triton.runtime.jit import constexpr_function
 
 from freetoken.kernel.triton.e4m3_compat import e4m3_native_cx, e4m3_u8_to_f32
 
@@ -84,6 +87,51 @@ def _e2m1_decode(code):
     bits = tl.where(mag > 1, normal, tl.where(mag == 1, 0x3F000000, 0))  # 0x3F000000 == 0.5
     bits = tl.where(code > 7, bits | -2147483648, bits)  # -2147483648 == the sign bit
     return bits.to(tl.float32, bitcast=True)
+
+
+def _force_no_native_e2m1() -> bool:
+    return os.environ.get("FREETOKEN_NVFP4_NO_NATIVE_CVT", "").lower() in ("1", "true", "yes", "on")
+
+
+_NO_NATIVE_E2M1 = _force_no_native_e2m1()
+
+
+@constexpr_function
+def e2m1_native_cvt_cx():
+    """Compile-time: does the target have the hardware FP4 decode?
+
+    ``cvt.rn.f16x2.e2m1x2`` (PTX ISA 8.6) exists from Blackwell on -- sm_100 datacenter
+    and sm_120 consumer alike. It turns :func:`_e2m1_decode`'s ~14-op bit construction
+    into ONE instruction per *pair* of codes, and it is bit-identical to it for all 256
+    byte values (``tests/moe/test_nvfp4_backends.py``), so the branch is a pure
+    scheduling choice. ``FREETOKEN_NVFP4_NO_NATIVE_CVT=1`` forces the arithmetic form
+    (read once at import, for A/B)."""
+    return not _NO_NATIVE_E2M1 and target_info.cuda_capability_geq(10, 0)
+
+
+@triton.jit
+def _e2m1_decode_pair_native(byte_):
+    """One packed NVFP4 byte -> (low nibble value, high nibble value) as fp16.
+
+    The low nibble -- the even-k code -- lands in the low half of the ``f16x2`` pair,
+    which is the same order :func:`_e2m1_decode` produces from ``code & 0xF`` and
+    ``(code >> 4) & 0xF``."""
+    return tl.inline_asm_elementwise(
+        """
+        {
+            .reg .b8  b0;
+            .reg .b32 h2;
+            cvt.u8.u32 b0, $2;
+            cvt.rn.f16x2.e2m1x2 h2, b0;
+            mov.b32 {$0, $1}, h2;
+        }
+        """,
+        "=h,=h,r",
+        [byte_],
+        dtype=(tl.float16, tl.float16),
+        is_pure=True,
+        pack=1,
+    )
 
 
 @triton.jit
@@ -343,6 +391,15 @@ def _prefill_nvfp4_moe_kernel(
     packed_base = packed_ptr + slot * stride_pe + offs_bn[None, :] * stride_pn
     scale_base = scale_ptr + slot * stride_se + offs_bn[None, :] * stride_sn
 
+    # One e4m3 scale covers 16 k-values == 8 packed bytes, so a [BLOCK_KB, BLOCK_N]
+    # scale tile holds each value 8 times. Load the [NGRP, BLOCK_SIZE_N] distinct rows and
+    # broadcast: that is the single largest term in this kernel (measured 1.73x at the
+    # Nemotron geometry -- and it also takes the tile OUT of shared memory, 28 KB -> 12 KB).
+    tl.static_assert(BLOCK_SIZE_KB % 8 == 0, "BLOCK_SIZE_KB must be a multiple of 8 bytes")
+    NGRP: tl.constexpr = BLOCK_SIZE_KB // 8
+    offs_grp = tl.arange(0, NGRP)
+    n_grp_total = K // 16
+
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     K_BYTES = K // 2
     for kb in range(0, tl.cdiv(K_BYTES, BLOCK_SIZE_KB)):
@@ -351,14 +408,26 @@ def _prefill_nvfp4_moe_kernel(
 
         p_ptrs = packed_base + byte_idx[:, None] * stride_pkb
         bytes_ = tl.load(p_ptrs, mask=byte_mask[:, None], other=0).to(tl.int32)
-        sblk = byte_idx // 8
-        s_ptrs = scale_base + sblk[:, None] * stride_sblk
+
+        grp_idx = kb * NGRP + offs_grp
+        grp_mask = grp_idx[:, None] < n_grp_total
+        s_ptrs = scale_base + grp_idx[:, None] * stride_sblk
         if e4m3_native_cx():
-            scale = tl.load(s_ptrs, mask=byte_mask[:, None], other=0.0).to(tl.float32)
+            s_grp = tl.load(s_ptrs, mask=grp_mask, other=0.0).to(tl.float32)
         else:
-            scale = e4m3_u8_to_f32(tl.load(s_ptrs, mask=byte_mask[:, None], other=0))
-        b_lo = _e2m1_decode(bytes_ & 0xF) * scale  # [BLOCK_KB, BLOCK_N]
-        b_hi = _e2m1_decode((bytes_ >> 4) & 0xF) * scale
+            s_grp = e4m3_u8_to_f32(tl.load(s_ptrs, mask=grp_mask, other=0))
+        scale = tl.reshape(
+            tl.broadcast_to(s_grp[:, None, :], (NGRP, 8, BLOCK_SIZE_N)),
+            (BLOCK_SIZE_KB, BLOCK_SIZE_N),
+        )
+
+        if e2m1_native_cvt_cx():
+            d_lo, d_hi = _e2m1_decode_pair_native(bytes_)
+            b_lo = d_lo.to(tl.float32) * scale  # [BLOCK_KB, BLOCK_N]
+            b_hi = d_hi.to(tl.float32) * scale
+        else:
+            b_lo = _e2m1_decode(bytes_ & 0xF) * scale
+            b_hi = _e2m1_decode((bytes_ >> 4) & 0xF) * scale
 
         a_lo = tl.load(a_ptrs_lo, mask=token_mask[:, None] & byte_mask[None, :], other=0.0)
         a_hi = tl.load(a_ptrs_hi, mask=token_mask[:, None] & byte_mask[None, :], other=0.0)
@@ -386,7 +455,9 @@ def _prefill_nvfp4_moe_kernel(
 __all__ = [
     "_apply_act",
     "_e2m1_decode",
+    "_e2m1_decode_pair_native",
     "_e2m1_lut",
+    "e2m1_native_cvt_cx",
     "_decode_nvfp4_moe_kernel",
     "_decode_nvfp4_marlin_kernel",
     "_prefill_nvfp4_moe_kernel",

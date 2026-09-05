@@ -105,3 +105,28 @@ def test_growable_mha_pool_reverses_each_growth_segment():
     pool.commit_pages(2 * step)
     assert pool.committed_pages == 2 * step
     assert pool._kv_buffer.data_ptr() == pointer
+
+
+@pytest.mark.parametrize("dtype", [torch.int16, torch.int32, torch.int64])
+def test_vmm_tensor_supports_the_integer_bank_dtypes(dtype):
+    """``--kv-grow-step-tokens`` allocates the MoE slot cache as ``VMMTensor``s, and the
+    b12x/flashinfer NVFP4 layout packs its codes into an **int32** bank -- so that pairing
+    used to die at startup with ``unsupported VMM tensor dtype: torch.int32``
+    (``benchmarks/results/nemotron35_lightning_5080_cache_study_2026-09-04.md``). The
+    dtype table in ``kernel/vmm.py`` and ``parse_dtype`` in ``csrc/vmm_tensor.cpp`` must
+    stay in step: a name missing from either side is the same startup failure."""
+    from freetoken.kernel.vmm import VMMTensor
+
+    n = 8 * 1024 * 1024 // torch.empty((), dtype=dtype).element_size()
+    allocation = VMMTensor((n,), dtype=dtype, device=torch.device("cuda"))
+    granularity = allocation.granularity
+    elems = granularity // torch.empty((), dtype=dtype).element_size()
+    assert allocation.tensor.dtype is dtype
+    allocation.tensor[:elems].fill_(7)
+    allocation.commit_ranges([(granularity, granularity)])
+    allocation.tensor[elems : 2 * elems].fill_(-3)
+    torch.cuda.synchronize()
+    assert int(allocation.tensor[:16].sum()) == 7 * 16
+    assert int(allocation.tensor[elems : elems + 16].sum()) == -3 * 16
+    del allocation
+    gc.collect()

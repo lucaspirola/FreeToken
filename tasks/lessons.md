@@ -919,3 +919,49 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   The extend forward is 27-30 ms, but `631*7.4 + 54*V = 7.48 s` puts the end-to-end verify
   step at ~52 ms -- **~40 % of it is not the forward** (drain, batch prep, a 46-launch eager
   commit). A component benchmark is a lower bound on a feature's cost, never the cost.
+
+## 2026-09-05 (MoE prefill GEMM — the redundant *load*, not the arithmetic)
+- **A per-block quantization scale is a `K/QBLOCK`-sized tensor. Load it at that size and
+  broadcast; never at the tile's K.** The NVFP4 prefill K-loop indexed the scale with
+  `byte_idx // 8`, producing a `[BLOCK_KB, BLOCK_N]` tile in which every row repeats eight
+  times — one e4m3 scale covers 16 k-values = 8 packed bytes. Loading the distinct
+  `[BLOCK_KB/8, BLOCK_N]` rows and `broadcast_to(...).reshape(...)` was **1.73x on its own**
+  and took the kernel's shared memory 28 KB -> 12 KB. The *multiply* has to happen at the
+  tile's K; the *load* does not, and the compiler cannot CSE a load.
+- **Ablate to a wrong-but-fast bound before optimizing further.** A `FAST=16` arm that skips
+  the scale entirely (garbage output) ran at 17.41 ms against the fixed kernel's 16.67 —
+  i.e. the fixed kernel is already past the "scale is free" bound, and every further idea on
+  that axis (fp16 product, serializing the two dequant tiles) was measured at 0 %. One
+  deliberately incorrect arm retired four hypotheses.
+- **Look for a hardware instruction before hand-rolling the bit twiddle — and look in the
+  competitor's source.** `cvt.rn.f16x2.e2m1x2` (PTX 8.6, Blackwell) decodes a packed NVFP4
+  byte to an `f16x2` in one op; it was found by grepping the installed *flashinfer* wheel
+  (`moe_w4a16_fp4_helpers.py`) for `e2m1`, which is where b12x's 78 TFLOP/s came from. In
+  Triton it is 12 lines of `tl.inline_asm_elementwise` and it is bit-identical to the
+  arithmetic decode for all 256 byte values, so it needs no accuracy gate at all. (`.reg .b8`
+  needs `cvt.u8.u32`, not `cvt.u16.u32` — ptxas says only "Arguments mismatch".)
+- **A tile sweep can be a *negative* result that is worth its GPU minutes.** 68 tiles at
+  M=8192 bought 1.12x against a 3.6x gap; that is what said "the structure, not the launch"
+  and redirected the effort. Report the exhausted sweep, do not quietly drop it.
+- **`nan` in a comparison table is usually a missing row, not a NaN.** The ticket "b12x
+  returned nan at M=8192" was `bench_nvfp4_moe_kernels.py` printing `float("nan")` for every
+  column of a backend that contributed no rows. Before debugging a numeric fault, check
+  whether the number was ever computed — one grep of the reporting code, no GPU.
+- **A skew knob is cheaper than a real capture, and it can retire the requirement.**
+  Dirichlet-alpha routing at 0.25/1.0/4.0 moved M=8192 by 0.7 %, because 49,152 routed rows
+  over 128 experts leave every expert with hundreds whatever the skew. That justified *not*
+  spending a model load on capturing real `topk_ids` — say which experiment you skipped and
+  why, with the number that licenses it.
+- **`pgrep -f <script name>` matches the `bash -c` wrapper that contains the name**, so
+  "is my job still running?" answered yes for 35 minutes after it had finished. Same family
+  as the 2026-09-04 `pkill -f` rule: check `ps -o etime -p <pid>` on the *real* pid, or look
+  at the artifact's mtime. The tuner had written its config tables 16 minutes in.
+- **`gpu_lock.sh` kills the job before Python flushes a buffered stdout**, so a wrapped
+  script that does not `exec >` its own log (or run `python -u`) leaves a **0-byte** log even
+  on a fully successful run. Both halves of the rule are needed: redirect *inside* the
+  wrapped script AND use `-u`.
+- **When the whole change is bit-exact, say so and drop the agreement gate.** The scale
+  broadcast reads the same values and the hardware FP4 decode produces the same codes, so
+  `max|Δ| = 0.000e+00` at every tile and the 131K/262K needle answers are byte-identical
+  between the two arms. That is a stronger statement than any `assert_close` tolerance, and
+  it is what makes a launch-table rewrite safe to ship without a quality re-gate.
