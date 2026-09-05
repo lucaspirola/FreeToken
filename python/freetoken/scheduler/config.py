@@ -21,6 +21,18 @@ class SchedulerConfig(EngineConfig):
     # GGUF MoE with concurrency; zero explicitly keeps normal aggregate-token batching.
     max_prefill_seqs: int | None = None
     cache_type: str = "radix"
+    # --- speculative decoding (scheduler/spec_ngram.py) ---
+    # None disables it; "ngram" enables prompt-lookup (n-gram) speculation. Greedy-only and
+    # single-stream in v1: a request with temperature > 0, or any step with more than one
+    # running request, takes the ordinary decode path.
+    speculative: str | None = None
+    # n-gram order. 8, not the literature's 3: when verification costs 4.4x a decode step you
+    # draft for precision, not recall (see benchmarks/results/..._ngram_spec_2026-09-05.md §2).
+    spec_ngram_n: int = 8
+    # Draft tokens per verify step; the forward carries spec_draft_len + 1 positions.
+    spec_draft_len: int = 8
+    # Halve the draft length after a rejection at position 0, restore it after a full accept.
+    spec_adaptive: bool = True
     offline_mode: bool = False
     decode_log_interval: int = 40
     special_token_ckpt: bool = False

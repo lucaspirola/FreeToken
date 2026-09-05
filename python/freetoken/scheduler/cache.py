@@ -632,6 +632,28 @@ class CacheManager:
                 self.swa_pool.alloc_swa(allocated)
             _write_page_table(self.page_table, allocated, allocation_info, self.page_size)
 
+    def free_spec_tail(self, req: Req, keep_len: int, alloc_len: int) -> None:
+        """Return the KV pages a rejected speculative draft allocated.
+
+        ``allocate_paged`` allocates exactly ``[page_ceil(cached_len), page_ceil(device_len))``
+        and nothing ever removes a suffix, so a verify forward that widened ``device_len`` to
+        ``alloc_len`` and then rolled back to an accepted ``cached_len`` of ``keep_len`` must
+        hand the surplus pages back here -- otherwise the next step re-allocates the same
+        positions and the difference leaks for the life of the request.
+
+        ``keep_len`` is the request's post-rollback ``cached_len`` (NOT ``device_len``), which
+        is what restores the invariant the allocator assumes: pages exist exactly up to
+        ``page_ceil(cached_len)``, and the next step allocates the newly emitted token's page.
+        """
+        first = div_ceil(keep_len, self.page_size) * self.page_size
+        end = div_ceil(alloc_len, self.page_size) * self.page_size
+        if end <= first:
+            return
+        tail = self.page_table[req.table_idx, first:end]
+        if self.swa_paged:
+            self._free_swa(tail)
+        self._free(tail)
+
     def cache_req(self, req: Req, *, finished: bool) -> None:
         if self.is_swa:
             return self._cache_req_swa(req, finished=finished)
@@ -908,6 +930,9 @@ class CacheManager:
         unless it was donated to the tree. Idempotent -- clears the refs so a re-entry frees
         nothing (defense-in-depth against the abort/finish double-free, see _free_req_resources)."""
         slots = list(req.mamba_ping_pong) if req.mamba_ping_pong is not None else []
+        if req.spec_scratch_slot is not None:
+            slots.append(req.spec_scratch_slot)
+            req.spec_scratch_slot = None
         if not keep_live and req.linear_slot_idx is not None:
             slots.append(req.linear_slot_idx)
         if slots:

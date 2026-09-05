@@ -246,6 +246,12 @@ class NemotronHMamba2Mixer(BaseOP):
         x = x.view(-1, self.num_heads, self.head_dim)
         B = B.view(-1, self.n_groups, self.state_size)
         C = C.view(-1, self.n_groups, self.state_size)
+        if batch.spec_capture is not None:
+            # Speculative verify forward: record this layer's scan inputs so the accepted
+            # prefix can be committed to the live state slot without a second model pass.
+            # The scan itself runs against the scratch slot (fla.cache_indices), so the live
+            # recurrent + conv state is not advanced at all. See spec_scan.SpecScanCapture.
+            batch.spec_capture.record(self, x, dt, B, C, conv_in)
         if reference_enabled():
             from . import mamba2_reference
 

@@ -491,7 +491,7 @@ class GGUFOutputHead(DeferredGGUFLinear):
 
         batch = get_global_ctx().batch
         if batch.is_prefill:
-            x = x[batch.attn_metadata.get_last_indices(batch.size)].contiguous()
+            x = x[batch.last_indices(batch.size)].contiguous()
         return super().forward(x)
 
 

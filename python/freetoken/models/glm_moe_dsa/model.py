@@ -35,7 +35,7 @@ class GlmFp8LMHead(ParallelLMHead):
 
         batch = get_global_ctx().batch
         if batch.is_prefill:
-            indices = batch.attn_metadata.get_last_indices(batch.size)
+            indices = batch.last_indices(batch.size)
             x = x[indices].contiguous()
         return fp8_pertensor_linear(x, self.weight, self.weight_scale)
 

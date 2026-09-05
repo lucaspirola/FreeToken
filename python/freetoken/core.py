@@ -78,6 +78,11 @@ class Req:
     # handler must not free resources under an in-flight forward; it sets this flag and
     # _process_last_data frees the request when the batch drains (after copy_done.synchronize).
     aborted: bool = False
+    # Speculative decoding (--speculative ngram): a private LinearStatePool slot the verify
+    # forward advances INSTEAD of the live slot, so a rejected draft leaves no recurrent state
+    # to roll back (see scheduler/spec_ngram.py). Allocated lazily on the first verify step and
+    # returned by CacheManager._free_req_slots. None for every non-speculative request.
+    spec_scratch_slot: int | None = None
 
     def __post_init__(self) -> None:
         assert self.input_ids.is_cpu
@@ -149,6 +154,15 @@ class Batch:
     attn_metadata: BaseAttnMetadata = field(init=False)
     # concatenated multimodal soft-token embeddings for a prefill batch (or None)
     mm_embeds: torch.Tensor | None = field(default=None, init=False)
+    # --- speculative decoding (verify batch) ---
+    # Explicit LM-head row selection, overriding the prefill path's "last token of each
+    # request". A verify batch needs the logits of EVERY position it carries; everything else
+    # leaves this None and keeps ``attn_metadata.get_last_indices``.
+    logits_indices: torch.Tensor | None = field(default=None, init=False)
+    # Per-layer recurrent-scan input recorder installed for a verify forward, so the accepted
+    # prefix can be committed to the live state slot afterwards without a second model pass
+    # (models/nemotron_h/spec_scan.py). None on every ordinary forward.
+    spec_capture: object | None = field(default=None, init=False)
     # Prefill log stats snapshotted at schedule time (before forward's complete_one()
     # advances cached_len), so the prefill log reports the tokens actually forwarded and
     # the prefix-cache hit -- matching SGLang's #new-token / #cached-token. Set by the
@@ -160,6 +174,16 @@ class Batch:
     # _prepare_batch succeeds. Continuation chunks leave this empty, so accounting is
     # exactly-once.
     prompt_admissions: List[Tuple[int, int, int]] = field(default_factory=list, init=False)
+
+    def last_indices(self, bs: int) -> torch.Tensor:
+        """Rows of the token-major hidden state the LM head should score.
+
+        Ordinarily the last position of each request (an extend/prefill forward predicts
+        one token per sequence). A speculative verify batch sets ``logits_indices`` to keep
+        every position instead -- the whole point of the forward is the k+1 predictions."""
+        if self.logits_indices is not None:
+            return self.logits_indices
+        return self.attn_metadata.get_last_indices(bs)
 
     @property
     def is_prefill(self) -> bool:

@@ -229,11 +229,13 @@ To reproduce the old behaviour for an A/B, start the server with
 FREETOKEN_EXTEND_NUM_STAGES=1`. Both the decode and the extend launch are logged once at
 startup (`Triton decode launch: ...`, `Triton extend launch: ...`).
 
-### Speculative decoding — NO-GO 2026-09-05, and why
+### Speculative decoding — `--speculative ngram`, shipped 2026-09-05
 
-Prompt-lookup (n-gram) speculative decoding was measured and refused, like Phase 4's MTP but
-for a different reason
-(`benchmarks/results/nemotron35_lightning_5080_ngram_spec_2026-09-05.md`).
+Prompt-lookup (n-gram) speculative decoding was measured and refused
+(`benchmarks/results/nemotron35_lightning_5080_ngram_spec_2026-09-05.md`), then unblocked by the
+extend-path MoE fix and built
+(`benchmarks/results/nemotron35_lightning_5080_ngram_spec_impl_2026-09-05.md`). What follows is
+the whole chain: why it was refused, what the blocker actually was, and what shipped.
 
 **Acceptance is not the problem.** Under greedy decoding a prompt-lookup drafter is verified
 against exactly the greedy continuation, so its acceptance is computable offline from ordinary
@@ -288,14 +290,71 @@ m = 32 it is 11.1 ms against Mamba-2's 15.6). 131K prefill 5,059 → 5,105 tok/s
 needle recalled in both arms, and a long prompt whose last chunk is short is greedy token-identical.
 Write-up: `benchmarks/results/nemotron35_lightning_5080_extend_moe_2026-09-05.md`.
 
-Order of work if speculation is revisited: (1) **done** — the extend path reuses the decode expert
-cache; (2) capture a fixed-width verify forward; (3) build `--speculative ngram` (default
-`--spec-ngram-n 8`, `--spec-draft-len 8`, greedy only). With (1) a verify step costs **4.4×** a
-graphed decode step instead of 42×, which projects **1.63×** on the copy class — already clear of
-the 1.25× bar MTP failed, so (2) is now an improvement rather than a precondition. This also
-corrects the Phase 4 write-up: its 1.63× verify cost came from a bs=2 *decode* step, but a real
-verify step takes the *extend* path, so MTP's projection was ~25× optimistic about its own verify
-step.
+This also corrects the Phase 4 (MTP) write-up: its 1.63× verify cost came from a bs=2 *decode*
+step, but a real verify step takes the *extend* path, so MTP's projection was ~25× optimistic
+about its own verify step.
+
+#### What shipped
+
+`--speculative ngram` (off by default), with `--spec-ngram-n 8`, `--spec-draft-len 8` and
+`--no-spec-adaptive`. **Greedy and single-stream in v1**: a request with `temperature > 0`, any
+step with more than one running request, a multimodal prompt, a hidden-state probe, an SWA model
+or `--cache-type naive` all silently take the ordinary decode path — the flag never refuses a
+request, it just does not speculate on it.
+
+A step drafts `k` tokens from the request's own prompt + output (most recent occurrence of the
+trailing 8-gram), runs **one extend forward over `k + 1` positions** keeping every logits row,
+accepts the longest agreeing prefix plus the bonus token, and commits. Mamba-2 state is verified
+into a private scratch slot (never the live one) and the accepted prefix is committed with one
+varlen SSD scan per layer; a self-check (`FREETOKEN_SPEC_CHECK_COMMIT=<n>`) shows that replay
+reproduces the forward's own state to **0.000e+00** on both the recurrent block and the conv
+window. Rejected KV pages are returned by `CacheManager.free_spec_tail` — without it every partial
+rejection leaked `k - accepted` pages — and rejected tokens never reach the host token list, so the
+prefix cache cannot see them.
+
+**Measured** (1 023 output tokens, one model load, with a second non-speculative control arm):
+
+| class | off | on | control off2 | draft rate | accepted/drafted | speedup |
+|---|---:|---:|---:|---:|---:|---:|
+| code | 135.8 | 140.4 | 136.8 | 0.005 | 0.83 | **1.03×** |
+| prose | 138.3 | 141.9 | 141.9 | 0.007 | 0.25 | **1.02×** |
+| copy (agent tool output) | 135.8 | 136.9 | 133.6 | 0.079 | 0.80 | **1.01×** |
+| 131K needle | 87.3 | 77.3 | 86.9 | 0.036 | 0.63 | **0.89×** |
+
+tok/s at bs=1; run-to-run spread on the non-speculative arms is 1.6–3.5 %, and an ungated control
+run reached 1.11× on the copy class with the same drafter statistics, so **read the copy-class win
+as ~1.05× with a spread of several points.** The n = 8 precision gate is what keeps code and prose
+from regressing; n = 3 (the published prompt-lookup setting) costs 12–14 % on exactly those two.
+
+The win is well short of the 1.63× the go/no-go projected, and the shortfall is measured, not
+mysterious: the draft rate is **0.079** against the offline replay's 0.353 (engagement is decided
+one token stale, so a copy burst is entered one step late), and an end-to-end verify step costs
+**~52 ms** against the ~30 ms extend forward inside it (the commit issues 46 eager kernel launches).
+Both are ordinary optimisation work; the write-up's §10 quantifies them.
+
+**Two things to know before enabling it.**
+
+1. **It is not token-identical to non-speculative greedy decoding, and cannot be.** The verify step
+   argmaxes *extend*-path logits and commits state with the *SSD scan*, where a decode step uses
+   the graphed decode kernels and the recurrent step — different reduction orders. The control arm
+   reproduces the baseline exactly, so the engine is deterministic; the speculative arm diverges at
+   token 40–71 of 1 023 on three of four prompts (identical on the fourth, and the 131K needle is
+   recalled in both arms). Any multi-token verification scheme on this engine carries this.
+2. **Long context regresses.** A verify step's extend attention reads the KV history once per query
+   token, so at 131K it costs ~118 ms against an ~11.5 ms decode step — **~10×**, against ~7× at
+   short context — and `k + 1 = 9` cannot beat that. The decoder therefore measures its own
+   verify/decode ratio online and stops drafting when `accepted + 1` can no longer pay for it,
+   re-probing every 16 gated steps. There is deliberately **no** context-length threshold: the
+   ratio depends on KV dtype, attention backend and acceptance. The gate cannot refund the
+   *measurement*, though — pricing itself costs two verify steps, which on a short generation at
+   131K is the whole −11 %.
+
+A 16-way passthrough soak passes with zero errors in both arms and flat p50 / request count; its
+p95/p99 tail differs but one 10-minute pair cannot separate that from variance (write-up §11).
+
+Still open, by upside: cutting the ~40 % of a verify step that is not the forward (batch the
+46-launch commit), the burst-entry hysteresis, `--spec-draft-len 16` for long context, batched
+speculation, a graph-captured fixed-width verify forward, and sampling support.
 
 ### 1M single-session profile
 

@@ -87,12 +87,20 @@ run_phase() {  # $1 = route suffix, $2 = phase key (STAGE|PASS), $3 = workdir na
   echo
 }
 
-run_phase stage       STAGE soakStage
-run_phase passthrough PASS  soakPass
+# SOAK_PHASES selects which routes run (default: both, in this order). A short single-route
+# A/B sets it to just "passthrough".
+for phase in ${SOAK_PHASES:-stage passthrough}; do
+  case "$phase" in
+    stage)       run_phase stage       STAGE soakStage ;;
+    passthrough) run_phase passthrough PASS  soakPass ;;
+    *) echo "unknown SOAK_PHASES entry: $phase"; exit 5 ;;
+  esac
+done
 curl -s -m 5 -o /dev/null -w 'health_http=%{http_code}\n' "http://127.0.0.1:$PORT/health"
 
 # --- disconnect-abort probe (ff470e7): drop a long prompt mid-prefill, then confirm
 # /v1/stats.active returns to 0 (the abort reached the scheduler and freed the slot).
+if [ "${SOAK_PROBE:-1}" = 1 ]; then
 echo "=== disconnect probe $(date -Is) ==="
 curl -s -m 5 "http://127.0.0.1:$PORT/v1/stats" > "$SP/stats_before_probe.json"
 python3 - "$PORT" <<'PY'
@@ -128,6 +136,7 @@ else:
     print("active did NOT return to 0:", a)
 PY
 curl -s -m 5 "http://127.0.0.1:$PORT/v1/stats" > "$SP/stats_after_probe.json"
+fi
 
 kill "$HW" 2>/dev/null
 kill "$SAMP" 2>/dev/null

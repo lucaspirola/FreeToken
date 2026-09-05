@@ -344,7 +344,7 @@ class LagunaGGUFLMHead(DeferredGGUFLinear):
         from freetoken.layers.gguf import fused_mul_mat_gguf
         batch = get_global_ctx().batch
         if batch.is_prefill:
-            x = x[batch.attn_metadata.get_last_indices(batch.size)].contiguous()
+            x = x[batch.last_indices(batch.size)].contiguous()
         assert self.qweight is not None and self._quant_type is not None
         return fused_mul_mat_gguf(x, self.qweight, self._quant_type)
 

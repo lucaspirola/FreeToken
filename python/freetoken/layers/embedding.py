@@ -105,7 +105,7 @@ class ParallelLMHead(VocabParallelEmbedding):
         batch = ctx.batch
         bs = batch.size
         if batch.is_prefill:
-            indices = batch.attn_metadata.get_last_indices(bs)
+            indices = batch.last_indices(bs)
             x = x[indices].contiguous()
             del indices
 

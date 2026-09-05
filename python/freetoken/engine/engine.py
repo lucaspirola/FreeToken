@@ -1685,6 +1685,23 @@ class Engine:
         return ForwardOutput(next_tokens_gpu, next_tokens_cpu, copy_done_event)
 
     @torch.inference_mode()
+    def spec_verify_forward(self, batch: Batch) -> torch.Tensor:
+        """One speculative verify forward: greedy argmax for EVERY position of the batch.
+
+        Deliberately not ``forward_batch``: a verify step must not advance ``cached_len`` /
+        ``device_len`` (``complete_one``) before the acceptance count is known, must not
+        collapse the logits to one row per request, and is greedy by construction
+        (``--speculative ngram`` refuses a sampling request), so it needs no sampler.
+        Always eager -- CUDA graphs are captured for one-token decode batches only.
+        """
+        assert torch.cuda.current_stream() == self.stream
+        assert batch.is_prefill and batch.size == 1, "verify batch is one extend request"
+        assert batch.logits_indices is not None, "verify batch must keep every logits row"
+        with self.ctx.forward_batch(batch):
+            logits = self.model.forward()
+        return torch.argmax(logits, dim=-1).to(torch.int32)
+
+    @torch.inference_mode()
     def _warmup_prefill(self) -> None:
         """Compile the Triton prefill path before the first real request.
 

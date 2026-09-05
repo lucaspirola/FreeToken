@@ -936,6 +936,55 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--speculative",
+        type=str,
+        dest="speculative",
+        default=ServerArgs.speculative,
+        choices=["ngram"],
+        help=(
+            "Speculative decoding algorithm. 'ngram' is prompt-lookup speculation: the "
+            "request's own prompt + output is indexed by n-gram, a match drafts the "
+            "continuation, and one extend forward verifies it. Greedy and single-stream "
+            "only -- a sampling request, or any step with more than one running request, "
+            "silently takes the ordinary decode path. Omitted = off."
+        ),
+    )
+
+    parser.add_argument(
+        "--spec-ngram-n",
+        type=int,
+        dest="spec_ngram_n",
+        default=ServerArgs.spec_ngram_n,
+        help=(
+            "n-gram order for --speculative ngram. Larger n is a precision gate: it fires "
+            "far less often but is right far more often, which is the right trade when a "
+            "verify step costs several decode steps. Default 8."
+        ),
+    )
+
+    parser.add_argument(
+        "--spec-draft-len",
+        type=int,
+        dest="spec_draft_len",
+        default=ServerArgs.spec_draft_len,
+        help=(
+            "Draft tokens proposed per verify step for --speculative ngram; the verify "
+            "forward carries this many + 1 positions. Default 8."
+        ),
+    )
+
+    parser.add_argument(
+        "--no-spec-adaptive",
+        action="store_false",
+        dest="spec_adaptive",
+        default=ServerArgs.spec_adaptive,
+        help=(
+            "Keep the draft length fixed at --spec-draft-len instead of halving it after a "
+            "rejection at position 0 and restoring it after a full acceptance."
+        ),
+    )
+
+    parser.add_argument(
         "--shell-mode",
         action="store_true",
         help="Run the server in shell mode.",

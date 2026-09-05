@@ -855,3 +855,67 @@ check for `Discarded cold session ...: client token prefix changed` before blami
 - **Ship the arm that works and file the faster one.** The GEMV variant was 23-27x on the MoE
   and took one line; chasing the grouped GEMM's further ~2.3x of HBM would have cost another
   session and had a fault to design around. Same discipline as the scheduler's third attempt.
+
+## 2026-09-05 (building `--speculative ngram` — three measurement traps in one feature)
+- **A feature that "does nothing" and a feature that "never fires" look identical from the
+  outside.** The first measured run reported `draft_rate 0.0` on the copy class where the
+  offline replay said 0.353, and the only reason it was diagnosable at all was adding
+  per-reason decline counters (`declined_no_slot`, `declined_stale_match`, `declined_budget`,
+  `declined_shape`). **Instrument every early `return False` in a gate with its own counter
+  before measuring it**, not after the number confuses you.
+- **`LinearStatePool.num_free_slots` is normally ZERO during steady-state decode.** A request
+  holds live + 2 ping-pong and the radix tree owns every donated snapshot, so "is there a free
+  slot?" is the wrong question — the right one is "can `ensure_mamba_slots(1)` make one?"
+  (tier 2, LRU-evict an unlocked tree snapshot). Any new consumer of that pool must escalate,
+  and must NOT escalate to tier 3 (`reserve_mamba_slots` spills a session lease) for an
+  optimisation.
+- **The design doc said "reuse the already-reserved ping-pong pair"; both slots were live.**
+  One holds the tool-call anchor freeze, the other is the next radix chunk snapshot's
+  destination. **A slot described as "scratch" in a design note is not scratch until you have
+  read every writer of it.**
+- **A/B without a repeat of arm A is not an A/B.** `on != off` was unattributable until an
+  `off2` control arm ran last and came back identical to `off` on 4/4 prompts — which is what
+  turned "speculation might be buggy" into "the engine is deterministic and speculation
+  genuinely changes the stream". One extra arm, no extra model load.
+- **When two paths must agree but cannot be compared end-to-end, compare the INTERMEDIATE they
+  share.** A greedy diff cannot separate "the state commit is wrong" from "extend kernels
+  reduce in a different order than decode kernels". Replaying all m positions and comparing
+  against what the verify forward itself wrote (`SpecScanCapture.replay_error`) does: it came
+  back **0.000e+00** and closed the question in one run. Build that check while you build the
+  thing, not after a confusing result.
+- **Warm the arm, not just the cache.** The first run measured off=84 tok/s against on=123 and
+  the "1.46x" was entirely a cold first arm: a 1-token generate warms the prefix tree but not
+  the expert cache or the decode path. A short decode warm-up per prompt made both arms land
+  within 1 %.
+- **Measure over the window the offline study used.** The copy class drafted on 0.8 % of steps
+  at `--max-tokens 256` and 8 % at 1 024 — the model spends its first ~200 tokens reasoning and
+  only then starts copying. A short generation had measured the preamble, not the phenomenon.
+- **A cost ratio measured at one context length is not a constant.** A verify step's extend
+  attention reads the KV history once per query token, so it is ~3.6x a decode step at short
+  context and **~10x at 131K** — which flips a +11 % win into a −20 % loss. The fix is to
+  estimate the ratio online (the gap between consecutive scheduler steps IS a decode step's
+  wall time) rather than to threshold on context length, because the ratio also depends on KV
+  dtype, attention backend and acceptance.
+- **Speculative decoding on this engine is NOT token-identical to non-speculative decoding, and
+  no implementation can make it so.** The verify step argmaxes extend-path logits and commits
+  state with the SSD scan; a decode step uses the graphed decode kernels and the recurrent step.
+  Say this in the write-up as a property of the architecture, so the next person does not spend
+  a session hunting a bug that is a reduction order.
+- **A self-tuning gate needs the RIGHT estimator on each side, and "robust" is not one answer.**
+  The break-even gate compares a verify step against a decode step. `verify_ms` must be a
+  running MINIMUM (a few dozen samples, and the first pays Triton autotune -- as an EWMA that
+  one-off read 11.35 where the steady state is 4-5, closed the gate, and then starved it of
+  the samples that would reopen it). `decode_ms` must be an EWMA (hundreds of samples, and the
+  scheduler loop's gap is not uniform, so its minimum sits far below a real step -- as a floor
+  it gated out 264 of 278 drafts and turned +11 % into -0.3 %). Each wrong choice cost a GPU
+  run. **Ask how many samples a quantity gets and what its outliers look like before picking.**
+- **Make a gate hard to close and easy to leave open when a false close costs more than a
+  false open.** Requiring two timed samples plus a 25 % margin took the copy-class declines
+  from 264/278 to 5/59 while still shutting off at 131K.
+- **Measure the feature over the window the projection assumed.** The go/no-go's 1.63x used
+  1 023 output tokens; measuring at 256 caught only the model's reasoning preamble and put the
+  copy-class draft rate at 0.8 % instead of 8 %.
+- **Back the per-step cost out of the throughput before believing a component measurement.**
+  The extend forward is 27-30 ms, but `631*7.4 + 54*V = 7.48 s` puts the end-to-end verify
+  step at ~52 ms -- **~40 % of it is not the forward** (drain, batch prep, a 46-launch eager
+  commit). A component benchmark is a lower bound on a feature's cost, never the cost.

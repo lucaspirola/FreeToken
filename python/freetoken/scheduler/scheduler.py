@@ -37,6 +37,7 @@ from .config import SchedulerConfig
 from .decode import DecodeManager
 from .io import SchedulerIOMixin
 from .prefill import ChunkedReq, PrefillManager
+from .spec_ngram import SpecNgramDecoder
 from .status import SchedulerStatusReporter
 from .table import TableManager
 
@@ -309,6 +310,21 @@ class Scheduler(SchedulerIOMixin):
         self._pageable_trial: tuple[int, int] | None = None
         self._pageable_rejected: set[tuple[int, int]] = set()
         self._pageable_retune_disabled = False
+        self._spec: SpecNgramDecoder | None = None
+        if getattr(config, "speculative", None) == "ngram":
+            self._spec = SpecNgramDecoder(
+                self,
+                n=config.spec_ngram_n,
+                draft_len=config.spec_draft_len,
+                adaptive=config.spec_adaptive,
+            )
+            if not self._spec.enabled:
+                self._spec = None
+            else:
+                logger.info_rank0(
+                    f"--speculative ngram: n={config.spec_ngram_n}, "
+                    f"draft_len={config.spec_draft_len}, adaptive={config.spec_adaptive}"
+                )
 
         # Initialize the I/O mixin
         super().__init__(config, self.engine.tp_cpu_group)
@@ -607,6 +623,22 @@ class Scheduler(SchedulerIOMixin):
         ):
             self._execute_pending_rebuild()
 
+        # Speculative decoding runs drained: the drafter needs every emitted token before it
+        # can index the next n-gram, so a verify step cannot overlap with its successor. The
+        # peek below is the hysteresis that keeps that off the common path -- it asks, with
+        # the one-token-stale token list, whether the drafter would fire at all, which is one
+        # dict lookup and is False on ~99.6 % of code/prose steps.
+        # ``getattr``: the low-level loop tests drive these loops with a scheduler-shaped stub.
+        spec = getattr(self, "_spec", None)
+        spec_req = spec.peek() if spec is not None else None
+        if spec_req is not None:
+            self.stream.wait_stream(self.engine.stream)
+            self._process_last_data(last_data)
+            self._flush_abort_acks()
+            last_data = self._last_data = None
+            if spec.run_step(spec_req):
+                return None
+
         # Order this iteration's host->device token_pool copies (issued on ``self.stream``
         # during scheduling) after the previous batch's sampled-token writes (issued on the
         # engine stream in ``_forward``). Without this, a request that reuses a just-freed
@@ -662,6 +694,13 @@ class Scheduler(SchedulerIOMixin):
             self.prefill_manager.runnable or self.decode_manager.runnable
         ):
             self._execute_pending_rebuild()
+
+        # Non-overlap mode is already drained here, so speculation needs no early drain.
+        spec = getattr(self, "_spec", None)
+        spec_req = spec.peek() if spec is not None else None
+        if spec_req is not None and spec.run_step(spec_req):
+            self._flush_abort_acks()
+            return
 
         forward_input = self._schedule_next_batch()
         ongoing_data = None
@@ -1796,6 +1835,8 @@ class Scheduler(SchedulerIOMixin):
             req.mamba_ping_pong = tuple(remap[slot] for slot in req.mamba_ping_pong)
         if req.mamba_restore_src is not None:
             req.mamba_restore_src = remap[req.mamba_restore_src]
+        if req.spec_scratch_slot is not None:
+            req.spec_scratch_slot = remap[req.spec_scratch_slot]
 
     @torch.inference_mode()
     def _maybe_resize_elastic_capacity(self) -> None:

@@ -345,7 +345,7 @@ class GGUFTiedLMHead:
 
         batch = get_global_ctx().batch
         if batch.is_prefill:
-            indices = batch.attn_metadata.get_last_indices(batch.size)
+            indices = batch.last_indices(batch.size)
             x = x[indices].contiguous()
         return fused_mul_mat_gguf(x, self._embedding.qweight, self._quant_type)
 

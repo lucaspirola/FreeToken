@@ -577,3 +577,61 @@ the clock. A live 16-way soak on both routes remains the acceptance test.
       (c) `_ensure_experts_sized_kernel` evicts serially in a `(1,)` grid -- one argmin over
       `next_pow2(cache_size)` lanes per miss, fine at a decode step's 6 and the first suspect if
       the M = 32 number lands above prediction.
+- [x] **`--speculative ngram`** (ticket 3 of the n-gram NO-GO §6, unblocked by the extend-MoE fix).
+      Prompt-lookup speculation, greedy-only, single-stream v1. Plan and what shipped:
+      - [x] `NgramDrafter` (incremental most-recent-occurrence index over prompt + output),
+            `accepted_count`, adaptive draft length -- `python/freetoken/scheduler/spec_ngram.py`.
+      - [x] Verify step: one extend forward over `m = k + 1` positions with **every** logits row
+            kept (`Batch.logits_indices` + `Batch.last_indices`, replacing the direct
+            `attn_metadata.get_last_indices` call in all six LM-head sites), greedy argmax in a
+            dedicated `Engine.spec_verify_forward` (no `complete_one`, no sampler, always eager).
+      - [x] Mamba-2 state: verify into a **private scratch slot** (`Req.spec_scratch_slot`, drawn
+            from the LinearStatePool free-list, freed by `_free_req_slots`), never the live slot;
+            each mixer records its scan inputs into `SpecScanCapture`
+            (`models/nemotron_h/spec_scan.py`) and the accepted prefix is committed with one varlen
+            SSD scan per layer plus a conv-window slide. A full acceptance skips the replay and
+            copies the scratch slot back. NOT the already-reserved ping-pong pair the design
+            sketched: those hold the tool-call anchor freeze and the radix chunk snapshot.
+      - [x] KV rollback: `CacheManager.free_spec_tail` returns the pages the rejected positions
+            allocated, restoring the allocator's invariant (pages exist exactly to
+            `page_ceil(cached_len)`). Without it every partial rejection leaked `k - j` pages.
+      - [x] Prefix cache never sees a rejected token: a verify batch is drained by this module,
+            not by `_process_last_data`, so no `cache_req` runs on it, and the finish-time insert
+            boundary is `cached_len`, which only ever advances by the accepted count.
+      - [x] EOS / stop-string / length truncation inside an accepted run; one `DetokenizeMsg` per
+            accepted token with `finished` on the last only.
+      - [x] Engagement: a pre-drain `peek()` on the one-token-stale token list decides whether to
+            drain and run a (necessarily synchronous) verify step. Overlap is what makes a plain
+            decode step 6.9 ms rather than ~9, so running the whole loop drained would cost ~30 %
+            on the ~99.6 % of code/prose steps that never draft.
+      - [x] Flags `--speculative ngram`, `--spec-ngram-n 8`, `--spec-draft-len 8`,
+            `--no-spec-adaptive`; refused (with a warning, falling back to ordinary decode) on SWA,
+            on non-radix recurrent caching, and per-step on sampling / multi-request / multimodal /
+            hidden-state-probe requests.
+      - [x] Tests: `tests/scheduler/test_spec_ngram.py` (26 CPU tests: drafter, acceptance,
+            adaptive k, and the full verify step against a faked scheduler -- partial/total/full
+            acceptance, EOS truncation, budget and tool-call-anchor clamps, scratch-slot lifecycle,
+            pool exhaustion); `tests/e2e/test_spec_ngram_equivalence.py` (CUDA, `needs_weights`).
+      - [x] Benchmarks: `benchmarks/probe_spec_ngram_impl.py` (one model load, both arms toggled on
+            the live scheduler, warm prefix tree so only decode is compared).
+      - [x] Break-even gate: the verify/decode cost ratio is ~7x at short context and ~10x at
+            131K, so the decoder measures both terms online (the gap between consecutive peeks IS
+            a decode step) and stops drafting when `accepted + 1` can no longer pay. Verify uses a
+            running MINIMUM (its first sample pays Triton autotune) and decode an EWMA (its
+            minimum is far below a real step) -- getting either wrong cost a GPU run each.
+      - [x] **Measured** (write-up §5): code 1.03x, prose 1.02x, copy 1.01x (1.11x ungated, same
+            drafter stats -- read it as ~1.05x), 131K needle 0.89x. Commit self-check bit-exact
+            (0.000e+00). 16-way soak PASS both arms, 0 errors, p50 and request count flat.
+- [ ] Speculation follow-ups, by measured upside: (a) **~40 % of a verify step is not the forward**
+      (~52 ms end-to-end vs a ~30 ms extend forward) -- the commit issues 46 eager kernel launches
+      and `_prepare_batch` rebuilds pinned staging for a one-request batch; taking the step from 7x
+      to 4x a decode step moves the copy class from 1.03x to ~1.12x; (b) the **burst-entry
+      hysteresis** costs a factor of ~4 in draft rate (0.079 measured vs 0.353 offline) -- a
+      stickiness latch, decidable in one run at latch 0/2/4; (c) `--spec-draft-len` 4/8/16/24 on
+      the 131K needle, since break-even there needs `accepted + 1 > ~10` against a ceiling of 9;
+      (d) the soak tail (p95 +22 %, p99 +131 % on ONE 10-minute pair with different session mixes;
+      re-run at the reference 20-minute phase length); (e) batched (bs > 1) verify --
+      `_make_write_tuple` and the drain loop are one-token-per-request; (f) a graph-captured
+      fixed-width verify forward; (g) sampling (non-greedy) speculation needs `Sampler.prepare` to
+      repeat-interleave its per-request parameter rows by k; (h) the drafter indexes the whole
+      prompt on first engagement (~0.1-0.2 s at 131K).
