@@ -1132,3 +1132,6 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   which is impossible at k = 8 — it was still running at the previous arm's `--spec-draft-len 16`.
   An impossible number in a sweep is a harness bug, not a discovery: check it against the
   configuration's own ceiling. Every variant now carries every tunable.
+- 2026-09-05: `git add -A` swept two agents' repo-root `scratchpad/` files into e4070da/b84ecb7
+  (removed in c8d42c9, now gitignored). RULE for the lead: stage by explicit path lists, never
+  `-A`; agents write scratch only under the session scratchpad dir, never the repo root.
