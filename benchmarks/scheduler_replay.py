@@ -3,10 +3,11 @@
 
 Two ways to run it:
 
-  * ``--gate`` -- the CI regression gate (.github/workflows/cpu-checks.yml). Runs the
-    three fixed scenarios below and exits non-zero if throughput, completions or (on the
-    residency profile) the error rate fall outside the recorded floors, or if the
-    scheduler raises at all. Takes ~1 min.
+  * ``--gate`` -- the CI regression gate (.github/workflows/cpu-checks.yml). Runs the four
+    fixed scenarios below and exits non-zero if throughput, completions or (on the
+    residency profiles) the error rate fall outside the recorded floors, if the scheduler
+    raises at all, if it DEADLOCKS, or if the finishability invariant is violated on any
+    pass. Takes ~1 min.
   * everything else -- a single ad-hoc run that prints one JSON line, for bisecting a
     scheduler regression or measuring a candidate fix (``--diagnose`` adds the
     per-refusal breakdown that identified the prefill admission-gate starvation).
@@ -32,13 +33,39 @@ charges the pool MAXIMUM cannot tell that state apart from an empty pool. It als
 soak's 600 s client timeout, so a starved request becomes an error rather than an eternal
 wait.
 
+The ``switchyard-deadlock`` profile is what soak report T needed and neither of the above
+had: the ~40K mid-sized chunked prompts that deadlocked the pool against each other, plus
+the FAITHFUL client-timeout model (``abort_inflight=False``; see ``abandon_starved``). A
+client giving up does not give the engine its KV back -- FastAPI never sees the disconnect
+of a request that has yielded no chunk -- and modelling the timeout as a free abort was the
+escape hatch that let this replay pass both trees that then deadlocked live.
+
 Metrics: lanes per prefill batch, prefill budget utilisation, wait-to-first-chunk per
-request, and any fatal raised out of the scheduler path; plus, for the residency profile,
+request, and any fatal raised out of the scheduler path; plus, for the residency profiles,
 the stall signature (``stall_frac`` / ``stall_usage_p50`` -- share of the wall clock with no
 batch, and the pool occupancy while it is silent), ``timeouts`` / ``error_rate``, the
 session-lease lifecycle (``lease_reclaims`` / ``lease_expiries``), and ``match_calls`` /
 ``match_tokens_per_prefill_pass`` as the wall-clock proxy for the O(queue x prompt) radix
 walks that a refused pass repeats.
+
+Two of them exist because a throughput number could not see soak report T at all:
+
+  * ``deadlock`` / ``trailing_silence`` / ``trailing_silence_frac`` -- a deadlock produces
+    ZERO gaps BETWEEN batch lines, because the silence starts after the last one and never
+    ends. Measure the trailing half or the run that never recovers scores best.
+  * ``invariant_violations`` / ``slack_min`` -- the finishability invariant of the ADMITTED
+    SET, sampled every tick:
+
+        owed = SUM over in-flight chunked prefills of (input_len - forwarded) + output_len
+             + DecodeManager.inflight_tokens
+        owed <= CacheManager.available_size + reclaimable idle lease tokens
+
+    Violated = the pool has promised more than it can ever hand over, and since the
+    chunked-prefill scheduler advances every lane together, nothing completes to break the
+    tie. This is the check that separates the trees: ``ea7ed7c`` beats every throughput
+    floor here and violates it on 566 switchyard-stage passes (short by up to 192,242
+    tokens) and 2,181 switchyard-deadlock passes. The scheduler carries the same statement
+    as an env-gated assertion, ``FREETOKEN_SCHEDULER_INVARIANT=warn|raise``.
 
 Deliberately API-defensive: it runs unchanged at every commit that has
 PrefillManager.schedule_next_batch(budget), and reports which knobs were absent.
@@ -109,6 +136,27 @@ SCENARIOS_SWITCHYARD = [
     ("large-tool-catalog",   9_216,  48),
     ("long-context",       118_000,  48),
 ]
+# "switchyard-deadlock" profile: the geometry of the permanent deadlock of soak report T5.
+#
+# The failure there was NOT long-context prompts. It was FOURTEEN mid-sized chunked
+# prefills, admitted one at a time through a gate that re-counted the same reclaimable
+# lease tokens for each of them, which between them had forwarded 237,819 tokens and still
+# owed 222,538 -- a combined footprint of 1.76x a 262,144-token pool. Nothing was decoding,
+# so nothing could complete to hand a page back, and no lane could buy the page it needed
+# to finish. 222,538 / 14 = 15.9K owed each on ~33K prompts; the scenario length is set a
+# little above that, at the point where sixteen of them cannot possibly fit in the pool and
+# six comfortably can, which is where a gate that re-sells the same capacity separates
+# hardest from one that does not.
+#
+# Session residency is kept (it is the reclaimable capacity the broken gate double-counts)
+# but the prompts are short enough that sixteen RETAINED prefixes cannot fill the pool on
+# their own -- so the only way this profile can wedge is by over-admitting prefills, which
+# is exactly the property under test. Its client-timeout model is the faithful one
+# (``abort_inflight=False``, see abandon_starved): the deadlock is permanent, as it was
+# live.
+SCENARIOS_DEADLOCK = [
+    ("chunked-mid", 40_000, 100),
+]
 # Session geometry, from the soak driver (S1) and the server's session defaults.
 SESSION_TTL = 300.0       # UserMsg.session_ttl_seconds default (scheduler.py:875)
 CLIENT_TIMEOUT = 600.0    # switchyard soak --request-timeout; a starved request is abandoned
@@ -167,8 +215,9 @@ class Traffic:
         self.rng = random.Random(seed)
         self.uid = 0
         table = {"pressure": SCENARIOS_PRESSURE, "fanout": SCENARIOS_FANOUT,
-                 "switchyard-stage": SCENARIOS_SWITCHYARD}.get(profile, SCENARIOS)
-        self.sessions = profile == "switchyard-stage"
+                 "switchyard-stage": SCENARIOS_SWITCHYARD,
+                 "switchyard-deadlock": SCENARIOS_DEADLOCK}.get(profile, SCENARIOS)
+        self.sessions = profile.startswith("switchyard")
         self.reuse = 0.0 if profile == "fanout" else REUSE_FRAC
         self.jitter = (0.95, 1.05) if profile == "fanout" else (0.8, 1.2)
         self.pop = [s for s in table for _ in range(s[2])]
@@ -390,7 +439,13 @@ def install_diagnostics(pm=None):
 
 def run(ticks: int, seed: int, verbose: bool = False, profile: str = "stage",
         diagnose: bool = False, pool_pages: int = POOL,
-        interleave: bool = True):
+        interleave: bool = True, abort_inflight: bool | None = None):
+    # See ``abandon_starved``. False is what the real server does; True is a deliberate
+    # simplification that keeps a starved run measurable (the throughput/error-rate
+    # profiles need the run to continue past a stall) and it is what the three original
+    # profiles' recorded floors were measured under.
+    if abort_inflight is None:
+        abort_inflight = profile != "switchyard-deadlock"
     cm, tm, dm, pm, caps = build_pool(pool_pages, interleave)
     traffic = Traffic(seed, profile)
     match_stats = install_match_counter(cm)
@@ -444,12 +499,49 @@ def run(ticks: int, seed: int, verbose: bool = False, profile: str = "stage",
     leases: dict[str, _Lease] = {}
     session_of: dict[int, str] = {}
     timed_out: set[int] = set()
+    # Requests the client gave up on that the SERVER never learned about (see
+    # abandon_starved): still in the pending list, still holding their forwarded pages.
+    abandoned_inflight: set[int] = set()
     stalls: list[float] = []
     stall_usage: list[float] = []
     stall_total = 0.0
     reclaims = 0
     expiries = 0
     pool_tokens = pool_pages * PAGE_SIZE
+    # ---- finishability invariant of the ADMITTED SET (soak report T5) ----
+    #
+    #   owed = SUM over in-flight chunked prefills of (input_len - forwarded) + output_len
+    #        + DecodeManager.inflight_tokens                (the running decodes' remainder)
+    #   owed <= cache_manager.available_size + reclaimable idle lease tokens
+    #
+    # The right-hand side is every token admission can still OBTAIN: what is free or
+    # evictable now, plus the idle session leases demand reclaim would release. A violation
+    # says the requests already admitted cannot all be driven to completion even if every
+    # reclaimable thing in the pool is handed to them -- and since the chunked-prefill
+    # scheduler advances all lanes together, nothing completes to break the tie. That is the
+    # deadlock precondition, and it is what "a budget checked only at admission" cannot see:
+    # each admit passed its own check against a capacity the next admit then spent again.
+    #
+    # Live (T5): 14 chunked prefills had forwarded 237,819 tokens of a 262,144-token pool and
+    # still owed 222,538 -- a 1.76x peak footprint -- with #running-req 0 and nothing
+    # reclaimable. Every continuation deferred at kv_pages == 0, forever.
+    owed_samples: list[int] = []
+    slack_samples: list[int] = []
+    invariant_violations = 0
+    last_batch_clock = 0.0
+    deadlock = False
+    deadlock_state = None
+
+    def admitted_owed() -> int:
+        owed = 0
+        for pending in pm.pending_list:
+            chunked = pending.chunked_req
+            if chunked is not None:
+                owed += max(0, pending.input_len - chunked.cached_len) + pending.output_len
+        return owed + dm.inflight_tokens
+
+    def obtainable() -> int:
+        return cm.available_size + reclaimable_tokens()
 
     def reclaimable_tokens():
         """``Scheduler._reclaimable_session_tokens``: locked, but buyable on demand."""
@@ -545,7 +637,22 @@ def run(ticks: int, seed: int, verbose: bool = False, profile: str = "stage",
         return min(times) if times else None
 
     def abandon_starved():
-        """The soak's 600 s client timeout: what turns a stall into an error rate."""
+        """The soak's 600 s client timeout: what turns a stall into an error rate.
+
+        A client giving up does **not** in general give the engine its KV back, and getting
+        that wrong is what hid soak report T from this replay for two rewrites. FastAPI's
+        disconnect detection lives in ``ApiServer.stream_with_cancellation``, which checks
+        ``request.is_disconnected()`` only *after* the response generator has yielded a
+        chunk (python/freetoken/server/api_server.py:419). A request that is still in
+        prefill has yielded nothing, so the loop is parked on the ack queue, the disconnect
+        is never observed, no ``AbortMsg`` is ever sent, and the scheduler keeps the
+        request -- its pending-list entry, its table slot and every KV page it has already
+        forwarded -- for the rest of the server's life.
+
+        Modelling the timeout as a free abort gave every deadlock an escape hatch the real
+        server does not have: the replay healed after 600 s and reported an error rate,
+        where the soak reported 2,616 s of unbroken silence to the end of the run.
+        """
         now = state["clock"]
         for uid, t in list(outstanding.items()):
             if now - t < CLIENT_TIMEOUT:
@@ -553,23 +660,46 @@ def run(ticks: int, seed: int, verbose: bool = False, profile: str = "stage",
             timed_out.add(uid)
             outstanding.pop(uid, None)
             pending = next((p for p in pm.pending_list if p.uid == uid), None)
-            if pending is not None:
+            if (pending is not None and not abort_inflight
+                    and pending.chunked_req is not None):
+                # Mid-prefill and holding forwarded pages, and it has streamed nothing, so
+                # the server never learns the client is gone. Count the client-side error
+                # and leave the engine holding the KV -- for good.
+                #
+                # Scoped to a request that has actually forwarded a chunk: one still purely
+                # queued holds no KV at all, so whether the model keeps it or drops it
+                # cannot change the pool, and dropping it is what keeps the closed
+                # 16-client loop from silting up with entries that are only an artefact of
+                # the slot abstraction.
+                abandoned_inflight.add(uid)
+            elif pending is not None:
                 chunked = pm.abort_req(uid)
                 if chunked is not None:
                     cm.cache_req(chunked, finished=True)
                     tm.free(chunked.table_idx)
             else:
+                # Already decoding, so it has streamed: the next yield sees the
+                # disconnect and aborts for real.
                 req = dm.abort_req(uid)
                 if req is not None:
                     cm.cache_req(req, finished=True)
                     tm.free(req.table_idx)
             sid = session_of.get(uid)
-            if sid is not None and leases[sid].active_uid == uid:
+            if (sid is not None and leases[sid].active_uid == uid
+                    and uid not in abandoned_inflight):
                 # The turn is gone, so the lease goes idle and starts ageing out. Its
                 # retained KV is NOT released here -- that is what _expire_sessions is for.
+                #
+                # A request the server never learned about is the exception: its session is
+                # still ACTIVE as far as the scheduler is concerned, so demand reclaim skips
+                # it forever. Soak report T6 counted 112 idle expiries during the deadlock
+                # and none of them freed anything, for exactly this reason.
                 leases[sid].active_uid = None
                 leases[sid].expires_at = now + SESSION_TTL
                 leases[sid].last_used_at = now
+            # The client itself moves on either way (closed loop), but admit_new() is
+            # bounded by pending+running, so an abandoned-but-resident request keeps its
+            # slot in practice.
             free_slots.append(slot_of[uid])
 
     def admit_new():
@@ -595,6 +725,12 @@ def run(ticks: int, seed: int, verbose: bool = False, profile: str = "stage",
         admit_new()
         while tick < ticks:
             tick += 1
+            owed = admitted_owed()
+            slack = obtainable() - owed
+            owed_samples.append(owed)
+            slack_samples.append(slack)
+            if slack < 0:
+                invariant_violations += 1
             prefill_runnable = pm.runnable
             decode_runnable = dm.runnable
             batch = None
@@ -633,7 +769,28 @@ def run(ticks: int, seed: int, verbose: bool = False, profile: str = "stage",
                 # 515 s / 624 s silence of soak report S5, and it is the whole signature.
                 nxt = next_release_time()
                 if nxt is None:
-                    fatal = "LIVELOCK: no batch schedulable with work outstanding"
+                    # Permanent: work is outstanding, nothing is schedulable, and no
+                    # outside event (idle TTL, client giving up on a request the server
+                    # can still see) will ever release a token. This is soak report T --
+                    # the last batch line of the run, followed by silence to the end.
+                    deadlock = True
+                    lanes = [(max(0, q.input_len - q.chunked_req.cached_len)
+                              + q.output_len)
+                             for q in pm.pending_list if q.chunked_req is not None]
+                    deadlock_state = {
+                        "chunked_lanes": len(lanes),
+                        "owed": admitted_owed(),
+                        "owed_min_lane": min(lanes) if lanes else None,
+                        "forwarded": sum(q.chunked_req.cached_len
+                                         for q in pm.pending_list
+                                         if q.chunked_req is not None),
+                        "available": cm.available_size,
+                        "reclaimable": reclaimable_tokens(),
+                        "running": len(dm.running_reqs),
+                        "queued_fresh": sum(1 for q in pm.pending_list
+                                            if q.chunked_req is None),
+                    }
+                    fatal = "DEADLOCK: no batch schedulable and nothing left to release"
                     break
                 if verbose and len(stalls) < 8:
                     held = sum(int(x.handle.cached_len) for x in leases.values()
@@ -661,6 +818,9 @@ def run(ticks: int, seed: int, verbose: bool = False, profile: str = "stage",
                 admit_new()
                 continue
 
+            # A batch line in the server log: the clock at the last one is what the
+            # trailing-silence measurement below is taken against.
+            last_batch_clock = state["clock"]
             # ---- _prepare_batch: growth check, then allocation ----
             if caps["committed_pages_required"]:
                 required = cm.committed_pages_required(batch.reqs)
@@ -784,6 +944,25 @@ def run(ticks: int, seed: int, verbose: bool = False, profile: str = "stage",
         "stall_episodes": len(stalls),
         "stall_max": round(max(stalls), 1) if stalls else None,
         "stall_usage_p50": pct(stall_usage, 50),
+        # ---- deadlock signature (soak report T) ----
+        # ``stall_*`` measures silence BETWEEN two batches, and a deadlock produces none of
+        # that: the silence starts after the LAST batch and never ends, so the soak's
+        # gaps>=30s analyzer scored zero gaps on the run that never recovered. These three
+        # are the trailing half of the same measurement.
+        "deadlock": deadlock,
+        "deadlock_state": deadlock_state,
+        "trailing_silence": round(clock - last_batch_clock, 1),
+        "trailing_silence_frac": (round((clock - last_batch_clock) / clock, 4)
+                                  if clock > 0 else None),
+        # ---- finishability invariant (see admitted_owed) ----
+        "owed_max": max(owed_samples) if owed_samples else None,
+        "owed_p95": pct(owed_samples, 95),
+        "slack_min": min(slack_samples) if slack_samples else None,
+        "slack_p05": pct(slack_samples, 5),
+        "invariant_violations": invariant_violations,
+        "invariant_violation_frac": (round(invariant_violations / len(owed_samples), 4)
+                                     if owed_samples else None),
+        "abandoned_inflight": len(abandoned_inflight),
         "timeouts": len(timed_out),
         "error_rate": (round(len(timed_out) / (len(finished) + len(timed_out)), 4)
                        if (finished or timed_out) else None),
@@ -832,33 +1011,41 @@ def run(ticks: int, seed: int, verbose: bool = False, profile: str = "stage",
 # Python/torch versions does not trip the gate while a real starvation regression (which
 # halves throughput) does.
 #
-# Measured on the corrected admission gate (fresh admits charged against
-# ``CacheManager.admissible_size`` -- free + evictable + reclaimable idle leases -- with
-# continue-past-refusals, admission aging and the match memo), seed 7, 20,000 forwards,
-# torch CPU, Python 3.12; the run is deterministic:
-#   stage            prefilled_tokens 6,194,304  completed 375
-#   pressure         prefilled_tokens 8,094,693  completed  96
-#   switchyard-stage prefilled_tokens 4,534,310  completed 445  error_rate 0.2096
+# Measured on the RESTORED d685e99 admission gate (fresh admits charged their whole
+# remaining footprint against ``available_size``), seed 7, 20,000 forwards, torch CPU,
+# Python 3.12; the run is deterministic:
+#   stage            prefilled_tokens 2,814,602  completed 181
+#   pressure         prefilled_tokens 5,000,774  completed  60
+#   switchyard-stage prefilled_tokens 1,873,120  completed 219  error_rate 0.3578
 #
-# For reference, on the same harness and seed:
-#   upstream bd372b6   stage 7,103,059 / 404      pressure 8,577,078 / 83
-#   main     68c54e7   stage 2,814,602 / 181      pressure 5,000,774 / 60
-#   reverted 81ab30e   stage 7,049,549 / 373      pressure 10,071,808 / 99
-# 81ab30e outscores this gate on raw stage/pressure throughput and still FAILED the live
-# 16-way soak, which is the whole reason the switchyard-stage case exists: it is the only
-# profile that models session residency, and it is where 81ab30e's over-admission shows up
-# as a pool pinned at token usage 1.00 (``stall_usage_p50`` 1.0000 against 0.94 here).
-# Raw throughput on the two residency-free profiles is therefore NOT a sufficient gate.
+# d685e99 is the ONLY tree that has passed the live 16-way Switchyard soak
+# (stage route: 471 req / 0 err / 1 STALLED). Two successive rewrites scored far higher
+# here and failed live, so these floors are deliberately set to the *live-passing* tree
+# and not to the best replay number ever recorded:
+#   upstream bd372b6   stage 7,103,059 / 404   pressure  8,577,078 / 83
+#   81ab30e (reverted) stage 7,049,549 / 373   pressure 10,071,808 / 99   -- soak FAIL
+#   ea7ed7c (reverted) stage 6,194,304 / 375   pressure  8,094,693 / 96   -- soak DEADLOCK
+# Both reverted trees beat this gate on raw throughput. Raw throughput on the two
+# residency-free profiles is therefore NOT a sufficient gate, and neither is the
+# switchyard profile's error rate on its own: what discriminates a deadlock is the
+# ``deadlock_violations`` invariant below (the owed footprint of the admitted set).
 #
 GATE_TICKS = 20_000
 GATE_SEED = 7
 GATE_CASES = [
     # profile, min prefilled_tokens, min completed, max error_rate (None = not checked)
-    ("stage",            5_880_000, 356, None),
-    ("pressure",         7_680_000,  91, None),
+    ("stage",            2_670_000, 171, None),
+    ("pressure",         4_750_000,  57, None),
     # The residency profile is graded on goodput AND on the soak's own acceptance metric.
-    # main scores 0.3578 here and 81ab30e 0.2620, so the ceiling is a real discriminator.
-    ("switchyard-stage", 4_300_000, 422, 0.22),
+    ("switchyard-stage", 1_779_000, 208, 0.376),
+    # The deadlock profile is the regression test for soak report T. Its floors come from
+    # the shipped tree (standing reservation + chunked-prefill cap: 903,157 tokens / 118
+    # completed / 0.2625 error rate, identical to d685e99 on this profile) -- but the
+    # checks that matter on it are the two every case now carries, ``deadlock`` and
+    # ``invariant_violations``. ea7ed7c beats every throughput floor here (1,716,024 / 278,
+    # error rate 0.1965) and fails those two: 2,181 violations, the admitted set owing up
+    # to 42,477 tokens more than the pool could obtain.
+    ("switchyard-deadlock", 857_000, 112, 0.276),
 ]
 
 
@@ -881,12 +1068,29 @@ def gate(ticks: int = GATE_TICKS, seed: int = GATE_SEED, verbose: bool = False) 
         err = out.get("error_rate")
         if max_error is not None and err is not None and err > max_error:
             bad.append(f"error_rate {err} > {max_error}")
+        # The two checks that a throughput floor cannot make. Both reverted trees beat this
+        # gate's numbers and failed the live soak; these are what they fail.
+        if out.get("deadlock"):
+            bad.append(
+                "permanent deadlock: last batch at "
+                f"{out['sim_seconds'] - out['trailing_silence']:.1f}s, then "
+                f"{out['trailing_silence']:.1f}s "
+                f"({out['trailing_silence_frac']:.0%}) of silence -- "
+                f"{out['deadlock_state']}"
+            )
+        if out.get("invariant_violations"):
+            bad.append(
+                f"finishability invariant violated on {out['invariant_violations']} "
+                f"passes ({out['invariant_violation_frac']:.1%}); the admitted set owed "
+                f"up to {-out['slack_min']:,} tokens more than the pool could obtain"
+            )
         print(f"{'FAIL' if bad else 'ok  '} {profile:<17} "
               f"tokens={tokens:>10,} (min {min_tokens:>9,})  "
               f"completed={completed:>4} (min {min_completed:>4})  "
               f"lanes={out['lanes_mean']}  util={out['util_mean']}  "
               f"err={out.get('error_rate')}  stallUsage={out.get('stall_usage_p50')}  "
-              f"{elapsed:.1f}s")
+              f"viol={out.get('invariant_violations')}  "
+              f"deadlock={out.get('deadlock')}  {elapsed:.1f}s")
         for line in bad:
             print(f"       {line}")
         failures.extend(f"{profile}: {line}" for line in bad)
@@ -896,7 +1100,8 @@ def gate(ticks: int = GATE_TICKS, seed: int = GATE_SEED, verbose: bool = False) 
             print(f"  - {line}")
         print("\nReproduce a single case with:\n"
               f"  uv run --no-project python benchmarks/scheduler_replay.py --ticks {ticks} "
-              f"--seed {seed} --profile <stage|pressure|switchyard-stage> --diagnose")
+              f"--seed {seed} --profile "
+              "<stage|pressure|switchyard-stage|switchyard-deadlock> --diagnose")
         return 1
     print("\nscheduler replay gate passed")
     return 0
@@ -912,8 +1117,17 @@ if __name__ == "__main__":
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--label", default="")
     ap.add_argument("--profile", default="stage",
-                    choices=["stage", "pressure", "fanout", "switchyard-stage"])
+                    choices=["stage", "pressure", "fanout", "switchyard-stage",
+                             "switchyard-deadlock"])
     ap.add_argument("--diagnose", action="store_true")
+    ap.add_argument("--abort-inflight", dest="abort_inflight",
+                    action="store_true", default=None,
+                    help="model a client timeout as freeing an in-flight prefill "
+                         "(the server does NOT: see abandon_starved)")
+    ap.add_argument("--no-abort-inflight", dest="abort_inflight",
+                    action="store_false",
+                    help="faithful client-timeout model; default on "
+                         "switchyard-deadlock")
     ap.add_argument("--pool", type=int, default=POOL)
     ap.add_argument("--no-interleave", action="store_true")
     a = ap.parse_args()
@@ -922,7 +1136,7 @@ if __name__ == "__main__":
         # CI runs it at the defaults the floors above were measured at.
         sys.exit(gate(a.ticks if a.ticks != 4000 else GATE_TICKS, a.seed, a.verbose))
     out = run(a.ticks, a.seed, a.verbose, a.profile, a.diagnose, a.pool,
-              not a.no_interleave)
+              not a.no_interleave, a.abort_inflight)
     out["label"] = a.label
     out["profile"] = a.profile
     out["pool"] = a.pool

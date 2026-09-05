@@ -567,3 +567,30 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   turn 2 with `context_length_exceeded` — after 1,818 s of prefill. Every graded turn appends
   its question *and its reply*, and the server also reserves the decode budget. Subtract the
   whole conversation's growth from the target before starting a 30-minute prefill.
+
+## 2026-09-05 (third scheduler-gate attempt: restore d685e99, then fix the invariant)
+- **A CPU replay that lets a starved request die is not modelling the server.** The soak's
+  600 s client timeout does NOT hand the engine's KV back: FastAPI's disconnect check runs
+  only after the response generator yields a chunk (`stream_with_cancellation`,
+  api_server.py:419) and a non-streaming handler is not cancelled on disconnect at all, so a
+  request stuck mid-prefill is never aborted and keeps its pending entry, its table slot and
+  every page it has forwarded for the life of the server. The replay modelled the timeout as
+  a free abort, which gave every deadlock an escape hatch the real server does not have --
+  and that is why it passed BOTH trees that then deadlocked live. Before trusting a
+  simulator, ask what it lets go of that the real thing never does.
+- **The invariant, not the throughput number, is the gate.** Every failed tree beat the
+  replay's throughput floors: 81ab30e 7.05 M tokens, ea7ed7c 6.19 M, against d685e99's
+  2.81 M -- and 81ab30e/ea7ed7c both failed the live soak. What separates them is a
+  property, checked every pass: `owed(admitted set) <= obtainable`. ea7ed7c violates it on
+  566 switchyard-stage passes; d685e99 and the fix never do. Add the property check before
+  adding another floor.
+- **"Admitted" is a set, and a per-arrival check is not a set check.** The fix is one line
+  of accounting -- seed the adder's `reserved_size` with the standing reservation of every
+  prompt already mid-prefill, so a request keeps costing admission until it finishes -- plus
+  a cap on concurrent chunked prefills as the bound that survives an arithmetic slip. Charge
+  it only to FRESH admits, and keep it out of `reserved_pages` (that is the per-chunk cap's
+  budget; mixing them is the 6-lanes-to-2 regression of R6).
+- **Throughput cleverness is what broke the last two attempts.** ea7ed7c's continue-past-
+  refusals, admission aging, match memo, oversize skip and `admissible_size` were all
+  defensible individually and together they re-sold reclaimable capacity once per pass. The
+  restored tree keeps none of them. Third attempt: ship the smallest correct invariant.

@@ -61,19 +61,45 @@ pool — through the *real* `PrefillManager` / `CacheManager` / `TableManager` /
 `DecodeManager`. No GPU, no model, no kernels: it drives the scheduling logic directly
 and counts what got prefilled and what finished.
 
-`--gate` runs two fixed scenarios at seed 7 for 20,000 forwards and fails if throughput
-or completions fall under the recorded floors, or if the scheduler raises at all:
+`--gate` runs four fixed scenarios at seed 7 for 20,000 forwards and fails if throughput
+or completions fall under the recorded floors, if the error rate exceeds its ceiling, if
+the scheduler raises, if it **deadlocks**, or if the **finishability invariant** is
+violated on any pass:
 
-| profile | prefilled tokens | completions |
-|---------|------------------|-------------|
-| `stage` (the soak's scenario mix) | ≥ 6,500,000 | ≥ 350 |
-| `pressure` (long prompts crowd the queue) | ≥ 8,500,000 | ≥ 85 |
+| profile | prefilled tokens | completions | error rate |
+|---------|------------------|-------------|------------|
+| `stage` (the soak's scenario mix) | ≥ 2,670,000 | ≥ 171 | — |
+| `pressure` (long prompts crowd the queue) | ≥ 4,750,000 | ≥ 57 | — |
+| `switchyard-stage` (adds session residency) | ≥ 1,779,000 | ≥ 208 | ≤ 0.376 |
+| `switchyard-deadlock` (soak report T geometry) | ≥ 857,000 | ≥ 112 | ≤ 0.276 |
 
-Measured at `81ab30e`, seed 7, 20,000 forwards, torch 2.11 CPU / Python 3.12:
-stage **7,049,549 tokens / 373 completions**, pressure **10,071,808 / 99**. The floors
-sit ~8–13% under that, which is slack enough for scheduling jitter and far tighter than
-the regression class they exist for: the pre-fix trees managed roughly half the stage
-throughput, or raised out of `_prepare_batch` outright.
+The floors sit ~5% under `d685e99`, the only tree that has passed the live 16-way
+Switchyard soak (stage route: 471 requests / 0 errors / 1 STALLED interval). They are
+deliberately **not** set to the best replay numbers ever recorded: `81ab30e` scored
+7,049,549 / 373 on `stage` and `ea7ed7c` 6,194,304 / 375, and both then failed the live
+soak — `ea7ed7c` deadlocking a 262,144-token pool permanently after 5 m 35 s.
+
+That is why the two non-throughput checks exist, and why they are the ones that matter:
+
+* **`deadlock` / `trailing_silence`.** A deadlock produces zero gaps *between* batch
+  lines, because the silence starts after the last one and never ends. The gate reports
+  the trailing half of the measurement too.
+* **`invariant_violations` / `slack_min`.** Every tick, the replay checks that the set of
+  requests **already admitted** is still finishable:
+
+  ```
+  owed = SUM over in-flight chunked prefills of (input_len - forwarded) + output_len
+       + DecodeManager.inflight_tokens
+  owed <= CacheManager.available_size + reclaimable idle lease tokens
+  ```
+
+  A violation says the pool has promised more than it can ever hand over. `ea7ed7c`
+  passes every throughput floor above and fails this on 566 `switchyard-stage` passes
+  (short by up to 192,242 tokens) and 2,181 `switchyard-deadlock` passes. The scheduler
+  carries the same statement as an env-gated debug assertion, without the lease term (it
+  has no hook for it, so its check is strictly tighter):
+  `FREETOKEN_SCHEDULER_INVARIANT=warn` logs each violation (safe for a live soak),
+  `=raise` fails fast.
 
 The run is deterministic — identical counts on 2 cores and on 12 — and takes about
 4 seconds wall on two cores, so it costs nothing to keep in CI.
