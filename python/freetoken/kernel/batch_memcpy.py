@@ -28,12 +28,21 @@ def _probe(fn) -> None:
     src = torch.arange(16, dtype=torch.uint8).pin_memory()
     dst = torch.zeros(16, dtype=torch.uint8, device="cuda")
     stream = torch.cuda.Stream()
+    # dst is allocated and zeroed on the AMBIENT stream; the private stream has to
+    # order after that fill, or a caller with work already queued makes the probe
+    # race its own memset -- and one lost race latches _batch_memcpy=False for the
+    # life of the process, silently disabling prefill hit-D2D.
+    stream.wait_stream(torch.cuda.current_stream())
     fn(
         torch.tensor([dst.data_ptr()]),
         torch.tensor([src.data_ptr()]),
         torch.tensor([16]),
         stream.cuda_stream,
     )
+    # dst was allocated on the ambient stream but is written on `stream`; record it
+    # so the caching allocator cannot hand the block to another ambient-stream
+    # allocation while the batch copy is still in flight.
+    dst.record_stream(stream)
     stream.synchronize()
     if not torch.equal(dst.cpu(), src):
         raise RuntimeError("cudaMemcpyBatchAsync probe copied wrong bytes")

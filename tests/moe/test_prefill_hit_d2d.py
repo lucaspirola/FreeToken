@@ -71,10 +71,31 @@ def test_batch_memcpy_roundtrip():
     src_ptrs = torch.tensor([src[p].data_ptr() for p in perm.tolist()], dtype=torch.int64)
     sizes = torch.full((rows,), feat, dtype=torch.int64)
     stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
         batch_memcpy_jit(dst_ptrs, src_ptrs, sizes, stream.cuda_stream)
+    dst.record_stream(stream)
     stream.synchronize()
     assert torch.equal(dst.cpu(), src[perm])
+
+
+@CUDA
+@JIT
+@BATCH_API
+def test_batch_memcpy_probe_survives_busy_ambient_stream():
+    """load_batch_memcpy()'s probe zeroes dst on the AMBIENT stream and copies on a
+    private one. With a caller's work already queued ambient-side, an unordered
+    probe reads its own memset AFTER the copy and raises -- which latches
+    OffloadMoeCache._batch_memcpy=False process-wide. It must not."""
+    from freetoken.kernel.batch_memcpy import load_batch_memcpy
+
+    a = torch.randn(2048, 2048, device="cuda")
+    b = torch.randn(2048, 2048, device="cuda")
+    torch.cuda.synchronize()
+    for _ in range(200):  # ~0.5 s of queued work on the current stream
+        a = torch.mm(a, b)
+    load_batch_memcpy()  # probes; must not raise while the ambient stream is busy
+    torch.cuda.synchronize()
 
 
 @CUDA

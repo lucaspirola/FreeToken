@@ -753,3 +753,13 @@ check for `Discarded cold session ...: client token prefix changed` before blami
 - **Do not pipe `scripts/gpu_lock.sh`, and read the exit code with that in mind.** Every run here
   ended `Killed` / 137 from its own cleanup trap *after* writing complete output. Grep the
   redirected file; do not conclude the job died.
+
+## 2026-09-05 (WSL OOM restart, 08:59)
+- Kernel OOM killed the gpu_lock worker (16 GB shmem + 2 GB anon) at 32.5 GB user peak,
+  then WSL tore the session down. Cause: a CPU-side agent running pytest/torch (2–7 GB)
+  while the model was loading. gpu_lock only protects the GPU job from being the last
+  straw; it does not stop a sibling from pushing the total over.
+- RULE: while any model is loaded, sibling agents run NO pytest/torch imports and stay
+  under ~1 GB RSS. Test suites for CPU work run before the GPU job starts or after it ends.
+- RULE: the scratchpad does not survive WSL restarts; soak drivers/scripts worth keeping
+  go under benchmarks/ or scripts/, not scratchpad.
