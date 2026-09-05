@@ -706,6 +706,11 @@ def test_offload_cache_rebuild_refreshes_pageable_graph_descriptors():
     reset_calls = []
 
     class _GatherTask:
+        def stats(self):
+            # (calls, rows, nanoseconds), like the native PageableGather: the rebuild's
+            # reset_stats reads the window before discarding it (cumulative /v1/stats).
+            return (3, 12, 1_000)
+
         def reset_stats(self):
             reset_calls.append(True)
 
@@ -717,6 +722,131 @@ def test_offload_cache_rebuild_refreshes_pageable_graph_descriptors():
     assert cache.src_indices.shape == (10,)
     assert cache._pageable_stage_src_indices.tolist() == list(range(10))
     assert reset_calls == [True]
+
+
+def test_decode_stat_totals_stay_monotonic_across_rebuilds_and_resets():
+    """``/v1/stats -> scheduler.moe.decode`` is documented as a CUMULATIVE counter document
+    that two snapshots difference into a decode hit rate. Every underlying counter is
+    windowed -- ``reset_stats`` zeroes them, and so do the rebuild and pageable-retune
+    paths through it -- so a soak phase with 30 cache rebuilds published totals that kept
+    restarting at zero and a hit rate nobody could measure. The totals must therefore fold
+    each discarded window into a host-side base, while ``decode_miss_stats`` (the idle-log
+    view) stays per-window.
+    """
+    from flashlib.kernels.slot_cache import Stat
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    _init_tp()
+    cache = OffloadMoeCache(
+        num_layers=2, num_experts=4, cache_size=6, device=torch.device("cpu")
+    )
+    cache.set_bank_sources(
+        {
+            "gate_up": [torch.randn(4, 32, 8) for _ in range(2)],
+            "down": [torch.randn(4, 8, 16) for _ in range(2)],
+        }
+    )
+
+    def _decode_window(layer, *, active, missing, calls, hit_rows, rows):
+        cache.lru_stats[layer, Stat.ACTIVE] += active
+        cache.lru_stats[layer, Stat.MISS] += missing
+        cache.lru_stats[layer, Stat.CALLS] += calls
+        cache.stat_fetched += missing
+        cache.prefill_hit_rows += hit_rows
+        cache.prefill_total_rows += rows
+
+    _decode_window(0, active=80, missing=20, calls=10, hit_rows=7, rows=9)
+    first = cache.decode_stat_totals()
+    assert first == {
+        "layer_calls": 10, "active": 80, "missing": 20, "fetched": 20,
+        "prefill_hit_rows": 7, "prefill_rows": 9,
+        "pageable_stage_calls": 0, "pageable_rows": 0,
+    }
+
+    cache.rebuild(8)  # a rebuild cold-starts the cache and zeroes every device counter
+
+    assert cache.cache_size == 8
+    # The published totals survive the rebuild verbatim: nothing was decoded since.
+    assert cache.decode_stat_totals() == first
+    # ...while the idle-log window really did reset.
+    assert cache.decode_miss_stats()["layer_calls"] == 0
+    assert cache.decode_miss_stats()["prefill_rows"] == 0
+    assert cache.decode_miss_stats_per_layer()["per_layer"][0]["steps"] == 0
+
+    # A second window on top of a rebuilt cache accumulates, it does not replace.
+    _decode_window(1, active=40, missing=5, calls=5, hit_rows=1, rows=3)
+    second = cache.decode_stat_totals()
+    assert second == {
+        "layer_calls": 15, "active": 120, "missing": 25, "fetched": 25,
+        "prefill_hit_rows": 8, "prefill_rows": 12,
+        "pageable_stage_calls": 0, "pageable_rows": 0,
+    }
+    assert cache.decode_miss_stats()["layer_calls"] == 5  # window sees only the new one
+
+    # A bare idle reset_stats (the other zeroing path) folds identically.
+    cache.reset_stats()
+    assert cache.decode_stat_totals() == second
+    assert cache.decode_miss_stats()["layer_calls"] == 0
+
+    # And the window/total split holds over a third window.
+    _decode_window(0, active=10, missing=1, calls=2, hit_rows=0, rows=4)
+    third = cache.decode_stat_totals()
+    assert third["layer_calls"] == 17 and third["active"] == 130
+    assert third["missing"] == 26 and third["fetched"] == 26
+    assert third["prefill_hit_rows"] == 8 and third["prefill_rows"] == 16
+    assert cache.decode_miss_stats()["layer_calls"] == 2
+    # Monotonic, key by key, over every snapshot taken above.
+    for previous, current in ((first, second), (second, third)):
+        assert all(current[key] >= previous[key] for key in previous)
+
+
+def test_decode_totals_fold_the_pageable_window_a_rebuild_discards():
+    """The pageable rows live in the native gather tasks, whose counters ``reset_stats``
+    clears. They are published in the same cumulative document, so a rebuild must fold
+    them too rather than restart them."""
+    from freetoken.moe.host_banks import HostResidency
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    _init_tp()
+    cache = OffloadMoeCache(
+        num_layers=1, num_experts=4, cache_size=6, device=torch.device("cpu")
+    )
+    cache.pageable_gpu = True
+    cache.set_bank_sources(
+        {"gate_up": [torch.randn(4, 32, 8)], "down": [torch.randn(4, 8, 16)]},
+        [HostResidency.PAGEABLE.value],
+    )
+    cache._pageable_stage_capacity = 8
+    cache._pageable_stage_src_indices = torch.arange(6, dtype=torch.int32)
+
+    class _GatherTask:
+        """Stands in for the native PageableGather: counts up, zeroes on reset_stats."""
+
+        def __init__(self):
+            self.calls, self.rows = 2, 40
+
+        def stats(self):
+            return (self.calls, self.rows, 5_000)
+
+        def reset_stats(self):
+            self.calls = self.rows = 0
+
+    task = _GatherTask()
+    cache._pageable_gather_tasks = {0: task}
+
+    assert cache.decode_stat_totals()["pageable_stage_calls"] == 2
+    assert cache.decode_stat_totals()["pageable_rows"] == 40
+
+    cache.rebuild(10)
+
+    assert task.rows == 0, "the rebuild must have reset the native gather counters"
+    assert cache.decode_stat_totals()["pageable_stage_calls"] == 2
+    assert cache.decode_stat_totals()["pageable_rows"] == 40
+    assert cache.decode_miss_stats()["pageable_rows"] == 0  # the window did restart
+
+    task.calls, task.rows = 1, 7
+    assert cache.decode_stat_totals()["pageable_stage_calls"] == 3
+    assert cache.decode_stat_totals()["pageable_rows"] == 47
 
 
 def test_offload_cache_rebuild_disables_prefill_overlap_when_too_small():

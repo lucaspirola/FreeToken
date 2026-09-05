@@ -59,6 +59,19 @@ _CACHED_EXTEND_FORMATS = frozenset({"nvfp4", "nvfp4_marlin", "nvfp4_b12x"})
 # stream. So refusing here costs nothing real: the forward falls back to the stream.
 _MAX_ENSURE_QUERY = 1024
 
+# Keys of the ``/v1/stats`` decode counter document (see ``decode_stat_totals``). Named
+# here so the cumulative base and the live window can never drift apart.
+_DECODE_TOTAL_KEYS = (
+    "layer_calls",
+    "active",
+    "missing",
+    "fetched",
+    "prefill_hit_rows",
+    "prefill_rows",
+    "pageable_stage_calls",
+    "pageable_rows",
+)
+
 _BANK_SCHEMAS: dict[str, tuple[str, ...]] = {
     # dense bf16 expert weights
     "bf16": ("gate_up", "down"),
@@ -332,6 +345,16 @@ class OffloadMoeCache:
         self.stat_steps_layer = torch.zeros(
             self.num_layers, dtype=torch.int64, device=self.device
         )
+        # Host-side cumulative base for ``decode_stat_totals`` (the /v1/stats wire
+        # document). Every counter above is WINDOWED: ``reset_stats`` zeroes them, and so
+        # do the rebuild and pageable-retune paths through it. A soak that rebuilt the
+        # cache 30 times therefore published a "cumulative" total that kept restarting at
+        # zero, so no pair of snapshots could be differenced into a hit rate.
+        # ``reset_stats`` now folds the window it is about to discard in here, and the
+        # public getter reports base + live, which is monotonic across resets.
+        # ``decode_miss_stats``/``decode_miss_stats_per_layer`` stay windowed on purpose:
+        # they are the per-window idle-log view.
+        self._decode_totals_base: dict[str, int] = dict.fromkeys(_DECODE_TOTAL_KEYS, 0)
         # Opt-in decode routing histogram (per layer, per expert) for cache-skew
         # analysis. Accumulated in ``ensure_experts`` from the raw expert ids before the
         # kernel rewrites them to slots. Only accurate with CUDA graphs disabled (the
@@ -894,19 +917,13 @@ class OffloadMoeCache:
         self.num_indices.zero_()
         self.num_missing_full.zero_()
         self.expert_recency.fill_(-1)
-        self.stat_missing.zero_()
-        self.stat_active.zero_()
-        self.stat_calls.zero_()
-        self.stat_fetched.zero_()
-        self.stat_missing_layer.zero_()
-        # a rebuild is a cold start for the cache; carrying pre-rebuild hit/miss counts over would skew every post-rebuild stats report
-        self.lru_stats.zero_()
-        self.stat_active_layer.zero_()
-        self.stat_fetched_layer.zero_()
-        self.stat_steps_layer.zero_()
+        # A rebuild is a cold start for the cache: carrying pre-rebuild hit/miss counts
+        # over would skew every post-rebuild stats report. The decode stat_*/lru_stats
+        # counters are NOT zeroed here -- the ``reset_stats()`` at the end of this method
+        # does it, after folding the window into the cumulative ``/v1/stats`` base, and
+        # nothing between here and there reads them. ``decode_freq`` is a routing
+        # histogram that ``reset_stats`` deliberately leaves alone, so it is cleared here.
         self.decode_freq.zero_()
-        self.prefill_hit_rows = 0
-        self.prefill_total_rows = 0
         self._hit_d2d_fallback_logged = (
             False  # geometry changed; re-log if still unusable
         )
@@ -1022,19 +1039,12 @@ class OffloadMoeCache:
         else:
             self.extend_cache_misses += 1
 
-    def decode_stat_totals(self) -> dict:
-        """Raw cumulative decode expert-cache counters, as ints.
+    def _live_decode_totals(self) -> dict:
+        """The raw decode counters accumulated SINCE the last :meth:`reset_stats`.
 
-        :meth:`decode_miss_stats` is the idle-log view: it divides by ``layer_calls`` and
-        returns ratios, which a cumulative wire document cannot subtract. These are the
-        same quantities *before* the division, so two ``/v1/stats`` snapshots difference
-        into the hit rate over the window between them -- the number soak §W7 wanted and
-        could not get, because every existing emission sat behind ``run_when_idle`` and a
-        saturated server never reaches an idle boundary (``Scheduler is idle`` appeared 0
-        times in 41 minutes at c=16).
-
-        Costs the same handful of ``.item()`` reads the idle path already pays, and the
-        caller runs it at most once every couple of seconds.
+        The device counters are windowed (a rebuild or an idle reset zeroes them), so this
+        is only half of the ``/v1/stats`` document: :meth:`decode_stat_totals` adds the
+        cumulative base that ``reset_stats`` folds the discarded windows into.
         """
         self._read_pageable_task_stats()
         if self.decode_target == "hybrid":
@@ -1053,6 +1063,29 @@ class OffloadMoeCache:
             "pageable_stage_calls": int(self.pageable_stage_calls),
             "pageable_rows": int(self.pageable_stage_rows),
         }
+
+    def decode_stat_totals(self) -> dict:
+        """Raw cumulative decode expert-cache counters, as ints.
+
+        :meth:`decode_miss_stats` is the idle-log view: it divides by ``layer_calls`` and
+        returns ratios, which a cumulative wire document cannot subtract. These are the
+        same quantities *before* the division, so two ``/v1/stats`` snapshots difference
+        into the hit rate over the window between them -- the number soak §W7 wanted and
+        could not get, because every existing emission sat behind ``run_when_idle`` and a
+        saturated server never reaches an idle boundary (``Scheduler is idle`` appeared 0
+        times in 41 minutes at c=16).
+
+        Monotonic by construction: the underlying device counters are windowed and get
+        zeroed by every cache rebuild and pageable retune (30 rebuilds in one 20-minute
+        soak phase, which made the published totals restart from zero and the hit rate
+        unmeasurable), so the discarded windows are folded into ``_decode_totals_base``
+        and reported here on top of the live one.
+
+        Costs the same handful of ``.item()`` reads the idle path already pays, and the
+        caller runs it at most once every couple of seconds.
+        """
+        base = self._decode_totals_base
+        return {key: base[key] + value for key, value in self._live_decode_totals().items()}
 
     def retune_pageable_layers(self, target: frozenset[int]) -> None:
         """Swap equal-count pinned/pageable layer banks at an idle boundary."""
@@ -1098,9 +1131,13 @@ class OffloadMoeCache:
             for layer in range(self.num_layers)
         ]
         self._build_copy_plan()
+        # Fold + zero BEFORE the staging rebuild: ``force=True`` constructs brand-new
+        # PageableGather tasks, and the old tasks' native counters (the only source for
+        # pageable_stage_calls/rows) die with them. Reading them afterwards would silently
+        # drop this window's pageable rows from the cumulative /v1/stats totals.
+        self.reset_stats()
         self.prepare_pageable_staging(self._pageable_stage_capacity, force=True)
         self.reset()
-        self.reset_stats()
 
     def lru_slot_range(self, layer_id: int) -> tuple[int, int]:
         """Allowed global LRU slot range; kernels emit class-local row ids."""
@@ -1509,6 +1546,14 @@ class OffloadMoeCache:
         self.policy_steps.zero_()
 
     def reset_stats(self) -> None:
+        # Fold the window that is about to be discarded into the cumulative base FIRST,
+        # so ``decode_stat_totals`` (the /v1/stats document) stays monotonic across every
+        # rebuild, pageable retune and idle reset. Every caller of this method is a host
+        # idle boundary -- never a captured graph or a per-step path -- so the .item() /
+        # .sum() device reads _live_decode_totals does here are free of the usual
+        # per-step-sync and CUDA-graph concerns.
+        for key, value in self._live_decode_totals().items():
+            self._decode_totals_base[key] += value
         self.prefill_hit_rows = 0
         self.prefill_total_rows = 0
         self.lru_stats.zero_()

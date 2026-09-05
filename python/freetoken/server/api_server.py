@@ -542,59 +542,17 @@ register_control_routes(app, get_global_state, lambda: _MODEL_SAMPLING)
 register_accounting_routes(app, get_global_state)
 
 
-# Paths the HTTP middleware logs into the request ring. The three chat protocols funnel through
-# the shared generation layer and are recorded there instead (with real token totals) — kept out
-# here to avoid a duplicate token-less row. These two run their own ack loop, so they stay logged
-# here as before (without per-request tokens). See generation.py `_record_generation`.
-_TRACKED_REQUEST_PREFIXES = (
-    "/v1/completions",
-    "/generate",
-)
-
-# Subpaths that share a tracked prefix but are NOT generation requests. count_tokens never
-# enters generation accounting, and its first-touch tokenizer load would otherwise dominate the
-# /v1/stats p95 and pollute /v1/requests — exclude it before the prefix check below.
-_UNTRACKED_REQUEST_PREFIXES = ("/v1/messages/count_tokens",)
-
-
 def _served_model_name() -> str | None:
     st = _GLOBAL_STATE
     cfg = getattr(st, "config", None) if st is not None else None
     return getattr(cfg, "served_model_name", None)
 
 
-@app.middleware("http")
-async def _record_request_middleware(request: Request, call_next):
-    """Time every generation request into the ring for /v1/requests + /v1/stats p95. Single-
-    model server, so model = served_model_name; stream is inferred from the response media
-    type. Token counts are P3 (SSE usage arrives after the handler returns) — kept as None."""
-    path = request.url.path
-    if path.startswith(_UNTRACKED_REQUEST_PREFIXES) or not path.startswith(
-        _TRACKED_REQUEST_PREFIXES
-    ):
-        return await call_next(request)
-    import time as _time
-
-    start = _time.monotonic()
-    response = await call_next(request)
-    duration_ms = int((_time.monotonic() - start) * 1000)
-    ctype = response.headers.get("content-type", "")
-    request_ring.record_request(
-        request_ring.RequestRecord(
-            ts=_time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
-            method=request.method,
-            path=path,
-            status=response.status_code,
-            model=_served_model_name(),
-            duration_ms=duration_ms,
-            ttft_ms=None,
-            prompt_tokens=None,
-            completion_tokens=None,
-            stream=ctype.startswith("text/event-stream"),
-            error=None,
-        )
-    )
-    return response
+# Times every generation request into the ring for /v1/requests + /v1/stats p95. It is a pure
+# ASGI wrapper (see request_ring.RequestRingMiddleware) and MUST stay one: the
+# @app.middleware("http") decorator it replaced became a Starlette BaseHTTPMiddleware, which
+# proxies the receive channel and swallows http.disconnect — blinding disconnect.py's poll.
+app.add_middleware(request_ring.RequestRingMiddleware, model_name=_served_model_name)
 
 
 class CacheRebuildRequest(BaseModel):
