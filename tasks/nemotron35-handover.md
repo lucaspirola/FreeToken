@@ -1,28 +1,36 @@
 # Nemotron 3.5 Lightning on FreeToken — handover
 
-State as of 2026-09-05, HEAD `ca7e74b` on `main`, working tree clean. The four 2026-09-05
-tickets (graph ladder, A-operand deinterleave, extend-cache guard, spec draft length) are
-**committed** in `ca7e74b`, and the end state has been **validated by a 16-way soak** against it
-(soak §W): 0 errors, 0 STALLED, 0 fatals on both routes, but **9 finishability-invariant warnings**
-in the passthrough tail — the one open blocker, ticketed in soak §W6. `fork/main`
-(`62f5a66`) is behind and 0 ahead — a fast-forward is available and is the user's
+State as of 2026-09-05, HEAD `e3a2019` on `main`, working tree carrying two uncommitted
+soak-harness files (`benchmarks/switchyard_soak/run.sh`, `benchmarks/probe_disconnect_middleware.py`).
+The four 2026-09-05 tickets (graph ladder, A-operand deinterleave, extend-cache guard, spec draft
+length) are committed in `ca7e74b`; the three §W tickets (restore charged against the finishability
+budget, shielded non-stream `abort_user`, MoE counters on `/v1/stats`) are committed in `e3a2019`,
+and that end state has been **validated by a 16-way soak** (soak §X): **0 finishability-invariant
+warnings** (§W's blocker closed), 0 errors, 0 STALLED, 0 fatals on both routes, passthrough
+throughput within 2 % of §W. One new finding: a **non-streaming client disconnect is never
+detected at all** — `BaseHTTPMiddleware` blinds `Request.is_disconnected()` (soak §X5/§X9.1).
+`fork/main` (`62f5a66`) is behind and 0 ahead — a fast-forward is available and is the user's
 call. Read this, then `tasks/nemotron35-plan.md` (spec),
 `tasks/todo.md` (open checklist), `tasks/lessons.md` (rules — read before touching the GPU),
 `docs/nemotron.md` (profiles + numbers), `docs/switchyard.md`, `docs/oracle.md`,
 `docs/cpu-checks.md`.
 
 ## Status
-Serving is correct and fast on the RTX 5080; the 262K/1M recall, scheduler-stall and
-16-way-soak blockers are all closed. The final 16-way soak against `ca7e74b` (soak §W,
-2026-09-05 17:55–18:39) passes on traffic — 639 stage / 2,155 passthrough requests, 0 errors,
-0 STALLED, 0 fatals, trailing silence 1 s / 3 s, disconnect abort clean, GPU back to 0 MiB — and
-confirms the dense graph ladder live (**0 of 485 decode batches ran eager**, against 73.5 % at
-`13af13d`). Two things came out of it: **9 finishability-invariant warnings** in the last 20 s of
-the passthrough phase (a constant 1,401-token over-promise that resolved itself; soak §W6 has the
-evidence and the CPU-only repro to try), and the discovery that `--moe-collect-stats` publishes
-**only at an idle boundary**, which a saturated soak never reaches — so expert-cache hit rate is
-unobtainable from a soak until those counters move to `/v1/stats` (soak §W7). What remains is
-those two, plus a ranked ticket list and one merge decision.
+Serving is correct and fast on the RTX 5080; the 262K/1M recall, scheduler-stall, 16-way-soak and
+finishability-invariant blockers are all closed. The validation soak against `e3a2019` (soak §X,
+2026-09-05 19:23–20:07) is an **unqualified PASS on the acceptance criteria**: 571 stage / 2,149
+passthrough requests, 0 errors, 0 STALLED, 0 fatals, **0 invariant warnings over 1,541 checks**
+(worst shortfall 0 tokens), trailing silence 1 s / 1 s, 0 of 503 decode batches eager, graceful
+shutdown in 4 s with GPU back to 0 MiB. Passthrough — the route that produced §W's 9 warnings —
+repeats §W to within 2 % on every headline, so the fix cost nothing; stage reads −10.6 % requests
+/ +13.9 % p95 but carried 13 % more new prefill tokens at 79.8 % prefix reuse against §W's 83.7 %
+(+26 % new tokens per request), i.e. heavier prompts, not a slower engine. Two things came out of
+it: the **non-streaming disconnect path never fires** (§X5 — the probe had been timing a
+completion, in §W too; the real cause is `api_server.py`'s `@app.middleware("http")` blinding
+`Request.is_disconnected()`, proven CPU-only in `benchmarks/probe_disconnect_middleware.py`), and
+the **MoE decode counters are zeroed by every bank rebuild**, so an elastic server still cannot
+report an expert-cache hit rate over a soak (§X6; the extend-cache gate rate *is* now a
+measurement, 3.1 %). What remains is those two, plus a ranked ticket list and one merge decision.
 
 ## Performance (start of effort → now)
 
@@ -37,13 +45,14 @@ those two, plus a ranked ticket list and one merge decision.
 | prefill 524K | 1,064 | **2,297** (2.16x, measured live in the oracle run) | oracle_2026-09-05 |
 | prefill 1M | 573–576 | **1,307** (2.28x; MoE-GEMM gain not re-measured at 1M) | prefill_profile |
 | 1M TTFT | 1,810–1,824 s | **795.8 s** | prefill_profile |
-| 16-way decode aggregate (soak, @16 lanes) | 81.6 stage / 161.4 passthrough tok/s | 85.7 / **217.3** | soak §W |
+| 16-way decode aggregate (soak, @16 lanes) | 81.6 stage / 161.4 passthrough tok/s | 75.7 / **211.1** | soak §X |
 | 16-way decode (engine, 12 lanes) | 143.21 eager | **153.84** (1.074x; 1.039x at 16) | decode16 |
-| soak stage | FAIL (crash, then stalls/deadlock at `81ab30e`/`ea7ed7c`) | **PASS** 639 req / 0 err / 0 STALLED, p95 **72.1 s** | soak §W |
-| soak passthrough | FAIL | **PASS** 2,155 req / 0 err / 0 STALLED, p95 27.0 s | soak §W |
-| prefill starvation signature | 61% stage / 19% passthrough of passes | **2 / 1,514 passes** (0.1%) | soak §W |
-| soak decode batches run eager | — | 73.5% at `13af13d` → **0.0%** (0 of 485) | soak §W3 |
-| soak effective prefill rate | 1,830 stage / 1,879 passthrough tok/s | **2,566 / 2,410** | soak §W3 |
+| soak stage | FAIL (crash, then stalls/deadlock at `81ab30e`/`ea7ed7c`) | **PASS** 571 req / 0 err / 0 STALLED, p95 82.1 s | soak §X |
+| soak passthrough | FAIL | **PASS** 2,149 req / 0 err / 0 STALLED, p95 27.5 s | soak §X |
+| soak finishability-invariant warnings | 9 (§W passthrough tail) | **0 of 1,541 checks** | soak §X4 |
+| prefill starvation signature | 61% stage / 19% passthrough of passes | **2 / 1,519 passes** (0.1%) | soak §X |
+| soak decode batches run eager | — | 73.5% at `13af13d` → **0.0%** (0 of 503) | soak §X3 |
+| soak effective prefill rate | 1,830 stage / 1,879 passthrough tok/s | **2,894 / 2,238** | soak §X3 |
 
 Oracle recall by question shape (needles all present in state; **0 `retention`, 0 `selection`
 at every length on both engines**):
@@ -106,25 +115,50 @@ run on either engine (cheap open rung).
 - **CI** — `.github/workflows/cpu-checks.yml` (ruff + CPU unit tests + scheduler replay gate),
   `508ea32`; `docs/cpu-checks.md`.
 - **Soak drivers in-repo** — `benchmarks/switchyard_soak/` (`f6ed0b5`).
-- **Final 16-way soak against the end state** — `ca7e74b`, 2026-09-05: PASS on traffic both
-  routes (639 / 2,155 requests, 0 errors, 0 STALLED, 0 fatals), stage p95 −34%, 0% of decode
-  batches eager, disconnect abort 0→1→0 in 2 s. Two new tickets (§W6, §W7) above. soak §W.
+- **16-way soak against `ca7e74b`** — 2026-09-05: PASS on traffic both routes (639 / 2,155
+  requests, 0 errors, 0 STALLED, 0 fatals), stage p95 −34%, 0% of decode batches eager. Two new
+  tickets (§W6, §W7). soak §W.
+- **Finishability invariant vs cold-session restores (§W6)** — `_restore_cold_session` spends the
+  same pool the admission gate proved against, from a path that is not a gate. Charged against an
+  exported `PrefillManager.finishability_reservation`, with a deferral (refusing reuse is always
+  correct, only slower) rather than a loosened invariant. `e3a2019`.
+- **Non-streaming `abort_user` shielded** — every non-streaming endpoint awaited it from inside an
+  `except asyncio.CancelledError` handler and a second cancellation at its 0.1 s sleep dropped both
+  the counter and the AbortMsg. `asyncio.shield` over a tracked task. Correct, but **unreachable**
+  in production for the reason in open ticket 0 below. `e3a2019`.
+- **MoE counters on `/v1/stats.scheduler.moe` (§W7)** — extend-cache gate hits/misses and the
+  decode expert-cache totals, off the idle path. `e3a2019`.
+- **Validation 16-way soak against `e3a2019`** — 2026-09-05: **0 invariant warnings** over 1,541
+  checks (§W6 closed), PASS on traffic both routes (571 / 2,149 requests, 0 errors, 0 STALLED,
+  0 fatals), passthrough within 2 % of §W on every headline, 0 of 503 decode batches eager,
+  trailing silence 1 s / 1 s, GPU back to 0 MiB. soak §X.
 
 ## Open, ranked by value
-0. **9 finishability-invariant warnings in the `ca7e74b` soak's passthrough tail.** The only
-   thing between the end state and an unqualified PASS. 19-second episode, constant 1,401-token
-   over-promise, resolved itself, no error/stall/fatal. Leading hypothesis: a cold session restore
-   materialises committed pages *after* admission, shrinking `available_size` without shrinking
-   the standing reservation the gate proved against (`prefill.py:503-546`). CPU-only next step:
-   extend `benchmarks/scheduler_replay.py` with a restore landing between a chunked prefill's
-   admission and its next chunk. **Do not run `FREETOKEN_SCHEDULER_INVARIANT=raise` in a soak
-   until this is understood.** soak §W6.
-0b. **`--moe-collect-stats` publishes only at an idle boundary**, and a saturated server never
-   reaches one (`Scheduler is idle` appeared 0 times in 41 minutes at c=16). So no soak can report
-   expert-cache hit rate. `decode_miss_stats()` is already a dict of ints — hang it off `/v1/stats`
-   next to `scheduler.prefill` the way `78f29d3` did. Add a counter to the extend-cache gate
-   (`use_cached_extend`) at the same time; today it can only be inferred from `#new-token <= 64`
-   (76 of 1,522 passes, 5.0 %). soak §W7.
+0. **A non-streaming client disconnect is never detected.** Not a missing counter — a missing
+   detection. A 60 K-token request whose socket closed 5 s into its prefill ran to completion and
+   answered 200 OK into the dead socket; the identical streaming request aborted the instant its
+   socket closed. `server/disconnect.py` is correct (0.25 s poll of `Request.is_disconnected()`);
+   `api_server.py`'s `@app.middleware("http")` request-ring recorder is a Starlette
+   `BaseHTTPMiddleware`, which proxies the ASGI receive channel through its own task and never
+   forwards `http.disconnect`, so the poll reads False forever and the `except
+   asyncio.CancelledError` handler that sends the AbortMsg is never entered. Streaming is immune
+   because its abort comes from the *send* side. Nothing leaks — the request finishes and releases
+   — but an abandoned non-streaming request burns a full prefill+decode, which is exactly what
+   `ff470e7` set out to stop. Fix: make the recorder a pure-ASGI middleware that passes `receive`
+   through untouched, and cover it with a test that drives a real uvicorn. **The soak probe had
+   been timing a completion, not an abort, in §W too** — it now closes on `requests.active >= 1`.
+   Repro (CPU, ~10 s): `uv run benchmarks/probe_disconnect_middleware.py`. soak §X5/§X9.1.
+0b. **MoE decode counters are zeroed by every bank rebuild.** `/v1/stats.scheduler.moe` now
+   publishes them (§W7 half closed — the extend-cache gate rate is a real measurement, **3.1 %**
+   of 35,328 routed extend layer-forwards, against the 5.0 % §W7 inferred), but `OffloadCache`'s
+   rebuild calls `lru_stats.zero_()` and an elastic soak rebuilds ~30 times, so a snapshot carries
+   only the traffic since the last rebuild and a two-snapshot delta is meaningless: `layer_calls`
+   read **115** after a 20-minute phase and **2,576** after a 26-second probe. Keep a
+   rebuild-surviving lifetime accumulator, or publish a `rebuild_epoch` a reader can check.
+   soak §X6/§X9.2.
+0c. **The restore-deferral path is unexercised by a soak** — 568 restores, `restores_deferred`
+   **0**, invariant violations 0. The charging alone held; the deferral arm's only evidence stays
+   `benchmarks/scheduler_replay.py`'s `switchyard-restore` profile plus the unit tests. soak §X4.
 1. **n-gram verify overhead** — ~40% of a verify step is not the forward (~52 ms vs a ~30 ms
    extend forward): 46 eager kernel launches in the commit, `_prepare_batch` rebuilding pinned
    staging for a one-request batch. Taking the step from 7x to 4x a decode step moves the copy
@@ -159,10 +193,11 @@ run on either engine (cheap open rung).
    `_maybe_shrink_growable_kv` wipes the prefix cache at idle; `scheduler_replay.py` scored the
    commit that then failed the live soak, so it is not an acceptance gate for policy.
 8. **Watch mean lanes per prefill batch** every soak: 3.43 stage / 4.92 passthrough at
-    `13af13d`, **3.18 / 4.96 at `ca7e74b`** (stage moved down while requests rose 30%). Stage >~5
-    **together with** rising errors or p95 is the §R6/§R7 mode returning. Also new at `ca7e74b`:
-    `fresh_admits_blocked_by_cap` = 435, i.e. `max_chunked_prefills = 8` **does** bind (§U5 could
-    not prove it either way), and host `MemAvailable` bottomed at 3.1 GiB against §V's 5.1.
+    `13af13d`, 3.18 / 4.96 at `ca7e74b`, **3.13 / 4.88 at `e3a2019`**. Stage >~5 **together with**
+    rising errors or p95 is the §R6/§R7 mode returning. Also: `fresh_admits_blocked_by_cap` = 388
+    (§W 435), i.e. `max_chunked_prefills = 8` **does** bind, and host `MemAvailable` bottomed at
+    **2.1 GiB** (§W 3.1, §V 5.1) — 0.1 GiB above `run.sh`'s own `SOAK_RAM_ABORT_GIB=2` watchdog.
+    The next soak on this profile should raise `--host-ram-reserve-gb` or expect an abort.
 9. **CI follow-ups** — re-run the full unit-test step with no GPU job live and record the wall
     time; fold `tests/moe`+`tests/kernels` in once `test_offload.py::test_adjust_config_*` skips
     without flashinfer; pay down the `[tool.ruff.lint] ignore` list.
@@ -175,7 +210,9 @@ run on either engine (cheap open rung).
 ## How to run things
 - **Soak**: `benchmarks/switchyard_soak/run.sh [tag] [duration]` — stage 20 m then passthrough
   20 m, c=16, server under `scripts/gpu_lock.sh` with `FREETOKEN_SCHEDULER_INVARIANT=warn`.
-  It refuses to start below 26 GiB `MemAvailable`; everything lands in `runs/<tag>/` (gitignored).
+  It refuses to start below 26 GiB `MemAvailable` and TERMs the server below 2 GiB while running;
+  everything lands in `runs/<tag>/` (gitignored). `SOAK_PHASES=""` (empty) runs the
+  disconnect probe alone — both endpoint shapes, ~90 s of GPU.
   Grade with `analyze.py` (per-route stats, lanes/batch, starvation-signature fraction,
   `stats_*.json` deltas) and `gaps.py` (leading/trailing silence). Contract/e2e checks:
   `scripts/switchyard_e2e.sh contract|soak|agents` (`docs/switchyard.md` §8).

@@ -4,9 +4,11 @@ Handover: `tasks/nemotron35-handover.md`. Plan: `tasks/nemotron35-plan.md`. Rule
 `tasks/lessons.md`. Results files below are in `benchmarks/results/` unless stated;
 `N35 =nemotron35_lightning_5080_`.
 
-HEAD `ca7e74b`, working tree clean; the four 2026-09-05 tickets are committed in it and the
-end state is **soak-validated** (`N35switchyard_soak_2026-09-04.md` §W: traffic PASS on both
-routes, 9 invariant warnings ticketed below). `fork/main` (`62f5a66`) is behind, 0 ahead.
+HEAD `e3a2019` (two uncommitted soak-harness files: `benchmarks/switchyard_soak/run.sh`,
+`benchmarks/probe_disconnect_middleware.py`). The four 2026-09-05 tickets are committed in
+`ca7e74b` and the three §W tickets in `e3a2019`; the end state is **soak-validated**
+(`N35switchyard_soak_2026-09-04.md` §X: traffic PASS on both routes and **0 invariant warnings**
+over 1,541 checks — §W's blocker closed). `fork/main` (`62f5a66`) is behind, 0 ahead.
 
 ---
 
@@ -485,3 +487,64 @@ one open blocker and is ticketed above with a CPU-only repro to try.
    99.9 → 85.7 tok/s and would look like a 14 % regression; both sides are n=14 out of ~170
    decode batches. The `>= 12` bucket (n=79 → 114) has identical medians (86.2) and a *rising*
    mean. Report the sample size next to any bucketed soak number, or do not report the bucket.
+
+---
+
+## 2026-09-05 — validation soak of the three §W fixes (`e3a2019`)
+
+- [x] **Run** — `SOAK_EXTRA_ARGS="--moe-collect-stats" benchmarks/switchyard_soak/run.sh e3a2019 20m`;
+      stage 20 m then passthrough 20 m at c=16, `FREETOKEN_SCHEDULER_INVARIANT=warn`,
+      `--enable-cache-report`, server under `scripts/gpu_lock.sh`. 19:22:52 → 20:07:41, READY in
+      24 s, both phases `exit=0`, graceful shutdown in 4 s, GPU back to **0 MiB**, no leftovers.
+- [x] **Grade** — `split.py`, `analyze.py` (logs **and** the three `/v1/stats` snapshots),
+      `gaps.py`. Full write-up: `N35switchyard_soak_2026-09-04.md` **§X**.
+- [x] **New check: `session_spill.restores_deferred`** — **0** over 568 restores (0 failed), with
+      0 invariant violations. The charging alone held; the deferral arm stayed unexercised.
+- [x] **New check: MoE counters from `/v1/stats.scheduler.moe`** — extend-cache gate **3.1 %**
+      (1,104 hits / 34,224 misses of 35,328 routed extend layer-forwards). Decode expert-cache hit
+      rate **still not soak-measurable** — see the new ticket.
+- [x] **New check: disconnect probe on BOTH shapes**, asserted against `stats_after_probe.json`.
+      **FAIL**: `client_disconnect` = **1**, required ≥ 2. `active` did return to 0. Diagnosed to
+      root cause with a CPU-only repro; no fix applied (not a one-liner).
+
+### Review
+
+**PASS on the stated acceptance criteria.** 571 stage / 2,149 passthrough requests, 0 errors,
+0 STALLED, 0 fatals, 0 tracebacks, 0 ERROR/CRITICAL lines, no `health_bad.log`, trailing silence
+**1 s / 1 s**, scheduling wall clock 99.7 % / 99.9 %, 0 of 503 decode batches eager, 0 spill or
+restore failures in 1,715 spills / 568 restores.
+
+**§W6 is closed: 1,541 invariant checks, 0 violations, worst shortfall 0 tokens** — on the same
+profile and the same route (passthrough) that produced §W's nine warnings, at unchanged
+throughput: requests −0.3 %, p50 +0.4 %, p95 +2.0 %, p99 −0.1 %, decode aggregate median +0.5 %.
+
+**Stage's −10.6 % requests / +13.9 % p95 is workload, not engine.** Prefix reuse 83.7 % → 79.8 %,
+so the same 20 minutes carried 13 % more new prefill tokens (2,894 vs 2,566 tok/s effective) over
+11 % fewer requests — **+26 % new tokens per request** — at 17 % higher instant prefill
+throughput. Stage is the low-count high-variance route (the §V→§W swing on it was +30 % requests /
+−34 % p95), and no marker, gap or pressure counter shows the §R6/§R7 mode.
+
+**The one FAIL is a pre-existing defect the new check was the first to look for.**
+`client_disconnect` counted the streaming probe and not the non-streaming one — and the reason is
+not the counter. On a drained server a 60 K-token prefill finishes in ~6.5 s, so the old probe's
+fixed 6 s sleep had been timing a *completion*, in §W too (§W5's "0 → 1 → 0 in 2 s" is that
+artefact). With a probe that closes on `requests.active >= 1`, the non-streaming request still ran
+to completion and answered 200 OK into a dead socket five seconds after the close. Root cause,
+proven CPU-only in the new `benchmarks/probe_disconnect_middleware.py` (middleware off: seen in
+2.01 s; on: never seen): `api_server.py`'s `@app.middleware("http")` request-ring recorder is a
+Starlette `BaseHTTPMiddleware`, which owns the ASGI receive channel and never forwards
+`http.disconnect`, so `disconnect.py`'s 0.25 s poll of `Request.is_disconnected()` reads False
+forever and the handler that sends the AbortMsg is never entered. Streaming is immune because its
+abort comes from the send side. `e3a2019`'s `asyncio.shield` is correct but unreachable there.
+Ticketed as open item 0; no fix in this session (a pure-ASGI middleware plus a uvicorn-level test).
+
+**A second measurement lesson.** `/v1/stats.scheduler.moe` publishes the decode expert-cache
+counters now, but `OffloadCache`'s bank rebuild calls `lru_stats.zero_()` and this run rebuilt 30
+times, so a snapshot only carries the traffic since the last rebuild: `layer_calls` read **115**
+after a 20-minute phase and **2,576** after a 26-second probe. Moving a counter off the idle path
+was necessary but not sufficient — **a cumulative counter that something else resets is still not
+readable as a delta**. Ticketed as open item 0b.
+
+**Host:** `MemAvailable` bottomed at **2.1 GiB** (§W 3.1, §V 5.1) over 495 samples, 0.1 GiB above
+`run.sh`'s own abort watchdog. GPU 13.85 GiB median / 14.78 peak; top-process RSS peak 23.4 GiB;
+30 elastic capacity changes (§W 50).

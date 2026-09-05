@@ -112,7 +112,8 @@ run_phase() {  # $1 = route suffix, $2 = phase key (STAGE|PASS), $3 = workdir na
 
 # SOAK_PHASES selects which routes run (default: both, in this order). A short single-route
 # A/B sets it to just "passthrough".
-for phase in ${SOAK_PHASES:-stage passthrough}; do
+# ``SOAK_PHASES=""`` (empty, not unset) runs no traffic phase at all -- a probe-only run.
+for phase in ${SOAK_PHASES-stage passthrough}; do
   if [ -e "$SP/RAM_ABORT" ]; then echo "SKIPPING $phase: $(cat "$SP/RAM_ABORT")"; break; fi
   case "$phase" in
     stage)       run_phase stage       STAGE soakStage ;;
@@ -122,42 +123,78 @@ for phase in ${SOAK_PHASES:-stage passthrough}; do
 done
 curl -s -m 5 -o /dev/null -w 'health_http=%{http_code}\n' "http://127.0.0.1:$PORT/health"
 
-# --- disconnect-abort probe (ff470e7): drop a long prompt mid-prefill, then confirm
-# /v1/stats.active returns to 0 (the abort reached the scheduler and freed the slot).
+# --- disconnect-abort probe (ff470e7, then e3a2019): drop a long prompt mid-prefill on
+# BOTH endpoint shapes -- non-streaming (which aborts from inside an
+# `except asyncio.CancelledError` handler, the path e3a2019 shielded) and streaming (which
+# has always gone through spawn_abort) -- then confirm /v1/stats.requests.active returns to
+# 0 and that requests.aborts.client_disconnect counted BOTH (>= 2). §W5 recorded the
+# counter stuck at 0 while the slot was demonstrably freed; the counter is the assertion now.
 if [ "${SOAK_PROBE:-1}" = 1 ] && [ ! -e "$SP/RAM_ABORT" ]; then
 echo "=== disconnect probe $(date -Is) ==="
 curl -s -m 5 "http://127.0.0.1:$PORT/v1/stats" > "$SP/stats_before_probe.json"
 python3 - "$PORT" <<'PY'
 import json, socket, sys, time, urllib.request
 port = sys.argv[1]
-body = json.dumps({
-    "model": "nemotron-3.5-lightning",
-    "messages": [{"role": "user", "content": "word " * 60000 + "\nSummarize."}],
-    "max_tokens": 64, "stream": False,
-}).encode()
-req = (b"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:" + port.encode() + b"\r\n"
-       b"Content-Type: application/json\r\nContent-Length: " + str(len(body)).encode()
-       + b"\r\nConnection: close\r\n\r\n" + body)
+
+def stats():
+    u = f"http://127.0.0.1:{port}/v1/stats"
+    return json.load(urllib.request.urlopen(u, timeout=5))
 
 def active():
-    u = f"http://127.0.0.1:{port}/v1/stats"
-    return json.load(urllib.request.urlopen(u, timeout=5))["requests"]["active"]
+    return stats()["requests"]["active"]
 
-print("active before probe:", active())
-s = socket.create_connection(("127.0.0.1", int(port)), timeout=10)
-s.sendall(req)
-time.sleep(6.0)
-print("active while probe in flight:", active())
-s.shutdown(socket.SHUT_RDWR); s.close()
-print("probe socket closed at", time.strftime("%H:%M:%S"))
-t0 = time.time()
-for _ in range(60):
-    time.sleep(2)
-    a = active()
-    if a == 0:
-        print("active back to 0 after %.0f s" % (time.time() - t0)); break
-else:
-    print("active did NOT return to 0:", a)
+def disconnects():
+    return (stats()["requests"].get("aborts") or {}).get("client_disconnect", 0)
+
+def probe(stream):
+    label = "streaming" if stream else "non-streaming"
+    body = json.dumps({
+        "model": "nemotron-3.5-lightning",
+        "messages": [{"role": "user", "content": "word " * 60000 + "\nSummarize."}],
+        "max_tokens": 64, "stream": stream,
+    }).encode()
+    req = (b"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:" + port.encode()
+           + b"\r\nContent-Type: application/json\r\nContent-Length: "
+           + str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body)
+    d0 = disconnects()
+    print(f"--- {label} probe: active before {active()}, client_disconnect before {d0}")
+    s = socket.create_connection(("127.0.0.1", int(port)), timeout=10)
+    s.sendall(req)
+    # Close as soon as the request is ADMITTED, not after a fixed sleep. On a drained
+    # server a ~60 K-token prefill finishes in ~6.5 s, so the old fixed 6 s raced it: the
+    # 2026-09-05 e3a2019 run's non-streaming probe returned 200 OK with 64 tokens
+    # generated and there was no disconnect left to detect (soak §X5). Admission is
+    # ~1 s in and leaves ~5 s of prefill to abort into.
+    for _ in range(120):
+        if active() >= 1:
+            break
+        time.sleep(0.25)
+    else:
+        print(f"{label}: request never became active; probe is not valid")
+    time.sleep(1.0)
+    print(f"{label}: active while in flight:", active())
+    s.shutdown(socket.SHUT_RDWR); s.close()
+    print(f"{label}: probe socket closed at", time.strftime("%H:%M:%S"))
+    t0 = time.time()
+    for _ in range(60):
+        time.sleep(2)
+        a = active()
+        if a == 0:
+            print(f"{label}: active back to 0 after %.0f s" % (time.time() - t0))
+            break
+    else:
+        print(f"{label}: active did NOT return to 0:", a)
+    for _ in range(10):
+        d1 = disconnects()
+        if d1 > d0:
+            break
+        time.sleep(1)
+    print(f"{label}: client_disconnect {d0} -> {d1}"
+          + ("" if d1 > d0 else "   <- NOT COUNTED"))
+
+probe(False)
+probe(True)
+print("final: active", active(), "client_disconnect", disconnects())
 PY
 curl -s -m 5 "http://127.0.0.1:$PORT/v1/stats" > "$SP/stats_after_probe.json"
 fi

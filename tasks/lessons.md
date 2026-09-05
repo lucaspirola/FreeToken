@@ -1226,3 +1226,38 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   back. There is always a non-destructive way to answer the same question (`git show
   HEAD:<path>` into a temp file, or `git diff` the file and read it). **A rule that says
   "never" does not have a "just this once, it is quick" exception.**
+
+## 2026-09-05 (validation soak of `e3a2019` — a probe that never tested what it claimed)
+- **A probe with a fixed sleep is racing whatever it measures.** The disconnect probe sent a
+  ~60 K-token prompt and closed the socket after 6.0 s. On a *drained* server — which is exactly
+  what a post-soak probe runs against — that prefill finishes in ~6.5 s, so the request completed
+  and answered `200 OK` about a second after the close. Both §W5 and §X read
+  `active 0 -> 1 -> 0` and called the abort verified; both were timing a **completion**. A probe
+  must be triggered by the state it needs (`poll until requests.active >= 1`, then close), never
+  by a wall-clock guess, and it must assert a counter that only the path under test can move.
+- **Two paths that do the same job through different plumbing are two separate tests.** The
+  streaming disconnect aborts from the *send* side (a write to a closed socket); the
+  non-streaming one can only come from polling `Request.is_disconnected()`. `api_server.py`'s
+  `@app.middleware("http")` is a Starlette `BaseHTTPMiddleware`, which owns the ASGI receive
+  channel and never forwards `http.disconnect` — so the poll reads False forever and the
+  non-streaming abort handler is unreachable. **Fixing the last step of a path (`e3a2019`
+  shielded `abort_user`) proves nothing until something proves the path is entered at all.**
+- **Reproduce a framework bug at the framework's level.** No unit test below the transport can
+  show this: it needs a real uvicorn, a real socket, and the middleware toggled on and off.
+  `benchmarks/probe_disconnect_middleware.py` is 60 lines, runs in 10 s with no GPU, and prints
+  `disconnect seen after 2.01 s` / `NO RESULT` — an A/B, not an argument.
+- **Moving a counter off the idle path is not enough if something else resets it.** §W7's fix
+  published the MoE decode counters on `/v1/stats`, but `OffloadCache`'s bank rebuild calls
+  `lru_stats.zero_()` and an elastic soak rebuilds ~30 times: `layer_calls` read **115** after a
+  20-minute phase and **2,576** after a 26-second probe. **Before trusting a delta between two
+  cumulative snapshots, enumerate every writer that can zero the counter** — and publish an epoch
+  next to it so a reader can tell that a reset happened.
+- **A soak's client-request count is a workload measurement, not only an engine one.** Stage read
+  −10.6 % requests and +13.9 % p95 against §W and looked like a regression; prefix reuse had
+  fallen 83.7 % → 79.8 %, so the same 20 minutes carried **13 % more new prefill tokens** over
+  11 % fewer, heavier requests (+26 % new tokens each) at 17 % higher instant prefill throughput.
+  Divide the work by the requests before believing a request-count delta.
+- **A fix can pass its validation without its main branch ever executing.** `restores_deferred`
+  was **0** over 568 restores with 0 invariant violations: the charging held the budget and the
+  deferral never fired. Report that explicitly — a green soak validated one arm of the change,
+  and saying so is what keeps the other arm's CPU-side evidence from being quietly forgotten.

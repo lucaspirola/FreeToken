@@ -1568,3 +1568,248 @@ an inference.
 `benchmarks/switchyard_soak/runs/ca7e74b/` (gitignored): `driver.log`, `server.log` (2.4 MB),
 `resources.csv`, `soakStage.log`, `soakPass.log`, `phase_{stage,pass}.log`,
 `stats_after_soak{Stage,Pass}.json`, `stats_{before,after}_probe.json`, `soakStage/`, `soakPass/`.
+
+---
+
+# Run against `e3a2019` (2026-09-05, validation of the three §W fixes) — **invariant PASS (0 warnings)**, traffic PASS on both routes, **disconnect counter FAIL on the non-streaming half**
+
+Tree: `e3a2019`, dirty by exactly one file — `benchmarks/switchyard_soak/run.sh`, the probe
+change described in §X5 (the driver log records ` M benchmarks/switchyard_soak/run.sh`). No
+engine file differs from `e3a2019`. What is new since the §W baseline (`ca7e74b`) is that one
+commit: cold-session restores charged against the finishability budget (with a deferral path),
+`abort_user` shielded for the non-streaming endpoints, and the MoE counters published on
+`/v1/stats.scheduler.moe`.
+
+## X1. Exact commands
+
+```bash
+SOAK_EXTRA_ARGS="--moe-collect-stats" benchmarks/switchyard_soak/run.sh e3a2019 20m
+uv run python benchmarks/switchyard_soak/split.py   runs/e3a2019
+uv run python benchmarks/switchyard_soak/analyze.py runs/e3a2019/phase_{stage,pass}.log
+uv run python benchmarks/switchyard_soak/analyze.py runs/e3a2019/stats_after_soak{Stage,Pass}.json \
+                                                    runs/e3a2019/stats_after_probe.json
+uv run python benchmarks/switchyard_soak/gaps.py runs/e3a2019/phase_stage.log 30 1788621797 1788623115
+uv run python benchmarks/switchyard_soak/gaps.py runs/e3a2019/phase_pass.log  30 1788623116 1788624423
+# follow-up, probe only (~90 s of GPU): SOAK_PHASES="" ... run.sh e3a2019_probe
+# CPU-only root cause for §X5:  uv run benchmarks/probe_disconnect_middleware.py
+```
+
+Serve line identical to §W (P2 profile + `--enable-cache-report` + `--moe-collect-stats`,
+`FREETOKEN_SCHEDULER_INVARIANT=warn`, c=16, stage 20 m then passthrough 20 m).
+
+## X2. Result
+
+| | stage | passthrough |
+|---|---|---|
+| verdict (client) | **PASS** | **PASS** |
+| requests / successes / failures | **571 / 571 / 0** | **2149 / 2149 / 0** |
+| error rate | 0.0000 % | 0.0000 % |
+| STALLED intervals | **0** | **0** |
+| p50 / p95 / p99 ms | 26,909 / **82,111** / 115,737 | 5,996 / **27,505** / 53,799 |
+| health / metrics checks, failures | 20 + 20, 0 | 20 + 20, 0 |
+| invalid-request canaries / failures | 3 / 0 | 3 / 0 |
+| detected server restarts | 0 | 0 |
+| scenario failures | none (5/5) | none (5/5) |
+| error records | 0 | 0 |
+| **finishability invariant violations** | **0** | **0** ✅ |
+
+Per-scenario successes — stage: prefix-reuse 123, growing-conversation 116, tool-call-burst 114,
+large-tool-catalog 109, long-context 109. Passthrough: 432 / 432 / 432 / 432, long-context 421.
+
+**Verdict against the acceptance criteria** (0 errors, ≤1 STALLED per route, **0 invariant
+warnings**, 0 fatals, trailing silence ≈ 0, throughput within noise of §W): **all pass.** The
+§W6 blocker is closed — 1,541 invariant checks, 0 violations, worst shortfall 0 tokens. The one
+FAIL in this run is the *new* check added to the probe, `client_disconnect >= 2`, which reads 1;
+that is a pre-existing latent defect this run is the first to look for, not a regression from
+`e3a2019` (§X5).
+
+## X3. Against §W (`ca7e74b`)
+
+| | §W stage | §X stage | §W pass | §X pass |
+|---|---|---|---|---|
+| requests | 639 | 571 (**−10.6 %**) | 2,155 | **2,149** (−0.3 %) |
+| errors / STALLED | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| p50 ms | 25,207 | 26,909 (+6.8 %) | 5,974 | 5,996 (+0.4 %) |
+| p95 ms | 72,094 | 82,111 (**+13.9 %**) | 26,973 | 27,505 (+2.0 %) |
+| p99 ms | 115,094 | 115,737 (+0.6 %) | 53,861 | 53,799 (−0.1 %) |
+| **invariant violations** | 0 | **0** | **9** | **0** ✅ |
+| mean lanes / prefill batch | 3.18 | 3.13 | 4.96 | 4.88 |
+| mean `#running-req` (decode) | 11.22 | 9.50 | 12.17 | 12.06 |
+| decode agg tok/s, median all | 74.6 | 70.3 | 185.5 | **186.5** |
+| decode agg tok/s @ `== 16` | 85.7 (n=14) | 75.7 (n=22) | 217.3 (n=137) | 211.1 (n=126) |
+| decode per-stream tok/s @ 16 | 5.36 | 4.73 | 13.58 | 13.19 |
+| prefill instant tok/s (median) | 2,964 | **3,469** | 2,226 | 1,777 |
+| effective new-token prefill rate | 2,566 | **2,894** (+13 %) | 2,410 | 2,238 (−7 %) |
+| prefix reuse | 83.7 % | **79.8 %** | 88.8 % | 89.3 % |
+| starvation signature | 2/813 = 0.2 % | 2/837 = **0.2 %** | 0/701 = 0.0 % | 0/682 = **0.0 %** |
+| trailing silence | 1 s (0.1 %) | **1 s (0.1 %)** | 3 s (0.2 %) | **1 s (0.1 %)** |
+| scheduling wall clock | 99.8 % | 99.7 % | 99.5 % | **99.9 %** |
+| gaps ≥ 30 s | 0 | 0 | 2 (40 s, 36 s) | 1 (34 s) |
+| decode batches run eager | 0/485 = 0.0 % | **0/503 = 0.0 %** | (same run) | (same run) |
+| `fresh_admits_blocked_by_cap` | 27 | 40 | 408 | 348 |
+| `refusals` | (500 whole run) | 418 | — | 142 |
+
+**Passthrough is a repeat of §W to within 2 % on every headline** — requests −0.3 %, p50 +0.4 %,
+p95 +2.0 %, p99 −0.1 %, decode aggregate median +0.5 % — and it is the route that carried §W's
+9 invariant warnings. That is the comparison that matters, and it says the fix cost nothing.
+
+**Stage's −10.6 % requests / +13.9 % p95 is a workload difference, not a slower engine.** Prefix
+reuse fell 83.7 % → 79.8 %, so the same 20 minutes carried **13 % more new prefill tokens**
+(3.81 M vs 3.38 M, 2,894 vs 2,566 tok/s effective) spread over 11 % fewer client requests —
+6,678 new tokens per request against §W's 5,294 (**+26 %**). Prefill instant throughput is up
+17 % (2,964 → 3,469 tok/s median). The route is also the low-count, high-variance one (571
+requests, per-interval p95 swinging 29 s–160 s inside this single run), and the §V→§W swing on
+it was +30 % requests / −34 % p95. Read stage as noise-plus-heavier-prompts; nothing in the
+markers, gaps or pressure counters shows the §R6/§R7 mode.
+
+## X4. Invariant, fatals, markers
+
+| check | stage | passthrough | whole run |
+|---|---|---|---|
+| `finishability invariant violated` (`=warn`) | 0 | **0** | **0** ✅ |
+| invariant checks (counter) | 859 | 682 | **1,541** |
+| worst shortfall (counter) | 0 | 0 | **0 tokens** |
+| `committed_pages_required` | 0 | 0 | **0** |
+| `LinearStatePool exhausted` | 0 | 0 | **0** |
+| `Eviction did not free enough space` | 0 | 0 | **0** |
+| oversize `can never be admitted` | 0 | 0 | **0** |
+| `Traceback (most recent call last)` | 0 | 0 | **0** |
+| ERROR / CRITICAL lines | 0 | 0 | **0** |
+| `/health` non-ok | 0 | 0 | **0** (no `health_bad.log`) |
+| aborts (`client_disconnect`/`error`/`explicit`) | 0/0/0 | 0/0/0 | **1/0/0** (the probe, §X5) |
+
+Deadlock signature (§T): leading silence 3 s / 0 s, **trailing silence 1 s / 1 s**, scheduling
+wall clock 99.7 % / 99.9 %. Stage has 0 gaps ≥ 30 s; passthrough has one (34 s at 20:06:06) and
+it is **not** a stall — the window is the same benign burst §V/§W recorded: `Cold-session host
+pressure: moved 5 checkpoint(s) RAM -> disk`, a run of `Released soft session ... KV protection
+(admission pressure)` and disk spills, with `usage=0.68 queue=4 running=11` throughout.
+
+`#mamba-slot` full occupancy: 46 stage prefill passes at 96/96 (0 passthrough), 8 stage decode
+batches at mamba usage 1.00; `LinearStatePool exhausted` 0. `KV grew` 3 (stage), `KV shrank` 0.
+1,148 `client tokens diverge` INFO lines (§W: 1,046) — the benign reused-auto-session case.
+
+**Session spill/restore, and the new deferral counter:** 1,715 spills / **0 failed**, 568
+restores / **0 failed** / 1,148 diverged, prefetches 0. **`restores_deferred` = 0.** So the
+invariant held with the charging alone and the deferral path never fired — which is the right
+outcome, but it also means **this soak does not exercise the deferral**; that arm still rests on
+`benchmarks/scheduler_replay.py`'s `switchyard-restore` profile and the unit tests. Note also
+that stage recorded **0** cold restores all phase (522 spills, 527 diverged); all 568 restores
+are passthrough's, i.e. the phase that produced §W's warnings, and it produced none here.
+
+## X5. Disconnect-abort probe — streaming counts, **non-streaming does not**, and the poll is blind by construction
+
+The probe now runs **both** shapes (a ~60 K-token prompt dropped mid-prefill) and asserts the
+counter, not just the slot. Result from `stats_after_probe.json`:
+
+| | active 0 → 1 → 0 | `requests.aborts.client_disconnect` |
+|---|---|---|
+| non-streaming | yes, back to 0 in 2 s | **0 — not counted** |
+| streaming | yes, back to 0 in 4 s | 0 → **1** |
+| **total** | active back to **0** ✅ | **1** — required ≥ 2 ❌ |
+
+**The first thing this run found is that the probe itself was lying, in §W too.** On a drained
+server a 60 K-token prefill finishes in ~6.5 s, and the probe closed its socket after a fixed
+6.0 s sleep: the server log shows the non-streaming request completing normally —
+`Decode batch, #running-req: 1 ... gen throughput 135.75` then
+`"POST /v1/chat/completions HTTP/1.1" 200 OK` — one second after the close. There was no
+disconnect left to detect. §W5's "0 → 1 → 0 in two seconds, `client_disconnect=0`" is the same
+artefact: it timed a *completion*. The probe now waits for `requests.active >= 1` and closes
+1 s later, mid-prefill (`run.sh`, uncommitted).
+
+**With a probe that genuinely disconnects, the non-streaming path still does not abort.** In the
+follow-up probe-only run the socket closed at 20:11:06, five seconds into the prefill; the
+server prefilled through 20:11:11, decoded 64 tokens and returned 200 OK into the dead socket.
+No `Client disconnected (or cancelled)` line, no `Aborting request`, no counter. The streaming
+probe in the main run logged both lines the instant its socket closed.
+
+**Root cause, proven CPU-only in `benchmarks/probe_disconnect_middleware.py`** (~10 s, no GPU):
+
+```
+BaseHTTPMiddleware installed: False        BaseHTTPMiddleware installed: True
+  /nonstream: disconnect seen after 2.01 s   /nonstream: NO RESULT   (never seen)
+```
+
+`server/disconnect.py` is correct — it polls `Request.is_disconnected()` every 0.25 s. What
+blinds it is `api_server.py`'s `@app.middleware("http")` request-ring recorder: Starlette turns
+that decorator into a `BaseHTTPMiddleware`, which proxies the ASGI receive channel through its
+own task and never forwards `http.disconnect` downstream, so `is_disconnected()` reads False for
+the life of the request. The streaming path is immune because its abort arrives from the *send*
+side (a write to a closed socket), which is why `spawn_abort` fires there and only there.
+
+So `e3a2019`'s `asyncio.shield` on `abort_user` is correct and remains correct — it just cannot
+be reached on the non-streaming path, because the `except asyncio.CancelledError` handler that
+would call it is never entered. **Nothing leaks**: the request runs to completion and releases
+its slot and pages normally. What is lost is the whole point of `ff470e7` — an abandoned
+non-streaming request keeps burning prefill and decode. Ticketed as §X9.1.
+
+## X6. MoE counters on `/v1/stats` — extend gate closed, decode hit rate still not soak-measurable
+
+`scheduler.moe` is published and §W7's inference is now a measurement:
+
+* **Extend-cache gate:** 1,104 hits / 34,224 misses = **3.1 % of 35,328 routed extend
+  layer-forwards** took the cached path (stage 414/18,883 = 2.1 %, passthrough 690/14,996 =
+  4.4 %), at the shipped `--moe-extend-cache-tokens 64`. §W7 *inferred* 5.0 % from prefill passes
+  with `#new-token ≤ 64`; the real figure is lower, because the gate also requires the layer to
+  be GPU-target, pinned and not size-classed. Confirms §W7's reading that a c=16 soak does not
+  exercise the cached extend path hard.
+* **Decode expert cache: still not obtainable from a soak, for a new reason.** The counters do
+  reach `/v1/stats` now, but `OffloadCache`'s bank rebuild calls `lru_stats.zero_()` ("a rebuild
+  is a cold start for the cache"), and this run had **30 elastic capacity changes**. Each one
+  wipes the counters, so a snapshot carries only the traffic since the last rebuild and the delta
+  between two snapshots is meaningless (it can go negative). Evidence: `layer_calls` reads **115**
+  after a 20-minute stage phase and **2,576** after a 26-second probe. The only clean window in
+  the run is the probe's, which is a single-lane 60 K-token request and reads
+  active 20,807 / missing 4,142 → **80.1 % hit rate** — not the 16-way decode regime anyone wants.
+  Ticketed as §X9.2. `MoE decode miss stats` log lines: still 0 (`Scheduler is idle` 0 times).
+
+## X7. Host behaviour
+
+* Busiest FreeToken process: **median 106.9 % CPU** (no spin), max 1,405 %.
+* GPU **13.85 GiB median, 14.78 GiB peak**; top-process RSS median 19.3 GiB, **peak 23.4 GiB**;
+  host `MemAvailable` median 6.7 GiB, **bottomed at 2.1 GiB** over 495 samples (§W: 3.1). That is
+  0.1 GiB above `run.sh`'s new `SOAK_RAM_ABORT_GIB=2` watchdog, which would have TERMed the
+  server. The floor guard did its job by not firing, but the margin is gone: the next soak on
+  this profile should either raise `--host-ram-reserve-gb` or expect an abort.
+* Elastic capacity changes: **30** (§W: 50), 34 graph-capture events (§W: 54).
+* **Graceful shutdown in 4 s, GPU back to 0 MiB**, no leftover venv processes.
+
+## X8. What this run settles
+
+1. **§W6 (the 9 finishability warnings) is closed.** 1,541 checks, 0 violations, worst shortfall
+   0, on the same profile and the same route that produced them — while passthrough throughput is
+   unchanged to within 2 %.
+2. **§W7 is half closed.** The extend-cache gate is a measurement (3.1 %); the decode
+   expert-cache hit rate is still unavailable across a soak.
+3. **§W ticket 4 (`client_disconnect` stays 0) is now understood and is worse than it looked**:
+   not a missing increment but a disconnect the non-streaming path cannot see at all.
+
+## X9. Still open after this run
+
+1. **Non-streaming disconnects are never detected** (§X5). `BaseHTTPMiddleware` blinds
+   `Request.is_disconnected()`. The fix is to stop routing the request-ring recorder through
+   `@app.middleware("http")` — a pure-ASGI middleware (`app.add_middleware(cls)` implementing
+   `__call__(scope, receive, send)` and passing `receive` through untouched) sees the same timing
+   and does not own the channel. Guard it with a test that drives a real uvicorn instance, since
+   nothing below the transport reproduces this. Repro: `benchmarks/probe_disconnect_middleware.py`.
+2. **MoE decode counters are zeroed by every bank rebuild** (§X6), so `/v1/stats` cannot report an
+   expert-cache hit rate on an elastic server. Either keep a rebuild-surviving lifetime accumulator
+   alongside `lru_stats`, or publish a `rebuild_epoch` next to the counters so a reader can tell
+   that a delta crossed a reset.
+3. **The restore-deferral path is unexercised by a soak** (§X4): 568 restores, 0 deferred. Its
+   only evidence stays CPU-side.
+4. `fresh_admits_blocked_by_cap` = 388 (§W: 435) — the `max_chunked_prefills = 8` cap still binds;
+   unchanged ticket.
+5. Lane watch (§V7 ticket 1): stage **3.13**, passthrough **4.88** — both down slightly from §W,
+   with errors and STALLED still 0. The §R6/§R7 mode is not returning.
+6. Host `MemAvailable` floor 2.1 GiB (§X7) — one soak away from tripping its own abort gate.
+7. `--moe-prefill-hit-d2d` is still off in the P2 profile (`prefill_rows=0` in every snapshot), so
+   `13af13d`'s probe fix remains unexercised by a soak (§V7 ticket 3, unchanged).
+
+## X10. Artifacts
+
+`benchmarks/switchyard_soak/runs/e3a2019/` (gitignored): `driver.log`, `server.log`,
+`resources.csv`, `soakStage.log`, `soakPass.log`, `phase_{stage,pass}.log`,
+`stats_after_soak{Stage,Pass}.json`, `stats_{before,after}_probe.json`, `soakStage/`, `soakPass/`.
+Probe-only follow-up in `runs/e3a2019_probe/`. In-repo: `benchmarks/probe_disconnect_middleware.py`
+(§X5 root cause) and the `run.sh` probe rewrite (both-shapes probe, admission-triggered close,
+`SOAK_PHASES=""` probe-only mode) — **uncommitted**.
