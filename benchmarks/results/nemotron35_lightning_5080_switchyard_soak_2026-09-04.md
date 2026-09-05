@@ -1167,3 +1167,166 @@ can answer this directly instead of by inference.**
 * `soak7/{server.log,driver.log,resources.csv,soakStage.log,soakPass.log,phase_stage.log,
   phase_pass.log,stats_after_{stage,pass}.json,stats_{before,after}_probe.json}`
 * `soak7/soakStage/results-switchyard_stage/`, `soak7/soakPass/results-switchyard_passthrough/`
+
+---
+
+# Run against 13af13d (2026-09-05) — PASS on both routes; the §R7 starvation signature is gone
+
+Tree: `812bc57` (seatable-lanes chunk divisor) + `32cc504` (fork/main Ada merge) + `52a6503`
+(CPU-safe capability probe) + `193da80` + `13af13d` (batch_memcpy probe stream ordering).
+Same P2 serving line and same soak invocation as §U, `FREETOKEN_SCHEDULER_INVARIANT=warn`,
+server under `scripts/gpu_lock.sh`.
+
+**The drivers now live in the repo**, not in a session scratchpad: a WSL OOM restart at 08:59
+destroyed a whole in-flight soak's artifacts along with `scratchpad/soak7/`. See §V8.
+
+## V1. Exact commands
+
+```bash
+benchmarks/switchyard_soak/run.sh 13af13d 20m       # writes runs/13af13d/
+#   -> gpu_lock.sh benchmarks/switchyard_soak/serve.sh   (the §U1 serve line, verbatim)
+#   -> switchyard_e2e.sh soak --duration 20m --concurrency 16 --route switchyard/{stage,passthrough}
+#   -> disconnect-abort probe, then TERM the ft serve python directly
+uv run python benchmarks/switchyard_soak/split.py   runs/13af13d
+uv run python benchmarks/switchyard_soak/analyze.py runs/13af13d/phase_{stage,pass}.log
+uv run python benchmarks/switchyard_soak/gaps.py    runs/13af13d/phase_stage.log 30 <start> <end>
+```
+
+`run.sh` refuses to start below 26 GiB `MemAvailable` (the OOM lesson) and writes everything
+under `benchmarks/switchyard_soak/runs/<tag>/`.
+
+## V2. Result
+
+| | stage | passthrough |
+|---|---|---|
+| verdict | **PASS** | **PASS** |
+| requests / successes / failures | **492 / 492 / 0** | **1904 / 1904 / 0** |
+| error rate | 0.0000 % | 0.0000 % |
+| STALLED intervals | **0** | **0** |
+| p50 / p95 / p99 ms | 29,820 / **109,395** / 149,081 | 6,888 / **24,580** / 46,695 |
+| health / metrics checks, failures | 20 + 20, 0 | 20 + 20, 0 |
+| invalid-request canaries / failures | 3 / 0 | 3 / 0 |
+| detected server restarts | 0 | 0 |
+| scenario failures | none (5/5) | none (5/5) |
+| error records | 0 | 0 |
+
+Per-scenario successes — stage: prefix-reuse 103, growing-conversation 103, tool-call-burst
+101, large-tool-catalog 94, long-context 91. Passthrough: 384 / 384 / 384 / 384, long-context 368.
+
+## V3. Against §U (`4a99e34`) — every headline moves the right way
+
+| | §U stage | §V stage | §U pass | §V pass |
+|---|---|---|---|---|
+| requests | 470 | **492** (+4.7 %) | 1,600 | **1,904** (+19 %) |
+| errors / STALLED | 0 / 0 | 0 / 0 | 0 / 1 | **0 / 0** |
+| p95 ms | 145,840 | **109,395** (−25 %) | 32,906 | **24,580** (−25 %) |
+| p99 ms | 230,183 | **149,081** (−35 %) | 83,354 | **46,695** (−44 %) |
+| **starvation signature** | 1,278/2,091 = **61 %** | **0/603 = 0.0 %** | 200/1,050 = 19 % | **0/599 = 0.0 %** |
+| mean lanes / prefill batch | 1.83 | 3.43 | 3.53 | 4.92 |
+| decode agg tok/s @ `#running-req == 16` | 96.8 | 99.9 | 177.5 | **190.6** |
+| per-stream tok/s @ 16 | 6.05 | 6.24 | 11.09 | 11.91 |
+| effective new-token prefill rate | 1,830 | **2,310** (+26 %) | 1,879 | 2,008 (+7 %) |
+| prefix reuse | 85.0 % | 82.3 % | 88.8 % | 89.6 % |
+| prefill instant tok/s (median) | 1,851 | **2,799** | 1,838 | 1,547 |
+| trailing silence | 1 s (0.1 %) | 1 s (0.1 %) | 1 s (0.1 %) | 2 s (0.2 %) |
+| scheduling wall clock | 97.2 % | **99.8 %** | 95.7 % | **99.8 %** |
+
+**§R7 ticket 1 is closed.** `chunk_limit = token_budget // waiting` produced the starvation
+signature (`#new-seq: 1`, `#new-token ≤ 512`, `#queue-req ≥ 8`) on 61 % of stage passes in §U;
+dividing by the lanes the pass will actually *seat* (`812bc57`) drops it to **zero on all 1,202
+prefill passes of this run**, on both routes. Stage median `#new-token` is 5,689 against §U's
+regime of 512-token crawls, and stage p95 falls 36 s.
+
+**On the lane count.** Lanes rose 1.83 → 3.43 (stage) and 3.53 → 4.92 (passthrough). Passthrough
+is inside the 4.7–6.6 band the *failing* trees occupied, so it was checked rather than assumed:
+those trees (§R6 4.71 / §R7 6.57) hit that band on the **stage** route with 15 and 32 client
+errors and p95 200.7 s. This run has 0 errors, 0 STALLED, 0 invariant violations and the best
+latency ever recorded on either route, and stage — the route the band was measured on — sits at
+3.43, below §R6's 4.71. More lanes is still not the metric; the metric is errors and p95, and
+both improved. See §V7 for what to watch.
+
+The one number that is *down* is passthrough prefill instant tok/s (1,838 → 1,547 median).
+That is a per-chunk rate, and this run seats more lanes per pass with a smaller median
+`#new-token` (3,010) and 89.6 % prefix reuse; the goodput that pays for it went **up** 19 % in
+requests and 7 % in effective new-token rate. Do not read the per-chunk median as throughput.
+
+## V4. Invariant, fatals, deadlock signature
+
+| check | stage | passthrough | whole run |
+|---|---|---|---|
+| `finishability invariant violated` (`=warn`) | 0 | 0 | **0** |
+| `committed_pages_required` | 0 | 0 | **0** |
+| `LinearStatePool exhausted` | 0 | 0 | **0** |
+| `Eviction did not free enough space` | 0 | 0 | **0** |
+| oversize `can never be admitted` | 0 | 0 | **0** |
+| `Traceback (most recent call last)` | 0 | 0 | **0** |
+| ERROR / CRITICAL lines | 0 | 0 | **0** |
+| `/health` non-ok | 0 | 0 | **0** |
+
+Zero invariant warnings across 1,202 prefill passes — `812bc57` moves no admission gate, and the
+live run agrees with the replay.
+
+**Deadlock signature (§T):** leading silence 2 s / 1 s, **trailing silence 1 s / 2 s**, scheduling
+wall clock **99.8 % of both phase windows** (§U: 97.2 % / 95.7 %). Stage has **0 gaps ≥ 30 s**.
+Passthrough has exactly one, 31 s at 09:41:50, and it is *not* a stall: the window holds 291
+non-batch lines — a burst of soft-session spills (0.63 GiB and 0.16 GiB records, RAM and disk
+tiers) with `KV protection (admission pressure)` releases, the same signature as §U's 54 s gap.
+`#queue-req: 11` with `#running-req: 3` at its start: the pool was making room, not stuck.
+
+**`#mamba-slot: 96/96` behaves.** 60 of 761 stage batch lines and 32 of 866 passthrough lines run
+at full GDN occupancy, longest consecutive run **7 batches** on each route. Inside those windows
+requests still complete (`200 OK` interleaved) and the pool drains through soft-session spill +
+release; `LinearStatePool exhausted` stays at 0. Full occupancy is a working state here, not a
+cliff.
+
+## V5. Disconnect-abort (`ff470e7`) — verified again
+
+`/v1/stats.requests.active` **0 → 1 → 0, back to 0 five seconds after the socket close** on a
+~60 K-token non-streaming request dropped mid-prefill (§U measured 7 s). No spurious aborts:
+0 client failures on 2,396 requests and 3/3 invalid-request canaries correct on both routes.
+The abort *count* is still unmeasurable (ticket 12).
+
+## V6. Host behaviour
+
+* Busiest FreeToken process: **median 101.0 % CPU** (no spin), max 1,348 % (model load /
+  spill bursts across workers).
+* GPU **13.9 GiB median, 15.8 GiB peak**; RSS peak **23.9 GB**; host `MemAvailable` bottomed at
+  **5.1 GiB** (median 7.5) — comfortable for this run, but see §V8.
+* Sessions: 441 cold restores (passthrough) with **0 failures**, 309 idle expiries,
+  1,186 `Released soft session … KV protection`. `KV grew` 3 times in stage (65,536 → 262,144)
+  and stayed there; `KV shrank` 0.
+* **Graceful shutdown in 4 s, GPU back to 0 MiB**, no leftover venv processes.
+* 826 `client tokens diverge at 3` INFO lines (§U: 761) — still the benign reused-auto-session
+  case, still indistinguishable from a stale-spill discard without the item-3 `.valid` fix.
+
+## V7. Still open after this run
+
+1. **Ticket §R7-1 is closed; watch the lane count instead.** The chunk divisor is the fix, but
+   lanes are now a *free* variable — nothing caps how many prompts one pass seats except the
+   pools. Record mean lanes every soak; if it climbs past ~5 on the **stage** route while errors
+   or p95 move, that is the §R6/§R7 failure mode returning.
+2. Tickets **8, 9, 10, 12** from §U8 are untouched by this run and still open (oversize prompts
+   have no client rejection path; `stopped_for_lane_cap` is dead code on this profile; a refused
+   prefill pass costs `O(queue × prompt)` radix walks; the admission bounds and the abort path
+   have no counters).
+3. **`--moe-prefill-hit-d2d` is off in the P2 serve profile** (`moe_prefill_hit_d2d=False` in the
+   run's `ServerArgs`), so this soak exercised **no** `cudaMemcpyBatchAsync` path and cannot
+   confirm the `13af13d` probe latched True. The probe fix is covered by
+   `tests/moe/test_prefill_hit_d2d.py::test_batch_memcpy_probe_survives_busy_ambient_stream`
+   instead, which calls `load_batch_memcpy()` behind ~0.5 s of queued ambient-stream work.
+   A soak that actually grades hit-D2D has to pass the flag.
+4. `benchmarks/scheduler_replay.py` (ticket 11) still needs the §T set-of-chunked-prefills case.
+
+## V8. Artifacts — now in the repo
+
+`benchmarks/switchyard_soak/` (tracked): `run.sh`, `serve.sh`, `sample.sh`, `split.py`,
+`analyze.py` (throughput, occupancy, lanes, **starvation signature**, markers), `gaps.py`
+(gaps + leading/**trailing** silence vs the driver's phase window, WARN at ≥ 120 s).
+`runs/` is gitignored; this run is `runs/13af13d/{driver.log,server.log,resources.csv,
+soakStage.log,soakPass.log,phase_{stage,pass}.log,stats_after_soak{Stage,Pass}.json,
+stats_{before,after}_probe.json,soakStage/,soakPass/}`.
+
+**Why they moved.** The 08:59 WSL OOM restart took `/tmp/claude-1000/.../scratchpad/soak7/`
+with it — drivers, analyzers and a running soak's logs, all unrecoverable. A benchmark harness
+that only exists in a session scratchpad is one host event away from having never existed.
+`sample.sh` now also records host `MemAvailable`, and `run.sh` refuses to start below 26 GiB.

@@ -1,6 +1,6 @@
 # Nemotron 3.5 Lightning on FreeToken — handover
 
-State as of 2026-09-05 ~05:30, HEAD 4a99e34 on `main` (not pushed). Read this, then
+State as of 2026-09-05 ~10:00, HEAD 13af13d on `main` (not pushed). Read this, then
 `tasks/nemotron35-plan.md` (spec + decisions), `tasks/todo.md` (checklist), `tasks/lessons.md`
 (rules), `docs/nemotron.md` (profiles), `docs/switchyard.md` (router contract + e2e harness).
 Memory notes: host embedder service, host-OOM rules, plan pointer.
@@ -48,7 +48,46 @@ What is left is the ticket list (5-12) and the 1M llama.cpp oracle leg (item 12)
    saturate their calibrated `input_scale`, but by the same 1.8e-5 clipped fraction at the
    passing 131K and the failing 147K — see `FREETOKEN_DEBUG_FP8_ACT_STATS`) and the whole
    NVFP4 path (W4A16 end to end, no activation quantization anywhere).
-2. **16-way Switchyard soak — CLOSED 2026-09-05, PASS on both routes against `4a99e34`.**
+2. **16-way Switchyard soak — RE-RUN 2026-09-05 against `13af13d`, PASS on both routes, and
+   §R7 ticket 1 (the starvation signature) is CLOSED.** Write-up: soak results file
+   §"Run against 13af13d" (§V). Tree: `812bc57` seatable-lanes chunk divisor + `32cc504`
+   fork/main Ada merge + `52a6503` + `193da80` + `13af13d`.
+   - **Stage 492 req / 0 err / 0 STALLED**, p50/p95/p99 **29,820 / 109,395 / 149,081 ms**;
+     **passthrough 1,904 req / 0 err / 0 STALLED**, 6,888 / 24,580 / 46,695 ms. 2,396
+     requests, zero failures, zero error records, 5/5 scenarios clean on both routes.
+   - **The starvation signature is 0 / 1,202 prefill passes (0.0 %)** on both routes, against
+     61 % (stage) and 19 % (passthrough) at `4a99e34`. Stage p95 **−25 %**, p99 **−35 %**;
+     passthrough p95 −25 %, p99 −44 %; requests +4.7 % / +19 %. Stage median `#new-token`
+     5,689 instead of §U's 512-token crawls; effective new-token prefill rate 1,830 → 2,310.
+   - 0 invariant warnings, 0 `committed_pages_required`, 0 `LinearStatePool exhausted`,
+     0 `Eviction did not free enough space`, 0 oversize skips, 0 tracebacks, 0 ERROR/CRITICAL,
+     40/40 `/health` ok. Trailing silence 1 s / 2 s; **scheduling wall clock 99.8 % of both
+     phases** (§U: 97.2 / 95.7). Stage 0 gaps ≥ 30 s; passthrough 1 (31 s) and it is a
+     session-spill burst — 291 non-batch lines, `#queue-req 11` with `#running-req 3` — not a
+     stall. `#mamba-slot: 96/96` reached on 60/761 and 32/866 batch lines, longest run
+     **7 batches**, requests still completing inside, pool exhaustion never reached.
+   - Mean lanes per prefill batch **1.83 → 3.43 (stage)** and **3.53 → 4.92 (passthrough)**.
+     Passthrough is inside the 4.7–6.6 band the failing trees occupied — but those were
+     **stage-route** numbers with 15/32 errors and p95 200.7 s; stage here is 3.43, below
+     §R6's 4.71, with 0 errors. Lanes are now a free variable: watch mean stage lanes every
+     soak and treat >~5 *with* moving errors/p95 as the §R6/§R7 mode returning.
+   - Disconnect-abort re-verified: `/v1/stats.requests.active` 0 → 1 → **0 five seconds** after
+     the socket close; 0 spurious aborts on 2,396 requests.
+   - Host: busiest process median 101.0 % CPU, GPU 13.9 GiB median / 15.8 GiB peak, RSS peak
+     23.9 GB, `MemAvailable` floor 5.1 GiB, 441 cold restores 0 failures, 309 idle expiries,
+     **graceful shutdown 4 s, GPU 0 MiB**, no leftovers.
+   - **Drivers are now tracked at `benchmarks/switchyard_soak/`** (`run.sh`, `serve.sh`,
+     `sample.sh`, `split.py`, `analyze.py`, `gaps.py`); outputs go to `runs/<tag>/`
+     (gitignored). They moved out of the session scratchpad because the 08:59 WSL OOM restart
+     destroyed `scratchpad/soak7/` *and* an in-flight soak. `run.sh` now refuses to start
+     below 26 GiB `MemAvailable` and `sample.sh` records it every 5 s.
+   - **Caveat:** `--moe-prefill-hit-d2d` is OFF in the P2 serve profile, so this soak
+     exercised no `cudaMemcpyBatchAsync` path; the `13af13d` probe fix is covered by
+     `tests/moe/test_prefill_hit_d2d.py::test_batch_memcpy_probe_survives_busy_ambient_stream`,
+     not by the soak.
+
+2b. **Previous soak — PASS on both routes against `4a99e34`** (superseded by the above; kept
+   for the history of what each tree bought).**
    Write-up: `benchmarks/results/nemotron35_lightning_5080_switchyard_soak_2026-09-04.md`
    §"Run against 4a99e34" (§U). Tree: `d685e99`'s gate restored **plus** `b030c7f`'s standing
    reservation (`PrefillManager._standing_reservation` seeded into `PrefillAdder.reserved_size`,

@@ -497,12 +497,40 @@ the clock. A live 16-way soak on both routes remains the acceptance test.
       median 2 s apart, max window 73 s), and a cumulative `aborted` counter on
       `StatsTracker` (`"Aborting request %d"` is debug-only, so disconnect-aborts cannot be
       counted from a soak log).
-- [ ] §R7 ticket 1 is now the stage route's binding limit: `chunk_limit = token_budget //
-      waiting` produced the starvation signature (`#new-seq: 1`, `#new-token <= 512`,
-      `#queue-req >= 8`) on **1,278 of 2,091 (61 %)** stage prefill passes and 200/1,050
-      (19 %) passthrough. A 118 K prompt at 512 tokens/pass is why stage p95 is still 146 s.
-      Size the interleave share by the lanes the pass will actually seat, or floor the chunk
-      at ~2 K tokens.
+- [x] **§R7 ticket 1 CLOSED live (2026-09-05, `13af13d`).** `812bc57` divides the interleave
+      share by the lanes the pass will actually SEAT instead of by queue depth. The starvation
+      signature (`#new-seq: 1`, `#new-token <= 512`, `#queue-req >= 8`) goes 1,278/2,091 (61 %)
+      stage and 200/1,050 (19 %) passthrough -> **0 of 1,202 prefill passes (0.0 %) on both
+      routes**. Stage median `#new-token` 5,689. Full re-run: **stage 492 req / 0 err / 0
+      STALLED**, p50/p95/p99 29,820/109,395/149,081 ms; **passthrough 1,904 / 0 err / 0
+      STALLED**, 6,888/24,580/46,695. p95 -25 % on both routes, p99 -35 % / -44 %, requests
+      +4.7 % / +19 %, effective new-token prefill rate 1,830 -> 2,310 tok/s. 0 invariant
+      warnings, 0 committed_pages_required, 0 LinearStatePool exhausted, 0 eviction failures,
+      0 tracebacks, 0 ERROR/CRITICAL; trailing silence 1 s / 2 s and **scheduling wall clock
+      99.8 % of both phases**. Disconnect-abort re-verified (active 1 -> 0 in 5 s). Graceful
+      shutdown 4 s, GPU 0 MiB. Write-up: soak results §V ("Run against 13af13d").
+- [ ] **Watch mean lanes per prefill batch now that the divisor no longer caps it.** 1.83 ->
+      3.43 (stage) and 3.53 -> 4.92 (passthrough) at `13af13d`. Passthrough sits inside the
+      4.7-6.6 band the failing trees hit, but those were *stage-route* numbers with 15/32
+      errors; stage here is 3.43 with 0 errors and the best p95 on record. Record lanes every
+      soak; stage >~5 **together with** rising errors or p95 is the §R6/§R7 mode returning.
+- [x] batch_memcpy probe stream ordering (`13af13d`): the probe zeroed `dst` on the ambient
+      stream and copied on a private one with no `wait_stream`, so a busy caller could make it
+      read its own memset late and latch `OffloadMoeCache._batch_memcpy = False` process-wide,
+      silently disabling prefill hit-D2D. Fixed with `stream.wait_stream(current_stream())` +
+      `dst.record_stream(stream)` (same pattern in `tests/moe/test_prefill_hit_d2d.py::
+      test_batch_memcpy_roundtrip`), plus a new
+      `test_batch_memcpy_probe_survives_busy_ambient_stream` that queues ~0.5 s of ambient
+      work before calling `load_batch_memcpy()`. `uv run pytest tests/moe -q` whole-dir:
+      **161 passed, 5 skipped**. NOTE: `--moe-prefill-hit-d2d` is OFF in the P2 serve profile
+      (`moe_prefill_hit_d2d=False`), so a soak against that line exercises no
+      `cudaMemcpyBatchAsync` at all and cannot confirm the probe latched True -- the test is
+      the evidence. A soak that grades hit-D2D must pass the flag.
+- [x] **Soak drivers moved into the repo at `benchmarks/switchyard_soak/`** (`run.sh`,
+      `serve.sh`, `sample.sh`, `split.py`, `analyze.py`, `gaps.py`; `runs/` gitignored). The
+      08:59 WSL OOM restart destroyed `scratchpad/soak7/` and an in-flight soak with it.
+      `run.sh` refuses to start below 26 GiB `MemAvailable`; `sample.sh` records it per 5 s;
+      `analyze.py` now reports lanes/batch and the starvation-signature fraction directly.
 - [x] Merged fork/main (14 Ada/Ornith commits) into nemotron35 at 32cc504. Before deploying on Ada:
       rebuild the _gguf extension (multiwarp bool→warps int64; stale .so silently picks 4-warp path).
 - [x] Scheduler.__init__'s unconditional torch.cuda.get_device_capability (from fork/main) is now

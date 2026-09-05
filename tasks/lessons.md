@@ -763,3 +763,38 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   under ~1 GB RSS. Test suites for CPU work run before the GPU job starts or after it ends.
 - RULE: the scratchpad does not survive WSL restarts; soak drivers/scripts worth keeping
   go under benchmarks/ or scripts/, not scratchpad.
+
+## 2026-09-05 (the soak that closed §R7 ticket 1, `13af13d`)
+- **A benchmark harness that lives only in a session scratchpad is one host event away from
+  never having existed.** A WSL OOM restart at 08:59 took `scratchpad/soak7/` — drivers,
+  analyzers, and a running soak's logs — with it. The drivers now live at
+  `benchmarks/switchyard_soak/` with `runs/` gitignored. If a script produced a number you
+  wrote into a results file, that script belongs in the repo.
+- **Instrument the failure that killed you, in the driver.** `run.sh` now refuses to start below
+  26 GiB `MemAvailable` and `sample.sh` logs it every 5 s. The floor during the passing run was
+  5.1 GiB with the model resident — so the *check* has to happen before the load, not during it.
+- **Grade the fix on its own signature, not on the headline.** §R7 ticket 1 was "61 % of stage
+  passes carry `#new-seq: 1`, `#new-token ≤ 512`, `#queue-req ≥ 8`". `analyze.py` counts exactly
+  that predicate, so `812bc57` closes as **0/1,202 passes** — a statement about the mechanism.
+  p95 −25 % is the consequence, and on its own it would have been consistent with luck.
+- **When a metric lands in the band that marked previous failures, check WHICH ROUTE the band
+  was measured on before calling it a regression.** Passthrough lanes 4.92 sits inside the
+  4.71–6.57 band of two failing trees — but that band was a *stage-route* measurement, and this
+  run's stage is 3.43 with 0 errors and the best p95 on record. Same number, different
+  population.
+- **A per-chunk rate can fall while goodput rises.** Passthrough `input throughput … instant`
+  median went 1,838 → 1,547 while requests went 1,600 → 1,904 and p95 fell 25 %: more lanes per
+  pass, smaller median `#new-token`, 89.6 % prefix reuse. Never read the per-chunk median as
+  engine throughput; divide total new tokens by the phase window instead.
+- **Fixing an admission cap makes the thing it capped a free variable.** The chunk divisor was
+  also, accidentally, a lane brake. With it gone, nothing bounds lanes but the pools — so the
+  soak checklist gains "record mean lanes" permanently, not because lanes are bad but because
+  the quantity is now unpinned.
+- **Check the serve line actually exercises the code you fixed.** The batch_memcpy probe fix was
+  supposed to be confirmed by grepping the soak's server log; `moe_prefill_hit_d2d=False` in the
+  P2 profile means that path never ran. A unit test that reproduces the hostile precondition
+  (queued ambient-stream work before `load_batch_memcpy()`) is the evidence — and it is cheaper
+  and repeatable. Read the ServerArgs dump before planning to grep for a feature.
+- **A 31 s hole with 291 non-batch lines in it is a spill burst, not a stall.** Second run in a
+  row where the only gap ≥ 30 s was session spill/release under admission pressure
+  (`#queue-req 11`, `#running-req 3`). Read inside the gap before naming it; the §U lesson held.
