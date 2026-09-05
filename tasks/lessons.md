@@ -634,3 +634,29 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   cost ~8 min; the 6 survivors at 262K/524K/1M cost ~6 min and the ratio was flat (2.41 ->
   2.46x) — the full grid at 1M would have been ~30 min of Triton compiles and timing for the
   same answer.
+
+## 2026-09-05 (the soak that finally passed, `4a99e34`)
+- **The invariant is cheap enough to leave on in a live soak.** `FREETOKEN_SCHEDULER_INVARIANT
+  =warn` evaluates `owed(admitted set) <= obtainable` before every scheduling pass and cost
+  nothing measurable (busiest process at 109.9 % CPU, the same ~106 % every healthy run has
+  recorded). Zero warnings across ~3,141 passes is a stronger statement than any throughput
+  number: it says the property held, not that the run happened to survive.
+- **Report trailing silence and the fix looks different.** With the §T lesson wired into
+  `gaps.py`, the passing tree reads as "trailing silence 1 s, scheduling wall clock 97.2 % of
+  the phase" — a positive measurement, not merely the absence of the failure. Instrument the
+  failure mode you just diagnosed *before* the run that is supposed to close it.
+- **A silent `continue` cannot be verified; infer it or instrument it.** `max_chunked_prefills`
+  logs nothing, so "it never bound" had to come from a log identity: a prefill pass with
+  `#cached-token > 0` necessarily admitted a FRESH request (continuations book 0 cached), which
+  proves `chunked_inflight < 8` at that pass — 282/2,091 such passes, median 2 s apart. That
+  bounds the answer honestly; it does not prove it. Ship the counter with the knob.
+- **Fewer lanes, zero errors, best latency.** Mean lanes per prefill batch 2.37 -> 4.71 -> 6.57
+  -> **1.83** with errors 0 -> 15 -> 32 -> **0** and stage p95 200.7 s -> 145.8 s. The
+  reservation seats fewer prompts on purpose; that IS the fix. Never grade a scheduler on lanes.
+- **A 54 s hole in the batch log is not automatically a stall.** The one gap of the run was ten
+  session spills (0.45 GiB each) and the restore of 589,680 cached tokens across 6 lanes. Read
+  the non-batch lines inside a gap before naming it.
+- **Prove a leak fix at the edge you can observe.** The disconnect-abort (`ff470e7`) has no
+  server-side counter, so it was verified by dropping a raw socket mid-prefill and watching
+  `/v1/stats.requests.active` go 1 -> 0 in 7 s, plus "0 client failures on 2,070 requests" as
+  the no-spurious-aborts half. Two cheap observations beat one missing metric.

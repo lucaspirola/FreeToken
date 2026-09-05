@@ -932,3 +932,238 @@ not *between* two batch lines.
   `soak6/soakPass/results-switchyard_passthrough/`, `stats_after_{stage,pass}.json`
 * `soak6/pyspy_stall1.txt` (4 min into the stall), `soak6/pyspy_stall2.txt` (30 min into the
   same stall, `inflight_prefill` byte-identical)
+
+---
+
+# Run against `4a99e34` (standing reservation + `max_chunked_prefills` + invariant) — **PASS**
+
+2026-09-05 04:42–05:29 local · FreeToken at **`4a99e34`**, working tree **clean** · same
+RTX 5080 / WSL2 host, 31 GiB available at launch, `piro-board-embedder` not running.
+
+Tree under test: scheduler = the `d685e99` gate restored, **plus** `b030c7f`'s standing
+reservation (`PrefillManager._standing_reservation` seeded into `PrefillAdder.reserved_size`),
+`max_chunked_prefills = 8`, and the `_check_finishability` invariant; `ff470e7` server
+disconnect-abort; `acc91e9` decode launch config; `4a99e34` prefill `BLOCK_M` register cap.
+
+**Verdict: PASS on both routes — the first tree since `befcde6`+§R6 to pass, and it passes
+harder.** 0 errors on 2,070 requests, 0 STALLED on stage (1 on passthrough), **0
+finishability-invariant warnings**, zero fatals, zero trailing silence, and every throughput
+axis up on §R4/§R6.
+
+## U1. Exact commands
+
+```bash
+# scratchpad/soak7/serve.sh — the soak6 line verbatim + the invariant, under the GPU lock
+FREETOKEN_PIN_BUDGET_GB=17 FREETOKEN_SCHEDULER_INVARIANT=warn \
+scripts/gpu_lock.sh scratchpad/soak7/serve.sh   # ft serve, port 1919, P2 profile
+#   --max-running-requests 16 --elastic-initial-requests 4 --kv-grow-step-tokens 65536
+#   --num-tokens 262144 --max-seq-len-override 131072 --kv-cache-dtype q8_0
+#   --attention-backend triton --moe-backend offload --moe-cache-auto --moe-cache-policy lfu
+#   --memory-ratio 0.85 --max-prefill-length 8192 --host-ram-reserve-gb 6 ...
+
+# scratchpad/soak7/run.sh: stage 20 m, then passthrough 20 m, default scenario set, c=16
+scripts/switchyard_e2e.sh soak --base-url http://127.0.0.1:1919 \
+  --model nemotron-3.5-lightning --duration 20m --concurrency 16 \
+  --route switchyard/{stage,passthrough}
+# -> switchyard-soak ... --max-output-tokens 256 --prompt-bytes 16384
+#      --context-window-tokens 131072 --max-error-rate 0 --request-timeout 600
+#      --scenario prefix-reuse --scenario growing-conversation --scenario tool-call-burst
+#      --scenario large-tool-catalog --scenario long-context
+```
+
+Server TERMed directly (not the lock wrapper) so the graceful path is what gets timed.
+
+## U2. Result
+
+| | stage | passthrough |
+|---|---|---|
+| verdict | **PASS** | **PASS** |
+| requests / successes / failures | **470 / 470 / 0** | **1600 / 1600 / 0** |
+| error rate | 0.0000 % | 0.0000 % |
+| STALLED intervals | **0** | 1 (t = 390 s) |
+| p50 / p95 / p99 ms | **24,283 / 145,840 / 230,183** | **7,527 / 32,906 / 83,354** |
+| health checks / failures | 20 / 0 | 20 / 0 |
+| invalid-request canaries / failures | 3 / 0 | 3 / 0 |
+| detected server restarts | 0 | 0 |
+| scenario failures | none (5/5 scenarios) | none (5/5 scenarios) |
+
+Per-scenario successes — stage: prefix-reuse 95, growing-conversation 95, tool-call-burst 95,
+large-tool-catalog 95, long-context 90. Passthrough: 320 each.
+
+## U3. Invariant, fatals and the deadlock signature
+
+| check | stage | passthrough | whole run |
+|---|---|---|---|
+| `finishability invariant violated` (`=warn`) | 0 | 0 | **0** |
+| `committed_pages_required` | 0 | 0 | **0** |
+| `LinearStatePool exhausted` | 0 | 0 | **0** |
+| `Traceback (most recent call last)` | 0 | 0 | **0** |
+| `can never be admitted` (oversize) | 0 | 0 | **0** |
+| `Eviction did not free enough space` | 0 | 0 | **0** |
+| `ERROR` / `CRITICAL` lines | 0 | 0 | **0** |
+
+The invariant is evaluated **before every scheduling pass** with `FREETOKEN_SCHEDULER_INVARIANT
+=warn` in the server env and never fired: across ~3,141 prefill passes the admitted set was
+always finishable against `available_size`. `ea7ed7c` violated it on 566 stage passes.
+
+**Trailing silence (the §T deadlock signature) — the analyzer now reports it** (`gaps.py`, in
+both `soak6/` and `soak7/`; leading + trailing silence against the driver's phase window):
+
+| | stage | passthrough |
+|---|---|---|
+| phase window | 1,445 s | 1,296 s |
+| batch lines | 2,276 | 1,285 |
+| leading silence (phase start → first batch) | 40 s (2.8 %) | 1 s (0.1 %) |
+| **trailing silence (last batch → phase end)** | **1 s (0.1 %)** | **1 s (0.1 %)** |
+| gaps ≥ 30 s between batch lines | **0** | 1 (54 s) |
+| scheduling wall clock | **1,404 s (97.2 %)** | 1,240 s (95.7 %) |
+
+For scale: `ea7ed7c` had 2,616 s of trailing silence and emitted its last batch 5 m 35 s into
+a 50-minute run; `81ab30e` spent 52 % of each phase emitting no batch.
+
+The one 54 s gap (passthrough, 05:09:06 → 05:10:00, usage 0.80, queue 1) is **not** a
+scheduler stall: it is a session-residency burst — ten `Spilled soft session … 118,062
+tokens` (0.45–0.54 GiB each, 5 to RAM then 5 to disk at 0.94–1.95 GiB/s) with their
+`Released … KV protection (admission pressure)`, and the batch that ends it restores
+**589,680 cached tokens across 6 fresh lanes**. Work, not silence. The passthrough STALLED
+interval (t = 390 s, zero completions in one 60 s window) sits in a different window where
+batches were flowing throughout.
+
+## U4. Throughput, and how it compares
+
+Server batch log, per phase (`soak7/analyze.py` on `phase_{stage,pass}.log`):
+
+| | stage | passthrough |
+|---|---|---|
+| decode batches | 185 | 235 |
+| mean `#running-req` | 8.06 | 11.28 |
+| decode aggregate tok/s (all batches) | median 81.2, mean 87.2, max 311.5 | median 143.4, mean 147.1, max 445.5 |
+| **decode aggregate tok/s @ `#running-req == 16`** | **96.8** (n=15) | **177.5** (n=93, mean 182.8, max 445.5) |
+| **decode per-stream tok/s @ 16** | **6.05** | **11.09** |
+| prefill batches | 2,091 | 1,050 |
+| prefill instant tok/s | median 1,851, mean 2,135, max 9,181 | median 1,838, mean 2,766, max 9,020 |
+| new prompt tokens | 2,397,852 | 2,263,387 |
+| effective new-token prefill rate (Σ`#new-token` / Σ chunk wall) | **1,830 tok/s** | **1,879 tok/s** |
+| prefill wall clock | 1,310 s (91 % of phase) | 1,205 s (93 %) |
+| prefix reuse (cached / (new+cached)) | **85.0 %** (13.57 M cached) | **88.8 %** (17.90 M cached) |
+| mean / median / max lanes per prefill batch | 1.83 / 1 / 16 | 3.53 / 3 / 16 |
+| batches at `#mamba-slot: 96/96` | 36 | 3 |
+| pressure episodes (usage ≥ 0.98, queue > 0) | 5 | 0 |
+
+Against the last passing tree (§R6, `befcde6` + `reserved_pages`) and the §R4 decode table
+(`fad1fc4`):
+
+| stage route | §R6 | **4a99e34** | Δ |
+|---|---|---|---|
+| requests / errors / STALLED | 471 / 0 / 1 | 470 / 0 / **0** | = / = / **−1** |
+| p50 / p95 / p99 ms | 29,104 / 200,742 / 257,441 | **24,283 / 145,840 / 230,183** | **−17 % / −27 % / −11 %** |
+| decode agg @ 16 (§R4) | 81.6 (n=8) | **96.8** (n=15) | **+18.6 %** |
+| decode per-stream @ 16 (§R4) | 5.10 | **6.05** | **+18.6 %** |
+| prefill instant tok/s median (§R4) | 1,637 | **1,851** | **+13.1 %** |
+| prefix reuse | 83.8 % | **85.0 %** | +1.2 pt |
+| mean lanes per prefill batch | 2.37 | 1.83 | **−23 %** |
+| new prompt tokens | 2.72 M | 2.40 M | −12 % |
+
+| passthrough route | §R4 (`fad1fc4`) | **4a99e34** | Δ |
+|---|---|---|---|
+| requests / errors | 1,219 / 0 | **1,600 / 0** | **+31 %** |
+| decode agg @ 16 | 161.4 (n=77) | **177.5** (n=93) | **+10.0 %** |
+| decode per-stream @ 16 | 10.09 | **11.09** | **+9.9 %** |
+| prefill instant tok/s median | 1,496 | **1,838** | **+22.9 %** |
+| p95 ms | — | 32,906 | — |
+
+`acc91e9` + `4a99e34` are visible here in a way they were not in the `ea7ed7c` run (which was
+starved 92 % of the wall clock): decode is up ~10 % at 16 lanes on passthrough and ~19 % on
+stage, prefill median instant throughput up 13–23 %. The 16-way aggregate of 177.5 tok/s
+beats the 168 tok/s recorded on 2026-09-04 for the LFU 16-way configuration.
+
+**Lanes went DOWN and that is the correct trade.** Mean lanes per prefill batch is 1.83
+against §R6's 2.37 — the standing reservation makes an in-flight prefill keep costing
+admission until it finishes, so fewer fresh prompts are seated at once. It bought 0 STALLED
+intervals and a 27 % lower p95 on the route that used to time out. Reading the series with
+the §S/§T lesson: 2.37 → 4.71 → 6.57 lanes with 0 → 15 → 32 errors, and now **1.83 lanes with
+0 errors and the best latency of any run**.
+
+## U5. `max_chunked_prefills = 8` — no evidence it ever bound (and it cannot be proven)
+
+The cap is a silent `continue` in `schedule_next_batch`; there is no log line and no
+`/v1/stats` counter, so "never binds" is **not directly observable**. The strongest available
+evidence, log-only:
+
+* A prefill pass with `#cached-token > 0` necessarily admitted a **fresh** request that pass
+  (continuation chunks contribute 0 to the cached counter — the hit is booked once at
+  admission), which proves `chunked_inflight < 8` at that moment.
+* Such passes: **282 of 2,091 (stage)** and **279 of 1,050 (passthrough)**, spaced
+  **median 2 s** apart (mean 5.0 / 4.6 s, p95 21 / 14 s, max 73 / 102 s).
+
+So the count of concurrent chunked prefills dropped below 8 every ~2 s throughout both
+phases; any window in which the cap could have bound is bounded by 73 s (stage) / 102 s
+(passthrough), and no symptom (no gap, no invariant warning, no queue growth) appears in
+those windows. Consistent with the knob's design note — the standing reservation is what
+holds the set finishable and the cap is belt-and-braces. **Ticket (new, see below): expose
+`chunked_prefills_inflight` and a `fresh_admits_blocked_by_cap` counter so the next soak
+can answer this directly instead of by inference.**
+
+## U6. Disconnect-abort (`ff470e7`)
+
+* **Live probe, after the two phases, same server**: a 60,000-word (~60 K token) non-streaming
+  `/v1/chat/completions` was posted on a raw socket and the socket shut down 6 s later, mid
+  prefill. `/v1/stats.requests.active` went 0 → **1** while it was in flight and back to
+  **0 seven seconds after the close** — the disconnect poll fired, the `AbortMsg` reached the
+  scheduler and the request's slot and forwarded KV were freed. Pre-`ff470e7` that request
+  would have held them for the life of the server.
+* **No spurious aborts of healthy clients**: 2,070 requests, **0 failures, 0 error records,
+  0 dropped error records**, `error_kinds: {}` on both routes, and 3/3 invalid-request
+  canaries still behaving. A spurious abort cuts a live client's response, which the soak
+  grades as an error; there were none.
+* **Count of aborts during the soak: not measurable.** `Scheduler._process_one_msg` logs
+  `"Aborting request %d"` at **debug**, and `StatsTracker` keeps only a live `_aborting` set,
+  no cumulative counter. Ticket below. What can be said: no client disconnected voluntarily
+  (0 errors, 0 timeouts), so the expected count is 0 and nothing in the run contradicts it.
+
+## U7. Host behaviour
+
+* No spin: busiest FreeToken process at **median 109.9 % CPU (stage) / 107.0 % (passthrough)**
+  over 497 five-second samples — the same ~106 % every previous run recorded while healthy.
+* GPU 14.1 GiB median, **15.8 GiB peak**; top-process RSS peak 24.2 GB, no host OOM.
+* `/health` `ok` on all 40 checks plus the driver's own 10 s watchdog (`health_bad.log` never
+  created). `KV grew` 3 times in stage (65,536 → 262,144) and stayed there.
+* Session residency: 126 (stage) + 270 (passthrough) idle-timeout expiries, **423 cold
+  restores, 0 failures**; 1,025 `Released soft session … KV protection` (291 admission +
+  85 GDN in stage, 734 admission in passthrough).
+* **Graceful shutdown in 3 s**, GPU back to **0 MiB**, no leftover venv processes.
+
+## U8. Still open after this run
+
+1. **§R7 ticket 1 is what now caps the stage route**, and it is measurable:
+   `chunk_limit = token_budget // waiting` produces the starvation signature
+   (`#new-seq: 1`, `#new-token ≤ 512`, `#queue-req ≥ 8`) on **1,278 of 2,091 stage prefill
+   passes (61 %)** and 200 of 1,050 passthrough passes (19 %). A 118 K-token prompt advancing
+   512 tokens per pass is why stage p95 is still 146 s. Size the interleave share by the lanes
+   the pass will actually seat, or floor the chunk at ~2 K tokens.
+2. **No observability for the two admission bounds.** Neither the standing reservation's
+   refusals nor `max_chunked_prefills` leaves a trace; §U5 had to infer. Add
+   `chunked_prefills_inflight`, `fresh_admits_blocked_by_cap` and `deferred_prefill_chunks`
+   to `/v1/stats` (the §R5 ticket, still open).
+3. **No abort counter.** `"Aborting request %d"` is debug-level and `StatsTracker` has no
+   cumulative `aborted`; a soak cannot count disconnect-aborts. One counter on `StatsTracker`
+   plus a `/v1/stats` field closes it.
+4. **761 `Discarded cold session …: client tokens diverge at 3, before the first stored state
+   boundary`** (INFO; `soak6` logged 179). Benign here — a reused auto-session id whose new
+   prompt diverges at token 3 — but it is the same message the handover's item-3 note flags
+   as *also* being emitted when `session.spill` is invalid after a capacity eviction. The
+   one-line `.valid` check would let the two cases be told apart in a log.
+5. `benchmarks/scheduler_replay.py` (ticket 11) still needs the §T set-of-chunked-prefills
+   case; this tree passes both the replay and the live soak, which is necessary, not
+   sufficient.
+
+## U9. Artifacts
+
+`/tmp/claude-1000/-home-lucas-ai-FreeToken/f4e2e9e3-f4f5-40d0-9980-b3b09d1ef47d/scratchpad/`
+
+* `soak7/{run.sh,serve.sh,sample.sh,split.py,analyze.py,gaps.py}` — driver + analyzers;
+  `gaps.py` now reports leading/trailing silence against the driver's phase window and warns
+  at ≥ 120 s of trailing silence (the same file was updated in `soak6/`)
+* `soak7/{server.log,driver.log,resources.csv,soakStage.log,soakPass.log,phase_stage.log,
+  phase_pass.log,stats_after_{stage,pass}.json,stats_{before,after}_probe.json}`
+* `soak7/soakStage/results-switchyard_stage/`, `soak7/soakPass/results-switchyard_passthrough/`

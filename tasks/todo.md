@@ -19,7 +19,7 @@ Full plan: tasks/nemotron35-plan.md
   - [x] 2B2 triton fallback tuning  - [x] 2B4 cache sizing study (triton default, LFU for 16-way, hybrid rejected)  - [x] 1M single-session spill gate (all 4 criteria PASS, 2026-09-04; restore NVMe 1.32 GiB/s vs RAM 5-8 GiB/s)
 
 ## Phase 3 — Switchyard
-- [x] 3A wire/errors  - [x] 3B JSON mode  - [x] 3C sessions+parsers  - [ ] 3D soak run (**FAILS at `ea7ed7c`+`acc91e9`, 2026-09-05, WORSE than 81ab30e**: stage 176 req/32 timeouts/12 STALLED, passthrough 32/32 = 100% error/18 STALLED; permanent deadlock, last batch 5m35s in, 2,616 s of unbroken silence; 14 chunked prefills own the pool at 1.76x its size. Last passing tree is still `befcde6`+reserved_pages fix -- see soak results §"Run against ea7ed7c" and handover item 2)  - [x] 3E residency: spill on demand + capacity/age retention + restart-persistent checkpoints  - [x] 3F prefetch next queued checkpoint to RAM  - [x] 3G partial-prefix restore + stray `</think>` + prefill-time boundary capture
+- [x] 3A wire/errors  - [x] 3B JSON mode  - [x] 3C sessions+parsers  - [x] 3D soak run (**PASSES at `4a99e34`, 2026-09-05**: stage 470 req / 0 err / 0 STALLED, passthrough 1,600 / 0 err / 1 STALLED, 0 finishability-invariant warnings, 0 fatals, 1 s trailing silence, decode @16 +19 %/+10 % and prefill median +13 %/+23 % vs §R4 -- soak results §"Run against 4a99e34" and handover item 2)  - [x] 3E residency: spill on demand + capacity/age retention + restart-persistent checkpoints  - [x] 3F prefetch next queued checkpoint to RAM  - [x] 3G partial-prefix restore + stray `</think>` + prefill-time boundary capture
 
 ## Phase 3H — hidden-state export (Switchyard probe contract)
 - [x] 3H implement (1f2de67)  - [x] 3H GPU parity check (all 52 layers cosine >= 0.998840)
@@ -426,4 +426,32 @@ the clock. A live 16-way soak on both routes remains the acceptance test.
       auto-session-busy resubmit aborts the pre-fallback uid (the wrapper was bound to it);
       the fallback request finishes on its own, so it does not leak -- see the comment in
       `openai_api.py::stream_chat_completion_chunks`.
-- [ ] Live soak against b030c7f with FREETOKEN_SCHEDULER_INVARIANT=warn (after prefill profile)
+- [x] Live soak against b030c7f with FREETOKEN_SCHEDULER_INVARIANT=warn (after prefill profile).
+      **DONE 2026-09-05, PASS on both routes against `4a99e34`** (clean tree: d685e99 gate +
+      standing reservation + `max_chunked_prefills=8` + finishability invariant, `ff470e7`
+      disconnect-abort, `acc91e9` decode, `4a99e34` prefill). Stage 470 req / **0 err / 0
+      STALLED**, p50/p95/p99 24,283/145,840/230,183 ms; passthrough 1,600 req / **0 err** /
+      1 STALLED, 7,527/32,906/83,354 ms. **0 invariant warnings** across ~3,141 passes
+      (`ea7ed7c` violated it on 566). 0 `committed_pages_required`, 0 `LinearStatePool
+      exhausted`, 0 tracebacks, 0 oversize warnings, 0 `Eviction did not free enough space`,
+      0 ERROR/CRITICAL. Trailing silence 1 s on both phases (the §T deadlock signature;
+      `ea7ed7c` had 2,616 s); scheduling wall clock 97.2 % / 95.7 % of the phase. Throughput
+      up on every axis vs §R4/§R6: decode @16 lanes 81.6 -> 96.8 tok/s stage and 161.4 ->
+      177.5 passthrough, per-stream 5.10 -> 6.05 / 10.09 -> 11.09, prefill instant median
+      1,637 -> 1,851 / 1,496 -> 1,838; stage p95 -27 %. Mean lanes per prefill batch 1.83
+      (§R6 2.37) -- the standing reservation seats fewer and that is the trade that bought
+      0 STALLED. Graceful shutdown 3 s, GPU 0 MiB. Write-up: soak results §U ("Run against
+      4a99e34"); drivers `scratchpad/soak7/`.
+- [ ] Scheduler/server observability the soak could not get (new, from §U5/§U6):
+      `chunked_prefills_inflight` + `fresh_admits_blocked_by_cap` + `deferred_prefill_chunks`
+      on `/v1/stats` (whether `max_chunked_prefills=8` ever binds is currently only
+      *inferable* -- 282/2,091 stage passes carried `#cached-token > 0`, i.e. a fresh admit,
+      median 2 s apart, max window 73 s), and a cumulative `aborted` counter on
+      `StatsTracker` (`"Aborting request %d"` is debug-only, so disconnect-aborts cannot be
+      counted from a soak log).
+- [ ] §R7 ticket 1 is now the stage route's binding limit: `chunk_limit = token_budget //
+      waiting` produced the starvation signature (`#new-seq: 1`, `#new-token <= 512`,
+      `#queue-req >= 8`) on **1,278 of 2,091 (61 %)** stage prefill passes and 200/1,050
+      (19 %) passthrough. A 118 K prompt at 512 tokens/pass is why stage p95 is still 146 s.
+      Size the interleave share by the lanes the pass will actually seat, or floor the chunk
+      at ~2 K tokens.
