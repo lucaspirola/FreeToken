@@ -450,3 +450,228 @@ Two operational findings fall out of this rung and are *not* about recall:
 * Drivers and logs: `<scratch>/oracle/{phaseA_524288.sh, phaseB_1M.sh, phaseB_524288.sh,
   phaseA_524288.log, phaseB_1044480.log, phaseB_524288.log, ft_524288_server.log,
   chunks_1M_ncpumoe23.txt}`
+
+---
+
+## 14. The 131K rung — the missing bottom of the ladder (2026-09-06, `9dc283e`)
+
+Handover item 6, first half. 2026-09-06 00:58–01:04 local, FreeToken at **`9dc283e`**, llama.cpp
+`9542 (6b80c74f2)`, host 32.1 GiB `MemAvailable` / 0 MiB VRAM before each phase.
+
+Prompt identity: **130,982 haystack tokens, 131,042-token turn-1 prompt, sha256
+`8d4f380ac9179e60`, filler cursor 0, byte-identical across the two engines** (verified on CPU
+with `record --build-only` before either lock acquisition; compare did not raise exit 3).
+Generics were kept at this length (cheap), so the matrix is over **24** rows, not 19.
+
+**`--n-cpu-moe` at 131K.** `docs/oracle.md` publishes no 131K-specific value; the harness
+default **14** — the same setting the doc's ~10 min budget row was computed on — is what ran,
+and it is healthy: the first 4,096-token chunk cost **~2.2 s** against the doc's ~3.5 s
+"healthy" mark and the 12 s+ collapse mark. There is idle VRAM at this length (a smaller value
+would fit), but 14 is documented, correct and not the bottleneck, so **no doc change is
+warranted** — the doc is right that the 262K default carries down.
+
+### 14a. Cost
+
+| | FreeToken (NVFP4) | llama.cpp (Q4_0) |
+|---|---|---|
+| turn 1 TTFT (cold 131K prefill) | **20.0 s** at **6,559 tok/s** | 74.3 s at 1,763 tok/s |
+| turns 2–19 TTFT | median **0.68 s** | median 0.43 s |
+| turns 2–19 decode | median **119.7 tok/s** | median 46.0 tok/s |
+| 19 graded turns + 5 generics, wall | **36 s** | 119 s |
+| phase wall incl. load and shutdown | **2 m 21 s** | 2 m 31 s |
+
+The 6,559 tok/s prefill is `9dc283e` landing exactly on the 6,577.8 tok/s the handover records
+for 131K prefill, and it is **3.7× llama.cpp on the identical prompt** — a much wider gap than
+the 12 % at 262K or the 2.4× at 524K, because at 131K FreeToken is not yet paying for KV
+growth while llama.cpp still pays 14 CPU-MoE blocks. Both engines' phases fit inside 2.5 min;
+the whole rung cost **5 minutes of GPU**, against the doc's ~15 min budget.
+
+### 14b. Agreement matrix (131,072)
+
+| | llama.cpp PASS | llama.cpp FAIL |
+|---|---:|---:|
+| **FreeToken PASS** | **21** | **1** |
+| **FreeToken FAIL** | **2** | **0** |
+
+| verdict | count |
+|---|---:|
+| `agree` | 21 |
+| `both-miss` | **0** |
+| `freetoken-only-miss` | 2 |
+| `llamacpp-only-miss` | 1 |
+| `missing` | 0 |
+
+Totals: FreeToken **22/24**, llama.cpp **23/24**. Compare exit code **2**.
+
+### 14c. Pass rate by question shape — 131K is where addressing still works
+
+| | direct | combined | reverse | control | generic | total |
+|---|---|---|---|---|---|---|
+| **FreeToken 131K** | **6/6** | 4/6 | **6/6** | 1/1 | 5/5 | 22/24 |
+| **llama.cpp 131K** | **6/6** | 5/6 | **6/6** | 1/1 | 5/5 | 23/24 |
+| FreeToken 262K | 5/6 | 2/6 | 6/6 | 1/1 | — | 14/19 |
+| llama.cpp 262K | 3/6 | 2/6 | 6/6 | 1/1 | — | 12/19 |
+| FreeToken 524K | 1/6 | 0/6 | 6/6 | 1/1 | — | 8/19 |
+| llama.cpp 524K | 2/6 | 1/6 | 6/6 | 1/1 | — | 10/19 |
+| FreeToken 1M | 1/6 | 0/6 | 5/6 | 1/1 | — | 7/19 |
+
+This is the anchor the ladder was missing. **`direct` is 6/6 on both engines at 131K**, 5/6 and
+3/6 at 262K, 1/6 and 2/6 at 524K. The direct-addressing collapse is monotone in length on both
+engines and it has not begun at 131K — so §12's "property of the model at half a million tokens
+and beyond" now has a clean lower bound, and there is no length at which FreeToken's direct
+recall falls off before llama.cpp's.
+
+### 14d. Every miss at 131K is arithmetic, on both engines
+
+Zero `retention`, zero `selection`, zero `interference-*`, zero `incoherent` on either engine.
+All six needles are `recall` or `recall-partial` with `in state = yes`, and every one of the
+four failing rows is a *combined* probe whose two constituent codes were both retrieved
+correctly:
+
+| probe | expected sum | FreeToken | llama.cpp | verdict |
+|---|---|---|---|---|
+| `combined:orchard+harbour` | 9854500 | 5663623 + 4190877 = **9854499** | correct | `freetoken-only-miss` |
+| `combined:harbour+quarry` | 12515393 | 8324516 + 4190877 = **12515392** | correct | `freetoken-only-miss` |
+| `combined:cavern+meadow` | 13301194 | correct | sum right, **named the wrong larger code** | `llamacpp-only-miss` |
+
+Both FreeToken rows are **off by exactly one** — the same arithmetic class as the two 262K
+`freetoken-only-miss` rows in §4 — and llama.cpp's single miss is a comparison error on a turn
+whose sum is right. Neither engine failed to *retrieve* anything at 131K.
+
+## 15. The 524K `direct:harbour` re-probe at `--filler-cursor 65` — the §11f explanation is wrong
+
+Handover item 6, second half. §11f attributed FreeToken's one leak-free direct-probe loss to
+turn 2 also being the one turn that paid a 50.0 s partial re-prefill. **It re-runs on a rotated
+haystack with a 2.62 s cached TTFT and misses again**, so the re-prefill was a coincidence.
+
+Prompt identity: **524,204 haystack tokens, 524,264-token turn-1 prompt, sha256
+`9e82fd972d04de7a`, filler cursor 65** — a different haystack from §11's `72683f24c68885d1`, so
+no session checkpoint from the cursor-0 run could match (65 is not a multiple of 64, per the
+doc's rule). Byte-identical across the two engines, verified on CPU before the lock. The spill
+directory was wiped at the top of phase A. Both legs ran `--no-generic`; llama.cpp used
+`-c 532480 … --n-cpu-moe 23`, first chunk **3.54 s**/4,096 — healthy.
+
+### 15a. Cost, and `9dc283e` against `2a139ad`
+
+| | FreeToken cursor 0 (`2a139ad`) | FreeToken cursor 65 (`9dc283e`) | llama.cpp cursor 65 |
+|---|---|---|---|
+| turn 1 TTFT | 228.2 s (2,297 tok/s) | **212.5 s (2,467 tok/s)** | 496.5 s (1,056 tok/s) |
+| turns 2–19 TTFT | median 2.46 s | median **2.00 s** | median 1.31 s |
+| turns 2–19 decode | median 85.3 tok/s | median **96.0 tok/s** | median 6.1 tok/s |
+| 19 graded turns, wall | 325 s | **255 s** | 607 s |
+| phase wall | 7 m 23 s | **5 m 22 s** | 11 m 22 s |
+
+`9dc283e`'s MoE prefill GEMM is visible: +7.4 % of 524K prefill over `2a139ad` and 2.3× the
+llama.cpp leg on the identical prompt. **Caveat on the llama.cpp decode median**: 6.1 tok/s
+here against 23.6 tok/s in the §11a cursor-0 run at the same `--n-cpu-moe 23`. Not investigated
+— it does not touch any verdict below, and the run is otherwise healthy (prefill chunk cost,
+prefix cache hits and every recall result all match the cursor-0 leg).
+
+### 15b. The matrix reproduces exactly
+
+| verdict | cursor 0 (§11b) | **cursor 65** |
+|---|---:|---:|
+| `agree` | 8 | **8** |
+| `both-miss` | 9 | **9** |
+| `freetoken-only-miss` | 2 | **2** |
+| `llamacpp-only-miss` | 0 | **0** |
+
+FreeToken **8/19**, llama.cpp **10/19**, both rungs. Shape totals are identical too: FreeToken
+direct **1/6**, llama.cpp direct **2/6**, reverse **6/6** on both, control 1/1 on both. Two
+independent haystacks, same numbers.
+
+### 15c. `direct:harbour`
+
+| | cursor 0 (§11f) | **cursor 65** |
+|---|---|---|
+| FreeToken answer | `5663623` (the **orchard** ledger code — `interference-cross`) | `1607392` (the **quarry** `register` twin) |
+| FreeToken turn-2 TTFT | **50.0 s** (partial re-prefill) | **2.62 s** (turns 3–19 median 2.00 s) |
+| FreeToken turn-2 cache | `cached 524287 / 524342` | `cached 524287 / 524342` |
+| llama.cpp answer | `4190877` — **PASS** | `4190877` — **PASS** |
+| verdict | `freetoken-only-miss` | `freetoken-only-miss` |
+| `reverse:harbour`, leak-free | PASS `4190877` | PASS `4190877` |
+
+**The 50 s TTFT was not the cause.** The re-probe pays a normal cached TTFT and still loses the
+probe, and it loses it to a *different* wrong code than the cursor-0 run did — `interference-cross`
+became `interference-near`. What survives across both haystacks is the fact of the miss and the
+fact that llama.cpp holds it. The needle is in state on both runs (`reverse:harbour` recovers
+`4190877` leak-free), so this is an addressing/selection-between-similar-keys result, not a lost
+needle. The second `freetoken-only-miss`, `combined:orchard+harbour`, is downstream of it:
+FreeToken carried `1607392` forward as harbour's code and summed it, where at cursor 0 it had
+both codes right and only the arithmetic wrong.
+
+## 16. Verdict — does FreeToken have any engine-side miss llama.cpp does not?
+
+**No engine-side miss in the sense that matters, and one reproducible weaker-than-llama.cpp
+probe that is not one.**
+
+- **131K: no miss at all.** 6/6 direct and 6/6 reverse on both engines, zero `both-miss`, zero
+  `retention` / `selection` / `interference-*`. FreeToken's two losses are both off-by-one sums
+  over codes it retrieved correctly, and llama.cpp loses one of its own the same way.
+- **524K: the collapse is the model's, confirmed a second time on a second haystack.** Nine of
+  nineteen turns `both-miss` at cursor 65 exactly as at cursor 0, both engines lose `key → code`
+  and both keep `code → key` 6/6, and four direct probes return the key's near-duplicate `register`
+  twin in NVFP4-FreeToken and Q4_0-llama.cpp alike. §12's conclusion stands.
+- **The one standing FreeToken-specific row is `direct:harbour` at 524K**, and it is now
+  *better characterised and no more alarming*: reproducible across two independent haystacks,
+  **not** explained by the 50 s re-prefill §11f blamed, needle demonstrably in state both times,
+  and confounded with NVFP4-vs-Q4_0 like every other `freetoken-only-miss` on this host. Per
+  `docs/oracle.md`'s own rule, an `interference-*` class is not grounds for a retention or kernel
+  bug. It is one probe out of nineteen, at the depth (0.25) whose twin sits at 0.78.
+
+**Recommendation.** Close handover item 6. Keep §12's "close the 1M direct-addressing ticket as
+model-limited" — 131K now bounds the collapse from below and 524K reproduces it on two
+haystacks. Re-word the `direct:harbour` lead rather than closing it silently: the re-prefill
+hypothesis is dead, and what remains is a single interference-class probe where FreeToken is
+weaker than llama.cpp under a quantization confound that cannot be lifted on this card. It is
+not worth GPU time on its own; it is worth re-checking the day a GGUF loader or an NVFP4
+llama.cpp path removes the confound.
+
+### 16a. Artifacts (131K and the 524K re-probe)
+
+* `~/ai/bench/oracle/2026-09-05/{ft_131072_c0.json, lc_131072_c0.json, report_131072_c0.md,
+  merged_131072_c0.json, llama_131072_c0.log}`
+* `~/ai/bench/oracle/2026-09-05/{ft_524288_c65.json, lc_524288_c65.json, report_524288_c65.md,
+  merged_524288_c65.json, llama_524288_c65.log}`
+* Drivers and logs: `<scratch>/oracle/{phaseA.sh, phaseB.sh, phaseA_131072_c0.log,
+  phaseB_131072_c0.log, phaseA_524288_c65.log, phaseB_524288_c65.log,
+  ft_131072_c0_server.log, ft_524288_c65_server.log}`
+
+### 16b. Reproduction
+
+```bash
+export ORACLE_OUT=~/ai/bench/oracle/2026-09-05
+export FT_MODEL=~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+export GGUF=~/ai/models/nemotron35-gguf/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_0.gguf
+
+# 0. prompt identity, CPU only, before any lock (~4 s per config)
+for e in freetoken llama.cpp; do
+  uv run benchmarks/oracle_cross_engine.py record --engine $e --model-dir $FT_MODEL \
+    --target-prompt-tokens 131072 --filler-cursor 0  --build-only --out /dev/null | grep haystack
+  uv run benchmarks/oracle_cross_engine.py record --engine $e --model-dir $FT_MODEL \
+    --target-prompt-tokens 524288 --filler-cursor 65 --build-only --out /dev/null | grep haystack
+done   # 8d4f380ac9179e60 / 9e82fd972d04de7a, identical across engines
+
+# 1. 131K -- phases A, B, C
+FREETOKEN_GPU_LOCK_WAIT=300 scripts/gpu_lock.sh <scratch>/oracle/phaseA.sh 131072 0
+FREETOKEN_GPU_LOCK_WAIT=300 scripts/gpu_lock.sh <scratch>/oracle/phaseB.sh 131072 0 14
+uv run benchmarks/oracle_cross_engine.py compare \
+  --freetoken $ORACLE_OUT/ft_131072_c0.json --llamacpp $ORACLE_OUT/lc_131072_c0.json \
+  --markdown $ORACLE_OUT/report_131072_c0.md --json $ORACLE_OUT/merged_131072_c0.json
+
+# 2. 524K re-probe at cursor 65 -- phases A, B, C
+FREETOKEN_GPU_LOCK_WAIT=300 scripts/gpu_lock.sh <scratch>/oracle/phaseA.sh 524288 65 --no-generic
+FREETOKEN_GPU_LOCK_WAIT=300 scripts/gpu_lock.sh <scratch>/oracle/phaseB.sh 524288 65 23 --no-generic
+uv run benchmarks/oracle_cross_engine.py compare \
+  --freetoken $ORACLE_OUT/ft_524288_c65.json --llamacpp $ORACLE_OUT/lc_524288_c65.json \
+  --markdown $ORACLE_OUT/report_524288_c65.md --json $ORACLE_OUT/merged_524288_c65.json
+```
+
+`phaseA.sh <LEN> <CURSOR> [extra]` runs `docs/oracle.md`'s Phase-A serve line verbatim
+(**including `--enable-cache-report`**, which this session confirms works: every turn reports a
+real `cached_tokens`, e.g. `524287/524342` on turn 2 at 524K), wipes
+`~/.cache/freetoken/oracle-spill` first, waits for a real 1-token completion rather than
+`/health`, then records and stops the server. `phaseB.sh <LEN> <CURSOR> <N_CPU_MOE> [extra]`
+wraps the Phase-B line. Both `exec >` their own log — never pipe `scripts/gpu_lock.sh`.
+One correction for `docs/oracle.md`: the Phase-A line's `ft serve` needs an absolute
+`.venv/bin/ft` inside a wrapper script, since `gpu_lock.sh` does not run through the venv shim.
