@@ -5,7 +5,9 @@ The soak (§U5/§U6) could see the scheduler's *rates* in the batch log but none
 was moving, whether the finishability invariant was ever violated on a tree that was not
 running with ``FREETOKEN_SCHEDULER_INVARIANT`` set, why speculation declined, and whether a
 session checkpoint failed. All of those were inferable at best, and several only from a
-debug-level log line that a soak does not capture.
+debug-level log line that a soak does not capture. §W7 added the expert cache to that list
+for the same reason in a different shape: its counters existed, but the only place they were
+ever emitted was ``Scheduler.run_when_idle``, and a server at c=16 never goes idle.
 
 Everything here is a plain counter incremented on a path the scheduler already walks -- no
 new work, no sampling, no allocation per pass. The counters live on the objects that make
@@ -114,6 +116,11 @@ class SpillCounters:
     # A record whose stored state boundaries all sit after the client's divergence point:
     # nothing restorable, so the context is recomputed.
     restores_diverged: int = 0
+    # A restore refused because its footprint did not fit under the finishability
+    # reservation the prefill admission gate has already promised away (soak §W6). The
+    # checkpoint is kept and retried; a persistently non-zero count means restores are
+    # losing races with chunked prefills and reuse is being paid for in recompute.
+    restores_deferred: int = 0
     prefetches: int = 0
     prefetches_failed: int = 0
     prefetches_collected: int = 0
@@ -125,16 +132,57 @@ class SpillCounters:
             "restores": self.restores,
             "restores_failed": self.restores_failed,
             "restores_diverged": self.restores_diverged,
+            "restores_deferred": self.restores_deferred,
             "prefetches": self.prefetches,
             "prefetches_failed": self.prefetches_failed,
             "prefetches_collected": self.prefetches_collected,
         }
 
 
+def build_moe_counters(moe: Any, collect_decode_stats: bool = False) -> Dict[str, Any] | None:
+    """The ``scheduler.moe`` block: expert-cache decisions, cumulative and integral.
+
+    Two sources with different costs, so they are gated differently.
+
+    ``extend_cache`` is free -- two host ints incremented at the ``use_cached_extend`` call
+    site -- and is therefore always published.
+
+    ``decode`` reads the CUDA-graph-safe ``stat_*`` accumulators, which only accumulate
+    under ``--moe-collect-stats``; publishing them otherwise would spend a device sync to
+    report zeros. Every field is a raw cumulative count, never a ratio: the hit rate a soak
+    wants is ``1 - missing/active`` over the *window between two snapshots*, and a ratio
+    already averaged over the process lifetime cannot be differenced back into one.
+
+    This exists because ``Scheduler.run_when_idle`` was the only place any of it was
+    emitted, and a saturated server never goes idle -- ``--moe-collect-stats`` was on for
+    the whole 41-minute ca7e74b soak at c=16 and printed nothing (soak §W7). The idle log
+    line is unchanged; this is a second, always-reachable path to the same counters.
+    """
+    if moe is None:
+        return None
+    doc: Dict[str, Any] = {}
+    hits = getattr(moe, "extend_cache_hits", None)
+    if hits is not None:
+        doc["extend_cache"] = {
+            "hits": int(hits),
+            "misses": int(getattr(moe, "extend_cache_misses", 0)),
+            "threshold_tokens": int(getattr(moe, "extend_cache_tokens", 0)),
+        }
+    totals = getattr(moe, "decode_stat_totals", None)
+    if collect_decode_stats and totals is not None:
+        try:
+            doc["decode"] = totals()
+        except Exception:  # noqa: BLE001 -- a diagnostic must never break the loop
+            doc["decode"] = None
+    return doc or None
+
+
 def build_scheduler_counters(
     prefill_manager: Any = None,
     spec: Any = None,
     spill_store: Any = None,
+    moe: Any = None,
+    moe_collect_stats: bool = False,
 ) -> Dict[str, Any]:
     """The ``/v1/stats["scheduler"]`` document.
 
@@ -144,7 +192,9 @@ def build_scheduler_counters(
     but idle" stay distinguishable on the wire -- the same ambiguity this ticket removes
     from ``cached_tokens``.
     """
-    doc: Dict[str, Any] = {"prefill": None, "spec": None, "session_spill": None}
+    doc: Dict[str, Any] = {
+        "prefill": None, "spec": None, "session_spill": None, "moe": None,
+    }
     counters = getattr(prefill_manager, "counters", None)
     if counters is not None:
         doc["prefill"] = counters.as_dict(
@@ -156,4 +206,5 @@ def build_scheduler_counters(
     spill = getattr(spill_store, "counters", None)
     if spill is not None:
         doc["session_spill"] = spill.as_dict()
+    doc["moe"] = build_moe_counters(moe, moe_collect_stats)
     return doc

@@ -13,7 +13,9 @@
 #   * the server runs under the GPU lock and its output is REDIRECTED, never piped -- the
 #     lock's exit trap pkill -9's its own process group, which kills any reader
 #   * shutdown TERMs the `ft serve` python directly, so the graceful path is what gets timed
-#   * it refuses to start below 26 GiB MemAvailable
+#   * it refuses to start below 26 GiB MemAvailable, and it also bounds the RUNNING floor:
+#     the watchdog TERMs the server if MemAvailable falls under SOAK_RAM_ABORT_GIB, so the run
+#     ends with its artifacts on disk instead of being destroyed by a host OOM
 set -uo pipefail
 REPO=/home/lucas/ai/FreeToken
 TAG="${1:-$(date -u +%Y%m%dT%H%M%SZ)}"
@@ -28,11 +30,20 @@ git -C "$REPO" log -1 --oneline
 git -C "$REPO" status --porcelain
 free -g | head -2
 
+# MemAvailable gates, in GiB: START is checked once before the model loads; WARN and ABORT
+# are checked every 10 s by the watchdog below (the 2026-09-04 soak bottomed at 3.1 GiB).
+START_GIB="${SOAK_RAM_START_GIB:-26}"
+WARN_GIB="${SOAK_RAM_WARN_GIB:-4}"
+ABORT_GIB="${SOAK_RAM_ABORT_GIB:-2}"
+
+mem_avail_gib() { awk '/MemAvailable/ {printf "%.1f", $2/1048576}' /proc/meminfo; }
+
 avail=$(awk '/MemAvailable/ {printf "%d", $2/1048576}' /proc/meminfo)
-if [ "$avail" -lt 26 ]; then
-  echo "ABORT: only ${avail} GiB MemAvailable (< 26); a model load here OOMs the host"
+if [ "$avail" -lt "$START_GIB" ]; then
+  echo "ABORT: only ${avail} GiB MemAvailable (< ${START_GIB}); a model load here OOMs the host"
   exit 2
 fi
+echo "ram gates: start>=${START_GIB} warn<${WARN_GIB} abort<${ABORT_GIB} GiB (now $(mem_avail_gib))"
 
 SOAK_PORT="$PORT" "$REPO/scripts/gpu_lock.sh" "$HERE/serve.sh" > "$SP/server.log" 2>&1 &
 LOCK=$!
@@ -63,6 +74,9 @@ find_srv() {
 SRV=$(find_srv)
 echo "server python pid=$SRV"
 
+# Health + host-RAM watchdog. The RAM half costs one awk on /proc/meminfo per 10 s and is what
+# bounds the *running* floor: under WARN_GIB it records the dip, under ABORT_GIB it TERMs the
+# server so the phase ends with driver.log/resources.csv/stats intact, which a host OOM would not.
 ( while true; do
     code=$(curl -s -m 5 -o "$SP/.h.json" -w '%{http_code}' "http://127.0.0.1:$PORT/health")
     body=$(tr -d ' \n' < "$SP/.h.json" 2>/dev/null)
@@ -70,6 +84,15 @@ echo "server python pid=$SRV"
       200:*'"status":"ok"'*) : ;;
       *) echo "$(date -Is) health_http=$code body=$body" >> "$SP/health_bad.log" ;;
     esac
+    ma=$(mem_avail_gib)
+    if awk -v a="$ma" -v f="$ABORT_GIB" 'BEGIN{exit !(a<f)}'; then
+      echo "$(date -Is) MemAvailable=${ma} GiB < ${ABORT_GIB}: TERMing server to save the artifacts" \
+        | tee -a "$SP/ram_low.log" >> "$SP/RAM_ABORT"
+      kill -TERM "$SRV" 2>/dev/null
+      break
+    elif awk -v a="$ma" -v f="$WARN_GIB" 'BEGIN{exit !(a<f)}'; then
+      echo "$(date -Is) MemAvailable=${ma} GiB < ${WARN_GIB}" >> "$SP/ram_low.log"
+    fi
     sleep 10
   done ) &
 HW=$!
@@ -90,6 +113,7 @@ run_phase() {  # $1 = route suffix, $2 = phase key (STAGE|PASS), $3 = workdir na
 # SOAK_PHASES selects which routes run (default: both, in this order). A short single-route
 # A/B sets it to just "passthrough".
 for phase in ${SOAK_PHASES:-stage passthrough}; do
+  if [ -e "$SP/RAM_ABORT" ]; then echo "SKIPPING $phase: $(cat "$SP/RAM_ABORT")"; break; fi
   case "$phase" in
     stage)       run_phase stage       STAGE soakStage ;;
     passthrough) run_phase passthrough PASS  soakPass ;;
@@ -100,7 +124,7 @@ curl -s -m 5 -o /dev/null -w 'health_http=%{http_code}\n' "http://127.0.0.1:$POR
 
 # --- disconnect-abort probe (ff470e7): drop a long prompt mid-prefill, then confirm
 # /v1/stats.active returns to 0 (the abort reached the scheduler and freed the slot).
-if [ "${SOAK_PROBE:-1}" = 1 ]; then
+if [ "${SOAK_PROBE:-1}" = 1 ] && [ ! -e "$SP/RAM_ABORT" ]; then
 echo "=== disconnect probe $(date -Is) ==="
 curl -s -m 5 "http://127.0.0.1:$PORT/v1/stats" > "$SP/stats_before_probe.json"
 python3 - "$PORT" <<'PY'
@@ -140,6 +164,9 @@ fi
 
 kill "$HW" 2>/dev/null
 kill "$SAMP" 2>/dev/null
+awk -F, 'NR>1 && $8!="" {n++; if (m=="" || $8+0 < m+0) m=$8} END {
+  if (n) printf "mem_avail_floor_gib=%s over %d samples\n", m, n }' "$SP/resources.csv"
+[ -e "$SP/RAM_ABORT" ] && echo "RAM_ABORT: $(cat "$SP/RAM_ABORT")"
 echo "=== stopping server $(date -Is) ==="
 t0=$(date +%s)
 kill -TERM "$SRV" 2>/dev/null

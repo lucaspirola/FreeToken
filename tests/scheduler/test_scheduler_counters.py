@@ -206,7 +206,7 @@ def test_build_scheduler_counters_distinguishes_off_from_idle():
     }
 
     assert build_scheduler_counters(None, None, None) == {
-        "prefill": None, "spec": None, "session_spill": None
+        "prefill": None, "spec": None, "session_spill": None, "moe": None
     }
 
 
@@ -268,5 +268,103 @@ def test_spill_counters_render_every_failure_channel():
     assert doc["spills_failed"] == 1 and doc["prefetches_failed"] == 2
     assert set(doc) == {
         "spills", "spills_failed", "restores", "restores_failed", "restores_diverged",
+        "restores_deferred",
         "prefetches", "prefetches_failed", "prefetches_collected",
     }
+
+# --------------------------------------------------------------------------- #
+# The expert cache (soak §W7)
+# --------------------------------------------------------------------------- #
+# ``--moe-collect-stats`` was on for the whole 41-minute ca7e74b soak at c=16 and emitted
+# nothing: every ``MoE decode miss stats`` / ``GPU batch profile`` line is printed from
+# ``Scheduler.run_when_idle``, and ``Scheduler is idle`` appeared 0 times -- a saturated
+# server never reaches an idle boundary, which is precisely the regime whose expert-cache
+# hit rate anyone would want. The counters now also ride the ``/v1/stats`` path, where a
+# busy server does reach them.
+#
+# ``OffloadMoeCache`` needs a GPU, so these drive ``build_moe_counters`` with the same
+# duck-typed stand-ins the function is written against.
+
+
+class _FakeMoeCache:
+    """The attributes ``build_moe_counters`` reads, and nothing else."""
+
+    def __init__(self, *, totals=None, raises=False):
+        self.extend_cache_hits = 0
+        self.extend_cache_misses = 0
+        self.extend_cache_tokens = 64
+        self._totals = totals
+        self._raises = raises
+
+    def note_extend_gate(self, cached: bool) -> None:
+        if cached:
+            self.extend_cache_hits += 1
+        else:
+            self.extend_cache_misses += 1
+
+    def decode_stat_totals(self) -> dict:
+        if self._raises:
+            raise RuntimeError("device sync failed")
+        return dict(self._totals or {})
+
+
+def test_the_extend_cache_gate_is_published_without_the_collect_stats_flag():
+    """Two host ints, so they cost nothing and are always on. §W7 could only INFER this
+    gate's engagement from the batch log (76 of 1,522 passes, 5.0%)."""
+    from freetoken.scheduler.counters import build_moe_counters
+
+    moe = _FakeMoeCache()
+    for cached in (True, False, False, True, False):
+        moe.note_extend_gate(cached)
+
+    doc = build_moe_counters(moe, collect_decode_stats=False)
+    assert doc == {"extend_cache": {"hits": 2, "misses": 3, "threshold_tokens": 64}}
+    assert "decode" not in doc, "the decode accumulators cost a device sync; do not pay it"
+
+
+def test_decode_totals_are_cumulative_ints_so_two_snapshots_subtract():
+    """A ratio averaged over the process lifetime cannot be differenced back into the hit
+    rate over a window; raw counts can."""
+    from freetoken.scheduler.counters import build_moe_counters
+
+    first = {"layer_calls": 100, "active": 800, "missing": 200, "fetched": 150,
+             "prefill_hit_rows": 10, "prefill_rows": 40,
+             "pageable_stage_calls": 3, "pageable_rows": 60}
+    second = dict(first, layer_calls=140, active=1120, missing=248)
+
+    a = build_moe_counters(_FakeMoeCache(totals=first), True)["decode"]
+    b = build_moe_counters(_FakeMoeCache(totals=second), True)["decode"]
+    assert all(isinstance(v, int) for v in a.values())
+    # 48 misses out of 320 active over the window: an 85% hit rate the lifetime figures
+    # (75.0% then 77.9%) never show.
+    assert (b["active"] - a["active"], b["missing"] - a["missing"]) == (320, 48)
+
+
+def test_a_failing_stats_read_reports_null_rather_than_breaking_the_loop():
+    from freetoken.scheduler.counters import build_moe_counters
+
+    doc = build_moe_counters(_FakeMoeCache(raises=True), True)
+    assert doc["decode"] is None and doc["extend_cache"]["hits"] == 0
+
+
+def test_no_expert_cache_is_distinguishable_from_an_idle_one():
+    """The same "off" vs "on but idle" distinction the rest of this document keeps."""
+    from freetoken.scheduler.counters import build_moe_counters, build_scheduler_counters
+
+    assert build_moe_counters(None) is None
+    assert build_scheduler_counters(None, None, None)["moe"] is None
+    assert build_scheduler_counters(None, None, None, moe=_FakeMoeCache())["moe"] == {
+        "extend_cache": {"hits": 0, "misses": 0, "threshold_tokens": 64}
+    }
+
+
+def test_the_moe_block_is_json_serializable_too():
+    import json
+
+    from freetoken.scheduler.counters import build_scheduler_counters
+
+    moe = _FakeMoeCache(totals={"layer_calls": 1, "active": 2, "missing": 1,
+                                "fetched": 1, "prefill_hit_rows": 0, "prefill_rows": 0,
+                                "pageable_stage_calls": 0, "pageable_rows": 0})
+    doc = build_scheduler_counters(None, None, None, moe=moe, moe_collect_stats=True)
+    assert json.loads(json.dumps(doc)) == doc

@@ -1188,3 +1188,41 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   decode at 16 lanes up 14 %, and effective prefill rate up 20 %. The tail was queueing, not a
   slower engine. Latency percentiles at a fixed concurrency are a function of how much work the
   server accepted; they are not comparable across runs that accepted different amounts.
+
+## 2026-09-05 (fixing the three §W tickets)
+- **A budget proved at admission is only worth what nothing else can spend.** The §W6
+  invariant warnings were not an admission-gate bug at all: `_check_finishability` and the
+  standing reservation were both correct. `Scheduler._restore_cold_session` simply spends the
+  same pool from a path that is not an admission gate — the message handler and
+  `_reclaim_for_blocked_prefill`, both of which run *between* two prefill passes. **When a
+  gate proves something about a shared resource, enumerate every other writer of that
+  resource and make each one charge itself against the same figure.** Exporting the gate's
+  own left-hand side (`PrefillManager.finishability_reservation`) rather than letting the
+  second writer re-derive it is what keeps the two from drifting.
+- **"Locked" costs the pool as much as "allocated".** The restore that broke the invariant
+  allocated **zero** new pages: 121,865 of its 127,204 tokens were already resident and
+  merely *evictable*, and `available_size` counts `evictable_size`. Charging only the
+  allocation (`hybrid_session_restore_geometry`'s `missing`) would have measured 0 and fixed
+  nothing. **Charge what the accounting identity actually loses, not what the code visibly
+  allocates** — and unit-test the estimate against the measured `available_size` drop.
+- **Defer, do not loosen.** The tempting fix was to relax the invariant to accommodate
+  restores. The correct one was to defer the restore: reuse is an optimization, so refusing
+  it is always *correct*, only slower, and a retry path already existed. A refusal that
+  cannot deadlock beats a weakened invariant every time.
+- **A reproduction that reproduces the wrong thing is worse than none.** The first version of
+  the `switchyard-restore` replay profile showed 43 violations while its restores cost a
+  measured **0** tokens — the number was right for the wrong reason. Instrumenting the
+  predicted cost against the actual `available_size` drop is what caught it. **Before
+  trusting a repro, assert that the mechanism you are modelling is the one moving the
+  number.**
+- **`await` inside an `except asyncio.CancelledError` handler is a place work goes to die.**
+  `abort_user` opened with a 0.1 s sleep and every non-streaming endpoint awaited it from a
+  cancellation handler; a second cancellation there silently dropped both the counter and the
+  `AbortMsg`. The streaming path had been immune for months because `spawn_abort` ran it as
+  its own task — **the asymmetry between two paths doing the same job is the bug report**.
+  `asyncio.shield` over a tracked task is the cheap fix, and it changes no call site.
+- **Do not `git stash`, even for a two-second baseline check.** I ran `git stash push` on one
+  test file to compare against baseline, against an explicit standing rule, and had to pop it
+  back. There is always a non-destructive way to answer the same question (`git show
+  HEAD:<path>` into a temp file, or `git diff` the file and read it). **A rule that says
+  "never" does not have a "just this once, it is quick" exception.**

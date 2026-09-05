@@ -61,7 +61,7 @@ pool — through the *real* `PrefillManager` / `CacheManager` / `TableManager` /
 `DecodeManager`. No GPU, no model, no kernels: it drives the scheduling logic directly
 and counts what got prefilled and what finished.
 
-`--gate` runs four fixed scenarios at seed 7 for 20,000 forwards and fails if throughput
+`--gate` runs five fixed scenarios at seed 7 for 20,000 forwards and fails if throughput
 or completions fall under the recorded floors, if the error rate exceeds its ceiling, if
 the scheduler raises, if it **deadlocks**, or if the **finishability invariant** is
 violated on any pass:
@@ -72,6 +72,7 @@ violated on any pass:
 | `pressure` (long prompts crowd the queue) | ≥ 4,750,000 | ≥ 57 | — |
 | `switchyard-stage` (adds session residency) | ≥ 1,779,000 | ≥ 208 | ≤ 0.376 |
 | `switchyard-deadlock` (soak report T geometry) | ≥ 857,000 | ≥ 112 | ≤ 0.276 |
+| `switchyard-restore` (soak report W6 geometry) | ≥ 2,264,000 | ≥ 292 | ≤ 0.356 |
 
 The floors sit ~5% under `d685e99`, the only tree that has passed the live 16-way
 Switchyard soak (stage route: 471 requests / 0 errors / 1 STALLED interval). They are
@@ -101,8 +102,30 @@ That is why the two non-throughput checks exist, and why they are the ones that 
   `FREETOKEN_SCHEDULER_INVARIANT=warn` logs each violation (safe for a live soak),
   `=raise` fails fast.
 
+`switchyard-restore` adds the half of the session lifecycle the other profiles left out:
+a demand reclaim **checkpoints** the lease before it unlocks (`_release_soft_session_handle`
+→ `_spill_soft_session`), and the session's next turn **restores** it. While the checkpoint
+is on disk its tokens are free or evictable, so `available_size` counts them and the
+admission gate sells them to chunked prefills; `_restore_cold_session` then locks them
+straight back, from the message path and from `_reclaim_for_blocked_prefill` — both between
+two prefill passes, neither an admission gate. `owed` does not move, so the finishability
+the gate proved on the previous pass is silently invalidated. That is soak report §W6: nine
+warnings in a 19-second window, a constant 1,401-token shortfall, two seconds after four
+`Restored cold session` lines (one of 79,104 tokens).
+
+The fix is that a restore is now charged against exactly what the gate proved against —
+`CacheManager.session_restore_footprint()` against `available_size -
+PrefillManager.finishability_reservation()` — and deferred, checkpoint intact, when it does
+not fit. It cannot deadlock: reuse is an optimization, so a deferred session simply
+re-prefills through the normal gated path, and `_reclaim_for_blocked_prefill` retries the
+restore after the next release. Deleting `finishability_reservation` from the tree (the
+pre-fix behaviour) takes this profile to 43 violations at seed 7, short by 84,234 tokens;
+over the seeds {1,3,5,7,11,13,17,23} the fixed tree is 0 violations on all eight and the
+unfixed one violates on seed 7 alone. The gate also requires `session_restores ≥ 8`, so a
+change that quietly stopped the profile exercising restores fails instead of passing.
+
 The run is deterministic — identical counts on 2 cores and on 12 — and takes about
-4 seconds wall on two cores, so it costs nothing to keep in CI.
+5 seconds wall on two cores, so it costs nothing to keep in CI.
 
 This is the only check here that catches the prefill admission-gate starvation class of
 bug. No unit test sees it: it needs sustained mixed-length traffic against a pool under
@@ -125,7 +148,7 @@ If a deliberate scheduling change moves these numbers, update `GATE_CASES` in th
 
 ### The `ornith-ada` profile (not gated)
 
-The four gated profiles all run with `PrefillManager.max_batch_seqs == 0`, because
+The five gated profiles all run with `PrefillManager.max_batch_seqs == 0`, because
 `_resolve_max_prefill_seqs` only caps prefill lanes for growable *quantized-GGUF MoE*
 serving — the Ornith path, not Nemotron. `--profile ornith-ada` is that geometry: four
 agents, a 4,096-token chunk and a 65,536-token pool (the configuration of

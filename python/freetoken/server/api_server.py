@@ -452,7 +452,35 @@ class FrontendManager:
     ):
         """``reason`` is for /v1/stats only -- the wire carries one untagged AbortMsg. It
         defaults to the disconnect case because every caller but the prepare-stop drain is
-        an ``asyncio.CancelledError`` handler."""
+        an ``asyncio.CancelledError`` handler.
+
+        Dispatched as a shielded task, which is the whole point of this wrapper. Every
+        non-streaming endpoint awaits this from *inside* an ``except asyncio.CancelledError``
+        handler, and :meth:`_dispatch_abort` opens with a 0.1 s sleep -- a yield point at
+        which anything that cancels the request task (a middleware, a proxy teardown, a
+        second disconnect) discards the whole coroutine. What is lost there is lost twice
+        over: ``/v1/stats`` never counts the abort, and the scheduler never receives the
+        AbortMsg, so the request keeps its pending entry, its table slot and every KV page
+        it has forwarded -- the exact leak this path exists to close.
+
+        Soak §W5 is that silence: ``requests.aborts.client_disconnect`` stayed 0 through a
+        probe (``"stream": false``, so this path) that demonstrably aborted. The streaming
+        path has always been immune because ``spawn_abort`` runs it as its own task; this
+        gives the non-streaming callers the same guarantee without changing how they call.
+        """
+        task = asyncio.ensure_future(self._dispatch_abort(uid, session_id, reason))
+        self.abort_tasks.add(task)
+        task.add_done_callback(self.abort_tasks.discard)
+        await asyncio.shield(task)
+
+    async def _dispatch_abort(
+        self, uid: int, session_id: str | None, reason: str
+    ) -> None:
+        """Count the abort and get the AbortMsg to the scheduler.
+
+        The sleep lets a terminal ack that is already on its way land first, so a request
+        that finished on its own is not aborted after the fact.
+        """
         await asyncio.sleep(0.1)
         if uid in self.ack_map:
             del self.ack_map[uid]

@@ -457,6 +457,24 @@ class PrefillManager:
                 total += max(0, req.input_len - chunked.cached_len) + req.output_len
         return total
 
+    def finishability_reservation(self) -> int:
+        """Everything the pool has already promised, in tokens.
+
+        The exact left-hand side of :meth:`_check_finishability`: the standing reservation
+        of the prompts mid-prefill plus the growth the running decodes will still allocate.
+        Exported because that proof is only worth what it is checked against -- anything
+        else that spends pool pages BETWEEN two prefill passes (a cold session restore,
+        which materialises committed pages straight out of the message path) has to charge
+        itself against this figure, or it retroactively invalidates a finishability the
+        admission gate had already established for requests it cannot see.
+
+        Soak §W6 is that failure: four cold restores, one of 79,104 tokens, landed in the
+        two seconds before nine ``finishability invariant`` warnings whose shortfall was a
+        constant 1,401 tokens -- the pool over-promised exactly once, by a restore, and
+        then tracked the admitted set in lockstep as it drained.
+        """
+        return self._standing_reservation() + self.decode_manager.inflight_tokens
+
     def _seatable_lanes(
         self, adder: PrefillAdder, lane_cap: int, chunked_inflight: int
     ) -> int:

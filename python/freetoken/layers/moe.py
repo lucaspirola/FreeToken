@@ -457,9 +457,13 @@ class OffloadMoELayer(MoELayer):
         (``_cached_extend_routed``), where the ids ARE remapped to slot ids."""
         cache = self.offload_cache
         assert cache is not None
-        if cache.use_cached_extend(
+        cached = cache.use_cached_extend(
             self.layer_id, hidden_states.shape[0], topk_ids.numel()
-        ):
+        )
+        # Counted here rather than inside the gate: this is the only production caller, and
+        # the two ints ride to /v1/stats with the scheduler counters (soak §W7).
+        cache.note_extend_gate(cached)
+        if cached:
             return self._cached_extend_routed(cache, hidden_states, topk_weights, topk_ids)
         if cache.prefill_overlap:
             views = self._wait_prefill_overlap(cache)

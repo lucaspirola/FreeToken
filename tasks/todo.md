@@ -39,8 +39,20 @@ routes, 9 invariant warnings ticketed below). `fork/main` (`62f5a66`) is behind,
       **22 minutes of one-off Triton JIT** at `BLOCK_K = 1024`; if the threshold is ever raised,
       that compile has to happen at warmup, never on a live request.
       Evidence: `N35misc_tickets_2026-09-05.md` §3.
-- [ ] **`--moe-collect-stats` publishes only at an idle boundary, so no soak can report an
-      expert-cache hit rate.** Every `MoE decode miss stats` / `GPU batch profile` line is emitted
+- [x] **DONE (uncommitted) — `--moe-collect-stats` publishes only at an idle boundary, so no
+      soak can report an expert-cache hit rate.**
+      Fix: `OffloadMoeCache.decode_stat_totals()` returns the same accumulators as raw
+      cumulative INTS (a lifetime ratio cannot be differenced back into a window's hit
+      rate), and `note_extend_gate()` counts every `use_cached_extend` decision at the
+      `layers/moe.py:_prefill_routed` call site — two host ints, no device work, so they
+      publish with or without the flag. `counters.build_moe_counters` renders both under
+      `/v1/stats.scheduler.moe` (`extend_cache` always, `decode` only under
+      `--moe-collect-stats`, since reading it costs a few `.item()` syncs), the scheduler
+      passes `engine.moe_offload_cache` into `build_scheduler_counters`, and `analyze.py`
+      prints both blocks. `run_when_idle`'s log lines are untouched. Tests:
+      `tests/scheduler/test_scheduler_counters.py` (5 new),
+      `tests/moe/test_extend_cache.py` (the gate counter survives `reset_stats`).
+      Original ticket: Every `MoE decode miss stats` / `GPU batch profile` line is emitted
       from `Scheduler.run_when_idle` (`scheduler.py:346-408`), and `Scheduler is idle` appeared
       **0 times in 41 minutes** at c=16 — the flag was on for the whole `ca7e74b` soak and returned
       nothing. `decode_miss_stats()` is already a dict of ints; hang it off `/v1/stats` next to
@@ -63,8 +75,35 @@ routes, 9 invariant warnings ticketed below). `fork/main` (`62f5a66`) is behind,
       Evidence: `N35decode16_2026-09-05.md` §0/§2/§7.2–7.3.
 
 ### Scheduler / server tickets
-- [ ] **9 finishability-invariant warnings in the `ca7e74b` soak (BLOCKER for an unqualified
-      PASS).** 18:38:30–18:38:49 of the passthrough phase, 9 of 702 checks: two in-flight chunked
+- [x] **DONE (uncommitted) — 9 finishability-invariant warnings in the `ca7e74b` soak.**
+      Root cause confirmed, and it is the hypothesis below: `Scheduler._restore_cold_session`
+      is the one thing that spends pool pages BETWEEN two prefill passes — it runs from
+      `_process_one_msg` (before `add_one_req`) and from `_reclaim_for_blocked_prefill`,
+      neither an admission gate — and it ends with the restored prefix LOCKED. That takes
+      those tokens out of `available_size` whether it allocated pages for them or merely
+      re-protected a prefix the tree still held as evictable, while `owed` does not move.
+      Reproduced in `benchmarks/scheduler_replay.py`: the new `switchyard-restore` profile
+      models the missing half of the session cycle (a reclaim CHECKPOINTS before it
+      unlocks; the session's next turn restores). Pre-fix it scores **43 violations at
+      seed 7, short by 84,234 tokens** — one restore of a 127,204-token prefix of which
+      121,865 tokens were still counted in `available_size`.
+      Fix: `CacheManager.session_restore_footprint()` (what the restore takes out of
+      `available_size`, verified equal to the measured drop) charged against
+      `available_size - PrefillManager.finishability_reservation()` (the exact left-hand
+      side of `_check_finishability`), and the restore is DEFERRED with its checkpoint
+      intact when it does not fit — counted as `session_spill.restores_deferred`. Cannot
+      deadlock: reuse is an optimization, so a deferred session re-prefills through the
+      normal gated path, `_reclaim_for_blocked_prefill` retries after the next release, and
+      the reservation it is charged against drains by a chunk per pass.
+      Post-fix: 0 violations and `deadlock` False on all of seeds {1,3,5,7,11,13,17,23},
+      seed 7 prefilled tokens +10.8% and error rate 0.3510 → 0.3391, with 12 restores and 2
+      deferrals. `switchyard-restore` is now the 5th `--gate` case (floors ~5% under the
+      measurement, plus `session_restores >= 8` so the profile cannot pass by doing
+      nothing); the four pre-existing profiles are bit-identical. Tests:
+      `tests/scheduler/test_prefill_finishability.py` (4 new). Docs: `docs/cpu-checks.md`.
+      `FREETOKEN_SCHEDULER_INVARIANT=raise` is now safe to soak — but soak it before
+      trusting that.
+      Original ticket: 18:38:30–18:38:49 of the passthrough phase, 9 of 702 checks: two in-flight chunked
       prefills over-promise the pool by a **constant 1,401 tokens** (0.5 % of 262,144) while both
       `owed` and `available_size` fall by one 8,192-token chunk per pass. It resolved itself —
       queue drained 14 → 0, no error, no stall, no fatal, graceful shutdown in 2 s. Leading
@@ -82,7 +121,27 @@ routes, 9 invariant warnings ticketed below). `fork/main` (`62f5a66`) is behind,
       passthrough) over the `ca7e74b` soak, plus 500 `refusals`. §U5 could not prove the cap ever
       bound; `78f29d3` now proves it does. Goodput went *up* in the same run, so this is evidence
       for the §U8-ticket-9 reservation arithmetic, not a demonstrated cost. soak §W3/§W9.
-- [ ] **The `client_disconnect` abort counter stays 0 through a probe that demonstrably aborted.**
+- [x] **DONE (uncommitted) — the `client_disconnect` abort counter stays 0 through a probe
+      that demonstrably aborted.**
+      Root cause: `FrontendManager.abort_user` opens with a 0.1 s settling sleep and the
+      NON-streaming endpoints (`openai_api.py:456/469/871`, `anthropic_api.py:165`,
+      `responses_api.py:208` — and the §W5 probe was `"stream": false`) *await* it from
+      inside their own `except asyncio.CancelledError` handler. Any cancellation of the
+      request task during that window discards the coroutine before `stats.on_abort` and
+      before the `AbortMsg` is sent, so the disconnect is invisible on `/v1/stats` **and**
+      the request keeps its pending entry, table slot and forwarded KV — the leak the path
+      exists to close. The streaming path was never exposed: `spawn_abort` runs it as its
+      own task. Reproduced with the fake-client fixture (0 aborts, 0 AbortMsgs).
+      Fix: `abort_user` now dispatches `_dispatch_abort` as a tracked task and awaits it
+      through `asyncio.shield`, so the delivery completes even when the caller is
+      cancelled. No call-site or ordering change. Tests: 5 new in
+      `tests/server/test_disconnect_abort.py`, including the cancellation case and that
+      `explicit` (prepare-stop drain) stays distinguishable from `client_disconnect`.
+      Caveat worth one soak line: this is the only mechanism in the tree that produces a
+      0 counter after an abort, but §W5 also saw `active` return to 0, which needs the
+      AbortMsg to have been delivered — so re-run the probe and read
+      `stats_after_probe.json` directly rather than a phase snapshot.
+      Original ticket:
       `78f29d3` publishes `requests.aborts`, and the §W5 disconnect probe took `active` 0 → 1 → 0
       in 2 s while `client_disconnect` never left 0 — the counter exists but the disconnect path
       does not increment it. Half of §U8 ticket 12. soak §W5.

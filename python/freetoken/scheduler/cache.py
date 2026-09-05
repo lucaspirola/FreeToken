@@ -605,6 +605,34 @@ class CacheManager:
             len(self.free_slots) + max(0, other_evictable),
         )
 
+    def session_restore_footprint(self, token_ids: torch.Tensor) -> int:
+        """Tokens a restore of ``token_ids`` will take OUT of :attr:`available_size`.
+
+        A restore ends with the whole prefix LOCKED, so it costs the pool everything in
+        that prefix ``available_size`` currently counts: the pages it must allocate for the
+        missing tail, plus the resident-but-evictable part it is about to protect. Pages
+        another handle already locks sit outside ``available_size`` already and cost
+        nothing -- which is why this is not simply ``len(token_ids)``.
+
+        Distinct from :meth:`hybrid_session_restore_geometry`, which answers the *physical*
+        question (can the committed pool back this restore, or must it grow first). This
+        answers the *budget* question, and it is the figure
+        ``PrefillManager.finishability_reservation`` has to be compared against.
+        """
+        walk = getattr(self.prefix_cache, "_walk", None)
+        if walk is None:
+            walk = getattr(self.prefix_cache, "_tree_walk", None)
+        if walk is None:  # a cache with no radix tree (naive): nothing is ever resident
+            return len(token_ids)
+        node, resident_len = walk(token_ids)
+        evictable = 0
+        cur = node
+        while not cur.is_root():
+            if cur.ref_count == 0:
+                evictable += cur.length
+            cur = cur.parent
+        return max(0, len(token_ids) - resident_len) + evictable
+
     def _free_swa(self, indices: torch.Tensor) -> None:
         """Free the swa-pool slots backing ``indices`` (full-pool slots). Idempotent over the
         0 sentinel, so safe to call on any slots being returned to free_slots."""

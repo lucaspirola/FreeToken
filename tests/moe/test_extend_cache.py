@@ -295,3 +295,18 @@ def test_above_threshold_still_streams_the_full_layer():
     # The overlap double buffer owns slots [0, 2E) and position == expert id there;
     # ensure_experts never ran, so no expert of layer 0 has a slot assigned.
     assert int((cache.slot_for_id[0] >= 0).sum()) == 0
+
+def test_the_gate_decision_is_counted_and_survives_a_rebuild():
+    """soak §W7: the gate's engagement could only be inferred from the batch log, because
+    it had no counter. ``MoE._prefill_routed`` now records every decision, and the count
+    rides ``/v1/stats.scheduler.moe.extend_cache`` -- which is cumulative, so
+    ``reset_stats`` (a cache rebuild or a pageable retune) must not walk it back."""
+    cache = _cache(extend_cache_tokens=64)
+    assert (cache.extend_cache_hits, cache.extend_cache_misses) == (0, 0)
+
+    for tokens in (8, 8, 4_096):
+        cache.note_extend_gate(cache.use_cached_extend(0, tokens))
+    assert (cache.extend_cache_hits, cache.extend_cache_misses) == (2, 1)
+
+    cache.reset_stats()
+    assert (cache.extend_cache_hits, cache.extend_cache_misses) == (2, 1)

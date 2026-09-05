@@ -266,3 +266,112 @@ def test_the_debug_assertion_stays_quiet_on_a_healthy_set(monkeypatch):
             break
         _forward(cm, batch)
     assert not pm.pending_list
+
+# --------------------------------------------------------------------------- #
+# A cold session restore is the one thing that spends the pool between two passes
+# --------------------------------------------------------------------------- #
+# Soak §W6: nine ``finishability invariant`` warnings in the passthrough tail of the
+# ca7e74b run, a CONSTANT 1,401-token shortfall over nine passes while both sides fell by
+# one 8,192-token chunk each -- the pool was over-promised exactly once and then tracked
+# the admitted set in lockstep. The two seconds before the first warning hold four
+# ``Restored cold session`` lines, one of 79,104 tokens.
+#
+# The mechanism: ``Scheduler._restore_cold_session`` runs from the message path (before
+# ``add_one_req``) and from ``_reclaim_for_blocked_prefill`` -- both BETWEEN two prefill
+# passes, neither an admission gate. It ends with the restored prefix LOCKED, which takes
+# those tokens out of ``available_size`` whether it allocated pages for them or merely
+# re-protected an evictable prefix the tree still held. ``owed`` does not move, so the
+# proof the gate made on the previous pass is quietly invalidated.
+
+
+def _install_evictable_prefix(cm, ids):
+    """An unlocked prefix in the radix tree: what a spilled session's KV looks like from
+    the pool's side -- still resident, evictable, and therefore counted in
+    ``available_size`` as capacity the admission gate is free to sell."""
+    pages = cm._allocate(len(ids))
+    cached_len, _handle = cm.prefix_cache.insert_prefix(ids, pages)
+    cm._free(pages[:cached_len])
+
+
+def test_finishability_reservation_is_the_invariant_it_is_named_after():
+    """The exported figure has to equal the check's own left-hand side, or charging
+    anything against it proves nothing."""
+    cm, _tm, dm, pm = _build(num_pages=256)
+    first = _pending(uid=1, first_token=0, length=96, max_tokens=8)
+    pm.pending_list = [first]
+    _forward(cm, pm.schedule_next_batch(32))
+    assert first.chunked_req is not None
+    assert pm.finishability_reservation() == (
+        pm._standing_reservation() + dm.inflight_tokens
+    )
+    assert pm.finishability_reservation() == _owed(pm)
+
+
+def test_session_restore_footprint_is_exactly_what_the_restore_costs_the_pool():
+    """``available_size`` counts ``evictable_size``, and locking moves those tokens into
+    ``protected_size`` -- so re-protecting a resident prefix costs the pool every bit as
+    much as allocating one, which is how a restore can over-promise the pool without
+    allocating a single new page."""
+    cm, _tm, _dm, _pm = _build(num_pages=256)
+    ids = torch.arange(500, 564, dtype=torch.int32)
+    _install_evictable_prefix(cm, ids)
+
+    predicted = cm.session_restore_footprint(ids)
+    before = cm.available_size
+    cm.retain_prefix(ids, len(ids))
+    assert predicted == before - cm.available_size == len(ids)
+
+    # Already protected: a second lock costs nothing, and the estimate has to say so.
+    assert cm.session_restore_footprint(ids) == 0
+
+
+def test_a_restore_the_pool_cannot_afford_is_what_breaks_the_invariant():
+    """The §W6 sequence, end to end.
+
+    A spilled session's prefix sits evictable in the tree, so the admission gate counts it
+    and admits a chunked prefill against it. Restoring it then locks those same tokens --
+    ``owed`` unchanged, ``available_size`` down by the whole prefix -- and the admitted set
+    is no longer finishable. The charge that prevents it is the one the scheduler now
+    makes: footprint against ``available_size - finishability_reservation()``.
+    """
+    cm, _tm, _dm, pm = _build(num_pages=256)
+    spilled = torch.arange(500, 564, dtype=torch.int32)
+    _install_evictable_prefix(cm, spilled)
+
+    # 200 + 8 fits the 256-token pool at the instant it is admitted, because the spilled
+    # prefix is evictable and ``available_size`` counts it. 200 + 8 + 64 does not.
+    admitted = _pending(uid=1, first_token=0, length=200, max_tokens=8)
+    pm.pending_list = [admitted]
+    _forward(cm, pm.schedule_next_batch(32))
+    assert admitted.chunked_req is not None, "the prompt must still be mid-prefill"
+    assert _owed(pm) <= cm.available_size, "the gate proved this set finishable"
+
+    reserved = pm.finishability_reservation()
+    footprint = cm.session_restore_footprint(spilled)
+    # This is the scheduler's refusal condition, evaluated on the state that produced §W6.
+    assert footprint > cm.available_size - reserved
+
+    # Do it anyway -- the pre-fix behaviour -- and the proof is gone, by exactly the amount
+    # the refusal condition was short by.
+    shortfall = footprint - (cm.available_size - reserved)
+    cm.retain_prefix(spilled, len(spilled))
+    assert _owed(pm) - cm.available_size == shortfall > 0
+
+
+def test_a_restore_that_fits_under_the_reservation_keeps_the_invariant():
+    """The other half: the charge must not refuse a restore the pool can actually back,
+    or session reuse is paid for in recompute on every busy server."""
+    cm, _tm, _dm, pm = _build(num_pages=1024)
+    spilled = torch.arange(500, 564, dtype=torch.int32)
+    _install_evictable_prefix(cm, spilled)
+
+    admitted = _pending(uid=1, first_token=0, length=128, max_tokens=8)
+    pm.pending_list = [admitted]
+    _forward(cm, pm.schedule_next_batch(32))
+
+    reserved = pm.finishability_reservation()
+    footprint = cm.session_restore_footprint(spilled)
+    assert footprint <= cm.available_size - reserved, "a roomy pool must not refuse"
+
+    cm.retain_prefix(spilled, len(spilled))
+    assert _owed(pm) <= cm.available_size

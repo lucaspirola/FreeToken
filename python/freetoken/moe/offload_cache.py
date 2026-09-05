@@ -414,6 +414,13 @@ class OffloadMoeCache:
         self._batch_memcpy = None
         self.prefill_hit_rows = 0
         self.prefill_total_rows = 0
+        # Extend-cache gate decisions, counted at the ``layers/moe.py`` call site (see
+        # ``note_extend_gate``). Two host ints -- no device work, no sync -- so unlike the
+        # ``stat_*`` decode tensors these are always on, not gated behind
+        # ``--moe-collect-stats``. Deliberately NOT cleared by ``reset_stats``: they are
+        # published cumulatively on ``/v1/stats``, and a rebuild must not walk them back.
+        self.extend_cache_hits = 0
+        self.extend_cache_misses = 0
 
     def _alloc_device_bank_cache(
         self, shape: tuple[int, ...], dtype: torch.dtype
@@ -998,6 +1005,54 @@ class OffloadMoeCache:
             and not self.is_cpu_layer(layer_id)
             and not self.is_unpinned_layer(layer_id)
         )
+
+    def note_extend_gate(self, cached: bool) -> None:
+        """Record one extend forward's routing decision at the gate.
+
+        Called once per layer per extend forward from ``MoE._prefill_routed``, which is the
+        only production caller of :meth:`use_cached_extend` -- the probes and tests that
+        call it with no ``num_routed`` deliberately do not count.
+
+        Soak §W7 had to *infer* this gate's engagement from the batch log (prefill passes
+        whose ``#new-token`` fell under ``--moe-extend-cache-tokens``: 76 of 1,522, 5.0%).
+        Two ints on the host path make it a measurement instead.
+        """
+        if cached:
+            self.extend_cache_hits += 1
+        else:
+            self.extend_cache_misses += 1
+
+    def decode_stat_totals(self) -> dict:
+        """Raw cumulative decode expert-cache counters, as ints.
+
+        :meth:`decode_miss_stats` is the idle-log view: it divides by ``layer_calls`` and
+        returns ratios, which a cumulative wire document cannot subtract. These are the
+        same quantities *before* the division, so two ``/v1/stats`` snapshots difference
+        into the hit rate over the window between them -- the number soak §W7 wanted and
+        could not get, because every existing emission sat behind ``run_when_idle`` and a
+        saturated server never reaches an idle boundary (``Scheduler is idle`` appeared 0
+        times in 41 minutes at c=16).
+
+        Costs the same handful of ``.item()`` reads the idle path already pays, and the
+        caller runs it at most once every couple of seconds.
+        """
+        self._read_pageable_task_stats()
+        if self.decode_target == "hybrid":
+            active = int(self.stat_active.item())
+            missing = int(self.stat_missing.item())
+            calls = int(self.stat_calls.item())
+        else:
+            active, missing, calls = (int(x) for x in self.lru_stats.sum(0))
+        return {
+            "layer_calls": calls,
+            "active": active,
+            "missing": missing,
+            "fetched": int(self.stat_fetched.item()),
+            "prefill_hit_rows": int(self.prefill_hit_rows),
+            "prefill_rows": int(self.prefill_total_rows),
+            "pageable_stage_calls": int(self.pageable_stage_calls),
+            "pageable_rows": int(self.pageable_stage_rows),
+        }
 
     def retune_pageable_layers(self, target: frozenset[int]) -> None:
         """Swap equal-count pinned/pageable layer banks at an idle boundary."""

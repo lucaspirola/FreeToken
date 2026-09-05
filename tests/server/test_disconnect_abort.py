@@ -362,3 +362,117 @@ def test_probe_failure_counts_as_a_disconnect():
 
     asyncio.run(main())
     assert len(_aborts(state)) == 1
+
+# --------------------------------------------------------------------------- #
+# The abort has to be COUNTED, and the count has to survive a cancelled handler
+# --------------------------------------------------------------------------- #
+# Soak §W5: the disconnect probe took ``/v1/stats.requests.active`` 0 -> 1 -> 0 in two
+# seconds on a ~60 K-token request dropped mid-prefill, and
+# ``requests.aborts.client_disconnect`` never left 0. The probe was non-streaming
+# (``"stream": false``), and that path *awaits* ``abort_user`` from inside its own
+# ``except asyncio.CancelledError`` handler -- where the first statement was a 0.1 s
+# sleep. Anything that cancels the request task during that window discarded the whole
+# coroutine, taking both the counter and the AbortMsg with it, so the disconnect was
+# invisible on /v1/stats AND the request kept its slot and its forwarded KV pages.
+#
+# ``abort_user`` now dispatches a shielded task, which is what the streaming path has
+# always had from ``spawn_abort``.
+
+
+def _hanging_manager() -> FrontendManager:
+    """A real FrontendManager (real abort_user, real StatsTracker) whose engine accepts a
+    submission and then never answers -- a request parked in prefill."""
+    state = _manager()
+
+    async def wait_for_ack(uid: int):
+        await asyncio.Event().wait()
+        yield None  # pragma: no cover -- unreachable, keeps this an async generator
+
+    state.wait_for_ack = wait_for_ack
+    return state
+
+
+def test_stream_disconnect_is_counted_once():
+    state = _manager()
+
+    async def main():
+        uid = state.new_user()
+        forever = asyncio.Event()
+
+        async def prefilling():
+            await forever.wait()
+            yield b"never"
+
+        with pytest.raises(asyncio.CancelledError):
+            await _collect(state.stream_with_cancellation(prefilling(), FakeRequest(0), uid))
+        await _drain_aborts(state)
+
+    asyncio.run(main())
+    assert state.stats.aborts["client_disconnect"] == 1
+    assert state.stats.aborts["explicit"] == 0 and state.stats.aborts["error"] == 0
+
+
+def test_nonstream_disconnect_is_counted_once():
+    """The path the soak probe took: /v1/chat/completions with stream=false."""
+    state = _hanging_manager()
+
+    with pytest.raises(asyncio.CancelledError):
+        _run_handler(handle_chat_completion(_chat_request(), FakeRequest(0), state, {}))
+
+    assert state.stats.aborts["client_disconnect"] == 1
+    assert len(_aborts(state)) == 1
+
+
+def test_nonstream_disconnect_is_counted_even_if_the_handler_is_cancelled():
+    """The §W5 regression itself.
+
+    The ASGI server tears the request task down while the abort is in flight. Before the
+    shield, the 0.1 s settling sleep swallowed the whole abort: no counter, no AbortMsg,
+    and a request left holding its KV for the life of the server.
+    """
+    state = _hanging_manager()
+
+    async def main():
+        task = asyncio.ensure_future(
+            handle_chat_completion(_chat_request(), FakeRequest(0), state, {})
+        )
+        await asyncio.sleep(0.05)   # inside the settling sleep
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await _drain_aborts(state)
+
+    asyncio.run(main())
+    assert state.stats.aborts["client_disconnect"] == 1
+    assert len(_aborts(state)) == 1, "the AbortMsg must reach the scheduler too"
+
+
+def test_a_completed_request_is_not_counted_as_a_disconnect():
+    """No regression: a connected client's request leaves every abort counter at 0."""
+    state = HangingState(
+        replies=[
+            UserReply(
+                uid=1,
+                incremental_output="hi there",
+                finished=True,
+                finish_reason="stop",
+                prompt_tokens_delta=3,
+                completion_tokens_delta=2,
+            )
+        ]
+    )
+    _run_handler(handle_chat_completion(_chat_request(), FakeRequest(None), state, {}))
+    assert state.aborts == []
+
+
+def test_the_prepare_stop_drain_is_counted_under_its_own_reason():
+    """``explicit`` and ``client_disconnect`` must stay distinguishable on /v1/stats --
+    a maintenance drain is not a client going away."""
+    state = _hanging_manager()
+
+    async def main():
+        uid = state.new_user()
+        await state.abort_user(uid, reason="explicit")
+
+    asyncio.run(main())
+    assert state.stats.aborts == {"client_disconnect": 0, "explicit": 1, "error": 0}

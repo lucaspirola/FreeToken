@@ -1549,6 +1549,43 @@ class Scheduler(SchedulerIOMixin):
             return False
 
         cm = self.cache_manager
+        # A restore is the one thing that spends pool pages without passing an admission
+        # gate: it runs from the message path and from _reclaim_for_blocked_prefill, both
+        # of which sit BETWEEN two prefill passes. The gate proved the prompts already
+        # mid-prefill finishable against an ``available_size`` this restore is about to
+        # shrink, and nothing re-checks that proof -- so charge the restore against the
+        # same budget and defer it when it does not fit.
+        #
+        # Deferring is always safe and can never deadlock: reuse is an optimization, so a
+        # session whose checkpoint is not restored simply re-prefills its prefix through
+        # the normal, fully gated admission path, and the checkpoint is kept for the retry
+        # that _reclaim_for_blocked_prefill runs after the next release -- the same retry
+        # that already covers the "pool still owned by the resident session" failure below.
+        # It also cannot starve: the reservation it is charged against is the unforwarded
+        # tail of prompts that are being forwarded, so it drains by a chunk per pass.
+        #
+        # Soak §W6: nine invariant warnings, a constant 1,401-token shortfall, two seconds
+        # after four cold restores (one of 79,104 tokens).
+        # Duck-typed like every other cross-component read in this file: the low-level
+        # session tests drive this with scheduler-shaped stubs, and a stub that cannot say
+        # what the pool has promised is treated as promising nothing.
+        reserve = getattr(self.prefill_manager, "finishability_reservation", None)
+        measure = getattr(cm, "session_restore_footprint", None)
+        if reserve is not None and measure is not None:
+            reserved = reserve()
+            footprint = measure(record.token_ids[:length])
+            if footprint > cm.available_size - reserved:
+                store.counters.restores_deferred += 1
+                logger.debug_rank0(
+                    "Deferred cold restore of session %s: %d tokens needed, %d obtainable "
+                    "(%d available less %d already promised to admitted prefills)",
+                    session_id,
+                    footprint,
+                    cm.available_size - reserved,
+                    cm.available_size,
+                    reserved,
+                )
+                return False
         try:
             missing, allocatable = cm.hybrid_session_restore_geometry(
                 record.token_ids[:length]
@@ -2341,6 +2378,12 @@ class Scheduler(SchedulerIOMixin):
             self.prefill_manager,
             getattr(self, "_spec", None),
             getattr(self, "_session_spill_store", None),
+            # The expert cache publishes here rather than only from run_when_idle, which a
+            # saturated server never reaches (soak §W7). The extend-cache gate counters are
+            # free; the decode accumulators cost a few .item() reads and only exist under
+            # --moe-collect-stats, so they ride the same flag.
+            moe=getattr(getattr(self, "engine", None), "moe_offload_cache", None),
+            moe_collect_stats=bool(getattr(config, "moe_collect_stats", False)),
         )
         if doc == self._counters_published:
             return  # nothing moved since the last snapshot; do not spend a message on it

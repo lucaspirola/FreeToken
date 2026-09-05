@@ -229,10 +229,42 @@ def report_stats(path: str, previous: tuple[str, dict] | None) -> dict:
                   f"/failed {spill.get('spills_failed', 0)}  "
                   f"restores={spill.get('restores', 0)}"
                   f"/failed {spill.get('restores_failed', 0)}"
-                  f"/diverged {spill.get('restores_diverged', 0)}  "
+                  f"/diverged {spill.get('restores_diverged', 0)}"
+                  f"/deferred {spill.get('restores_deferred', 0)}  "
                   f"prefetches={spill.get('prefetches', 0)}"
                   f"/failed {spill.get('prefetches_failed', 0)}"
                   f"/collected {spill.get('prefetches_collected', 0)}")
+        # The expert cache. Everything here used to be reachable only from
+        # ``Scheduler.run_when_idle``, which a c=16 soak never reaches -- so
+        # --moe-collect-stats ran for 41 minutes and reported nothing (§W7). The counters
+        # are cumulative ints, so the interesting figures are the DELTAS between two
+        # snapshots, which the flat diff above already prints under `scheduler.moe.*`; the
+        # rates below are lifetime averages, useful only as a sanity check.
+        moe = sched.get("moe")
+        if moe is None:
+            print("moe cache: no expert-offload cache on this engine")
+        else:
+            gate = moe.get("extend_cache") or {}
+            hits, misses = gate.get("hits", 0), gate.get("misses", 0)
+            total = hits + misses
+            print(f"moe extend-cache gate: hits={hits} misses={misses} "
+                  f"({(100.0 * hits / total) if total else 0.0:.1f}% of {total} routed "
+                  f"extend layer-forwards, threshold "
+                  f"{gate.get('threshold_tokens', 0)} tokens)")
+            dec = moe.get("decode")
+            if dec is None:
+                print("moe decode stats: off (--moe-collect-stats)")
+            else:
+                active, missing = dec.get("active", 0), dec.get("missing", 0)
+                rows, hit_rows = dec.get("prefill_rows", 0), dec.get("prefill_hit_rows", 0)
+                print(f"moe decode expert cache: layer_calls={dec.get('layer_calls', 0)} "
+                      f"active={active} missing={missing} "
+                      f"hit rate={(100.0 * (active - missing) / active) if active else 0.0:.1f}% "
+                      f"fetched={dec.get('fetched', 0)}")
+                print(f"  prefill hit-D2D rows={hit_rows}/{rows} "
+                      f"({(100.0 * hit_rows / rows) if rows else 0.0:.1f}%)  "
+                      f"pageable stage calls={dec.get('pageable_stage_calls', 0)} "
+                      f"rows={dec.get('pageable_rows', 0)}")
 
     flat = _flat(doc)
     if previous is not None:

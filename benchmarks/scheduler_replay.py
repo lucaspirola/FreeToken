@@ -157,6 +157,24 @@ SCENARIOS_SWITCHYARD = [
 SCENARIOS_DEADLOCK = [
     ("chunked-mid", 40_000, 100),
 ]
+# "switchyard-restore" profile: the soak §W6 geometry -- the same scenario mix and session
+# residency as "switchyard-stage", with the half of the session cycle none of the profiles
+# above modelled: a reclaimed lease is CHECKPOINTED (``_release_soft_session_handle`` spills
+# before it unlocks), and the session's next turn RESTORES it.
+#
+# That closes a hole in the accounting, not just in the traffic. While a prefix sits on
+# disk it costs the pool nothing, so ``available_size`` counts its tokens as free and the
+# admission gate sells them to chunked prefills; ``_restore_cold_session`` then takes them
+# straight back -- allocated and locked, outside every admission gate, and AFTER that gate
+# proved the admitted set finishable against an ``available_size`` the restore is about to
+# shrink. Nothing re-checks the proof, so the invariant goes negative by exactly the
+# restore's footprint and then tracks the admitted set in lockstep as it drains.
+#
+# Live (§W6): nine ``finishability invariant`` warnings in a 19 s window of the ca7e74b
+# passthrough tail, a CONSTANT 1,401-token shortfall while owed and available fell by one
+# 8,192-token chunk per pass -- the pool over-promised exactly once. The two seconds before
+# the first warning hold four ``Restored cold session`` lines, one of 79,104 tokens.
+SCENARIOS_RESTORE = SCENARIOS_SWITCHYARD
 # "ornith-ada" profile: the growable-GGUF SINGLE-LANE geometry, which none of the profiles
 # above reach. ``_resolve_max_prefill_seqs`` returns 1 -- and therefore
 # ``PrefillManager.max_batch_seqs = 1`` -- only for growable quantized-GGUF MoE
@@ -197,6 +215,12 @@ PROFILE_VERSION = 1
 
 # Per-profile overrides of the module-level Switchyard constants. Absent keys keep them.
 PROFILE_KNOBS = {
+    # Model the restore half of the session cycle (see SCENARIOS_RESTORE). Off everywhere
+    # else so the four profiles whose floors were measured against live-soak evidence stay
+    # bit-identical: a reclaim still records its checkpoint, but nothing ever reads it.
+    "switchyard-restore": {
+        "restore_spilled": True,
+    },
     "ornith-ada": {
         "agents": 4,                         # --max-running-requests on the Ada runs
         "prefill_budget": 4_096,             # Engine._resolve_auto_prefill_chunk on sm_89
@@ -281,7 +305,10 @@ def build_pool(pool_pages: int = POOL, interleave: bool = True,
             "interleave_chunks": hasattr(pm, "interleave_chunks"),
             "max_batch_seqs": hasattr(pm, "max_batch_seqs"),
             "small_prompt_group_tokens": hasattr(pm, "small_prompt_group_tokens"),
-            "committed_pages_required": hasattr(cm, "committed_pages_required")}
+            "committed_pages_required": hasattr(cm, "committed_pages_required"),
+            # Does this tree charge a cold session restore against the finishability
+            # reservation the admission gate proved? (soak §W6; absent before the fix)
+            "restore_charged": hasattr(PrefillManager, "finishability_reservation")}
     if caps["interleave_chunks"]:
         pm.interleave_chunks = interleave   # growable multi-agent mode, as the soak ran
     # The GGUF lane cap and its short-prompt escape hatch; both absent on older trees, and
@@ -309,6 +336,7 @@ class Traffic:
         table = {"pressure": SCENARIOS_PRESSURE, "fanout": SCENARIOS_FANOUT,
                  "switchyard-stage": SCENARIOS_SWITCHYARD,
                  "switchyard-deadlock": SCENARIOS_DEADLOCK,
+                 "switchyard-restore": SCENARIOS_RESTORE,
                  "ornith-ada": SCENARIOS_ORNITH}.get(profile, SCENARIOS)
         spec = TRACE_PROFILE if profile == "trace" else None
         if spec is not None:
@@ -424,15 +452,21 @@ class _Lease:
     ``handle`` is the locked radix handle ``retain_prefix`` returned: while it is held the
     session's prefix is *protected*, so it counts against neither ``free_slots`` nor
     ``evictable_size`` and is invisible to ``available_size`` and to eviction.
+
+    ``spill`` is the other half of the lifecycle: ``_release_soft_session_handle``
+    checkpoints the prefix (``_spill_soft_session``) *before* it unlocks, so a reclaimed
+    lease is a debt the pool owes back the moment the session's next turn arrives, not a
+    loss. It holds the checkpoint's token count; 0 means nothing is on disk.
     """
 
-    __slots__ = ("handle", "expires_at", "active_uid", "last_used_at")
+    __slots__ = ("handle", "expires_at", "active_uid", "last_used_at", "spill")
 
     def __init__(self):
         self.handle = None
         self.expires_at = None
         self.active_uid = None
         self.last_used_at = 0.0
+        self.spill = 0
 
 
 def install_match_counter(cm):
@@ -623,6 +657,15 @@ def run(ticks: int, seed: int, verbose: bool = False, profile: str = "stage",
     stall_total = 0.0
     reclaims = 0
     expiries = 0
+    # Session checkpoint traffic (``/v1/stats.scheduler.session_spill``): every reclaim
+    # spills, and ``restore_spilled`` profiles take the tokens back on the session's next
+    # turn. ``restores_deferred`` is the fix under test refusing to do so.
+    spills = 0
+    restores = 0
+    restores_deferred = 0
+    restores_failed = 0
+    restored_tokens = 0
+    restore_spilled = bool(knobs.get("restore_spilled", False))
     pool_tokens = pool_pages * PAGE_SIZE
     # ---- finishability invariant of the ADMITTED SET (soak report T5) ----
     #
@@ -684,9 +727,104 @@ def run(ticks: int, seed: int, verbose: bool = False, profile: str = "stage",
             cm.unlock(old)
 
     def release_lease(lease):
+        """``Scheduler._release_soft_session_handle``: CHECKPOINT, then unlock.
+
+        The real reclaim never simply drops a lease -- ``_spill_soft_session`` writes the
+        prefix to the spill store first, so the tokens it hands back to the pool are a debt
+        the session reclaims the moment its next turn arrives. Recording that debt is what
+        lets ``restore_session`` model the other half of the cycle; profiles without
+        ``restore_spilled`` only ever read the count.
+        """
+        nonlocal spills
+        if lease.handle is not None:
+            lease.spill = int(lease.handle.cached_len)
+            spills += 1
         cm.unlock(lease.handle)
         lease.handle = None
         lease.expires_at = None
+
+    def restore_session(lease, ids):
+        """``Scheduler._restore_cold_session`` -> ``CacheManager.restore_hybrid_session_prefix``.
+
+        The half of the session cycle the replay was missing, and the mechanism behind the
+        nine ``finishability invariant`` warnings of soak §W6.
+
+        While a prefix sits on disk it costs the pool nothing: ``available_size`` counts its
+        tokens as free or evictable and the admission gate sells them to chunked prefills.
+        Materialising it takes them straight back -- ALLOCATED AND LOCKED, from the message
+        path (``scheduler.py``'s ``_process_one_msg``, before ``add_one_req``) and from
+        ``_reclaim_for_blocked_prefill``, neither of which is an admission gate. Nothing
+        re-checks the proof the gate already made, so ``owed`` is unchanged while
+        ``available_size`` drops by the restore's whole footprint, and the invariant goes
+        negative by exactly that much -- once -- and then tracks the admitted set in
+        lockstep as it drains. Live: a constant 1,401-token shortfall over nine passes,
+        with four ``Restored cold session`` lines (one of 79,104 tokens) in the two seconds
+        before the first.
+
+        The page arithmetic mirrors ``restore_hybrid_session_prefix``: lock what is already
+        resident so ``_allocate`` cannot evict it, allocate only the missing tail, insert,
+        return whatever the tree had gained meanwhile, then lock the result.
+        """
+        nonlocal restores, restores_deferred, restores_failed, restored_tokens
+        # ``length <= len(ids) - 1``: the final prompt token must still run through prefill.
+        length = min(int(lease.spill), max(0, len(ids) - 1))
+        if length <= 0:
+            lease.spill = 0
+            return
+        tokens = ids[:length]
+        matched = cm.prefix_cache.match_prefix(tokens).cuda_handle
+        resident = int(matched.cached_len)
+        missing = length - resident
+        # What the restore takes out of ``available_size``: the tail it must allocate PLUS
+        # the resident-but-evictable part it is about to lock. Re-locking an evictable
+        # prefix costs the pool exactly as much as allocating it -- ``available_size``
+        # counts ``evictable_size`` and ``lock`` moves those tokens into ``protected_size``
+        # -- which is why a restore can over-promise the pool without allocating a single
+        # new page. Computed by the manager itself, so the replay charges a restore exactly
+        # what ``_restore_cold_session`` charges it.
+        footprint = getattr(cm, "session_restore_footprint", None)
+        cost = footprint(tokens) if footprint is not None else length
+        # THE FIX UNDER TEST. ``PrefillManager.finishability_reservation()`` is the exact
+        # left-hand side of ``_check_finishability``; charging the restore against it is
+        # what stops a restore from retroactively invalidating a finishability the
+        # admission gate already proved. A restore that does not fit is DEFERRED with its
+        # checkpoint intact -- reuse is an optimization, so recomputing the prefix is
+        # always correct, and the next turn (or ``_reclaim_for_blocked_prefill``'s retry
+        # after a release) picks it up once the reservation has drained. The attribute is
+        # absent on trees before the fix, and that is what reproduces the soak's warnings.
+        reserve = getattr(pm, "finishability_reservation", None)
+        if reserve is not None and cost > cm.available_size - reserve():
+            restores_deferred += 1
+            return
+        try:
+            if missing > 0:
+                # ``_restore_cold_session`` grows the committed pool first when free +
+                # evictable cannot cover the restore (Engine.grow_runtime_kv).
+                if caps["committed_pages"]:
+                    allocatable = (len(cm.free_slots)
+                                   + cm.prefix_cache.size_info.evictable_size)
+                    if missing > allocatable:
+                        required = cm.committed_pages + missing - allocatable
+                        new_total = min(pool_pages,
+                                        int(math.ceil(required / GROW_STEP)) * GROW_STEP)
+                        cm.add_committed_pages(new_total)
+                if resident:
+                    cm.lock(matched)          # inc_lock: do not evict what we just matched
+                allocated = cm._allocate(missing)
+                all_pages = (torch.cat((matched.get_matched_indices(), allocated))
+                             if resident else allocated)
+                cached_len, _inserted = cm.prefix_cache.insert_prefix(tokens, all_pages)
+                cm._free(allocated[: max(0, cached_len - resident)])
+                if resident:
+                    cm.unlock(matched)
+            lease.handle = cm.retain_prefix(ids, length)
+        except Exception:  # noqa: BLE001 -- reuse is an optimization, never an admission gate
+            restores_failed += 1
+            return                            # keep the checkpoint; retried on the next turn
+        lease.spill = 0
+        lease.expires_at = None
+        restores += 1
+        restored_tokens += cost
 
     def expire_leases():
         """``Scheduler._expire_sessions``: an IDLE lease past its TTL gives its KV back."""
@@ -834,7 +972,12 @@ def run(ticks: int, seed: int, verbose: bool = False, profile: str = "stage",
                 session_of[uid] = sid
             pm.add_one_req(_Msg(uid, ids, sid))
             if sid is not None:
+                # scheduler.py's order on a UserMsg carrying a session id:
+                # _reclaim_soft_sessions_for_admission (make room), then
+                # _restore_cold_session (take the checkpoint back), then add_one_req.
                 reclaim_for_admission(pm.pending_list[-1], sid)
+                if restore_spilled and lease.handle is None and lease.spill:
+                    restore_session(lease, ids)
 
     growable_decode_steps = 0
     try:
@@ -1084,6 +1227,16 @@ def run(ticks: int, seed: int, verbose: bool = False, profile: str = "stage",
                        if (finished or timed_out) else None),
         "lease_reclaims": reclaims,
         "lease_expiries": expiries,
+        # ---- session checkpoint traffic (soak §W6) ----
+        # ``restores_deferred`` is the fix: a restore charged against the standing
+        # reservation and refused rather than allowed to invalidate it. On a tree without
+        # ``PrefillManager.finishability_reservation`` it is 0 by construction and the
+        # violations show up in ``invariant_violations`` instead.
+        "session_spills": spills,
+        "session_restores": restores,
+        "session_restores_deferred": restores_deferred,
+        "session_restores_failed": restores_failed,
+        "session_restored_tokens": restored_tokens,
         "leases_resident": sum(1 for x in leases.values() if x.handle is not None),
         # ---- wall-clock proxy for a refused pass (soak report S5: O(queue x prompt)) ----
         "match_calls": match_stats["calls"],
@@ -1160,9 +1313,10 @@ def run(ticks: int, seed: int, verbose: bool = False, profile: str = "stage",
 GATE_TICKS = 20_000
 GATE_SEED = 7
 GATE_CASES = [
-    # profile, min prefilled_tokens, min completed, max error_rate (None = not checked)
-    ("stage",            4_773_000, 282, None),
-    ("pressure",         7_826_000,  86, None),
+    # profile, min prefilled_tokens, min completed, max error_rate (None = not checked),
+    # min session restores (None = the profile does not model them)
+    ("stage",            4_773_000, 282, None, None),
+    ("pressure",         7_826_000,  86, None, None),
     # The residency profile is graded on goodput AND on the soak's own acceptance metric.
     # The error ceiling moved 0.376 -> 0.410 with the chunk-share fix, and that is jitter,
     # not a regression: over seeds {1,3,5,7,11,13,17,23} the mean error rate is 0.288
@@ -1171,7 +1325,7 @@ GATE_CASES = [
     # completions rise 263 -> 337 (+28%) on the same eight seeds. The ceiling tracks the
     # seed-7 measurement (+5%) like every other floor here; the SPREAD is what says whether
     # a future move is real, so re-run the sweep before touching this number again.
-    ("switchyard-stage", 2_278_000, 243, 0.410),
+    ("switchyard-stage", 2_278_000, 243, 0.410, None),
     # The deadlock profile is the regression test for soak report T. Its floors come from
     # the shipped tree -- but the checks that matter on it are the two every case now
     # carries, ``deadlock`` and ``invariant_violations``. ea7ed7c beats every throughput
@@ -1180,14 +1334,34 @@ GATE_CASES = [
     # obtain. Seed 7 is this profile's BEST seed for error rate (0.1355 against a
     # 0.136-0.246 spread over the eight seeds above), so the 0.143 ceiling is tight by
     # construction; widen it from a sweep, not from a single failing run.
-    ("switchyard-deadlock", 1_105_000, 176, 0.143),
+    ("switchyard-deadlock", 1_105_000, 176, 0.143, None),
+    # The restore profile is the regression test for soak §W6, and like the deadlock
+    # profile its point is ``invariant_violations``, not its throughput. Measured on this
+    # tree at seed 7 / 20,000 forwards: 2,383,276 tokens, 308 completed, error 0.3391,
+    # 138 spills / 12 restores / 2 deferred, slack_min +169, 0 violations. The floors sit
+    # ~5% under those.
+    #
+    # The A/B that makes it a test: deleting ``PrefillManager.finishability_reservation``
+    # (the tree before the fix) on the SAME replay code takes seed 7 to 43 violations, the
+    # admitted set owing 84,234 tokens more than the pool could obtain -- one restore of a
+    # 127,204-token prefix, of which 121,865 tokens were evictable and therefore still
+    # counted in ``available_size`` when the gate proved the in-flight prefills finishable.
+    # Over the eight seeds {1,3,5,7,11,13,17,23} the fixed tree is 0 violations and
+    # ``deadlock`` False on all eight; the unfixed one violates on seed 7 alone -- which is
+    # why the live soak saw this once in 41 minutes over 642 restores, and why §V's 441
+    # restores produced none.
+    #
+    # ``min_restores`` guards the test itself: a change that stopped the profile spilling
+    # or restoring would otherwise pass it by doing nothing. The eight-seed spread is
+    # 10-27 restores, so the floor sits well under the low end.
+    ("switchyard-restore", 2_264_000, 292, 0.356, 8),
 ]
 
 
 def gate(ticks: int = GATE_TICKS, seed: int = GATE_SEED, verbose: bool = False) -> int:
     """Run the fixed gate cases and report. Returns a process exit code."""
     failures = []
-    for profile, min_tokens, min_completed, max_error in GATE_CASES:
+    for profile, min_tokens, min_completed, max_error, min_restores in GATE_CASES:
         t0 = time.perf_counter()
         out = run(ticks, seed, verbose=verbose, profile=profile)
         elapsed = time.perf_counter() - t0
@@ -1203,6 +1377,14 @@ def gate(ticks: int = GATE_TICKS, seed: int = GATE_SEED, verbose: bool = False) 
         err = out.get("error_rate")
         if max_error is not None and err is not None and err > max_error:
             bad.append(f"error_rate {err} > {max_error}")
+        # Not a floor on the tree -- a floor on the HARNESS. A profile whose whole purpose
+        # is one mechanism has to be shown still exercising it, or it grades nothing.
+        restores = out.get("session_restores")
+        if min_restores is not None and (restores or 0) < min_restores:
+            bad.append(
+                f"session_restores {restores} < {min_restores}: this profile is no longer "
+                f"exercising cold restores, so its invariant check proves nothing"
+            )
         # The two checks that a throughput floor cannot make. Both reverted trees beat this
         # gate's numbers and failed the live soak; these are what they fail.
         if out.get("deadlock"):
@@ -1219,11 +1401,13 @@ def gate(ticks: int = GATE_TICKS, seed: int = GATE_SEED, verbose: bool = False) 
                 f"passes ({out['invariant_violation_frac']:.1%}); the admitted set owed "
                 f"up to {-out['slack_min']:,} tokens more than the pool could obtain"
             )
-        print(f"{'FAIL' if bad else 'ok  '} {profile:<17} "
+        print(f"{'FAIL' if bad else 'ok  '} {profile:<19} "
               f"tokens={tokens:>10,} (min {min_tokens:>9,})  "
               f"completed={completed:>4} (min {min_completed:>4})  "
               f"lanes={out['lanes_mean']}  util={out['util_mean']}  "
               f"err={out.get('error_rate')}  stallUsage={out.get('stall_usage_p50')}  "
+              f"restores={out.get('session_restores')}/"
+              f"{out.get('session_restores_deferred')}def  "
               f"viol={out.get('invariant_violations')}  "
               f"deadlock={out.get('deadlock')}  {elapsed:.1f}s")
         for line in bad:
@@ -1236,7 +1420,8 @@ def gate(ticks: int = GATE_TICKS, seed: int = GATE_SEED, verbose: bool = False) 
         print("\nReproduce a single case with:\n"
               f"  uv run --no-project python benchmarks/scheduler_replay.py --ticks {ticks} "
               f"--seed {seed} --profile "
-              "<stage|pressure|switchyard-stage|switchyard-deadlock> --diagnose")
+              "<stage|pressure|switchyard-stage|switchyard-deadlock|switchyard-restore>"
+              " --diagnose")
         return 1
     print("\nscheduler replay gate passed")
     return 0
@@ -1253,7 +1438,8 @@ if __name__ == "__main__":
     ap.add_argument("--label", default="")
     ap.add_argument("--profile", default="stage",
                     choices=["stage", "pressure", "fanout", "switchyard-stage",
-                             "switchyard-deadlock", "ornith-ada", "trace"])
+                             "switchyard-deadlock", "switchyard-restore", "ornith-ada",
+                             "trace"])
     ap.add_argument("--profile-file", default="",
                     help="a benchmarks/trace_to_profile.py profile: run the traffic shape "
                          "of a captured trace instead of a hand-written scenario mix "
