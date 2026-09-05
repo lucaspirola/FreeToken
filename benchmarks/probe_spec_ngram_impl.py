@@ -71,13 +71,39 @@ def _stats(spec):
         "declined_budget": s.declined_budget,
         "declined_stale_match": s.declined_stale_match,
         "declined_uneconomic": s.declined_uneconomic,
+        "cost_ms": s.cost_ms,
     }
 
 
-def run_arm(llm, spec, ids: list[int], sp, *, on: bool, label: str | None = None) -> dict:
+# Each optimisation of the 2026-09-05 verify-step work, switchable so one model load can
+# measure the shipped path and the new one against the same off/off2 control.
+VARIANTS = {
+    "v0": dict(post_drain=False, fused_commit=False, fast_prep=False),
+    "v1": dict(post_drain=True, fused_commit=True, fast_prep=True),
+    "drain": dict(post_drain=True, fused_commit=False, fast_prep=False),
+    "commit": dict(post_drain=False, fused_commit=True, fast_prep=True),
+}
+# Repeats of v1 under different labels: the copy class's draft rate depends on the token
+# stream, which speculation itself perturbs, so "is this arm reproducible?" needs arms that
+# differ in nothing at all.
+VARIANTS["v1b"] = dict(VARIANTS["v1"])
+VARIANTS["v1c"] = dict(VARIANTS["v1"])
+for _k in (4, 12, 16, 24):
+    VARIANTS[f"k{_k}"] = dict(VARIANTS["v1"])   # draft_len filled in from the CLI in main()
+
+
+def run_arm(llm, spec, ids: list[int], sp, *, on: bool, label: str | None = None,
+            flags: dict | None = None) -> dict:
     from freetoken.scheduler.spec_ngram import SpecStats
 
     llm._spec = spec if on else None
+    if spec is not None:
+        # EVERY tunable, every arm: a variant that names only some of them would otherwise
+        # inherit the previous arm's values (measured the hard way -- a "v0" arm ran at the
+        # preceding arm's --spec-draft-len 16 and reported 15.5 tokens per verify step at
+        # k = 8, which is impossible).
+        for k, v in {**VARIANTS["v1"], **(flags or {})}.items():
+            setattr(spec, k, v)
     if spec is not None:
         spec.stats = SpecStats()
         spec._state = None
@@ -119,6 +145,18 @@ def main() -> None:
     p.add_argument("--max-seq-len", type=int, default=140000)
     p.add_argument("--host-ram-reserve-gb", type=float, default=6.0)
     p.add_argument("--only", nargs="*", default=None)
+    p.add_argument(
+        "--variants", nargs="*", default=["v1"],
+        help=f"speculative arms to run, in order; one of {sorted(VARIANTS)}",
+    )
+    p.add_argument(
+        "--sweep-k", nargs="*", type=int, default=None,
+        help="draft lengths to sweep (one arm each, all on the v1 path)",
+    )
+    p.add_argument(
+        "--sweep-n", nargs="*", type=int, default=None,
+        help="n-gram widths to sweep; crossed with --sweep-k",
+    )
     p.add_argument("--skip-needle", action="store_true")
     args = p.parse_args()
 
@@ -157,10 +195,30 @@ def main() -> None:
     warm = SamplingParams(temperature=0.0, max_tokens=1)
     sp = SamplingParams(temperature=0.0, max_tokens=args.max_tokens)
 
+    # A sweep is a set of v1 arms differing only in (n, k); the decoder reads both off
+    # itself when run_arm resets its per-request state, so one model load covers the grid.
+    # Every named variant carries every tunable, seeded from the CLI, so no arm can inherit
+    # a value from the arm before it.
+    for _v in VARIANTS.values():
+        _v["n"] = args.spec_ngram_n
+        _v["draft_len"] = args.spec_draft_len
+    for _k in (4, 12, 16, 24):
+        VARIANTS[f"k{_k}"]["draft_len"] = _k
+    if args.sweep_k or args.sweep_n:
+        ks = args.sweep_k or [args.spec_draft_len]
+        ns = args.sweep_n or [args.spec_ngram_n]
+        args.variants = []
+        for nn in ns:
+            for k in ks:
+                label = f"n{nn}k{k}"
+                VARIANTS[label] = dict(VARIANTS["v1"], n=nn, draft_len=k)
+                args.variants.append(label)
+
     prompts = build_prompts(repo)
     names = args.only or list(prompts)
     results: dict = {
         "config": {
+            "variants": {k: VARIANTS[k] for k in args.variants},
             "n": args.spec_ngram_n,
             "draft_len": args.spec_draft_len,
             "adaptive": not args.no_spec_adaptive,
@@ -186,12 +244,18 @@ def main() -> None:
         llm.generate([list(ids)], SamplingParams(temperature=0.0, max_tokens=16))
         off = run_arm(llm, spec, ids, params, on=False)
         print(f"  off: {off['tokens']} tok, {off['tok_per_s']} tok/s", flush=True)
-        on = run_arm(llm, spec, ids, params, on=True)
-        print(
-            f"  on : {on['tokens']} tok, {on['tok_per_s']} tok/s, "
-            f"lambda={on.get('lambda')}, {on.get('spec')}",
-            flush=True,
-        )
+        arms = {}
+        for vname in args.variants:  # NOT `name`: that is the prompt class, still in scope
+            arm = run_arm(
+                llm, spec, ids, params, on=True, label=vname, flags=VARIANTS[vname]
+            )
+            arms[vname] = arm
+            print(
+                f"  on/{vname}: {arm['tokens']} tok, {arm['tok_per_s']} tok/s, "
+                f"lambda={arm.get('lambda')}, {arm.get('spec')}",
+                flush=True,
+            )
+        on = arms[args.variants[-1]]
         # Control arm: spec OFF again, run last. Without it an "on != off" verdict cannot
         # distinguish speculation from ordinary run-to-run nondeterminism of the engine.
         off2 = run_arm(llm, spec, ids, params, on=False, label="off2")
@@ -210,6 +274,7 @@ def main() -> None:
             "prompt_tokens": len(ids),
             "off": off,
             "on": on,
+            "arms": arms,
             "off2": off2,
             "identical": identical,
             "control_identical": control_identical,
@@ -217,6 +282,10 @@ def main() -> None:
             "speedup": (
                 round(on["tok_per_s"] / off["tok_per_s"], 3) if off["tok_per_s"] else None
             ),
+            "speedups": {
+                k: (round(a["tok_per_s"] / off["tok_per_s"], 3) if off["tok_per_s"] else None)
+                for k, a in arms.items()
+            },
         }
         if name == "needle":
             code = PASSCODE.split()[-1].rstrip(".")
@@ -233,6 +302,7 @@ def main() -> None:
 
     summary = copy.deepcopy(results)
     for row in summary["classes"].values():
+        row.pop("arms", None)
         for arm in ("off", "on", "off2"):
             row[arm].pop("token_ids", None)
             row[arm]["text"] = row[arm]["text"][:120]

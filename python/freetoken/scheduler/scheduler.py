@@ -640,17 +640,23 @@ class Scheduler(SchedulerIOMixin):
 
         # Speculative decoding runs drained: the drafter needs every emitted token before it
         # can index the next n-gram, so a verify step cannot overlap with its successor. The
-        # peek below is the hysteresis that keeps that off the common path -- it asks, with
-        # the one-token-stale token list, whether the drafter would fire at all, which is one
-        # dict lookup and is False on ~99.6 % of code/prose steps.
+        # peek below is the hysteresis that keeps that off the common path -- with
+        # ``last_data`` still undrained the token list is one token short, so it asks the
+        # superset question ("could an indexed n-gram start with the tokens I have?"), which
+        # is one hash lookup and is False on the overwhelming majority of code/prose steps.
+        # The exact test runs after the drain, inside ``run_step``, so a burst is entered on
+        # the step it begins instead of the step after.
         # ``getattr``: the low-level loop tests drive these loops with a scheduler-shaped stub.
         spec = getattr(self, "_spec", None)
-        spec_req = spec.peek() if spec is not None else None
+        spec_req = spec.peek(stale=last_data is not None) if spec is not None else None
         if spec_req is not None:
+            drain0 = time.perf_counter()
             self.stream.wait_stream(self.engine.stream)
             self._process_last_data(last_data)
             self._flush_abort_acks()
             last_data = self._last_data = None
+            spec.stats.t_drain += (time.perf_counter() - drain0) * 1e3
+            spec.stats.drains += 1
             if spec.run_step(spec_req):
                 return None
 
@@ -716,9 +722,10 @@ class Scheduler(SchedulerIOMixin):
         ):
             self._execute_pending_rebuild()
 
-        # Non-overlap mode is already drained here, so speculation needs no early drain.
+        # Non-overlap mode is already drained here, so speculation needs no early drain --
+        # and its token list is current, so the exact n-gram test applies.
         spec = getattr(self, "_spec", None)
-        spec_req = spec.peek() if spec is not None else None
+        spec_req = spec.peek(stale=False) if spec is not None else None
         if spec_req is not None and spec.run_step(spec_req):
             self._flush_abort_acks()
             return

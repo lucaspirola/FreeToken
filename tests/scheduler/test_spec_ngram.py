@@ -13,12 +13,13 @@ inserts from).
 from __future__ import annotations
 
 import contextlib
+from types import SimpleNamespace
 from typing import List, NamedTuple
 
 import pytest
 import torch
 
-from freetoken.core import Req, SamplingParams
+from freetoken.core import Batch, Req, SamplingParams
 from freetoken.scheduler import spec_ngram
 from freetoken.scheduler.spec_ngram import (
     NgramDrafter,
@@ -151,6 +152,8 @@ class _FakePool:
     def free(self, slots) -> None:
         self._free.extend(slots)
 
+    track_chunk_size = 128
+
     def copy_from(self, src: int, dst: int) -> None:
         self.copies.append((src, dst))
 
@@ -165,9 +168,13 @@ class _FakeCacheManager:
         self.ensure_calls = 0
         self.evictable = 0
         self.freed_reqs: List[Req] = []
+        self.allocations: List[list] = []
 
     def free_spec_tail(self, req, keep_len, alloc_len) -> None:
         self.tail_frees.append((keep_len, alloc_len))
+
+    def allocate_paged(self, reqs) -> None:
+        self.allocations.append([(r.cached_len, r.device_len) for r in reqs])
 
     def snapshot_toolcall_anchor(self, reqs) -> None:
         self.anchor_calls += 1
@@ -191,8 +198,9 @@ class _FakeCacheManager:
 class _FakeCapture:
     instances: List["_FakeCapture"] = []
 
-    def __init__(self, num_tokens: int) -> None:
+    def __init__(self, num_tokens: int, *, fused: bool = True) -> None:
         self.num_tokens = num_tokens
+        self.fused = fused
         self.commits: List[tuple] = []
         _FakeCapture.instances.append(self)
 
@@ -205,12 +213,25 @@ class _NullStream:
         pass
 
 
+class _FakeAttnBackend:
+    """The verify path's attention surface: one metadata build per batch."""
+
+    def __init__(self) -> None:
+        self.calls: List[int] = []
+
+    def prepare_metadata(self, batch) -> None:
+        self.calls.append(sum(r.extend_len for r in batch.padded_reqs))
+
+
 class _FakeEngine:
-    def __init__(self, pool, greedy_script: List[List[int]]) -> None:
+    def __init__(self, pool, greedy_script: List[List[int]], *, max_len: int = 256) -> None:
         self.linear_state_pool = pool
         self.stream = _NullStream()
         self._script = greedy_script
         self.forward_widths: List[int] = []
+        self.attn_backend = _FakeAttnBackend()
+        # [table_idx, position] -> KV slot; the lean verify prep gathers out_loc off it.
+        self.page_table = torch.arange(2 * max_len, dtype=torch.int32).view(2, max_len)
 
     def spec_verify_forward(self, batch) -> torch.Tensor:
         assert batch.logits_indices is not None
@@ -245,7 +266,7 @@ class _FakeScheduler:
     def __init__(self, req: Req, greedy_script, *, pool=None, max_len: int = 256) -> None:
         self.cache_manager = _FakeCacheManager()
         self.cache_manager.attach_pool(pool)
-        self.engine = _FakeEngine(pool, greedy_script)
+        self.engine = _FakeEngine(pool, greedy_script, max_len=max_len)
         self.decode_manager = _FakeDecodeManager([req])
         self.prefill_manager = _FakePrefillManager()
         self.status_reporter = _FakeStatusReporter()
@@ -256,16 +277,23 @@ class _FakeScheduler:
         self.stream = _NullStream()
         self.engine_stream_ctx = contextlib.nullcontext()
         self.token_pool = torch.zeros(2, max_len, dtype=torch.int32)
-        self.config = type("cfg", (), {"page_size": 1})()
+        self.config = type("cfg", (), {"page_size": 1, "kv_grow_step_tokens": 0})()
+        self._forward_iter = 0
         self.replies: list = []
         self.freed: List[Req] = []
-        self.prepared_widths: List[int] = []
+
+    @property
+    def prepared_widths(self) -> List[int]:
+        """Extend width of every batch that reached the attention metadata builder --
+        the one point both the lean verify prep and ``_prepare_batch`` pass through."""
+        return self.engine.attn_backend.calls
 
     # -- collaborators the decoder calls into ------------------------------
 
     def _prepare_batch(self, batch):
         req = batch.reqs[0]
-        self.prepared_widths.append(req.extend_len)
+        batch.padded_reqs = batch.reqs
+        self.engine.attn_backend.prepare_metadata(batch)
         rows = torch.full((req.extend_len,), req.table_idx, dtype=torch.int64)
         cols = torch.arange(req.cached_len, req.device_len, dtype=torch.int64)
         return _FakeForwardInput(batch=batch, input_tuple=(rows, cols))
@@ -306,6 +334,28 @@ def _make_req(tokens: List[int], *, output_len: int = 64, table_idx: int = 1) ->
     return req
 
 
+@pytest.fixture(autouse=True)
+def _no_pinned_metadata(monkeypatch):
+    """Stub the recurrent-metadata builder.
+
+    ``build_fla_metadata`` stages through pinned host memory, which initialises a CUDA
+    context; this suite must stay on the CPU. The lean verify prep's contract with it is
+    "called once per (extend length, state slot), result cached", and
+    ``test_verify_prep_reuses_its_metadata`` is what checks that.
+    """
+    import freetoken.attention.linear as linear
+
+    calls: list = []
+
+    def fake(batch, device):
+        calls.append((sum(r.extend_len for r in batch.padded_reqs),
+                      batch.reqs[0].linear_slot_idx))
+        return SimpleNamespace(track_dst=None, calls=calls)
+
+    monkeypatch.setattr(linear, "build_fla_metadata", fake)
+    return calls
+
+
 def _decoder(sch, *, n: int = 3, draft_len: int = 4, adaptive: bool = False):
     dec = SpecNgramDecoder.__new__(SpecNgramDecoder)
     dec.sch = sch
@@ -321,6 +371,13 @@ def _decoder(sch, *, n: int = 3, draft_len: int = 4, adaptive: bool = False):
     dec.commit_error = (0.0, 0.0)
     dec.enabled = True
     dec.disabled_reason = ""
+    dec.post_drain = True
+    dec.fused_commit = True
+    dec.fast_prep = True
+    dec._prep = None
+    dec._fla_cache = {}
+    dec._ev = None
+    dec._ev_pending = False
     return dec
 
 
@@ -601,3 +658,75 @@ def test_peek_is_the_hysteresis_gate():
     dec2 = _decoder(sch2)
     assert dec2.peek() is None
     assert dec2.stats.plain_peeks == 1
+
+
+# --------------------------------------------------------------------------- post-drain engagement
+
+
+def test_could_match_is_a_superset_of_has_match():
+    """The pre-drain predictor may never miss a draft the post-drain test would take."""
+    import random
+
+    rng = random.Random(7)
+    stream = [rng.randrange(12) for _ in range(400)]
+    drafter = NgramDrafter(4)
+    superset, exact = 0, 0
+    for i in range(8, len(stream)):
+        drafter.observe(stream[: i + 1])
+        could = drafter.could_match(stream[:i])          # one token stale
+        does = drafter.has_match(stream[: i + 1])        # what the verify step will ask
+        assert not does or could, f"missed a draftable step at {i}"
+        superset += could
+        exact += does
+    assert exact > 0 and superset >= exact
+
+
+def test_engagement_catches_a_burst_on_the_step_it_starts():
+    """A copy burst is entered at its first token, not at its second.
+
+    ``[1,2,3,4]`` recurs: with the one-token-stale list the exact test cannot see the ``4``
+    that completes the key, so the old predictor declined the entry step and only fired on
+    the next one. The (n-1)-prefix test sees ``[1,2,3]`` and engages immediately.
+    """
+    drafter = NgramDrafter(4)
+    history = [1, 2, 3, 4, 9, 9, 1, 2, 3, 4]
+    drafter.observe(history)
+    stale = history[:-1]                     # the token list the scheduler has pre-drain
+    assert not drafter.has_match(stale)      # the old, one-token-late predictor
+    assert drafter.could_match(stale)        # the new one
+    assert drafter.draft(history, 2) == [9, 9]
+
+
+def test_peek_uses_the_exact_test_when_the_tokens_are_current():
+    """In the non-overlapped loop nothing is stale, so the superset would only waste steps."""
+    tokens = [1, 2, 3, 7, 8, 9, 1, 2]
+    req = _make_req(tokens)
+    sch = _FakeScheduler(req, [])
+    dec = _decoder(sch)
+    assert dec.peek(stale=True) is req       # (1,2) prefixes the indexed (1,2,3)
+    assert dec.peek(stale=False) is None     # but (1,2,3)... wait: no 3-gram ends here
+    assert dec.stats.plain_peeks == 1
+
+
+def test_verify_prep_builds_its_metadata_once_per_shape(monkeypatch):
+    """The verify batch has one shape, so its recurrent metadata is built once, not per step."""
+    monkeypatch.setattr(spec_ngram, "_make_capture", _FakeCapture)
+    _FakeCapture.instances.clear()
+    tokens = [1, 2, 3, 7, 8, 9, 1, 2, 3]
+    req = _make_req(tokens, output_len=64)
+    pool = _FakePool()
+    sch = _FakeScheduler(req, [[7, 8, 9, 1, 55], [7, 8, 9, 1, 55]], pool=pool)
+    _seed_token_pool(sch, req)
+    dec = _decoder(sch, draft_len=4)
+    assert dec.run_step(req) is True
+    assert sch.prepared_widths == [5]              # one attention-metadata build
+    assert len(dec._fla_cache) == 1                # keyed by (extend width, state slot)
+    key, cached = next(iter(dec._fla_cache.items()))
+    assert key == (5, req.spec_scratch_slot)
+    batch = Batch(reqs=[req], phase="prefill")
+    batch.padded_reqs = batch.reqs
+    req.linear_slot_idx = req.spec_scratch_slot
+    assert dec._fla_metadata(batch, req, 5) is cached   # a second step at the same width
+    assert len(cached.calls) == 1                       # ... does not rebuild it
+    # the verify step allocated pages for L .. L+k before the forward, not after the commit
+    assert sch.cache_manager.allocations == [[(8, 13)]]

@@ -103,12 +103,21 @@ class NgramDrafter:
     n-gram write-up).
     """
 
-    __slots__ = ("n", "index", "cursor")
+    __slots__ = ("n", "index", "prefix", "cursor")
 
     def __init__(self, n: int) -> None:
         assert n >= 1
         self.n = n
         self.index: Dict[Tuple[int, ...], int] = {}
+        # Hashes of the (n-1)-prefixes of every indexed n-gram: the *post-drain* predictor.
+        # A burst that begins at position p is only visible in the n-gram key once token p
+        # is known, and the scheduler only knows it after the drain -- but the key's first
+        # n-1 entries are already in the pre-drain token list. Membership here therefore
+        # answers "could the drafter fire once this step's token lands?", which is a strict
+        # superset of "will it": no burst entry can be missed, and the exact test still runs
+        # post-drain in ``draft``. Hashes, not tuples, so a 131K prompt costs ~8 MB and one
+        # C-level hash per token rather than a second tuple table.
+        self.prefix: set[int] = set()
         self.cursor = 0
 
     def observe(self, tokens: Sequence[int]) -> None:
@@ -121,8 +130,11 @@ class NgramDrafter:
         limit = len(tokens) - 1
         i = self.cursor
         idx = self.index
+        pre = self.prefix
         while i + n <= limit:
-            idx[tuple(tokens[i : i + n])] = i + n
+            key = tuple(tokens[i : i + n])
+            idx[key] = i + n
+            pre.add(hash(key[:-1]))
             i += 1
         self.cursor = i
 
@@ -136,6 +148,21 @@ class NgramDrafter:
 
     def has_match(self, tokens: Sequence[int]) -> bool:
         return self._hit(tokens) is not None
+
+    def could_match(self, tokens: Sequence[int]) -> bool:
+        """Would some continuation of ``tokens`` be draftable once one more token lands?
+
+        The pre-drain predictor. ``tokens`` is one token short of the list the verify step
+        will actually query, so the key it will use is ``(tokens[-(n-1):], next_token)``;
+        this asks whether ANY n-gram with that (n-1)-prefix was ever indexed. False here
+        means the drafter provably cannot fire on the next step, which is what keeps the
+        drain off the common path; True costs a drain and an exact re-test.
+        """
+        n1 = self.n - 1
+        pos = len(tokens)
+        if pos < n1:
+            return False
+        return hash(tuple(tokens[pos - n1 : pos])) in self.prefix
 
     def draft(self, tokens: Sequence[int], k: int) -> List[int]:
         """Up to ``k`` tokens proposed to follow ``tokens``. Empty list = no match."""
@@ -178,6 +205,25 @@ class SpecStats:
     declined_budget: int = 0
     declined_stale_match: int = 0
     declined_uneconomic: int = 0
+    # Wall-clock breakdown of a verify step, in ms, summed over ``verify_steps``. A verify
+    # step is ~7x a decode step end to end against a ~30 ms forward, and "the rest" was one
+    # undivided number until this existed -- so it is reported, not inferred: draft+stage,
+    # batch preparation, the (eager) forward launch, the argmax sync, the state commit and
+    # the emission. ``drain_ms`` is charged by the scheduler, which owns the drain.
+    t_draft: float = 0.0
+    t_prep: float = 0.0
+    t_launch: float = 0.0
+    t_sync: float = 0.0
+    t_commit: float = 0.0
+    t_finish: float = 0.0
+    t_total: float = 0.0
+    t_drain: float = 0.0
+    drains: int = 0
+    # GPU-side (CUDA event) time of the forward and of the commit, so the host-launch share
+    # of an eager extend forward is a measurement rather than a subtraction.
+    g_forward: float = 0.0
+    g_commit: float = 0.0
+    g_commit_n: int = 0
     # Accepted-token histogram, one entry per verify step, keyed by the accepted count as a
     # string (the wire document is JSON). The mean alone hides the shape that decides whether
     # speculation pays: lambda 3.6 from "half the steps accept 0 and half accept 7" is a
@@ -191,6 +237,25 @@ class SpecStats:
     @property
     def tokens_per_verify(self) -> float:
         return self.emitted_tokens / self.verify_steps if self.verify_steps else 0.0
+
+    @property
+    def cost_ms(self) -> dict:
+        """Mean per-verify-step wall clock, by phase."""
+        v = self.verify_steps or 1
+        d = self.drains or 1
+        return {
+            "draft": round(self.t_draft / v, 3),
+            "prep": round(self.t_prep / v, 3),
+            "launch": round(self.t_launch / v, 3),
+            "sync": round(self.t_sync / v, 3),
+            "commit": round(self.t_commit / v, 3),
+            "finish": round(self.t_finish / v, 3),
+            "total": round(self.t_total / v, 3),
+            "gpu_forward": round(self.g_forward / v, 3),
+            "gpu_commit": round(self.g_commit / max(self.g_commit_n, 1), 3),
+            "drain": round(self.t_drain / d, 3),
+            "drains": self.drains,
+        }
 
     @property
     def declines(self) -> dict:
@@ -219,6 +284,7 @@ class SpecStats:
             "accept_rate": round(self.accept_rate, 4),
             "tokens_per_verify": round(self.tokens_per_verify, 4),
             "declined": self.declines,
+            "cost_ms": self.cost_ms,
             "accepted_hist": dict(self.accepted_hist),
         }
 
@@ -271,6 +337,18 @@ class _SpecState:
             self.k = max(1, self.k // 2)
 
 
+@dataclass
+class _VerifyBuffers:
+    """Persistent device buffers for the verify batch's fixed geometry."""
+
+    ar32: torch.Tensor
+    ar64: torch.Tensor
+    pos32: torch.Tensor
+    pos64: torch.Tensor
+    rows: torch.Tensor
+    table_idx: int = -1
+
+
 # --------------------------------------------------------------------------- the decoder
 
 
@@ -282,6 +360,16 @@ class SpecNgramDecoder:
     the ordinary decode path, which is why this class never has to be correct for a shape it
     does not recognise -- it declines.
     """
+
+    # Class-level defaults so an instance built without __init__ (the CPU tests drive this
+    # class against a scheduler-shaped stub) still has the full attribute surface.
+    post_drain = True
+    fused_commit = True
+    fast_prep = True
+    _prep = None
+    _fla_cache: dict | None = None
+    _ev = None
+    _ev_pending = False
 
     def __init__(self, scheduler, *, n: int, draft_len: int, adaptive: bool = True) -> None:
         self.sch = scheduler
@@ -295,6 +383,18 @@ class SpecNgramDecoder:
         self._check_commit = int(os.environ.get("FREETOKEN_SPEC_CHECK_COMMIT", "0"))
         self._spare_slot: int | None = None
         self.commit_error: tuple[float, float] = (0.0, 0.0)
+        # Three optimisations, each independently switchable so one GPU session can measure
+        # the before and the after (see benchmarks/probe_spec_ngram_impl.py --variants).
+        #   post_drain    engagement decided from the post-drain token list (§ NgramDrafter
+        #                 .could_match): catches a burst on the step it starts, not one later
+        #   fused_commit  one SSD scan for all layers instead of one per layer
+        #   fast_prep     the verify batch built from the request's own fixed shape instead
+        #                 of through the general _prepare_batch
+        self.post_drain = os.environ.get("FREETOKEN_SPEC_POST_DRAIN", "1") == "1"
+        self.fused_commit = os.environ.get("FREETOKEN_SPEC_FUSED_COMMIT", "1") == "1"
+        self.fast_prep = os.environ.get("FREETOKEN_SPEC_FAST_PREP", "1") == "1"
+        self._prep: _VerifyBuffers | None = None
+        self._fla_cache: dict = {}
         self.enabled, self.disabled_reason = self._supported()
         if not self.enabled:
             logger.warning(
@@ -343,12 +443,17 @@ class SpecNgramDecoder:
             return None
         return req
 
-    def peek(self) -> Req | None:
-        """The candidate whose trailing n-gram already has a match, or None.
+    def peek(self, *, stale: bool = True) -> Req | None:
+        """The candidate the drafter could fire on this iteration, or None.
 
-        Called BEFORE the previous step is drained, so the token list is one token stale.
-        That is exactly the right predictor: a copy burst that matched at ``L-1`` matches at
-        ``L`` too, and a miss here costs one dict lookup.
+        With ``stale`` (the overlapped loop, where the previous step's token has not been
+        drained yet) the token list is one token short of the one the verify step will
+        query, so the test is :meth:`NgramDrafter.could_match` -- "is there an indexed
+        n-gram whose first n-1 tokens are the ones I already have?". That is a strict
+        superset of the exact test, so a burst is entered on the step it begins rather than
+        the step after (the old exact-on-stale-tokens test cost a factor of ~4 in draft rate,
+        write-up §7); the exact test then runs post-drain inside :meth:`run_step`, which
+        declines and falls back to the ordinary path when the prediction does not hold.
 
         Doubles as the clock for the break-even estimator: the gap between two consecutive
         peeks that both took the ordinary path IS one overlapped decode step.
@@ -373,7 +478,12 @@ class SpecNgramDecoder:
                 state.decode_ms = _ewma(state.decode_ms, sample)
         self._last_peek_hit = False
         state.sync(req.input_ids)
-        if state.k <= 0 or not state.drafter.has_match(state.tokens):
+        hit = (
+            state.drafter.could_match(state.tokens)
+            if (stale and self.post_drain)
+            else state.drafter.has_match(state.tokens)
+        )
+        if state.k <= 0 or not hit:
             self.stats.plain_peeks += 1
             return None
         if not self._pays_off(state):
@@ -421,6 +531,7 @@ class SpecNgramDecoder:
         """Run one verify step. Returns False if the request was not in a draftable shape,
         in which case nothing was mutated and the caller should take the ordinary path."""
         sch = self.sch
+        t_draft0 = time.perf_counter()
         state = self._state_for(req)
         state.sync(req.input_ids)
         L = req.cached_len
@@ -436,16 +547,36 @@ class SpecNgramDecoder:
             self.stats.declined_stale_match += 1
             return False
 
-        started = time.perf_counter()
+        st = self.stats
+        started = t = time.perf_counter()
+        st.t_draft += (t - t_draft0) * 1e3
         with sch.engine_stream_ctx:
             sch.engine.stream.wait_stream(sch.stream)
-            greedy, capture, scratch = self._verify(req, draft)
+            ev = self._events()
+            greedy, capture, scratch, prep_ms = self._verify(req, draft, ev)
+            st.t_prep += prep_ms
+            t, prev = time.perf_counter(), t
+            st.t_launch += (t - prev) * 1e3 - prep_ms
             greedy_ids = greedy.tolist()  # syncs the stream
+            t, prev = time.perf_counter(), t
+            st.t_sync += (t - prev) * 1e3
+            if ev is not None:
+                st.g_forward += ev[0].elapsed_time(ev[1])
             accepted = accepted_count(draft, greedy_ids)
             emitted = greedy_ids[: accepted + 1]
+            if ev is not None:
+                ev[2].record()
             self._commit(req, state, L, len(draft), emitted, capture, scratch)
+            if ev is not None:
+                ev[3].record()
+                self._ev_pending = True
+            t, prev = time.perf_counter(), t
+            st.t_commit += (t - prev) * 1e3
             reply = self._finish(req, state, L, emitted)
+            t, prev = time.perf_counter(), t
+            st.t_finish += (t - prev) * 1e3
 
+        st.t_total += (time.perf_counter() - started) * 1e3
         state.verify_ms = _floor(state.verify_ms, (time.perf_counter() - started) * 1e3)
         state.verify_samples += 1
         state.emit = _ewma(state.emit, float(len(emitted)))
@@ -457,6 +588,29 @@ class SpecNgramDecoder:
         self.stats.note_accepted(accepted)
         self._report(req, reply, len(emitted))
         return True
+
+    def _events(self):
+        """Four reusable CUDA events: forward start/end, commit start/end.
+
+        The commit pair is read on the NEXT verify step, and only if it has completed, so
+        the breakdown costs no synchronisation of its own (the forward pair is already
+        covered by the argmax sync that the step pays anyway). ``g_commit`` is averaged over
+        the samples actually taken, not over every verify step.
+        """
+        if self._ev is None:
+            if getattr(self.sch.device, "type", None) != "cuda":
+                return None
+            self._ev = [torch.cuda.Event(enable_timing=True) for _ in range(4)]
+            self._ev_pending = False
+        if self._ev_pending:
+            # Inside a tight burst the previous commit can still be queued. Reading an
+            # incomplete event raises, and this is a statistic -- drop the sample rather
+            # than synchronise the step that is about to run.
+            if self._ev[3].query():
+                self.stats.g_commit += self._ev[2].elapsed_time(self._ev[3])
+                self.stats.g_commit_n += 1
+            self._ev_pending = False
+        return self._ev
 
     def _budget(self, req: Req, state: _SpecState) -> int:
         """Draft length for this step, clamped by every hard bound.
@@ -495,8 +649,10 @@ class SpecNgramDecoder:
 
     # -- forward ---------------------------------------------------------------
 
-    def _verify(self, req: Req, draft: List[int]):
-        """Stage the draft, run the extend forward, return (greedy ids, capture, scratch)."""
+    def _verify(self, req: Req, draft: List[int], ev=None):
+        """Stage the draft, run the extend forward.
+
+        Returns ``(greedy ids, capture, scratch, prep_ms)``."""
         sch = self.sch
         pool = sch.engine.linear_state_pool
         L = req.cached_len
@@ -524,16 +680,111 @@ class SpecNgramDecoder:
             if scratch is not None:
                 req.linear_slot_idx = scratch
             batch = Batch(reqs=[req], phase="prefill")
-            forward_input = sch._prepare_batch(batch)
-            batch.logits_indices = torch.arange(m, dtype=torch.int64, device=sch.device)
+            t0 = time.perf_counter()
+            if self.fast_prep and not sch.config.kv_grow_step_tokens:
+                input_tuple = self._prepare_verify(batch, req, L, m)
+            else:
+                input_tuple = sch._prepare_batch(batch).input_tuple
+            batch.logits_indices = self._rows(m)
             if scratch is not None:
-                capture = _make_capture(m)
+                capture = _make_capture(m, fused=self.fused_commit)
                 batch.spec_capture = capture
-            batch.input_ids = sch.token_pool[forward_input.input_tuple]
+            batch.input_ids = sch.token_pool[input_tuple]
+            prep_ms = (time.perf_counter() - t0) * 1e3
+            if ev is not None:
+                ev[0].record()
             greedy = sch.engine.spec_verify_forward(batch)
+            if ev is not None:
+                ev[1].record()
         finally:
             req.linear_slot_idx = live_slot
-        return greedy, capture, scratch
+        return greedy, capture, scratch, prep_ms
+
+    # -- batch preparation ------------------------------------------------------
+
+    def _prepare_verify(self, batch: Batch, req: Req, L: int, m: int):
+        """The subset of ``Scheduler._prepare_batch`` a verify batch actually needs.
+
+        A verify batch is the most predictable batch this engine ever builds: exactly one
+        request, prefill phase, extend length ``k + 1``, never multimodal, never chunked,
+        never SWA (the decoder refuses all of those), and the same shape on every step of a
+        burst. Almost everything ``_prepare_batch`` does for it is either a branch that
+        cannot apply or a pinned staging tensor rebuilt at an identical shape -- including a
+        full ``Sampler.prepare``, whose per-request parameter rows this path never reads
+        (the verify forward is greedy by construction and runs no sampler at all).
+
+        What is left is the page allocation, the positions, the page-table gather and the
+        two metadata builders. The positions and the per-token request row come off
+        persistent device buffers, so the whole preparation is four kernel launches and no
+        host->device staging.
+        """
+        sch = self.sch
+        batch.padded_reqs = batch.reqs
+        sch._forward_iter += 1
+        sch.cache_manager.allocate_paged(batch.reqs)
+        buf = self._buffers(m)
+        torch.add(buf.ar32[:m], L, out=buf.pos32[:m])
+        torch.add(buf.ar64[:m], L, out=buf.pos64[:m])
+        if buf.table_idx != req.table_idx:
+            buf.rows.fill_(req.table_idx)
+            buf.table_idx = req.table_idx
+        batch.positions = buf.pos32[:m]
+        input_tuple = (buf.rows[:m], buf.pos64[:m])
+        batch.out_loc = sch.engine.page_table[input_tuple]
+        if sch.engine.linear_state_pool is not None:
+            batch.fla_metadata = self._fla_metadata(batch, req, m)
+        sch.engine.attn_backend.prepare_metadata(batch)
+        return input_tuple
+
+    def _buffers(self, m: int) -> "_VerifyBuffers":
+        buf = self._prep
+        if buf is None or buf.ar32.numel() < m:
+            size = max(m, self.draft_len + 1)
+            dev = self.sch.device
+            buf = _VerifyBuffers(
+                ar32=torch.arange(size, dtype=torch.int32, device=dev),
+                ar64=torch.arange(size, dtype=torch.int64, device=dev),
+                pos32=torch.empty(size, dtype=torch.int32, device=dev),
+                pos64=torch.empty(size, dtype=torch.int64, device=dev),
+                rows=torch.empty(size, dtype=torch.int64, device=dev),
+            )
+            self._prep = buf
+        return buf
+
+    def _rows(self, m: int) -> torch.Tensor:
+        """``arange(m)`` -- the verify batch keeps every logits row."""
+        return self._buffers(m).ar64[:m]
+
+    def _fla_metadata(self, batch: Batch, req: Req, m: int):
+        """Cached recurrent metadata for a one-request extend of ``m`` tokens.
+
+        Every field is a function of ``(m, state slot)`` here: ``cu_seqlens`` is ``[0, m]``,
+        ``cache_indices`` is the scratch slot, ``has_initial_state`` is True (a verify step
+        only ever runs on a request that already has state), and the mid-chunk snapshot
+        metadata is None because ``m`` never reaches a chunk boundary. That last one is an
+        invariant, not an observation, so it is asserted.
+        """
+        from freetoken.attention.linear import build_fla_metadata
+
+        pool = self.sch.engine.linear_state_pool
+        assert m <= pool.track_chunk_size, (
+            f"a verify extend of {m} tokens can cross a {pool.track_chunk_size}-token "
+            "snapshot boundary; the cached metadata would drop the snapshot"
+        )
+        # (m, slot) is the whole key: every tensor in the result is built from those two
+        # integers, so a pool rebuild -- which moves the state tensors but not the slot
+        # numbering -- does not invalidate it.
+        key = (m, req.linear_slot_idx if req.linear_slot_idx is not None else req.table_idx)
+        if self._fla_cache is None:
+            self._fla_cache = {}
+        meta = self._fla_cache.get(key)
+        if meta is None:
+            meta = build_fla_metadata(batch, self.sch.device)
+            assert meta.track_dst is None, "verify batch unexpectedly wants a state snapshot"
+            if len(self._fla_cache) > 64:
+                self._fla_cache.clear()
+            self._fla_cache[key] = meta
+        return meta
 
     @staticmethod
     def _ensure_scratch(req: Req, pool) -> int:
@@ -692,10 +943,10 @@ class SpecNgramDecoder:
         sch.send_result(reply)
 
 
-def _make_capture(num_tokens: int):
+def _make_capture(num_tokens: int, *, fused: bool = True):
     from freetoken.models.nemotron_h.spec_scan import SpecScanCapture
 
-    return SpecScanCapture(num_tokens)
+    return SpecScanCapture(num_tokens, fused=fused)
 
 
 __all__ = [

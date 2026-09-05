@@ -1066,3 +1066,69 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   prefixes collapse in the prefix cache. Per-request `device_len` (what attention costs)
   is still the full length, so the mixed-context regime is real — but `#token` is unique
   pages, and reading it as "the contexts did not materialize" is a wrong turn.
+
+## 2026-09-05 (making `--speculative ngram` pay — a superset predictor and one scan for 23 layers)
+- **When a decision must be made before the data arrives, ask a question the stale data CAN
+  answer.** Engagement had to be decided pre-drain (draining every step costs ~30 %), and the
+  shipped code asked the *exact* n-gram question of a one-token-stale list — the answer for the
+  previous position. The clean fix is not a latch or a heuristic: the key the next step will use
+  is `(known n-1 tokens, unknown next token)`, so membership of the **(n−1)-prefix set** is a
+  *strict superset* that cannot miss a draftable step, and the exact test still runs post-drain
+  and declines. Right code — but see the next lesson for how much it was actually worth.
+- **A "measured" gap between two runs of the same feature may be the feature perturbing its own
+  input.** The write-up that motivated this work put the copy-class draft rate at 0.079 against
+  an offline 0.353 and attributed the gap to burst-entry hysteresis. It was **stream variance**:
+  speculation changes its own token stream, the copy prompt's output opens with a few hundred
+  tokens of reasoning before the verbatim copy starts, and where that lands inside a 1 024-token
+  window decides the draft rate. Arms of the *same binary* spanned **1.04x to 1.67x**. Replaying
+  the fixed non-speculative transcript through both policies put the real gap at **2 %**. **Under
+  greedy decoding, acceptance is a deterministic function of the baseline transcript — so replay
+  it instead of running more arms.** Three byte-identical repeats confirmed the engine is
+  deterministic (identical drafter statistics, 1.8 % tok/s spread): the noise was never in the
+  engine, it was in the comparison.
+- **Independent heads mean the layer axis is a head axis.** The verify commit ran 23
+  `mamba2_prefill` calls, one per Mamba-2 layer — ~280 kernel launches to advance 9 tokens. Every
+  Nemotron-H mixer has the same `(head_dim, state_size, heads_per_group)`, so 23 x 64 heads
+  concatenate into one 1 472-head sequence (`A` and `dt_bias` concatenate with them; `D` feeds only
+  the discarded scan output and is dropped). **7.12 -> 0.45 ms of host time and bit-exact
+  (0.000e+00) at eight (m, n) shapes** — because folding independent heads together changes no
+  reduction. Ask "which axis of this loop is the kernel already batching over?" before accepting a
+  per-layer loop.
+- **Validate a kernel-shape change weightlessly before booking the model load.** 60 lines of
+  synthetic mixers and a fake pool proved bit-exactness AND measured the 7.12 -> 0.45 ms in ~40 s
+  of GPU. It also caught a real bug the model load would have hidden: the fused-plan cache was
+  keyed on the pool and layer ids but not on the *weights*, so a second set of mixers was served
+  the first set's concatenated `A`. The key now carries `A.data_ptr()`.
+- **A per-step host cost that hides under the GPU is not a graph opportunity.** Ticket "graph the
+  verify forward" rested on the bs=1 decode measurement (33.9 ms eager vs 6.88 ms graphed). At
+  m = 9 the verify forward is **30.6 ms of host launch against 36.4 ms of GPU**, and at 131K it is
+  31.0 against 91.8 — the Python already runs underneath. Close the ticket with the two numbers
+  instead of leaving it plausible. (Same shape as the 16-lane decode finding; the rule generalises:
+  **measure the host and GPU legs before promising a launch-path fix.**)
+- **A verify batch is the one batch whose shape never changes — build it that way.** The general
+  `_prepare_batch` spent its work on inapplicable branches, re-pinned staging tensors at an
+  identical shape, and ran a full `Sampler.prepare` that a greedy verify forward never reads.
+  0.80 -> 0.34 ms/step. Cache what is a function of `(extend width, state slot)`, and *assert* the
+  invariant that makes the cache legal (here: `k + 1` never crosses a 128-token chunk boundary, so
+  the mid-chunk snapshot metadata is always absent).
+- **`for name in ...` inside `for name, ids, params in cases:` silently collapses a whole sweep.**
+  The probe wrote every prompt class into `results["classes"][<variant name>]`, so a 4-class JSON
+  came out with one key. The log had everything; the artifact had one row. **Never reuse a loop
+  variable of an enclosing loop** — and check the artifact's row count against the run's, not just
+  that it parsed.
+- **Report the per-phase cost with the throughput.** Adding `cost_ms` (draft / prep / launch /
+  sync / commit / emit, plus CUDA-event GPU time for the forward and the commit) turned "~40 % of
+  a verify step is not the forward" into a table that named the 1.24 ms commit and the 0.80 ms
+  prep — and showed that the *drain* the design was built around costs 0.15 ms inside a burst,
+  because the previous step was itself drained. Free to collect: the forward events ride the
+  argmax sync the step already pays, and the commit events are read on the next step.
+- **A CUDA event read on the "next" step must be guarded with `query()`.** Reading
+  `elapsed_time` on a pair that is still queued raises `RuntimeError: Both events must be
+  completed`, and it did — 6 GPU minutes into a sweep, inside a tight burst where the previous
+  commit had not drained. Instrumentation must never be able to kill the run it is measuring:
+  check `event.query()` and drop the sample.
+- **A flag dictionary that names only the flags a variant changes will inherit the previous
+  variant's values.** A sweep arm labelled "v0, k = 8" reported **15.5 tokens per verify step**,
+  which is impossible at k = 8 — it was still running at the previous arm's `--spec-draft-len 16`.
+  An impossible number in a sweep is a harness bug, not a discovery: check it against the
+  configuration's own ceiling. Every variant now carries every tunable.

@@ -265,3 +265,48 @@ HEAD `14c1bd8`, tree clean. `fork/nemotron35` == HEAD (pushed); `fork/main` is 7
       08:59 on 2026-09-05 destroyed `scratchpad/soak7/` and an in-flight soak with it. `run.sh`
       refuses to start below 26 GiB `MemAvailable`; `sample.sh` records it every 5 s.
 - [x] Commits pushed as `fork/nemotron35`.
+
+## 2026-09-05 — make `--speculative ngram` pay (verify-step cost, engagement, draft length)
+
+Follow-up to `benchmarks/results/nemotron35_lightning_5080_ngram_spec_impl_2026-09-05.md`
+tickets 1, 2, 3 and 6. Write-up:
+`benchmarks/results/nemotron35_lightning_5080_ngram_spec_fast_2026-09-05.md`.
+
+- [x] **Engagement decided post-drain.** `NgramDrafter.could_match` + an (n−1)-prefix hash set;
+      `peek(stale=...)` in both scheduler loops. Strict superset of the exact test, so no burst
+      entry can be missed; the exact test runs post-drain in `run_step`.
+- [x] **Verify batch built from its own fixed shape.** `SpecNgramDecoder._prepare_verify`,
+      persistent device buffers, metadata cached by (extend width, state slot), no
+      `Sampler.prepare`. 0.80 → 0.34 ms/step. Falls back to `_prepare_batch` under
+      `--kv-grow-step-tokens`.
+- [x] **The 280-launch commit → one fused scan.** `SpecScanCapture._commit_fused` folds the layer
+      axis onto the head axis (23 × 64 heads = one 1 472-head sequence). 7.12 → 0.45 ms host,
+      **bit-exact** at eight (m, n) shapes (`benchmarks/check_spec_fused_commit.py`, weightless).
+- [x] **Graph-captured verify forward — measured NO-GO.** m = 9: 30.6 ms host launch vs 36.4 ms
+      GPU; 131K: 31.0 vs 91.8. The launch path already hides under the GPU.
+- [x] **Draft-length / n sweep.** k ∈ {4,8,12,16} × n ∈ {6,8,10}, four classes. Plus a
+      stream-independent fixed-transcript replay (`benchmarks/spec_engage_replay.py`).
+- [x] **Instrumentation.** `SpecStats.cost_ms` (per-phase wall clock + CUDA-event GPU time),
+      surfaced on `/v1/stats`.
+- [x] Gates: greedy agreement (`off == off2` on 4/4 in every session), 131K needle answered
+      identically in both arms, 30 CPU tests, full CPU suite green.
+
+### Review
+
+**Result.** A verify step is 54.0 → 35.6 ms (−34 %). On a fixed transcript with the measured
+per-step costs, the copy class goes **1.11× → 1.61×** at the shipped `k = 8` and **1.88×** at
+`k = 16`; code and prose are 0.99× at every setting; 131K still regresses (ratio ~12×).
+
+**Two corrections to the previous write-up, both from measurement.**
+1. Ticket 2's "burst entry costs a factor of ~4 in draft rate" is wrong — the real gap is 2 %.
+   Its 0.079-vs-0.353 evidence was **stream variance**: speculation perturbs its own output and
+   the copy prompt's reasoning preamble decides how much of the 1 024-token window is copy. Arms
+   of the same binary span 1.04×–1.67×.
+2. A single copy-class throughput arm cannot measure this feature. Three byte-identical repeats
+   give identical drafter statistics and 1.8 % tok/s spread, so the engine is deterministic —
+   the variance is in the comparison, not the measurement. Greedy acceptance is a deterministic
+   function of the baseline transcript, so replay it.
+
+**Not done, deliberately.** The default `--spec-draft-len` is left at 8: k = 16 is worth ~1.17×
+on copy and neutral elsewhere, but it doubles the price of the break-even gate's two probe steps
+at long context, and that trade wants its own confirming session.

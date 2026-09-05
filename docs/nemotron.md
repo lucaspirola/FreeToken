@@ -384,25 +384,63 @@ window. Rejected KV pages are returned by `CacheManager.free_spec_tail` — with
 rejection leaked `k - accepted` pages — and rejected tokens never reach the host token list, so the
 prefix cache cannot see them.
 
-**Measured** (1 023 output tokens, one model load, with a second non-speculative control arm):
+#### The verify step, made cheap (2026-09-05, second pass)
 
-| class | off | on | control off2 | draft rate | accepted/drafted | speedup |
-|---|---:|---:|---:|---:|---:|---:|
-| code | 135.8 | 140.4 | 136.8 | 0.005 | 0.83 | **1.03×** |
-| prose | 138.3 | 141.9 | 141.9 | 0.007 | 0.25 | **1.02×** |
-| copy (agent tool output) | 135.8 | 136.9 | 133.6 | 0.079 | 0.80 | **1.01×** |
-| 131K needle | 87.3 | 77.3 | 86.9 | 0.036 | 0.63 | **0.89×** |
+`..._ngram_spec_fast_2026-09-05.md` closed the two cost tickets and corrected the record on a
+third.
 
-tok/s at bs=1; run-to-run spread on the non-speculative arms is 1.6–3.5 %, and an ungated control
-run reached 1.11× on the copy class with the same drafter statistics, so **read the copy-class win
-as ~1.05× with a spread of several points.** The n = 8 precision gate is what keeps code and prose
-from regressing; n = 3 (the published prompt-lookup setting) costs 12–14 % on exactly those two.
+**A verify step went from 54.0 ms to 35.6 ms** (copy class, 100+ samples per arm, measured per
+phase via `/v1/stats["scheduler"]["spec"]["cost_ms"]`):
 
-The win is well short of the 1.63× the go/no-go projected, and the shortfall is measured, not
-mysterious: the draft rate is **0.079** against the offline replay's 0.353 (engagement is decided
-one token stale, so a copy burst is entered one step late), and an end-to-end verify step costs
-**~52 ms** against the ~30 ms extend forward inside it (the commit issues 46 eager kernel launches).
-Both are ordinary optimisation work; the write-up's §10 quantifies them.
+| phase | before | after |
+|---|---:|---:|
+| batch preparation | 0.80 ms | **0.34 ms** |
+| forward (host launch / GPU) | 50.6 / 54.7 ms | **30.6 / 36.4 ms** |
+| state commit | 1.24 ms | **0.18 ms** |
+| end-to-end step | **54.0 ms** | **35.6 ms** |
+
+- **One SSD scan for all 23 layers.** Mamba-2 heads are independent and every Nemotron-H mixer
+  has the same `(head_dim, state_size, heads_per_group)`, so the layer axis folds onto the head
+  axis: 23 × 64 heads is one 1 472-head sequence, `A` and `dt_bias` concatenate, and `D` is
+  dropped because it only feeds the scan output the commit discards. **~280 kernel launches →
+  ~11, 7.12 → 0.45 ms of host time, bit-exact** (0.000e+00 at eight (m, n) shapes;
+  `benchmarks/check_spec_fused_commit.py`, weightless).
+- **The verify batch is built from its own fixed shape** instead of through
+  `Scheduler._prepare_batch` — persistent device buffers for positions and rows, metadata cached
+  by (extend width, state slot), and no `Sampler.prepare` (the verify forward is greedy and runs
+  no sampler).
+- **Engagement is decided post-drain**: the pre-drain peek now asks whether any indexed n-gram
+  *starts with* the n−1 tokens already held, a strict superset that cannot miss a burst entry,
+  and the exact test runs after the drain.
+
+**Two corrections to the first write-up, both from measurement:**
+
+1. **The burst-entry hysteresis was not a factor of 4.** Replaying the baseline transcript through
+   both peeks (`benchmarks/spec_engage_replay.py`, CPU) puts the old one at draft rate 0.484 /
+   λ 4.59 and the new one at 0.484 / 4.67 — **2 %**. The 0.079-against-0.353 that motivated the
+   ticket was **stream variance**: speculation perturbs its own output, the copy prompt opens with
+   a few hundred tokens of reasoning before the verbatim copy starts, and where that transition
+   lands inside a 1 024-token window decides the draft rate. Single copy-class arms of the same
+   binary span **1.04× to 1.67×**.
+2. **A graph-captured verify forward is a no.** At m = 9 the eager forward is **30.6 ms of host
+   launch against 36.4 ms of GPU**, and at 131K 31.0 against 91.8 — the Python already runs
+   underneath the GPU. (Same shape as the 16-lane decode finding.)
+
+**Measured, and projected on a fixed transcript with the measured per-step costs** — the second is
+the load-bearing number, because it is not subject to the stream lottery:
+
+| class | end-to-end arms (off / before / after) | fixed-transcript projection, before → after |
+|---|---|---|
+| code | 139.1 / 138.8 / 134.8 | 0.99× → 0.99× |
+| prose | 146.5 / 146.4 / 143.2 | 0.99× → 0.99× |
+| copy | 138.9 / 144.9 / **210.5** | **1.11× → 1.61×** at k = 8, **1.88×** at k = 16 |
+| 131K needle | 131.9 / 107.2 / 110.8 | still a regression at every k (ratio ~12×) |
+
+**`--spec-draft-len 16` is worth another ~1.17× on copy-heavy traffic** and is neutral (0.99×) on
+code and prose: acceptance does not decay with the draft length on verbatim copy (15.7 of 17
+tokens kept) while the verify step grows only ~1.8 ms per drafted token. The default is still 8 —
+raising it doubles the price of the break-even gate's two probe steps at long context — so set it
+explicitly for agent traffic. **`--spec-draft-len 4` is a regression** and should not be used.
 
 **Two things to know before enabling it.**
 
@@ -413,7 +451,7 @@ Both are ordinary optimisation work; the write-up's §10 quantifies them.
    token 40–71 of 1 023 on three of four prompts (identical on the fourth, and the 131K needle is
    recalled in both arms). Any multi-token verification scheme on this engine carries this.
 2. **Long context regresses.** A verify step's extend attention reads the KV history once per query
-   token, so at 131K it costs ~118 ms against an ~11.5 ms decode step — **~10×**, against ~7× at
+   token, so at 131K it costs ~92 ms against a ~7.6 ms decode step — **~12×**, against ~5× at
    short context — and `k + 1 = 9` cannot beat that. The decoder therefore measures its own
    verify/decode ratio online and stops drafting when `accepted + 1` can no longer pay for it,
    re-probing every 16 gated steps. There is deliberately **no** context-length threshold: the
@@ -424,9 +462,12 @@ Both are ordinary optimisation work; the write-up's §10 quantifies them.
 A 16-way passthrough soak passes with zero errors in both arms and flat p50 / request count; its
 p95/p99 tail differs but one 10-minute pair cannot separate that from variance (write-up §11).
 
-Still open, by upside: cutting the ~40 % of a verify step that is not the forward (batch the
-46-launch commit), the burst-entry hysteresis, `--spec-draft-len 16` for long context, batched
-speculation, a graph-captured fixed-width verify forward, and sampling support.
+Still open, by upside: raising the default draft length to 16 (one confirming session), a
+cheaper long-context verify step — the extend attention reads the whole KV history once per
+query token, and a fused multi-query kernel that reads it once for all `m` is the shape of the
+fix, and the only thing that makes speculation pay above ~64K — batched (bs > 1) speculation, and
+sampling support. The 46-launch commit, the batch-prep overhead, the burst-entry hysteresis and
+the graph-captured verify forward are all closed above.
 
 ### 1M single-session profile
 
