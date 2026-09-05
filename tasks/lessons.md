@@ -1261,3 +1261,42 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   was **0** over 568 restores with 0 invariant violations: the charging held the budget and the
   deferral never fired. Report that explicitly — a green soak validated one arm of the change,
   and saying so is what keeps the other arm's CPU-side evidence from being quietly forgotten.
+
+## 2026-09-05 (soak §Y5b — the 576 s admission livelock)
+- **A FIFO admission loop with one stopping rule is a head-of-line block, and the pool
+  being 41 % free is the tell.** `usage=0.59`, `mamba 26/96`, 15 queued, 0 batches, 0
+  invariant violations for 1.87 M consecutive checks: the gate was arithmetically right
+  every single time and the *queue discipline* was the bug. When a stall shows capacity
+  free and the invariant clean, stop auditing the arithmetic and look at what the loop
+  refuses to examine.
+- **`break` on a refusal is also an accidental reservation — check which one you are
+  removing.** Skipping past a refused FRESH admit is only safe because
+  `PrefillAdder.reserved_size` already carries the standing reservation of everything
+  mid-prefill, so the lane behind cannot re-sell the refused prompt's pages. That term is
+  exactly what `ea7ed7c`'s continue-past-refusals lacked; the same edit is a deadlock
+  without it and a livelock fix with it. The lesson is not "never continue past a refusal",
+  it is "continue only against a budget that remembers".
+- **A hot loop that never sleeps is a second, independent bug.** `blocking = not
+  prefill_manager.runnable` can never be true for a queue nobody can admit, so the refused
+  pass re-ran at 3,240 Hz on one core. Fixing only the queue discipline would have hidden
+  it; fixing only the sleep would have left a 576 s silent stall. Ask separately: *can this
+  state change?* and *am I burning a core while it cannot?*
+- **A seat-scan that mirrors the loop is not automatically better than one that
+  under-counts.** Giving `_seatable_lanes` the same skip cost **20 % of prefill throughput
+  and utilisation 0.96 -> 0.79 on all five replay profiles**: `would_seat` is optimistic on
+  purpose and stopping at the first refusal is what bounds the optimism. Measure the mirror,
+  do not assume symmetry is correctness.
+- **Do not swap files under a running sweep.** A background seed sweep spawns one
+  subprocess per point; `cp`-ing the module back to baseline mid-flight silently poisoned
+  the later profiles with baseline numbers that looked plausible. Finish the sweep or copy
+  the tree.
+- **The replay already reproduced it; nobody was reading the metric.** `switchyard-stage`
+  at seed 7 scores `stall_seconds` 6,997 (68 % of the run) with a single 541.7 s episode
+  against the soak's 576 s — the gate simply had no column for it. Before building a new
+  repro profile, print the whole metrics dict of the existing ones.
+- **A prompt that "can never fit the pool" was unreachable, and one grep settled it.**
+  `engine.py:546` sets `max_seq_len = min(config.max_seq_len, num_tokens)` and the message
+  path already rejects `input_len >= max_seq_len` and clamps `max_tokens`, so
+  `input_len + output_len <= pool` by construction. The ticket asked for a 4xx rejection
+  path that would have been dead code (and a false-rejection risk on SWA). Check the
+  sizing invariant before implementing the ticket's remedy.

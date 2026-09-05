@@ -147,22 +147,83 @@ over 1,541 checks — §W's blocker closed). `fork/main` (`62f5a66`) is behind, 
       `78f29d3` publishes `requests.aborts`, and the §W5 disconnect probe took `active` 0 → 1 → 0
       in 2 s while `client_disconnect` never left 0 — the counter exists but the disconnect path
       does not increment it. Half of §U8 ticket 12. soak §W5.
-- [ ] **An over-pool prompt has no client rejection path.** `PrefillManager.schedule_next_batch`
-      skips a fresh request whose `input_len + output_len > cache_manager.max_size`, logs one
-      warning and `continue`s — never removing it from `pending_list`, never failing the request,
-      so the client hangs until its own timeout. It also keeps inflating `waiting`, shrinking every
-      other lane's chunk, and `_seatable_lanes` lacks the same skip, so one unadmittable prompt
-      pins the seatable-lane estimate. Fix: 400/413 at admission, and mirror the skip in
-      `_seatable_lanes`.
+- [x] **DONE (uncommitted) — the 576 s admission livelock (soak §Y5b), formerly filed as "an
+      over-pool prompt has no client rejection path".**
+      Root cause: the admission loop was FIFO with a single stopping rule. A fresh prompt the
+      pools refused made the pass `break`, so every request behind it went unexamined — with
+      1 running request draining to 0, 15 queued, `token usage 0.59` and 108 K tokens of the
+      pool free. Nothing was running, so no page came back, so every subsequent pass took the
+      identical decision; `normal_loop`'s `blocking`/`_only_idle_sessions` test requires an
+      EMPTY prefill queue, which a queue nobody can admit never is, so the loop never took its
+      10 ms nap: 1,867,771 refusals in 576 s (~3,240/s) on one core at 102 %. It ended only
+      when the clients' 600 s timeouts fired. The seatable-lane histogram pinned at bucket 2
+      is `would_seat` (which does not `lock()` the matched prefix) disagreeing with
+      `_try_allocate_one` (which locks, and re-checks the gate against the smaller budget).
+      Fix (three lines of policy):
+      (a) a refused FRESH admit is SKIPPED, not stopped on, while `PrefillAdder.headroom` > 0
+          — the same shape as the existing `max_chunked_prefills` skip, and safe for the same
+          reason: `reserved_size` carries every claim already made, so a lane admitted after
+          the skip cannot re-sell the refused prompt's pages (this is the term `ea7ed7c`'s
+          continue-past-refusals lacked). Counted as `fresh_admits_deferred` on `/v1/stats`.
+      (b) `headroom` (token budget, table slots, pool minus reservations) stops the walk when
+          nothing of any size can be seated, so a genuinely full pool does not radix-match the
+          whole queue.
+      (c) `Scheduler._only_idle_sessions` also returns True when the last pass scheduled
+          nothing (`_admission_stalled`), so a refused pass takes the 10 ms nap instead of
+          spinning. Cleared by `_process_last_data` (a drain changes the state).
+      **NOT done, and it turns out not to be reachable: the client-rejection path.** The
+      original ticket's `max_size` skip no longer exists in the tree, and an over-pool prompt
+      cannot occur: `engine.py:546` sets `self.max_seq_len = min(config.max_seq_len,
+      num_tokens)`, and `_process_one_msg` already rejects `input_len >= max_seq_len` with
+      `ErrorReplyMsg(code="context_length_exceeded")` and clamps `max_tokens` to
+      `max_seq_len - input_len` — so `input_len + output_len <= max_seq_len <= pool tokens`
+      by construction. §Y5b's head was refused by the pool's *current* protected/live
+      commitment, not by the pool's size, so rejecting it would have been wrong; deferral is
+      the correct treatment and is what shipped. `_seatable_lanes` was deliberately NOT given
+      the same skip: `would_seat` is optimistic and its optimism is only bounded by stopping
+      at the first refusal, so mirroring inflated the chunk-share divisor and cost 20 % of
+      prefill throughput on all five replay profiles (util 0.96 -> 0.79). Under-counting the
+      divisor is the safe direction. Tests: `tests/scheduler/test_admission_livelock.py`
+      (5 new, 4 of them fail on `efa37da`) + 2 in `test_scheduler_counters.py`.
 - [ ] **`stopped_for_lane_cap` rotation is dead code on this model.** `lane_cap =
       _resolve_max_prefill_seqs(config)` is 0 for Nemotron (confirmed live with `py-spy dump
       --locals`), so the interleaved `pending_list = remaining + chunked_list` branch is
       unreachable exactly on the profile that turns interleaving on. Its comment describes
       `blocked_fresh` / the refusals break. Set the flag there or delete the branch.
-- [ ] **A refused prefill pass costs O(queue × prompt) radix walks.** 16 pending 118K-token
-      prompts are re-`match_prefix`ed from scratch on every pass that returns `None` (4 of 5
-      py-spy samples during the `81ab30e` stall were inside `fast_compare_key`). Cache the match
-      per pending request, or skip the walk once the pass has refused a fresh admit.
+- [ ] **A refused prefill pass costs O(queue × prompt) radix walks — and the §Y5b fix made it
+      2.6x worse per pass.** 16 pending 118K-token prompts are re-`match_prefix`ed from scratch
+      on every pass that returns `None` (4 of 5 py-spy samples during the `81ab30e` stall were
+      inside `fast_compare_key`), and now a pass that skips past a refused fresh admit walks
+      further down the queue before it stops. Measured on the replay, seed 7:
+      `match_tokens_per_prefill_pass` 167,629 -> 518,410 on `switchyard-stage`,
+      158,925 -> 444,522 on `pressure`. In absolute terms the fix still spends far LESS
+      (§Y5b's spin ran 3,240 passes/s; a stalled pass now runs at most ~100/s), and the
+      healthy path is untouched because it never refuses — but this is now the top scheduler
+      CPU ticket. Cache the match per pending request per pass (the adder is rebuilt every
+      pass, so a per-pass memo is enough; note the lessons flag a "match memo" as one of
+      `ea7ed7c`'s ingredients, so keep it strictly a memo and change no gate).
+- [ ] **`_reclaim_soft_sessions_for_pending` measures the pressure the admission gate does
+      NOT feel, so it frees nothing at exactly the moment it should.** It computes
+      `needed = (input_len - cached_len) + output_len` and calls it pressure only when
+      `needed > cm.available_size` — the *pre-lock* budget. `_try_allocate_one` locks the
+      matched prefix first, which moves it out of `full_evictable_size`, and only then
+      re-checks the same gate; a turn with a large evictable prefix therefore fails admission
+      while the reclaim decides there is no pressure and releases no lease. Soak §Y5b is the
+      evidence: zero `Released soft session ... KV protection (admission pressure)` lines in
+      the whole 576 s window, and none in the 9m36s before the clients gave up. It also only
+      ever looks at `pending_list[0]` (the `for` body ends in `return released`). The §Y5b fix
+      stops this wedging the queue, but the request itself still waits for a lease to expire
+      on its own. Fix needs the lock delta in the pressure test; do not just add
+      `cached_len` (that over-triggers the spill).
+
+- [ ] **The streaming disconnect path still raises `CancelledError` out of the ASGI app.**
+      `FrontendManager.stream_with_cancellation` re-raises after `spawn_abort`, so uvicorn
+      logs `Exception in ASGI application` for a StreamingResponse whose client left. The
+      non-streaming endpoints now return a quiet 499 (`disconnect.ClientGone` +
+      `client_gone_response`); the streaming generator needs the equivalent (`return`, not
+      `raise`, once the abort is spawned) — left out of the §Y8.4 fix because §Y's 10
+      tracebacks were all on the non-stream path.
+
 - [ ] **`_maybe_shrink_growable_kv` calls `evict_all_unlocked_prefixes()` before computing
       whether a shrink is possible**, so above the initial KV step every idle moment wipes the
       whole prefix cache and often shrinks nothing (`server.gen1.log` 09:44–09:47).

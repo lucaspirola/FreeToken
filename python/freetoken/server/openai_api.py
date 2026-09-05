@@ -26,7 +26,12 @@ from .api_models import (
     ToolChoiceObject,
 )
 from .client_sessions import chat_session_id
-from .disconnect import aiter_or_disconnect, await_or_disconnect
+from .disconnect import (
+    ClientGone,
+    aiter_or_disconnect,
+    await_or_disconnect,
+    client_gone_response,
+)
 from .function_call_parser import ToolCallItem
 from .json_output import apply_json_instruction, schema_instruction
 from .request_logger import log_request
@@ -451,9 +456,13 @@ async def handle_chat_completion(
         result = await await_or_disconnect(
             generate_full(uid, spec, state, source="/v1/chat/completions"), request
         )
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as exc:
         trace.seal(status="abort", error_code="client_disconnect")
         await state.abort_user(uid, session_id=spec.session_id)
+        if isinstance(exc, ClientGone):
+            # The socket is already gone: re-raising here only makes uvicorn log an ASGI
+            # traceback for a request that ended exactly as designed (soak §Y8.4).
+            return client_gone_response()
         raise
     except GenerationError as exc:
         if not _auto_session_busy(exc, spec):
@@ -464,9 +473,13 @@ async def handle_chat_completion(
             result = await await_or_disconnect(
                 generate_full(uid, spec, state, source="/v1/chat/completions"), request
             )
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             trace.seal(status="abort", error_code="client_disconnect")
             await state.abort_user(uid)
+            if isinstance(exc, ClientGone):
+                # The socket is already gone: re-raising here only makes uvicorn log an ASGI
+                # traceback for a request that ended exactly as designed (soak §Y8.4).
+                return client_gone_response()
             raise
         except GenerationError as retry_exc:
             trace.seal(status="error", error_code=retry_exc.code)
@@ -866,9 +879,13 @@ async def handle_completion(
                     finish_reason = getattr(ack, "finish_reason", None) or "stop"
                     break
                 trace.first_token()
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             trace.seal(status="abort", error_code="client_disconnect")
             await state.abort_user(uid, session_id=req.session_id)
+            if isinstance(exc, ClientGone):
+                # The socket is already gone: re-raising here only makes uvicorn log an ASGI
+                # traceback for a request that ended exactly as designed (soak §Y8.4).
+                return client_gone_response()
             raise
         choices.append({"index": index, "text": text, "finish_reason": finish_reason, "logprobs": None})
 

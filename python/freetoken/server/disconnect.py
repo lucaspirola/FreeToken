@@ -28,6 +28,36 @@ T = TypeVar("T")
 # abandoned prefill keeps running, so it is deliberately much coarser than a chunk.
 POLL_INTERVAL_S = 0.25
 
+# nginx's "client closed request". Never reaches a socket -- uvicorn drops a send on a
+# disconnected transport -- so it exists purely to give the endpoint something to RETURN.
+CLIENT_CLOSED_REQUEST = 499
+
+
+class ClientGone(asyncio.CancelledError):
+    """The poll below observed the client had left; nobody cancelled this task.
+
+    A subclass of ``CancelledError`` on purpose: every caller's existing
+    ``except asyncio.CancelledError`` still catches it and still sends the AbortMsg, so
+    the abort stays in one place per endpoint. What the distinct type buys is the answer
+    to the question the endpoint could not previously ask -- "is there still a client to
+    raise at?" -- and the answer is no, so re-raising is wrong: it leaves uvicorn to log
+    ``ERROR: Exception in ASGI application`` with a full traceback for a request that
+    ended exactly as designed (soak §Y8.4, 10 of them in one phase). Return
+    :func:`client_gone_response` instead; a genuine outer cancellation (shutdown) is a
+    plain ``CancelledError`` and must still propagate.
+    """
+
+
+def client_gone_response():
+    """The quiet end of a request whose client is already gone.
+
+    Built lazily so this module stays importable without a web framework (the in-process
+    callers and most of the unit tests never touch it).
+    """
+    from fastapi import Response
+
+    return Response(status_code=CLIENT_CLOSED_REQUEST)
+
 
 async def client_gone(request: Any) -> bool:
     """True if the client has disconnected (or its receive channel is already dead)."""
@@ -70,7 +100,7 @@ async def _wait_or_disconnect(
             return
         if await client_gone(request):
             await _drain_cancelled(task)
-            raise asyncio.CancelledError
+            raise ClientGone
 
 
 async def await_or_disconnect(

@@ -1310,13 +1310,45 @@ def run(ticks: int, seed: int, verbose: bool = False, profile: str = "stage",
 # switchyard profile's error rate on its own: what discriminates a deadlock is the
 # ``deadlock_violations`` invariant below (the owed footprint of the admitted set).
 #
+# Re-measured after soak §Y5b: the admission loop now SKIPS a fresh prompt the pools cannot
+# seat instead of stopping the pass on it (``PrefillAdder.headroom`` bounds the skip), and
+# ``Scheduler._only_idle_sessions`` lets a pass that scheduled nothing take the loop's 10 ms
+# nap. Same seed, ticks and interpreter; efa37da -> this tree:
+#   stage               5,024,311 -> 6,019,776 (+20%)  completed 297 -> 389  util 0.851 -> 0.963
+#   pressure            8,238,023 -> 7,074,811 (-14%)  completed  91 -> 114  util 0.917 -> 0.958
+#   switchyard-stage    2,398,186 -> 3,060,472 (+28%)  completed 256 -> 548  err 0.391 -> 0.018
+#   switchyard-deadlock 1,163,345 -> 1,607,883 (+38%)  completed 185 -> 341  err 0.136 -> 0.003
+#   switchyard-restore  2,383,276 -> 2,707,851 (+14%)  completed 308 -> 552  err 0.339 -> 0.020
+# ``invariant_violations`` 0 and ``deadlock`` False on all five, before and after, and over
+# the eight seeds {1,3,5,7,11,13,17,23} as well: the skip charges every admit against the
+# same ``reserved_size`` the refused prompt was measured against, so it re-sells nothing.
+#
+# ``pressure`` is the one number that falls, and it is a TICK-ALLOCATION artefact, not lost
+# throughput. The replay spends 20,000 forwards; the fixed tree finishes 25% more requests,
+# so 195 of those forwards move from prefill to decode and ``sim_seconds`` drops 6,467 ->
+# 5,840. Per simulated second the prefill rate is 1,274 -> 1,211 tok/s (-5%) while
+# completions are 0.0141 -> 0.0195/s (+39%) and ``lc_completed`` (the long prompts, the ones
+# a short-job-first bias would starve) is 82 -> 102. Long-context completions rise on every
+# profile that has them, which is the check that says this is not queue-jumping.
+#
+# The ``max_stall_frac`` column is NEW and is the direct §Y5b regression test. ``stall_*``
+# already measured exactly the failure -- wall clock with a non-empty queue and no batch
+# schedulable -- and the gate simply had no column for it. At seed 7 the pre-fix tree scores:
+#   switchyard-stage    stall_frac 0.6809, 20 episodes, longest 541.7 s
+#   switchyard-deadlock stall_frac 0.4287,  9 episodes, longest 401.2 s
+#   switchyard-restore  stall_frac 0.7223, 32 episodes, longest 563.0 s
+# against the live soak's single 576-second hole (§Y5b). The fixed tree scores 0.0 on all
+# three at seed 7; the ceilings below are set off the eight-seed SPREAD (worst 0.2324 /
+# 0.2499 / 0.2331), not off seed 7, because a ceiling that tracks the best seed is a
+# flake. ``stage``/``pressure`` have never stalled on any seed, before or after.
 GATE_TICKS = 20_000
 GATE_SEED = 7
 GATE_CASES = [
     # profile, min prefilled_tokens, min completed, max error_rate (None = not checked),
-    # min session restores (None = the profile does not model them)
-    ("stage",            4_773_000, 282, None, None),
-    ("pressure",         7_826_000,  86, None, None),
+    # min session restores (None = the profile does not model them),
+    # max stall_frac -- share of the wall clock with queued work and no batch (soak §Y5b)
+    ("stage",            5_718_000, 369, None, None, 0.05),
+    ("pressure",         6_721_000, 108, None, None, 0.05),
     # The residency profile is graded on goodput AND on the soak's own acceptance metric.
     # The error ceiling moved 0.376 -> 0.410 with the chunk-share fix, and that is jitter,
     # not a regression: over seeds {1,3,5,7,11,13,17,23} the mean error rate is 0.288
@@ -1325,7 +1357,10 @@ GATE_CASES = [
     # completions rise 263 -> 337 (+28%) on the same eight seeds. The ceiling tracks the
     # seed-7 measurement (+5%) like every other floor here; the SPREAD is what says whether
     # a future move is real, so re-run the sweep before touching this number again.
-    ("switchyard-stage", 2_278_000, 243, 0.410, None),
+    # The error ceiling is 0.070 because the eight-seed spread on the fixed tree is
+    # 0.013-0.0665 (seed 7 is 0.0179); the pre-§Y5b spread was 0.198-0.391. Completions over
+    # the same eight seeds: 256-422 before, 491-671 after.
+    ("switchyard-stage", 2_907_000, 520, 0.070, None, 0.35),
     # The deadlock profile is the regression test for soak report T. Its floors come from
     # the shipped tree -- but the checks that matter on it are the two every case now
     # carries, ``deadlock`` and ``invariant_violations``. ea7ed7c beats every throughput
@@ -1334,7 +1369,7 @@ GATE_CASES = [
     # obtain. Seed 7 is this profile's BEST seed for error rate (0.1355 against a
     # 0.136-0.246 spread over the eight seeds above), so the 0.143 ceiling is tight by
     # construction; widen it from a sweep, not from a single failing run.
-    ("switchyard-deadlock", 1_105_000, 176, 0.143, None),
+    ("switchyard-deadlock", 1_527_000, 323, 0.059, None, 0.35),
     # The restore profile is the regression test for soak §W6, and like the deadlock
     # profile its point is ``invariant_violations``, not its throughput. Measured on this
     # tree at seed 7 / 20,000 forwards: 2,383,276 tokens, 308 completed, error 0.3391,
@@ -1354,14 +1389,15 @@ GATE_CASES = [
     # ``min_restores`` guards the test itself: a change that stopped the profile spilling
     # or restoring would otherwise pass it by doing nothing. The eight-seed spread is
     # 10-27 restores, so the floor sits well under the low end.
-    ("switchyard-restore", 2_264_000, 292, 0.356, 8),
+    ("switchyard-restore", 2_572_000, 524, 0.058, 8, 0.35),
 ]
 
 
 def gate(ticks: int = GATE_TICKS, seed: int = GATE_SEED, verbose: bool = False) -> int:
     """Run the fixed gate cases and report. Returns a process exit code."""
     failures = []
-    for profile, min_tokens, min_completed, max_error, min_restores in GATE_CASES:
+    for (profile, min_tokens, min_completed, max_error, min_restores,
+         max_stall_frac) in GATE_CASES:
         t0 = time.perf_counter()
         out = run(ticks, seed, verbose=verbose, profile=profile)
         elapsed = time.perf_counter() - t0
@@ -1385,6 +1421,19 @@ def gate(ticks: int = GATE_TICKS, seed: int = GATE_SEED, verbose: bool = False) 
                 f"session_restores {restores} < {min_restores}: this profile is no longer "
                 f"exercising cold restores, so its invariant check proves nothing"
             )
+        # The §Y5b check: wall clock with a non-empty queue and nothing schedulable. A
+        # throughput floor cannot make it -- the pre-fix tree stalls for 68% of the
+        # switchyard-stage run in 20 episodes (longest 541.7 s, against the live soak's
+        # 576 s hole) and still clears its old token floor, because the tokens it does
+        # forward it forwards efficiently. Silence is the defect, not the rate.
+        stall_frac = out.get("stall_frac")
+        if (max_stall_frac is not None and stall_frac is not None
+                and stall_frac > max_stall_frac):
+            bad.append(
+                f"stall_frac {stall_frac} > {max_stall_frac}: "
+                f"{out['stall_episodes']} episodes, longest {out['stall_max']}s of wall "
+                "clock with a non-empty queue and no batch schedulable (soak §Y5b)"
+            )
         # The two checks that a throughput floor cannot make. Both reverted trees beat this
         # gate's numbers and failed the live soak; these are what they fail.
         if out.get("deadlock"):
@@ -1405,7 +1454,7 @@ def gate(ticks: int = GATE_TICKS, seed: int = GATE_SEED, verbose: bool = False) 
               f"tokens={tokens:>10,} (min {min_tokens:>9,})  "
               f"completed={completed:>4} (min {min_completed:>4})  "
               f"lanes={out['lanes_mean']}  util={out['util_mean']}  "
-              f"err={out.get('error_rate')}  stallUsage={out.get('stall_usage_p50')}  "
+              f"err={out.get('error_rate')}  stallFrac={out.get('stall_frac')}  "
               f"restores={out.get('session_restores')}/"
               f"{out.get('session_restores_deferred')}def  "
               f"viol={out.get('invariant_violations')}  "

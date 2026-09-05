@@ -256,6 +256,14 @@ class Scheduler(SchedulerIOMixin):
         # an existing agent's stream latency while keeping the large prefill kernels efficient.
         self._growable_decode_burst = 32
         self._growable_decode_steps = 0
+        # True while the last scheduling pass produced no batch at all. With a queue that
+        # cannot be admitted, ``prefill_manager.runnable`` stays True forever, so the loop's
+        # own "am I idle?" test never fires and the receive is never allowed to rest: soak
+        # §Y5b spun 1.87 M identical refused passes in 576 s, ~3,240/s, on one core at
+        # 102 %. Nothing but an incoming message or a lease deadline can change that state,
+        # and both of those are already what the loop polls for -- so the pass that
+        # scheduled nothing is allowed to take the same 10 ms nap an idle one takes.
+        self._admission_stalled = False
         # Work-conserving controller for the only scheduler path that cannot mix prefill and
         # decode kernels. Forward timing is sampled after its CUDA completion barrier, so no
         # synchronize is added to the hot path. Keep enough tokens per waiting lane for the
@@ -769,6 +777,9 @@ class Scheduler(SchedulerIOMixin):
     def _process_last_data(self, last_data: ForwardData | None) -> None:
         if last_data is None:
             return
+        # A drained batch releases pages and finishes requests, so a refusal recorded
+        # before it is no longer evidence that the next pass will refuse too.
+        self._admission_stalled = False
 
         batch, (_, next_tokens_cpu, copy_done) = last_data[0].batch, last_data[1]
         copy_done.synchronize()
@@ -1829,9 +1840,20 @@ class Scheduler(SchedulerIOMixin):
         return bool(store is not None and store.num_records)
 
     def _only_idle_sessions(self, last_data: ForwardData | None) -> bool:
+        """Nothing left to do this iteration but wait for a message or a deadline.
+
+        ``_admission_stalled`` is the second way to reach that state: a queue the pools
+        cannot admit keeps ``prefill_manager.runnable`` True, but the pass that just refused
+        every one of its lanes proved that no batch will come out of another attempt until
+        something outside this loop changes -- and the only things that can are exactly what
+        the caller is about to poll for (a message, and the lease/checkpoint deadlines
+        ``_sessions_need_service`` keeps the loop awake for). Without it the refused pass is
+        re-run flat out; soak §Y5b burned a core for 576 s doing that.
+        """
         return (
             last_data is None
-            and not self.prefill_manager.runnable
+            and (not self.prefill_manager.runnable
+                 or getattr(self, "_admission_stalled", False))
             and not self.decode_manager.runnable
             and self._pending_rebuild is None
             and not getattr(self, "_growable_shrink_pending", False)
@@ -2280,6 +2302,9 @@ class Scheduler(SchedulerIOMixin):
                 if self.prefill_manager.runnable:
                     self._reclaim_for_blocked_prefill()
                 batch = self.decode_manager.schedule_next_batch()
+        # A pass that scheduled nothing lets the loop rest (see _only_idle_sessions);
+        # any batch at all means the state is still moving and it must not.
+        self._admission_stalled = batch is None
         if batch is None:
             return None
         forward_input = self._prepare_batch(batch)

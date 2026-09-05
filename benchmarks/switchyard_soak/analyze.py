@@ -203,6 +203,9 @@ def report_stats(path: str, previous: tuple[str, dict] | None) -> dict:
                   "   <- nonzero means the cap BINDS; the reservation arithmetic is wrong")
             print(f"  deferred chunks: {pre.get('deferred_chunks', 0)}   "
                   f"refusals (pool/table/budget): {pre.get('refusals', 0)}")
+            print(f"  fresh admits deferred (skipped, queue kept moving): "
+                  f"{pre.get('fresh_admits_deferred', 0)}"
+                  "   <- soak §Y5b: nonzero WITH batches flowing is the fix working")
             print(f"  chunked prefills in flight: last={pre.get('chunked_inflight', 0)} "
                   f"max={pre.get('chunked_inflight_max', 0)}")
             print(f"  seatable lanes: last={pre.get('seatable_lanes_last', 0)}")

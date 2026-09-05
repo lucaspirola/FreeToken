@@ -270,13 +270,26 @@ def _run_handler(coro):
     return asyncio.run(coro)
 
 
+def _assert_quiet_close(result) -> None:
+    """A non-streaming endpoint whose client left ends with a response, not a raise.
+
+    Re-raising the ``CancelledError`` is what put ten ``ERROR: Exception in ASGI
+    application`` tracebacks in the soak's stage phase (§Y8.4) for requests that ended
+    exactly as designed. Nothing is ever written: uvicorn drops a send on a disconnected
+    transport, so the status code is only a marker for the endpoint's own bookkeeping.
+    """
+    assert result is not None, "the endpoint must return, not raise, for a gone client"
+    assert getattr(result, "status_code", None) == D.CLIENT_CLOSED_REQUEST
+
+
+
 def test_chat_nonstream_aborts_on_disconnect():
     state = HangingState()
-    with pytest.raises(asyncio.CancelledError):
-        _run_handler(
-            handle_chat_completion(_chat_request(), FakeRequest(0), state, {})
-        )
+    result = _run_handler(
+        handle_chat_completion(_chat_request(), FakeRequest(0), state, {})
+    )
     assert state.aborts == [(1, None)]
+    _assert_quiet_close(result)
 
 
 def test_chat_nonstream_normal_completion_is_unaffected():
@@ -303,9 +316,9 @@ def test_chat_nonstream_normal_completion_is_unaffected():
 def test_completions_nonstream_aborts_on_disconnect():
     state = HangingState()
     req = CompletionRequest(model="client-model", prompt="hello", max_tokens=8)
-    with pytest.raises(asyncio.CancelledError):
-        _run_handler(handle_completion(req, FakeRequest(0), state, {}))
+    result = _run_handler(handle_completion(req, FakeRequest(0), state, {}))
     assert state.aborts == [(1, None)]
+    _assert_quiet_close(result)
 
 
 def test_anthropic_nonstream_aborts_on_disconnect():
@@ -313,9 +326,9 @@ def test_anthropic_nonstream_aborts_on_disconnect():
     req = AnthropicMessagesRequest.model_validate(
         {"model": "claude-x", "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]}
     )
-    with pytest.raises(asyncio.CancelledError):
-        _run_handler(handle_anthropic_messages(req, FakeRequest(0), state, {}))
+    result = _run_handler(handle_anthropic_messages(req, FakeRequest(0), state, {}))
     assert state.aborts == [(1, None)]
+    _assert_quiet_close(result)
 
 
 def test_responses_nonstream_aborts_on_disconnect():
@@ -323,17 +336,16 @@ def test_responses_nonstream_aborts_on_disconnect():
     req = ResponsesRequest.model_validate(
         {"model": "gpt-x", "input": "hi", "max_output_tokens": 16}
     )
-    with pytest.raises(asyncio.CancelledError):
-        _run_handler(handle_responses(req, FakeRequest(0), state, {}))
+    result = _run_handler(handle_responses(req, FakeRequest(0), state, {}))
     assert state.aborts == [(1, None)]
+    _assert_quiet_close(result)
 
 
 def test_disconnected_nonstream_request_stops_reading_the_engine():
     """The abort is only half the fix: the handler must also stop awaiting the engine,
     or the coroutine (and its ack queue) lives on."""
     state = HangingState()
-    with pytest.raises(asyncio.CancelledError):
-        _run_handler(handle_chat_completion(_chat_request(), FakeRequest(0), state, {}))
+    _run_handler(handle_chat_completion(_chat_request(), FakeRequest(0), state, {}))
     # One submission, one abort — nothing left running.
     assert len(state.sent) == 1
     assert len(state.aborts) == 1
@@ -416,11 +428,13 @@ def test_nonstream_disconnect_is_counted_once():
     """The path the soak probe took: /v1/chat/completions with stream=false."""
     state = _hanging_manager()
 
-    with pytest.raises(asyncio.CancelledError):
-        _run_handler(handle_chat_completion(_chat_request(), FakeRequest(0), state, {}))
+    result = _run_handler(
+        handle_chat_completion(_chat_request(), FakeRequest(0), state, {})
+    )
 
     assert state.stats.aborts["client_disconnect"] == 1
     assert len(_aborts(state)) == 1
+    _assert_quiet_close(result)
 
 
 def test_nonstream_disconnect_is_counted_even_if_the_handler_is_cancelled():

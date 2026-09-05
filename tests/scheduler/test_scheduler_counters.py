@@ -103,12 +103,45 @@ def test_every_pass_is_counted_with_its_divisor_and_chunked_population():
 
 def test_a_pass_that_seats_nothing_new_still_counts_itself():
     """A pass is a scheduling decision even when it returns no batch -- and a run of them
-    is exactly the shape a starved queue makes."""
+    is exactly the shape a starved queue makes.
+
+    A fresh prompt the pool cannot seat while the pool still HAS room is deferred rather
+    than stopped on (soak §Y5b), so it lands in ``fresh_admits_deferred``; ``refusals``
+    stays the count of passes that gave up on the queue tail as well.
+    """
     _cm, _tm, _dm, pm = _build(num_pages=32)
     pm.pending_list = [_pending(uid=1, first_token=0, length=4_096, max_tokens=8)]
     assert pm.schedule_next_batch(32) is None
     assert pm.counters.passes == 1
+    assert pm.counters.fresh_admits_deferred == 1
+    assert pm.counters.refusals == 0
+
+
+def test_a_pass_with_no_headroom_stops_instead_of_walking_the_queue():
+    """The other half of the skip: when nothing can be seated at all, the walk stops at
+    the first refusal and does NOT radix-match the rest of the queue.
+
+    Skipping past every refusal unconditionally would make a pass that can seat nothing
+    re-``match_prefix`` every queued prompt -- the open ticket "a refused prefill pass
+    costs O(queue x prompt) radix walks", made worse rather than better. ``headroom``
+    (zero here because every table slot is taken) is what keeps the skip off that path.
+    """
+    cm, tm, _dm, pm = _build(num_pages=4_096, interleave_chunks=True)
+    for _ in range(tm.available_size):
+        tm.allocate()
+    assert tm.available_size == 0
+
+    pm.pending_list = [
+        _pending(uid=i, first_token=i * 10_000, length=8, max_tokens=4) for i in range(1, 8)
+    ]
+    matched: list[int] = []
+    real_match = cm.match_req
+    cm.match_req = lambda req: (matched.append(req.uid), real_match(req))[1]
+
+    assert pm.schedule_next_batch(64) is None
     assert pm.counters.refusals == 1
+    assert pm.counters.fresh_admits_deferred == 0
+    assert matched == [], f"a pass that can seat nothing must not walk the queue: {matched}"
 
 
 def test_an_empty_queue_is_not_a_pass():

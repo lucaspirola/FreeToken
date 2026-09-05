@@ -86,6 +86,25 @@ class PrefillAdder:
         if self.reserved_pages < 0:
             self.reserved_pages = self.reserved_size
 
+    @property
+    def headroom(self) -> int:
+        """Tokens this pass could still sell to a lane BEHIND the one it just refused.
+
+        Zero means nothing of any size can be seated -- the token budget is spent, there
+        is no free table slot, or every claim already standing on the pool covers it -- so
+        the admission walk may stop. Positive means the refusal was about the size of
+        *that* prompt against what is left, not about the pool being empty, and a shorter
+        request behind it may still fit; skipping past the refusal is then the difference
+        between serving the queue and soak §Y5b's 576-second head-of-line stall.
+
+        This is also the bound that keeps the skip cheap: without it a genuinely full pool
+        would make every refused pass walk (and ``match_prefix``) the entire queue -- the
+        open ticket "a refused prefill pass costs O(queue x prompt) radix walks".
+        """
+        if self.token_budget <= 0 or self.table_manager.available_size <= 0:
+            return 0
+        return max(0, self.cache_manager.available_size - self.reserved_size)
+
     def _page_span(self, start: int, end: int) -> int:
         """Fresh pages the extend ``[start, end)`` pulls, charged per WHOLE page."""
         ps = self.cache_manager.page_size
@@ -481,11 +500,19 @@ class PrefillManager:
         """How many lanes will this pass actually seat? -- the interleave share's divisor.
 
         The 8,192-token prefill budget has to be split between the lanes that end up in the
-        batch, and the admission loop below is FIFO with a single stopping rule, so that set
-        is a prefix of the queue: continuations (seatable whenever the pool can back a page)
-        and fresh prompts that clear the standing-reservation gate, minus the fresh prompts
-        the ``max_chunked_prefills`` cap skips, cut short by the first refusal and by
-        ``lane_cap``. This walks that prefix on a copy of the adder and counts it.
+        batch, and this walks a prefix of the queue on a copy of the adder and counts it:
+        continuations (seatable whenever the pool can back a page) and fresh prompts that
+        clear the standing-reservation gate, minus the fresh prompts the
+        ``max_chunked_prefills`` cap skips, cut short by the first refusal and by
+        ``lane_cap``.
+
+        That prefix is now NARROWER than what the loop below seats: the loop skips past a
+        refused fresh prompt (soak §Y5b) and this scan deliberately does not -- see the
+        comment on the ``break``. Under-counting only makes the share generous, which the
+        per-iteration recompute absorbs. Since the loop started skipping, a seat count of 0
+        no longer implies an empty batch; a count ABOVE zero and an empty batch is still the
+        §Y5b signature (a histogram pinned at bucket 2 for 1.7 M consecutive passes that
+        scheduled nothing whatsoever).
 
         Dividing by the QUEUE DEPTH instead -- what ``f3c3ac4`` shipped and what soak report
         §R7 ticket 1 / §U8 measured -- is the stage route's starvation: sixteen queued
@@ -509,6 +536,16 @@ class PrefillManager:
             if is_fresh and inflight >= self.max_chunked_prefills:
                 continue  # skipped, not stopped on -- mirrors the loop below
             if not scan.would_seat(pending_req, table_free, mamba_free):
+                # Stop here even though the LOOP would skip a refused fresh prompt and keep
+                # going. ``would_seat`` is deliberately optimistic (it does not lock the
+                # matched prefix, charges one page per lane and never escalates into
+                # eviction), and that optimism is only bounded by stopping at the first
+                # refusal; skipping through the queue with it inflates the divisor, which
+                # shrinks every lane's chunk -- measured on the replay as prefill
+                # throughput -20 % and utilisation 0.96 -> 0.79 across all five profiles.
+                # Under-counting is the safe direction: ``chunk_limit`` is only ever an
+                # upper bound, and the per-iteration recompute below hands the unspent
+                # budget to the lanes the pass actually seats.
                 break
             seatable += 1
             if is_fresh:
@@ -685,9 +722,30 @@ class PrefillManager:
                     stopped_for_lane_cap = index + 1 < len(self.pending_list)
                     break
             else:
-                # Refused for pool / table / budget, not for lanes: the queue tail behind it
-                # goes unserved this pass. Distinguished from the lane-cap stop above, which
-                # is a fair rotation rather than back-pressure.
+                if not is_continuation and adder.headroom > 0:
+                    # A FRESH prompt the pools cannot seat RIGHT NOW is skipped, not
+                    # stopped on -- exactly like the ``max_chunked_prefills`` skip above,
+                    # and safe for the same reason: ``PrefillAdder.reserved_size`` carries
+                    # every claim this pass has already made plus the standing reservation
+                    # of every prompt mid-prefill, so a lane admitted after the skip is
+                    # measured against an unchanged budget and cannot re-sell the pages the
+                    # refused prompt would have needed. (That re-selling -- charging each
+                    # arrival against a budget that forgets the last one -- is what made
+                    # ``ea7ed7c``'s continue-past-refusals a deadlock; the reservation is
+                    # the missing term, and it is here now.)
+                    #
+                    # Breaking instead is soak §Y5b: one long-context prompt whose
+                    # remaining footprint did not fit the pool's *current* protected/live
+                    # commitment sat at the head of the queue for 576 s while fifteen
+                    # requests that did fit waited behind it, 108 K tokens of the pool went
+                    # unused, and the pass re-ran the identical refusal 1.87 M times.
+                    self.counters.fresh_admits_deferred += 1
+                    continue
+                # Either the pool has nothing left to give anyone this pass (``headroom``
+                # gone, or a continuation -- which owns its slots and is refused only when
+                # the pool cannot back one more page), or the token budget is spent. The
+                # queue tail behind it goes unserved. Distinguished from the lane-cap stop
+                # above, which is a fair rotation rather than back-pressure.
                 self.counters.refusals += 1
                 break  # We cannot add more requests
         if len(reqs) == 0:

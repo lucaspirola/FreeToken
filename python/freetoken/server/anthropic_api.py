@@ -34,7 +34,7 @@ from .anthropic_models import (
     AnthropicUsage,
 )
 from .client_sessions import anthropic_session_id
-from .disconnect import await_or_disconnect
+from .disconnect import ClientGone, await_or_disconnect, client_gone_response
 from .generation import (
     KEEPALIVE,
     ContentDelta,
@@ -161,8 +161,12 @@ async def handle_anthropic_messages(
         result = await await_or_disconnect(
             generate_full(uid, spec, state, source="/v1/messages"), request
         )
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as exc:
         await state.abort_user(uid, session_id=spec.session_id)
+        if isinstance(exc, ClientGone):
+            # The socket is already gone: re-raising here only makes uvicorn log an ASGI
+            # traceback for a request that ended exactly as designed (soak §Y8.4).
+            return client_gone_response()
         raise
     except GenerationError as exc:
         return _anthropic_error_response(400, "invalid_request_error", str(exc))

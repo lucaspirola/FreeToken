@@ -52,6 +52,14 @@ class PrefillCounters:
     # Lanes a pass admitted but could not finish: their remainder is deferred to a later
     # pass. One per lane per pass, so a 30-chunk prompt contributes 29.
     deferred_chunks: int = 0
+    # Fresh prompts the pools refused while the pass still had headroom, and which the
+    # admission loop therefore SKIPPED rather than stopped on. One per prompt per pass, so
+    # a prompt that no longer fits the pool's protected/live commitment contributes one per
+    # pass until it is admitted or the client goes away. A large and growing value with
+    # batches still flowing is the healthy shape of soak §Y5b (a request that does not fit
+    # is no longer holding up the queue); a large value together with ``refusals`` rising
+    # and no prefill batches is the pool actually being full.
+    fresh_admits_deferred: int = 0
     # Passes that stopped because a lane was refused (the admission loop's ``break``), i.e.
     # the queue tail went unserved for want of pool, table or budget rather than lanes.
     refusals: int = 0
@@ -89,6 +97,7 @@ class PrefillCounters:
             "passes": self.passes,
             "fresh_admits_blocked_by_cap": self.fresh_admits_blocked_by_cap,
             "deferred_chunks": self.deferred_chunks,
+            "fresh_admits_deferred": self.fresh_admits_deferred,
             "refusals": self.refusals,
             "chunked_inflight": self.chunked_inflight,
             "chunked_inflight_max": self.chunked_inflight_max,
