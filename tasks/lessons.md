@@ -594,3 +594,43 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   refusals, admission aging, match memo, oversize skip and `admissible_size` were all
   defensible individually and together they re-sold reclaimable capacity once per pass. The
   restored tree keeps none of them. Third attempt: ship the smallest correct invariant.
+
+## 2026-09-05 (Nemotron 3.5 prefill profile — a tile constant measured on another geometry)
+- **Same bug, second kernel: a launch constant swept for one head shape becomes the silent
+  default for every other.** The decode fix (2026-09-04) was `kv_splits=8` from a fallback;
+  this one is `num_warps=4`, swept for the D=256 consumer `(64,32)` extend tile and applied
+  to *all* geometries, while `_select_extend_tile`'s `head_dim<=128` arm independently
+  hard-coded `BLOCK_M=128`. Neither half was wrong on its own; their product was a spilling
+  kernel. **When two launch parameters are chosen in different places, check the pair.**
+- **`n_regs` / `n_spills` off the compiled Triton kernel settle "why is this slow" in one
+  call.** Walking `kernel.device_caches` after one launch gave 396 spill slots per thread at
+  `BLOCK_M=128`/4 warps against 14 at 64 — the whole 2.46x, before any profiler. Do this
+  before hypothesising about bandwidth: the microbench said 7.4 GB/s of a 960 GB/s part,
+  which reads as "memory bound" and is in fact "spilling".
+- **Fewest spills is not fastest.** `32/4` and `64/8` spill zero and are 50–70 % slower than
+  `64/4` with its 14. Spills explain the *collapse*; the winner still has to be measured.
+- **Derive the cap from the kernel's own accumulator shape, not from the winning number.**
+  `BLOCK_M x BLOCK_DV / (32 * num_warps) <= 64` reproduces the measured winner *and* leaves
+  every 8-warp device and every measured `head_dim>=256` branch untouched — a rule, not a
+  second curve fit. (Same discipline as `_grid_filling_splits`.)
+- **Two engine measurements plus the kernel's own ratio bound the engine's share without
+  instrumenting the engine.** `slope = s_att + s_other` with a before/after A/B and the
+  microbench's 2.46x solves to `s_other = 0 ± 0.2e-3 ms/token` — i.e. ±13 s of a 1M prefill
+  for KV grow, page allocation and the `O(prefix)` page-index build combined. No torch
+  profiler, no model.py hook, no per-layer CUDA events. Fit the curve you can already
+  measure before adding instrumentation.
+- **`input throughput (token/s): X instant` on a `Prefill batch` line IS a per-chunk timer.**
+  `#new-token / X` is that chunk's wall time (the reporter runs after the drain barrier) and
+  the running sum of `#new-token` is its prefix, so a per-chunk cost-vs-position regression
+  comes out of an ordinary server log with no code change. r2 0.999 over 127 chunks.
+  Exclude chunk 0: Triton autotune + MoE cache first-touch make it a 4.8 s outlier.
+- **Do not pipe `scripts/gpu_lock.sh` into anything.** Its exit trap runs `pkill -9 -g $$`,
+  which kills the reader too: the job completes, the file is written, and the caller sees
+  `Killed` / exit 137 and concludes the run died. Redirect to a file, then read the file.
+- **A background `until` loop does not make the agent wait.** Backgrounded waits return
+  immediately, so polling with them burns turns without advancing the clock; a *foreground*
+  `until ! kill -0 $PID; do sleep 20; done` is what actually blocks on a 13-minute GPU job.
+- **Sweep the cheap length, confirm the expensive one.** 66 configurations at a 131K prefix
+  cost ~8 min; the 6 survivors at 262K/524K/1M cost ~6 min and the ratio was flat (2.41 ->
+  2.46x) — the full grid at 1M would have been ~30 min of Triton compiles and timing for the
+  same answer.

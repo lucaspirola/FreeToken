@@ -965,3 +965,157 @@ def test_triton_metadata_keeps_full_indices_and_optional_swa_indices(monkeypatch
     assert metadata.indices.tolist() == [10, 11, 20, 21, 22]
     assert metadata.swa_indices is not None
     assert metadata.swa_indices.tolist() == [110, 111, 120, 121, 122]
+
+
+@pytest.mark.parametrize(
+    ("block_dv", "num_warps", "expected"),
+    [
+        (128, 4, 64),  # sm_120 Nemotron 32Q/2KV/D128 -- the 2026-09-05 prefill fix
+        (128, 8, 128),  # 8-warp devices still admit the historical 128-row tile
+        (256, 4, 32),
+        (256, 8, 64),
+        (512, 4, 16),
+        (1024, 4, 16),  # never below the floor
+    ],
+)
+def test_extend_block_m_cap_follows_the_accumulator(block_dv, num_warps, expected):
+    """BLOCK_M is capped by fp32 accumulator registers per thread, not by a constant."""
+    from freetoken.kernel.triton.attention import _EXTEND_ACC_REGS, _extend_block_m_cap
+
+    assert _extend_block_m_cap(block_dv, num_warps) == expected
+    if expected > 16:
+        assert expected * block_dv / (32 * num_warps) <= _EXTEND_ACC_REGS
+
+
+@pytest.mark.parametrize(
+    ("head_dim", "smem_optin", "capability", "formats", "expected"),
+    [
+        # THE FIX: sm_120 takes 4 warps, so the hard-coded 128-row tile spilled
+        # (396 spill slots vs 14) and ran at 29.3 TFLOP/s instead of 70.4.
+        (128, 101376, (12, 0), (0, 0), (64, 64, 4, 1)),
+        # 8-warp devices are untouched: same tile, same warps, same stages as before.
+        (128, 101376, (8, 9), (0, 0), (128, 64, 8, 1)),
+        (128, 232448, (9, 0), (0, 0), (128, 64, 8, 1)),
+        # Measured head_dim >= 256 branches are overrides and must not move.
+        (256, 101376, (12, 0), (0, 0), (64, 32, 4, 2)),
+        (256, 101376, (12, 0), (3, 4), (64, 32, 8, 2)),  # q6/q5 unpacking lanes
+        (256, 232448, (9, 0), (0, 0), (128, 64, 8, 1)),
+        (512, 101376, (12, 0), (0, 0), (16, 16, 4, 1)),  # gemma4 full attention
+    ],
+)
+def test_extend_launch_config(head_dim, smem_optin, capability, formats, expected):
+    import triton
+
+    from freetoken.kernel.triton.attention import extend_launch_config
+
+    got = extend_launch_config(
+        head_dim=head_dim,
+        block_d=triton.next_power_of_2(head_dim),
+        smem_optin=smem_optin,
+        capability=capability,
+        k_format=formats[0],
+        v_format=formats[1],
+    )
+    assert got == expected
+
+
+def test_extend_launch_env_override(monkeypatch):
+    """The prefill twin of FREETOKEN_DECODE_*, so a launch change is A/B-able."""
+    import triton
+
+    from freetoken.kernel.triton import attention as attn
+
+    def cfg():
+        attn._extend_launch_env_override.cache_clear()
+        return attn.extend_launch_config(
+            head_dim=128,
+            block_d=triton.next_power_of_2(128),
+            smem_optin=101376,
+            capability=(12, 0),
+        )
+
+    try:
+        assert cfg() == (64, 64, 4, 1)
+        monkeypatch.setenv("FREETOKEN_EXTEND_BLOCK_M", "128")
+        monkeypatch.setenv("FREETOKEN_EXTEND_NUM_WARPS", "8")
+        assert cfg() == (128, 64, 8, 1)
+        monkeypatch.setenv("FREETOKEN_EXTEND_BLOCK_N", "32")
+        monkeypatch.setenv("FREETOKEN_EXTEND_NUM_STAGES", "2")
+        assert cfg() == (128, 32, 8, 2)
+    finally:
+        attn._extend_launch_env_override.cache_clear()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton attention needs CUDA")
+def test_extend_launch_change_agrees_with_the_previous_tile(monkeypatch):
+    """The 64-row tile must agree with the 128-row one it replaces.
+
+    Changing BLOCK_M changes the order of the flash accumulation, so the two are not
+    bit-identical and a bitwise gate would reject a correct 2.46x. Gate on agreement
+    against both the old launch and the dense reference instead.
+    """
+    from freetoken.kernel.triton import attention as attn
+
+    torch.manual_seed(7)
+    device = torch.device("cuda")
+    # Nemotron 3.5 Lightning attention geometry.
+    num_q_heads, num_kv_heads, head_dim = 32, 2, 128
+    cached_len, extend_len = 384, 192
+    total_kv = cached_len + extend_len
+    q = torch.randn(extend_len, num_q_heads, head_dim, device=device, dtype=torch.bfloat16)
+    k_cache = torch.randn(total_kv, num_kv_heads, head_dim, device=device, dtype=torch.bfloat16)
+    v_cache = torch.randn(total_kv, num_kv_heads, head_dim, device=device, dtype=torch.bfloat16)
+    k_extend = k_cache[cached_len:].clone()
+    v_extend = v_cache[cached_len:].clone()
+    qo_indptr = torch.tensor([0, extend_len], dtype=torch.int32, device=device)
+    kv_indptr = torch.tensor([0, total_kv], dtype=torch.int32, device=device)
+    indices = torch.arange(total_kv, dtype=torch.int32, device=device)
+    prefix_lens = torch.tensor([cached_len], dtype=torch.int32, device=device)
+    q_to_req = torch.zeros(extend_len, dtype=torch.int32, device=device)
+    q_positions = torch.arange(
+        cached_len, total_kv, dtype=torch.int64, device=device
+    )
+    sm_scale = head_dim**-0.5
+
+    def run():
+        attn._extend_launch_env_override.cache_clear()
+        return extend_paged_attention_call()
+
+    def extend_paged_attention_call():
+        return attn.extend_paged_attention(
+            q,
+            k_cache,
+            v_cache,
+            qo_indptr,
+            kv_indptr,
+            indices,
+            prefix_lens,
+            extend_len,
+            sm_scale,
+            k_extend=k_extend,
+            v_extend=v_extend,
+        )
+
+    try:
+        new = run()
+        monkeypatch.setenv("FREETOKEN_EXTEND_BLOCK_M", "128")
+        monkeypatch.setenv("FREETOKEN_EXTEND_BLOCK_N", "64")
+        monkeypatch.setenv("FREETOKEN_EXTEND_NUM_WARPS", "4")
+        monkeypatch.setenv("FREETOKEN_EXTEND_NUM_STAGES", "1")
+        old = run()
+    finally:
+        attn._extend_launch_env_override.cache_clear()
+
+    expected = _reference_paged_attention(
+        q,
+        k_cache,
+        v_cache,
+        kv_indptr,
+        indices,
+        q_to_req,
+        q_positions,
+        sm_scale,
+        None,
+    )
+    torch.testing.assert_close(new.float(), old.float(), atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(new.float(), expected.float(), atol=2e-2, rtol=2e-2)

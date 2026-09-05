@@ -95,7 +95,12 @@ class TritonAttentionBackend(BaseAttnBackend):
             (group.head_dim for group in kv_groups),
             default=int(getattr(config, "head_dim", 1)),
         )
-        from freetoken.kernel.triton.attention import _sm_count, decode_launch_config
+        from freetoken.kernel.triton.attention import (
+            _optin_smem_bytes,
+            _sm_count,
+            decode_launch_config,
+            extend_launch_config,
+        )
 
         quant_k = getattr(self.kvcache, "quant_k", getattr(self.kvcache, "quant", None))
         quant_v = getattr(self.kvcache, "quant_v", getattr(self.kvcache, "quant", None))
@@ -135,6 +140,24 @@ class TritonAttentionBackend(BaseAttnBackend):
             int(getattr(config, "num_kv_heads", 1)), self.max_head_dim,
             quant_name, sm_count,
         )
+        if capability is not None:
+            # Same reason: the extend tile is picked inside the kernel launcher from the
+            # head dim and the device, and a whole-prompt prefill is quadratic in it.
+            # Say which one this process took, so an A/B can prove which arm ran.
+            ext = extend_launch_config(
+                head_dim=self.max_head_dim,
+                block_d=1 << (max(self.max_head_dim, 1) - 1).bit_length(),
+                smem_optin=_optin_smem_bytes(
+                    self.device.index if self.device.index is not None else 0
+                ),
+                capability=capability,
+            )
+            init_logger(__name__).info(
+                "Triton extend launch: block_m=%d block_n=%d warps=%d stages=%d "
+                "(head_dim=%d sm=%d.%d)",
+                ext[0], ext[1], ext[2], ext[3], self.max_head_dim,
+                capability[0], capability[1],
+            )
 
     def _ensure_decode_scratch(
         self,

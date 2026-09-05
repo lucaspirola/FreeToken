@@ -482,6 +482,29 @@ def _optin_smem_bytes(device_index: int) -> int:
     return int(getattr(props, "shared_memory_per_block_optin", 0))
 
 
+@functools.lru_cache(maxsize=1)
+def _extend_launch_env_override() -> tuple[int | None, int | None, int | None, int | None]:
+    """``(block_m, block_n, num_warps, num_stages)`` forced by the environment.
+
+    The extend/prefill launch is picked from ``head_dim`` and the device's opt-in
+    shared memory alone (:func:`_select_extend_tile`, :func:`extend_launch_config`),
+    so an end-to-end A/B of a launch change would otherwise need a rebuild. The
+    decode path has had ``FREETOKEN_DECODE_*`` since 2026-09-04; these are the
+    prefill twins. Unset entries keep the computed value.
+    """
+
+    def _get(name: str) -> int | None:
+        raw = os.getenv(name, "").strip()
+        return int(raw) if raw else None
+
+    return (
+        _get("FREETOKEN_EXTEND_BLOCK_M"),
+        _get("FREETOKEN_EXTEND_BLOCK_N"),
+        _get("FREETOKEN_EXTEND_NUM_WARPS"),
+        _get("FREETOKEN_EXTEND_NUM_STAGES"),
+    )
+
+
 def _select_extend_tile(head_dim: int, block_d: int, smem_optin: int) -> tuple[int, int]:
     """Pick ``(BLOCK_M, BLOCK_N)`` for the extend/prefill kernel, shared-memory aware.
 
@@ -504,6 +527,77 @@ def _select_extend_tile(head_dim: int, block_d: int, smem_optin: int) -> tuple[i
     if head_dim <= 384:
         return (32, 64) if fits(32, 64) else (32, 32)
     return (32, 64) if fits(32, 64) else (16, 16)
+
+
+# The extend kernel's fp32 accumulator is `BLOCK_M x BLOCK_DV`, spread over
+# `32 * num_warps` lanes. Past ~64 registers per thread for the accumulator alone
+# Triton spills it to local memory and the kernel collapses -- measured 2.46x on an
+# RTX 5080 at 32Q/2KV/D128 (see benchmarks/results/
+# nemotron35_lightning_5080_prefill_profile_2026-09-05.md).
+_EXTEND_ACC_REGS = 64
+
+
+def _extend_block_m_cap(block_dv: int, num_warps: int) -> int:
+    """Largest ``BLOCK_M`` whose fp32 accumulator stays inside the register budget.
+
+    Derived from the kernel's own accumulator shape rather than from a measured
+    constant, so it follows the warp count instead of pinning one head shape:
+    ``acc`` is ``BLOCK_M x BLOCK_DV`` fp32 over ``32 * num_warps`` lanes.
+    """
+    return max(16, _EXTEND_ACC_REGS * 32 * num_warps // block_dv)
+
+
+def extend_launch_config(
+    *,
+    head_dim: int,
+    block_d: int,
+    smem_optin: int,
+    capability: tuple[int, int],
+    k_format: int = 0,
+    v_format: int = 0,
+) -> tuple[int, int, int, int]:
+    """``(block_m, block_n, num_warps, num_stages)`` for the extend/prefill kernels.
+
+    Split out of :func:`extend_paged_attention` so the choice is testable and
+    overridable (``FREETOKEN_EXTEND_*``) rather than inline in the launch.
+    """
+    block_m, block_n = _select_extend_tile(head_dim, block_d, smem_optin)
+    # On sm_89 the consumer-safe 64x32 tile for D=256 still has room for a
+    # second software-pipeline stage.  It halves cold-chunk time (68 -> 35 ms
+    # per Ornith full-attention layer at 8K) and remains ~10% faster once an
+    # 8K quantized prefix is present. Larger-D fallback tiles stay at one stage.
+    num_stages = 2 if (head_dim, block_m, block_n) == (256, 64, 32) else 1
+    # Swept on RTX 5080 (sm_120): 4 warps beat 8 at the consumer (64, 32) D=256
+    # tile for both extend kernels (2.01x cold prefill, 1.12x long-Q4-prefix
+    # extension); sm_89 measured faster with 8. BLOCK_N=16 corrupts the packed
+    # loader in the extend kernels too and must never be selected here.
+    num_warps = 4 if capability >= (12, 0) else 8
+    if (
+        (k_format, v_format) == (3, 4)
+        and capability >= (12, 0)
+        and (head_dim, block_m, block_n) == (256, 64, 32)
+    ):
+        # Q6/Q5 benefits from the extra unpacking lanes: 8 warps / 2 stages cut the
+        # 8K-prefix + 2K-chunk kernel from 12.31 to 9.69 ms on RTX 5080. BLOCK_N=16
+        # failed the numerical oracle and 64 overflowed consumer Blackwell shared memory.
+        num_warps = 8
+        num_stages = 2
+    if head_dim <= 128:
+        # The <=128 arm of _select_extend_tile returns a hard-coded 128-row tile that
+        # was never measured against the warp count chosen just above. On sm_120 that
+        # is 4 warps, i.e. 128 accumulator registers per thread and a spilling kernel:
+        # 29.3 TFLOP/s against 70.4 for the 64-row tile at a 131K prefix, and the whole
+        # 2.46x of the 2026-09-05 prefill profile. Devices that take 8 warps still
+        # admit BLOCK_M=128 and are left exactly as they were. Head dims above 128 keep
+        # their measured tiles (D=256 consumer 64x32, gemma4's D>=384 fallbacks).
+        block_m = min(block_m, _extend_block_m_cap(block_d, num_warps))
+    env_m, env_n, env_warps, env_stages = _extend_launch_env_override()
+    return (
+        env_m or block_m,
+        env_n or block_n,
+        env_warps or num_warps,
+        env_stages or num_stages,
+    )
 
 
 @triton.jit
@@ -1553,29 +1647,14 @@ def extend_paged_attention(
     # Tile size is shared-memory bound: keep the fast (large) tiles on GPUs whose opt-in
     # shared memory fits them, shrink on consumer GPUs (sm_89 ~99KB) where the default
     # 128x64 overflows once head_dim >= 256 (e.g. gemma4: SWA 256, full-attention 512).
-    block_m, block_n = _select_extend_tile(
-        head_dim, block_d, _optin_smem_bytes(q.device.index)
+    block_m, block_n, num_warps, num_stages = extend_launch_config(
+        head_dim=head_dim,
+        block_d=block_d,
+        smem_optin=_optin_smem_bytes(q.device.index),
+        capability=torch.cuda.get_device_capability(q.device),
+        k_format=k_format,
+        v_format=v_format,
     )
-    # On sm_89 the consumer-safe 64x32 tile for D=256 still has room for a
-    # second software-pipeline stage.  It halves cold-chunk time (68 -> 35 ms
-    # per Ornith full-attention layer at 8K) and remains ~10% faster once an
-    # 8K quantized prefix is present. Larger-D fallback tiles stay at one stage.
-    num_stages = 2 if (head_dim, block_m, block_n) == (256, 64, 32) else 1
-    # Swept on RTX 5080 (sm_120): 4 warps beat 8 at the consumer (64, 32) D=256
-    # tile for both extend kernels (2.01x cold prefill, 1.12x long-Q4-prefix
-    # extension); sm_89 measured faster with 8. BLOCK_N=16 corrupts the packed
-    # loader in the extend kernels too and must never be selected here.
-    num_warps = 4 if torch.cuda.get_device_capability(q.device) >= (12, 0) else 8
-    if (
-        (k_format, v_format) == (3, 4)
-        and torch.cuda.get_device_capability(q.device) >= (12, 0)
-        and (head_dim, block_m, block_n) == (256, 64, 32)
-    ):
-        # Q6/Q5 benefits from the extra unpacking lanes: 8 warps / 2 stages cut the
-        # 8K-prefix + 2K-chunk kernel from 12.31 to 9.69 ms on RTX 5080. BLOCK_N=16
-        # failed the numerical oracle and 64 overflowed consumer Blackwell shared memory.
-        num_warps = 8
-        num_stages = 2
     grid = (qo_indptr.numel() - 1, num_q_heads, triton.cdiv(max_q_len, block_m))
     if k_extend is not None or v_extend is not None:
         assert k_extend is not None and v_extend is not None

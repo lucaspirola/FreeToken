@@ -141,6 +141,10 @@ cached-prefix reuse 3/6 runs; equal VRAM and reasoning score. See
 `--max-prefill-length 8192` with `--memory-ratio 0.85`. The SSD kernels are in; a 32 768-token
 synthetic needle prefills at 5 623–5 777 tok/s end to end and decodes at ~115 tok/s.
 
+Chunk size is **not** a throughput lever: total prefix work is `~N^2/2` whatever the chunk,
+and the per-chunk flat cost is dominated by MoE work proportional to the tokens in it, so
+raising it above 8192 buys only ~106 ms per chunk of fixed overhead (< 2 % of a 1M prefill).
+
 ### Measured throughput (2026-09-04, task 2B4)
 
 Decode through `/v1/chat/completions`, `--moe-cache-auto`, Triton expert GEMM:
@@ -175,6 +179,41 @@ above (143.2 tok/s), i.e. the curve is flat rather than context-bound, and what 
 the KV read itself (the kernel sustains 609-722 GB/s of a ~960 GB/s part). To reproduce the
 old behaviour for an A/B, start the server with
 `FREETOKEN_DECODE_KV_SPLITS=8 FREETOKEN_DECODE_BLOCK_N=32 FREETOKEN_DECODE_NUM_WARPS=4`.
+
+### Prefill with context (2026-09-05)
+
+Prefill was quadratic in context for the same *kind* of reason decode was linear in it: a
+launch constant measured on another geometry. `_select_extend_tile`'s `head_dim <= 128` arm
+returned a hard-coded `BLOCK_M = 128` tile, while sm_120 takes `num_warps = 4` (a value swept
+for the D=256 consumer tile), so the extend kernel's `BLOCK_M x BLOCK_DV` fp32 accumulator
+needed 128 registers per thread and **spilled — 396 spill slots against 14 at `BLOCK_M = 64`**,
+28.6 TFLOP/s against 70.4. `extend_launch_config` now caps `BLOCK_M` by that accumulator's
+register budget (`_extend_block_m_cap`), which moves only the arm that was never measured;
+every `head_dim >= 256` branch and every 8-warp device keeps its launch exactly.
+
+Same server twice, cold prefill, needle recalled in every run
+(`benchmarks/results/nemotron35_lightning_5080_prefill_profile_2026-09-05.md`):
+
+| prompt tokens | prefill before | prefill after | TTFT before -> after |
+|---:|---:|---:|---:|
+| 131,088 | 3 230 tok/s | **5 288** tok/s (1.64x) | 40.6 s -> **24.8 s** |
+| 262,160 | 1 965 | **3 683** (1.87x) | 133.4 s -> **71.2 s** |
+| 1,040,016 | 573–576 (recorded 3x) | **1 307** (2.28x) | 1 810–1 824 s -> **795.8 s** |
+
+Per 8K chunk the cost is `861 ms + 10.4e-3 * prefix` after the fix (r2 0.999 over 127 chunks
+of the 1M run) against `836 + 25.8e-3` before — the **intercept does not move**, so the change
+is confined to attention, and the non-attention position-dependent term solves to
+**0 ± 0.2e-3 ms/token, i.e. ±13 s of a 1M prefill**: KV grow, page allocation and the
+`O(prefix)` page-index build are not measurable. The Mamba-2 SSD scan is flat in position by
+construction (1.068 ms/layer/8K chunk, 0.2 % of a 1M prefill); the flat term is **79 % MoE
+expert GEMMs** (23 layers x 29.5 ms at M=8192), which is now what a short-prompt prefill
+costs. Attention is still 91 % of the last chunk at 1M and the kernel is at 31 % of the
+card's bf16 peak — see §9 of the write-up for the remaining tickets.
+
+To reproduce the old behaviour for an A/B, start the server with
+`FREETOKEN_EXTEND_BLOCK_M=128 FREETOKEN_EXTEND_BLOCK_N=64 FREETOKEN_EXTEND_NUM_WARPS=4
+FREETOKEN_EXTEND_NUM_STAGES=1`. Both the decode and the extend launch are logged once at
+startup (`Triton decode launch: ...`, `Triton extend launch: ...`).
 
 ### 1M single-session profile
 
@@ -276,9 +315,10 @@ ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   1 510 (524K) → 1 434 (655K); a full 1M session extrapolates to ~1 180 slots (rate 0.40).
   **VRAM is not the blocker for one 1M session.**
 - **Throughput** on a growing synthetic-needle prompt: 131K prefill 3 007 tok/s / decode
-  72.6 tok/s; 262K 1 790 / 51.8; 524K 997 / 32.0. Prefill cost is quadratic in context
-  (526 s for a cold 524K prompt). **The decode half of that curve is superseded** — see
-  "Decode with context" below; prefill is unchanged.
+  72.6 tok/s; 262K 1 790 / 51.8; 524K 997 / 32.0. **Both halves of this curve are
+  superseded** — see "Decode with context" and "Prefill with context" above. Prefill is
+  still quadratic in context (it must be: every chunk attends over the whole prefix), but
+  the constant is 2.46x smaller since 2026-09-05.
 - ~~**Coherence caveat**: the needle passes at 131K but is missed at 262K and 524K.~~
   **Retracted 2026-09-04.** Those 2B4 runs predate both the chat-endpoint gate (`ec54e21`) and
   the Mamba-2 `dt`-floor fix (`3ac79ec`). Re-run through `/v1/chat/completions` at depth 0.50
