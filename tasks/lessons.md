@@ -1300,3 +1300,54 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   `input_len + output_len <= pool` by construction. The ticket asked for a 4xx rejection
   path that would have been dead code (and a false-rejection risk on SWA). Check the
   sizing invariant before implementing the ticket's remedy.
+
+## 2026-09-06 (three soaks in a row: §Y, §Z, §AA — and the tickets between them)
+- **The soak that validates a fix is the first run in which the fixed path has ever
+  executed — grade the whole run, not the criterion.** §Y proved both `38617a7` fixes
+  (11 real non-streaming disconnect aborts against 0 in §W/§X; MoE counters monotone across
+  16 bank rebuilds) and was still a **FAIL**: a 576 s stage admission livelock. Read the
+  attribution carefully before writing the causal story — the honest one is that the
+  livelock was **pre-existing and not previously observed** ("luck of workload"), and the
+  new disconnect path is what **ended** it: the first client abort lands 9 m 36 s *after*
+  the freeze starts. It is tempting, and wrong, to say the old behaviour was masking it.
+  A validation run is not a pass/fail on its own ticket; it is a fresh sample of the whole
+  system, and the two fixes had to be reported as validated in the same breath as the FAIL.
+- **Seeding one side of a two-sided gate buys nothing.** `FREETOKEN_SPEC_GATE_SEED` fits
+  `verify_ms(m)` from two narrow probes to 0.1 % of both measured operating points, primes
+  the break-even gate — and the gate still runs a full-width verify step, because the
+  *other* side, `emit`, is untouched at its optimistic `max_k + 1 = 9` prior, and
+  `_pays_off` compares the two. The seeded arm spent **226 ms pricing the gate against the
+  shipped arm's 182**. Before building a cheap estimator for one term of a comparison, check
+  what the comparison's other term is doing while yours is unmeasured — **both sides or
+  neither**.
+- **A "20 % of ceiling" ticket is worth exactly as much as its denominator.** The M=256 MoE
+  prefill bucket was ticketed at "20 % of ceiling with +53 % padding waste". The padding is
+  exact; the ceiling was a `tl.dot` ceiling that does not bind. At ~12 routed rows per
+  expert both GEMMs must still read every expert bank once — 718.5 MB, **0.748 ms at the
+  card's 960 GB/s** — against 1.078 ms measured, i.e. **69.4 % of the HBM roofline** and
+  ≤1.44x of real headroom. The obvious fix (`BLOCK_M=32`) is a **12 % loss** there. Write
+  the roofline down *before* opening the ticket, and name which one it is; the win turned
+  out to be one bucket over (M=512, 1.10x on two routings, served by the nearest-bucket rule
+  from the 256 table).
+- **A replay gate is blind to whatever it re-implements.** `benchmarks/scheduler_replay.py`
+  models the loop's reclaim *inline* instead of calling
+  `Scheduler._reclaim_for_blocked_prefill`, so the entire `8429411` reclaim change scored
+  identically on all five profiles — not because it did nothing, but because the gate cannot
+  see it (it moved +15/+18 % of admission-pressure releases live). The same file had the
+  opposite failure the day before: `switchyard-stage` had been reproducing the livelock in
+  its metrics dict for weeks with no column printing it. **For every gate, keep an explicit
+  list of what it simulates rather than calls** — anything on that list needs its own unit
+  coverage and its own soak line.
+- **A test stub that enumerates production methods breaks on every addition; bind the real
+  ones instead.** `_SchedulerStub` in `tests/scheduler/test_reclaim_and_match_memo.py`
+  substitutes only the collaborators (the two managers, the lease map, the checkpoint, the
+  cold restore) and routes everything else through `__getattr__` to the unbound `Scheduler`
+  method, so a new private helper on the reclaim path needs no new line in the test — and,
+  more importantly, the test cannot pass by re-implementing the behaviour it claims to
+  check. The duck-typed variant is the same rule at the other end: `_FakeMoeCache` is
+  documented as "the attributes `build_moe_counters` reads, and nothing else".
+- **`git add -u` is not a shortcut for the paths you meant to stage.** It stages every
+  tracked modification in the tree, which on a repo carrying results files, task files and
+  an in-flight experiment is exactly the `git add -A` failure this project already bans.
+  Stage the explicit paths, every time; the rule is about which files move, not about which
+  flag looks safer.
