@@ -965,3 +965,44 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   `max|Δ| = 0.000e+00` at every tile and the 131K/262K needle answers are byte-identical
   between the two arms. That is a stronger statement than any `assert_close` tolerance, and
   it is what makes a launch-table rewrite safe to ship without a quality re-gate.
+
+## 2026-09-05 (the 1M cross-engine oracle: a second engine that cannot be run is not an oracle)
+- **Verify prompt identity on CPU with `record --build-only` BEFORE acquiring the GPU lock.**
+  8 s of tokenizer work reproduced the FreeToken 1M haystack sha (`38f517c3e3b06ae3`) and
+  proved the two legs would be comparable. Doing this after a 20-minute prefill is how a run
+  gets thrown away.
+- **A capacity failure on a GPU does not always look like an OOM. On WSL2 it looks like a
+  silent 3–13x slowdown.** `llama-server -c 1052672` started fine, answered `/health`, and
+  processed its first 4,096-token chunk in 27.3 s instead of 2.05 s, because the driver pages
+  the overflow to host RAM instead of failing the allocation. **Always compare the first
+  `prompt processing` line against a known-good run at a shorter context** — that one line
+  said "this will take 20 hours" 90 seconds into a job budgeted at 4.
+- **`nvidia-smi` free memory is useless as a residency check under WSL2 oversubscription.** It
+  read 15,956–15,960 MiB used / 18–22 MiB free at `--n-cpu-moe` 14, 20 *and* 23 — i.e. at three
+  weight footprints 4 GiB apart, all three of which behaved very differently. The honest
+  residency probe is **throughput on the first chunk**, not a memory counter.
+- **Find the offload floor from the file, not by bisecting runs.** `gguf.GGUFReader` gave
+  685.1 MiB of routed experts per MoE block × 23 blocks in ten seconds, which says exactly what
+  `--n-cpu-moe 23` can buy (4.1 GiB over the documented 14) and that 23 is the floor. Two of
+  the three GPU attempts were avoidable with that number in hand.
+- **When the top rung is unreachable, look for the rung where the phenomenon *starts*.** The
+  1M question was "is the direct-probe collapse ours or the model's". The collapse begins at
+  524K (direct 5/6 → 1/6 between 262K and 524K), which llama.cpp *can* run — so the 1M question
+  was settled at 1/20 the cost and with a real oracle instead of no oracle. Ask "what is the
+  cheapest length that reproduces the shape" before defending the expensive one.
+- **Two engines returning the *same wrong number* is the strongest possible negative result.**
+  Four direct probes at 524K returned the key's near-duplicate twin byte-for-byte in both
+  NVFP4-FreeToken and Q4_0-llama.cpp. No amount of single-engine classification is worth that
+  one observation.
+- **A runbook whose serve line omits the flag its own check depends on will condemn good
+  runs.** `docs/oracle.md`'s Phase-A profile has no `--enable-cache-report`, so the 524K
+  recording came back `cached_tokens: 0` on every turn — and the same document says that means
+  "the run is measuring re-prefill, not recall". It was not: TTFT was 2.46 s on a 524K prompt
+  and the server's own log said `#new-token: 55, #cached-token: 524287`. **When a documented
+  red flag fires, corroborate it with an independent measurement before throwing the run away
+  — and check whether the flag can even be true given how the server was started.**
+- **A zero that can mean three things is a design bug, not a data point.** `openai_api.py`
+  returns 0 when cache reporting is off and then *omits* `prompt_tokens_details` entirely, so
+  "reporting disabled", "genuinely nothing cached" and "field absent" are the same bytes on
+  the wire. I spent a subagent proving there was no regression to find. Fields that gate on a
+  config flag should say so in the payload, or the consumer should record "not enabled".

@@ -514,6 +514,36 @@ ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   34.5 tok/s decode — both decode figures predate the launch-config fix below), and a
   1,040,080-token conversation recalls its needle as well —
   `benchmarks/results/nemotron35_lightning_5080_1m_sessions_2026-09-04.md`.
+- **Recall at 262K / 524K / 1M, stated properly (cross-engine oracle, 2026-09-05).** A single
+  needle at one depth is too coarse to describe this model. The twelve-needle suite
+  (`benchmarks/oracle_cross_engine.py`, six needles each with a near-duplicate `register` twin,
+  asked three ways) run against **both FreeToken and llama.cpp on byte-identical prompts** gives:
+
+  | | direct `key→code` | combined | reverse `code→key` | control |
+  |---|---|---|---|---|
+  | FreeToken 262K | 5/6 | 2/6 | 6/6 | denied |
+  | llama.cpp 262K | 3/6 | 2/6 | 6/6 | denied |
+  | FreeToken 524K | 1/6 | 0/6 | 6/6 | denied |
+  | llama.cpp 524K | 2/6 | 1/6 | 6/6 | denied |
+  | FreeToken 1M | 1/6 | 0/6 | 5/6 | denied |
+
+  **The state holds every needle at every length — `code → key` recovers 6/6 at 524K on both
+  engines and 5/6 at 1M — but `key → code` collapses between 262K and 524K, on llama.cpp Q4_0
+  exactly as on FreeToken NVFP4.** At 524K four of the six direct probes return the same key's
+  near-duplicate twin **byte-for-byte in both engines**. So this is *addressing under
+  interference*, a model property, not a FreeToken retention or prefix-cache defect: zero
+  `retention` and zero `selection` classes on either engine at any length.
+  `benchmarks/results/nemotron35_lightning_5080_oracle_2026-09-05.md` §§9, 11, 12.
+
+  Practical reading for an agent workload: at ≥524K do not rely on "quote the value stored
+  under key X" when a near-duplicate key exists in the context; a `value → which key` or
+  a disambiguated composite question is far more reliable. Arithmetic over two retrieved
+  values is the weakest axis on both engines at every length.
+- **llama.cpp cannot serve this model at 1M on a 16 GiB card** (relevant only as the oracle's
+  second engine): `-c 1052672` reserves the whole card at *every* `--n-cpu-moe`, and even with
+  all 23 MoE blocks on host RAM the written KV outgrows residency at ~570K tokens and chunk
+  cost then climbs 11.5 s per 4,096 tokens — ≈20 h of prefill. FreeToken serves the same 1M
+  prompt at 573–576 tok/s. Same results file, §10.
 - `--nvfp4-backend flashinfer` + `--kv-grow-step-tokens` used to die at init with
   `unsupported VMM tensor dtype: torch.int32` (growable KV allocates the slot cache as VMM
   tensors; the b12x banks include an int32 bank). **Fixed 2026-09-05** — `int16`/`int32`/

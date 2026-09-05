@@ -362,8 +362,46 @@ Command: `ft serve --model ~/ai/models/Ornith-1.5-35B-Q4_K_M.gguf
       retrieval), **0 retention failures on either engine**. Top-k logit comparison still
       blocked on FreeToken having no logprobs in `SamplingParams` (see docs/oracle.md).
       **1M FreeToken leg also run** (no llama.cpp leg): 7/19 turns, 0 `retention`, 5/6 needles
-      recovered by leak-free reverse probes — interference, not retention. Remaining: the 131K
-      and 524K rungs, and the llama.cpp 1M leg.
+      recovered by leak-free reverse probes — interference, not retention.
+- [x] Q1a: **settle the 1M direct-addressing question — DONE 2026-09-05 at `2a139ad`, verdict
+      "no FreeToken engine defect"** (same results file, §§10–12).
+      - The llama.cpp 1M leg is **impossible on this card**, not merely slow: `-c 1052672`
+        reserves all 16 GiB at every `--n-cpu-moe` (14/20/23 all show 18–22 MiB free), the
+        first 4,096-token chunk costs 27.3 / 11.6 / 3.87 s against 2.05 s at `-c 270336`, and
+        even at the `--n-cpu-moe 23` floor (685.1 MiB × 23 expert blocks — nothing left to
+        offload) the written KV outgrows residency at ~570K tokens and chunk cost then climbs
+        +11.5 s per 4,096 tokens → **≈20 h of remaining prefill against a 4 h lock cap.**
+        Killed at 622,592 tokens. `docs/oracle.md` budget table and host rules corrected.
+      - Fell back to **524,288 on both engines** (byte-identical prompt, sha `72683f24c68885d1`).
+        Pass rate by shape — FreeToken 1/6 direct, 0/6 combined, **6/6 reverse**; llama.cpp
+        2/6, 1/6, **6/6**. 8 `agree` / **9 `both-miss`** / 2 `freetoken-only-miss` / 0
+        `llamacpp-only-miss`; **0 `retention`, 0 `selection` on either engine.**
+      - Four of the six direct probes return the same key's near-duplicate `register` code
+        **byte-for-byte in both engines** (quarry 1607392, cavern 3518470, meadow 8043961,
+        thicket 5290638). The `key → code` collapse between 262K and 524K is a **model**
+        property; `code → key` is intact at 6/6 on both engines. 1M's 1/6-direct-5/6-reverse
+        shape is the same phenomenon one rung up. **Close as model-limited — no kernel bug.**
+      - Cost note: 524K FreeToken prefill is now **2,297 tok/s** (228 s) against 1,064 tok/s on
+        2026-09-04 — `2a139ad` visible on a real workload — and 2.4x llama.cpp on the same
+        prompt, where at 262K the two were within 12 %.
+- [x] **`cached_tokens: 0` on every FreeToken turn — NOT a regression, a missing flag.**
+      `docs/oracle.md`'s Phase-A serve line omitted `--enable-cache-report`;
+      `openai_api.py:937-939` then returns 0 and `:955` omits `prompt_tokens_details`, so flag
+      off / genuine zero / field absent are indistinguishable on the wire. The scheduler was
+      hitting the cache all along (`#new-token: 55, #cached-token: 524287` on turn 2). Nothing
+      on that code path changed in `acc91e9..2a139ad`. **Fixed: the flag is now in
+      `docs/oracle.md`'s Phase-A line, and the runbook's re-prefill check says to corroborate
+      with TTFT and the server log.**
+- [ ] Consider making the omission impossible to misread: either have
+      `benchmarks/oracle_cross_engine.py` record "cache reporting not enabled" when the server
+      never sends `prompt_tokens_details`, or emit `prompt_tokens_details` unconditionally when
+      `enable_cache_report` is on (`openai_api.py:955`). One line either way.
+- [ ] Small lead from 524K: `direct:harbour` is the one leak-free direct probe llama.cpp holds
+      and FreeToken loses (returned the *orchard* code — `interference-cross`, and
+      `reverse:harbour` recovers it two turns later). It is also **turn 2, the one turn whose
+      TTFT was 50.0 s against 2.4 s for turns 3–19** — a partial prefix re-prefill. Cheap
+      re-probe: re-run 524K with `--filler-cursor 65` and see whether the pairing repeats.
+- [ ] Remaining oracle rung: 131K on both engines (cheap, ~10 min total).
 
 ## Backlog
 - [x] Prompt-lookup (n-gram) speculative decoding for agent-session decode — **NO-GO 2026-09-05**

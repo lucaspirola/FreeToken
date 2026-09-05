@@ -66,9 +66,14 @@ column does not invalidate a pass — it just means that pass is not independent
   FreeToken recording finishes and its server is stopped *before* llama-server starts.
 - **Stop the host GPU embedder first**: `systemctl --user stop piro-board-embedder`
   (or whatever is holding VRAM) before either engine.
-- **The lock caps a job at 4 h** (`FREETOKEN_GPU_LOCK_MAX_HOLD`). A 1M llama.cpp
-  recording has never been run on this host and may not fit inside it; see the budget
-  table below.
+- **The lock caps a job at 4 h** (`FREETOKEN_GPU_LOCK_MAX_HOLD`). A 1M llama.cpp recording
+  was attempted on 2026-09-05 and **does not fit the card** at any `--n-cpu-moe`; the top
+  cross-engine rung is **524,288**. See the budget table below.
+- **llama.cpp needs `--n-cpu-moe 23` at 524K**, not the 262K run's 14: the KV for half a
+  million tokens no longer leaves room for any routed experts on a 16 GiB card. Symptom of
+  getting this wrong is not an OOM — it is a silent 3–13x collapse in prompt-processing
+  throughput (WSL2 pages the overflow to host RAM). Check the first `prompt processing`
+  line in the llama log: ~3.5 s per 4,096-token chunk is healthy, 12 s+ is not.
 - **Leave headroom above the top rung.** The suite is a *conversation*: every graded turn
   appends its question and its reply, so turn 19's prompt is ~1.3 K tokens longer than turn
   1's, and the server also reserves the decode budget. Serving `--num-tokens 1048576` and
@@ -90,7 +95,7 @@ export ORACLE_OUT=~/ai/bench/oracle/$(date +%F)
 mkdir -p "$ORACLE_OUT"
 export FT_MODEL=~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
 export GGUF=~/ai/models/nemotron35-gguf/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_0.gguf
-export LEN=262144            # one of 131072 / 262144 / 524288 / 1048576
+export LEN=262144            # one of 131072 / 262144 / 524288 (1048576 is FreeToken-only)
 ```
 
 ### Phase A — FreeToken
@@ -107,7 +112,7 @@ FREETOKEN_PIN_BUDGET_GB=17 scripts/gpu_lock.sh \
   --moe-backend offload --moe-cache-auto --linear-state-slots 6 \
   --memory-ratio 0.85 --max-prefill-length 8192 --host-ram-reserve-gb 6 \
   --session-spill-ram-gb 12 --session-spill-dir ~/.cache/freetoken/oracle-spill \
-  --port 8123
+  --enable-cache-report --port 8123
 
 # terminal 2 -- the recording (CPU-side; the GPU work happens in the server)
 uv run benchmarks/oracle_cross_engine.py record \
@@ -149,7 +154,11 @@ recording keeps its reported `prompt_tokens` so any drift is visible.
 Defaults reproduce the 262K reference invocation: `-c <target+8192> -np 1
 --no-context-shift --cache-ram 0 -ngl 999 --n-cpu-moe 14 -fa on -ctk q8_0 -ctv q8_0
 -b 4096 -ub 512 -t 16 --jinja --no-warmup`. `--n-cpu-moe 14` is what makes a 17.6 GiB
-Q4_0 fit a 16 GiB card; raise it if the server OOMs, lower it for speed if it fits.
+Q4_0 fit a 16 GiB card **at 262K**; at 524K use **23** (the floor — 685.1 MiB of routed
+experts per MoE block over 23 blocks, nothing left to offload above that). Getting this wrong
+does not OOM, it silently collapses prompt-processing throughput 3–13x, so check the first
+`prompt processing` line in `--llama-log`: ~3.5 s per 4,096-token chunk is healthy, 12 s+ is
+not.
 Anything else goes through repeated `--llama-arg`.
 
 ### Phase C — compare (CPU only, no lock)
@@ -174,7 +183,8 @@ design's five separate 262K prefills for five depths cost about an hour of GPU f
 same information. The sweep dimension is **length**:
 
 ```bash
-for LEN in 131072 262144 524288 1048576; do ... phases A, B, C ... done
+for LEN in 131072 262144 524288; do ... phases A, B, C ... done
+# 1048576 is FreeToken-only on a 16 GiB card -- phase A only, at --target-prompt-tokens 1044480
 ```
 
 Do not loop it unattended. Each length is two lock acquisitions with a manual server
@@ -189,13 +199,25 @@ llama.cpp is measured at 262K only.
 |---:|---:|---:|---:|---:|---:|
 | 131,072 | ~45 s (3,007 tok/s) | ~2 min | **~5 min** | ~60 s | **~10 min** |
 | 262,144 | ~140 s (1,860 tok/s) | ~3 min | **~8 min** | 141 s (2,230 tok/s) | **~12 min** |
-| 524,288 | ~500 s (1,064 tok/s) | ~5 min | **~15 min** | not measured | budget 30 min |
-| 1,048,576 | 1,815 s (573 tok/s) | ~5 min | **~35 min** | not measured | **may not fit the 4 h cap** |
+| 524,288 | 228 s (2,297 tok/s at `2a139ad`) | ~2 min | **~7 min** | 545 s (963 tok/s, `--n-cpu-moe 23`) | **~12 min** |
+| 1,048,576 | 1,815 s (573 tok/s) | ~5 min | **~35 min** | ≈20 h (extrapolated) | **does not fit — see below** |
+
+**llama.cpp at 1M does not fit a 16 GiB card** (measured 2026-09-05). `-c 1052672` reserves
+essentially the whole card at *every* `--n-cpu-moe` (`nvidia-smi`: 15,956–15,960 MiB used /
+18–22 MiB free at 14, 20 and 23), and the first 4,096-token chunk costs 27.3 s / 11.6 s /
+3.87 s at those three settings against 2.05 s for the same chunk at `-c 270336`.
+`--n-cpu-moe 23` is the floor — the GGUF's routed experts are 685.1 MiB × 23 blocks, so at 23
+there is nothing left to offload — and even there the written KV outgrows residency at about
+570K tokens, after which chunk cost climbs **+11.5 s per further 4,096 tokens** (107.5 s per
+chunk at 622K). Extrapolated remaining prefill: ≈20 h against the lock's 4 h cap. **Run the
+top cross-engine rung at 524,288, not 1,048,576**; 524K is where the direct-probe collapse
+first appears, so it reproduces the 1M phenomenon at 1/20 the cost.
+`benchmarks/results/nemotron35_lightning_5080_oracle_2026-09-05.md` §§10–12.
 
 Add ~25 s for FreeToken server start and several minutes for `llama-server` to load an
 18.9 GiB GGUF with 14 CPU-MoE blocks. A full four-length sweep of both engines is
-roughly **2.5–3 h of GPU** if 1M llama.cpp behaves, and the 1M llama.cpp leg is the one
-to attempt last and alone.
+roughly **1 h of GPU** for the three rungs that have both engines (131K, 262K, 524K); the
+1M rung is FreeToken-only, permanently, on this card.
 
 The whole point of the one-prefill-many-turns design is that the 19 graded turns are
 nearly free: at 1M they ride the prefix cache at TTFT 4.7–7.0 s and 19–20 tok/s decode,
@@ -203,6 +225,14 @@ against ~30 min for a cold re-prefill each. If a report shows `cached_tokens` co
 to near zero on turns 2+, the prefix match broke and the run is measuring re-prefill,
 not recall — check for a stray `</think>` in the previous reply before trusting anything
 in it.
+
+**This check only works if the FreeToken server was started with `--enable-cache-report`**
+(the Phase-A line above now has it; it did not on 2026-09-05, and the whole 524K recording
+came back reading `cached_tokens: 0`). Without the flag `openai_api.py` returns 0 and then
+omits `prompt_tokens_details` entirely, so *flag off*, *genuine zero* and *field absent* look
+identical on the wire. Corroborate before condemning a run: turn 2+ TTFT (2.5 s on a 524K
+prompt = cached, 200 s+ = re-prefill) and the server log's own
+`Prefill batch, ... #new-token: 55, #cached-token: 524287`. llama.cpp always reports it.
 
 ## Logprobs: the current gap
 
