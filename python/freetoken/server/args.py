@@ -43,6 +43,11 @@ class ServerArgs(SchedulerConfig):
     # Comma-separated CORS allow-list for browser/webview clients (e.g. the desktop
     # app). Empty string disables CORS headers entirely; "*" allows any origin.
     cors_origins: str = "tauri://localhost,http://tauri.localhost,http://localhost:1420"
+    # Append one JSON line per completed request to this directory (--trace-dir), for
+    # benchmarks/trace_replay.py and benchmarks/trace_to_profile.py. Off by default. No
+    # prompt text unless --trace-include-text; see docs/switchyard.md.
+    trace_dir: str | None = None
+    trace_include_text: bool = False
 
     @property
     def share_tokenizer(self) -> bool:
@@ -1057,6 +1062,28 @@ def parse_args(
         ),
     )
     parser.add_argument(
+        "--trace-dir",
+        type=str,
+        default=ServerArgs.trace_dir,
+        help=(
+            "Append one JSON line per completed request to this directory (created if "
+            "absent): arrival time, session id, route, model, prompt/cached/output token "
+            "counts, max_tokens, sampling params, TTFT, completion time, abort/disconnect, "
+            "and the prompt's HASH CHAIN -- never its text. Off by default. Replay it with "
+            "benchmarks/trace_replay.py; convert it with benchmarks/trace_to_profile.py."
+        ),
+    )
+    parser.add_argument(
+        "--trace-include-text",
+        action="store_true",
+        default=ServerArgs.trace_include_text,
+        help=(
+            "Also write the prompt messages into the trace. Only for replaying one's own "
+            "traffic: the file then carries everything the clients sent (it is written "
+            "0600 either way). No effect without --trace-dir."
+        ),
+    )
+    parser.add_argument(
         "--hidden-states-max-tokens",
         type=int,
         default=ServerArgs.hidden_states_max_tokens,
@@ -1084,6 +1111,23 @@ def parse_args(
         parser.error("--session-spill-limit-gb must be >= 0")
     if kwargs["hidden_states_max_tokens"] < 1:
         parser.error("--hidden-states-max-tokens must be >= 1")
+    if kwargs["trace_dir"] is not None:
+        # Expanded once here so ~ and $VAR resolve against the server's own environment.
+        # Unlike --hidden-states-dir this may not exist yet: nothing outside the server
+        # writes into it, so creating it at startup is safe and saves an mkdir in the
+        # launch line. A path that cannot be created is a startup error, not a silent
+        # no-op -- a soak that discovers at the end that it captured nothing is worse
+        # than one that refuses to start.
+        trace_root = os.path.abspath(os.path.expanduser(os.path.expandvars(kwargs["trace_dir"])))
+        try:
+            os.makedirs(trace_root, exist_ok=True)
+        except OSError as exc:
+            parser.error(f"--trace-dir {trace_root!r} cannot be created: {exc}")
+        if not os.path.isdir(trace_root):
+            parser.error(f"--trace-dir {trace_root!r} is not a directory")
+        kwargs["trace_dir"] = trace_root
+    if kwargs["trace_include_text"] and kwargs["trace_dir"] is None:
+        parser.error("--trace-include-text requires --trace-dir")
     if kwargs["hidden_states_dir"] is not None:
         # Resolved once, at startup: every request's target is later checked for
         # containment in this canonical path, so a symlinked or relative root must not

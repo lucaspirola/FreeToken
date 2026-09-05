@@ -47,6 +47,7 @@ from .openai_api import register_openai_routes
 from . import request_ring
 from .access_log_filter import install_polling_access_log_filter
 from .request_logger import init as init_request_logging, log_request
+from . import request_trace
 from .responses_api import register_responses_routes
 from .stats import StatsTracker
 
@@ -479,6 +480,10 @@ async def lifespan(_: FastAPI):
     # BEFORE tearing anything down so the backend supervisor treats the workers' ensuing
     # exit as expected rather than a crash — no spurious ERROR / "failed" latch during stop.
     _SHUTTING_DOWN.set()
+    # Before the backend teardown: the last requests' rows are already queued, and a
+    # worker reap that overruns its timeout must not cost us the tail of the trace.
+    # (request_trace also registers an atexit hook; this is the reliable one.)
+    request_trace.close()
     global _GLOBAL_STATE
     if _GLOBAL_STATE is not None:
         _GLOBAL_STATE.shutdown()
@@ -1097,6 +1102,9 @@ def run_api_server(config: ServerArgs, start_backend: Callable[[], "Any"], run_s
     # bad path is reported at boot rather than silently on the first request.
     install_cors(app, config.cors_origins)
     init_request_logging()
+    # Same reasoning for --trace-dir: open the file and start its writer thread now, so a
+    # capture that cannot be written fails at boot instead of at the end of a 20 m soak.
+    request_trace.configure(config.trace_dir, config.trace_include_text)
     # Hide the frequent health/stats/requests/cache-status polling of the desktop app (and of
     # the shell's status bar) from uvicorn's access log; non-polling access lines are
     # unaffected. See access_log_filter.py; toggle back on with LOG_LEVEL=DEBUG.

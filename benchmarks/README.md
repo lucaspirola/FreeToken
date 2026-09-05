@@ -96,3 +96,24 @@ instead — it writes the JSON profile the engine reads.
 `--prefill-hit-d2d`, for reproducing the long-context configurations in `docs/models.md`
 (e.g. Ornith Q4_0 at 200K) through the real serving path — all optional, defaults
 unchanged when omitted.
+
+**`trace_replay.py`** — replay a captured server trace (`ft serve --trace-dir DIR`)
+against a running server, preserving inter-arrival times and session affinity, and print
+p50/p95/p99, tok/s and error rate beside the trace's own. Prompts come back from stored
+text, or from deterministic filler that reproduces the recorded lengths and prefix-sharing
+structure from hashes alone. Stdlib only; `--dry-run` checks reconstruction with no server.
+See [docs/switchyard.md §9](../docs/switchyard.md#9-capturing-and-replaying-traces).
+
+```bash
+python benchmarks/trace_replay.py --trace /var/tmp/ft-trace \
+    --base-url http://127.0.0.1:1919 --model nemotron-3.5-lightning --out replay.json
+```
+
+**`trace_to_profile.py`** — convert a trace into a `scheduler_replay.py` profile (prompt-
+length buckets, cached fraction, output length, session retention, peak concurrency), so the
+CPU scheduler gate runs on real traffic shape instead of a hand-written scenario mix.
+
+```bash
+python benchmarks/trace_to_profile.py --trace /var/tmp/ft-trace --out trace.profile.json
+python benchmarks/scheduler_replay.py --profile-file trace.profile.json --ticks 4000
+```

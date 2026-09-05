@@ -30,6 +30,7 @@ from .disconnect import aiter_or_disconnect, await_or_disconnect
 from .function_call_parser import ToolCallItem
 from .json_output import apply_json_instruction, schema_instruction
 from .request_logger import log_request
+from . import request_trace
 from .generation import (
     ContentDelta,
     GenDone,
@@ -247,6 +248,57 @@ def _maintenance_gate(state: Any) -> JSONResponse | None:
     return JSONResponse({"error": msg}, status_code=503)
 
 
+def _trace_sampling(req: Any, sp: SamplingParams | None) -> dict[str, Any]:
+    """The sampling knobs a replay has to reproduce, read from the RESOLVED params.
+
+    ``req`` carries what the client sent (often nothing); ``sp`` carries what the engine
+    will actually run after the model's own defaults are folded in, and it is the second
+    that decides the traffic's shape. ``tools`` is the catalog *size* -- the Switchyard
+    large-tool-catalog scenario is a prompt-length effect, and the count is enough to
+    reproduce it without recording the schemas.
+    """
+    out: dict[str, Any] = {}
+    if sp is not None:
+        out.update(temperature=sp.temperature, top_p=sp.top_p, top_k=sp.top_k,
+                   stop=list(sp.stop_strs) if sp.stop_strs else None,
+                   ignore_eos=sp.ignore_eos)
+    effort = getattr(req, "reasoning_effort", None)
+    if effort:
+        out["reasoning_effort"] = effort
+    rf = getattr(req, "response_format", None)
+    if rf is not None:
+        out["response_format"] = getattr(rf, "type", None)
+    tools = getattr(req, "tools", None)
+    if tools:
+        out["tools"] = len(tools)
+    ctk = getattr(req, "chat_template_kwargs", None)
+    if ctk:
+        out["chat_template_kwargs"] = dict(ctk)
+    return {k: v for k, v in out.items() if v is not None}
+
+
+async def _traced_stream(inner: AsyncIterator[bytes], trace: Any) -> AsyncIterator[bytes]:
+    """Seal the trace for a stream that ends abnormally.
+
+    The normal ends seal themselves inside ``stream_chat_completion_chunks`` (it is the
+    only place the token totals exist), and ``Trace.seal`` is idempotent, so this only ever
+    catches what that generator never reaches: a client disconnect, which arrives as the
+    ``GeneratorExit`` of ``state.stream_with_cancellation`` closing us. Sitting *inside*
+    that wrapper is what makes the disconnect visible here at all.
+    """
+    try:
+        async for chunk in inner:
+            yield chunk
+    except (asyncio.CancelledError, GeneratorExit):
+        trace.seal(status="abort", error_code="client_disconnect")
+        raise
+    except BaseException as exc:  # noqa: BLE001 -- re-raised; the row is the point
+        trace.seal(status="error", error_code=type(exc).__name__)
+        raise
+    else:
+        trace.seal()
+
+
 def register_openai_routes(
     app: FastAPI,
     get_state: Callable[[], Any],
@@ -358,14 +410,30 @@ async def handle_chat_completion(
     # out can only ride in-stream, the non-stream path because a context overflow
     # answered here never costs a queue slot and reads identically to the
     # scheduler's own rejection.
+    # Opened before the preflight so an over-length prompt still produces a row: the
+    # context-overflow scenario is part of the traffic shape a replay has to reproduce.
+    trace = request_trace.NULL
+    if request_trace.enabled():
+        trace = request_trace.start(
+            "/v1/chat/completions",
+            messages=req.messages,
+            model=req.model,
+            session_id=spec.session_id,
+            stream=bool(req.stream),
+            max_tokens=spec.sampling_params.max_tokens,
+            sampling=_trace_sampling(req, spec.sampling_params),
+        )
+
     err = await preflight_error(spec, state)
     if err is not None:
+        trace.seal(status="error", error_code=err.code)
         return create_error_response(str(err), code=err.code)
 
     uid = await submit_generation(spec, state)
 
     if req.stream:
-        chunks = stream_chat_completion_chunks(uid, req, state, spec)
+        chunks = _traced_stream(
+            stream_chat_completion_chunks(uid, req, state, spec, trace=trace), trace)
         if request is not None:
             chunks = (
                 state.stream_with_cancellation(chunks, request, uid, spec.session_id)
@@ -384,10 +452,12 @@ async def handle_chat_completion(
             generate_full(uid, spec, state, source="/v1/chat/completions"), request
         )
     except asyncio.CancelledError:
+        trace.seal(status="abort", error_code="client_disconnect")
         await state.abort_user(uid, session_id=spec.session_id)
         raise
     except GenerationError as exc:
         if not _auto_session_busy(exc, spec):
+            trace.seal(status="error", error_code=exc.code)
             return create_error_response(str(exc), code=exc.code)
         uid = await _resubmit_unbound(spec, state)
         try:
@@ -395,9 +465,11 @@ async def handle_chat_completion(
                 generate_full(uid, spec, state, source="/v1/chat/completions"), request
             )
         except asyncio.CancelledError:
+            trace.seal(status="abort", error_code="client_disconnect")
             await state.abort_user(uid)
             raise
         except GenerationError as retry_exc:
+            trace.seal(status="error", error_code=retry_exc.code)
             return create_error_response(str(retry_exc), code=retry_exc.code)
     message: dict[str, Any] = {"role": "assistant", "content": result.content}
     if result.reasoning:
@@ -424,6 +496,18 @@ async def handle_chat_completion(
             result.reasoning_tokens,
         ),
     }
+    # Raw cached_tokens, not _reported_cached: --enable-cache-report gates the wire, and a
+    # trace whose cached fraction depended on a reporting flag could not be replayed.
+    # ttft_ms stays null on this path -- generate_full has no first-token hook, and
+    # inventing one from the completion time would poison the replay's comparison.
+    trace.seal(
+        request_id=f"chatcmpl-{uid}",
+        prompt_tokens=result.prompt_tokens,
+        cached_tokens=result.cached_tokens,
+        output_tokens=result.completion_tokens,
+        reasoning_tokens=result.reasoning_tokens,
+        finish_reason=result.finish_reason,
+    )
     if result.hidden_states_path is not None:
         # The written artifact, not the directory the client asked for: Switchyard reads
         # the path off the response and is documented never to guess the file name.
@@ -493,6 +577,7 @@ async def stream_chat_completion_chunks(
     req: ChatCompletionRequest,
     state: Any,
     spec: GenSpec | None = None,
+    trace: Any = request_trace.NULL,
 ) -> AsyncIterator[bytes]:
     """Format generate_events() into the OpenAI chat.completion.chunk SSE stream."""
     if spec is None:
@@ -520,6 +605,7 @@ async def stream_chat_completion_chunks(
                 "message": str(error), "type": "invalid_request_error", "code": error.code,
             }}
         )
+        trace.seal(request_id=f"chatcmpl-{uid}", status="error", error_code=error.code)
         yield b"data: [DONE]\n\n"
         return
 
@@ -547,7 +633,14 @@ async def stream_chat_completion_chunks(
                         "message": str(exc), "type": "invalid_request_error", "code": exc.code,
                     }}
                 )
+                trace.seal(request_id=f"chatcmpl-{uid}", status="error",
+                           error_code=exc.code, prompt_tokens=prompt_tokens,
+                           cached_tokens=cached_tokens, output_tokens=completion_tokens)
                 break
+        # Every non-terminal event is output on the wire, so the first one is TTFT. (The
+        # role chunk above is not: it is emitted before the engine has produced anything.)
+        if not isinstance(ev, GenDone):
+            trace.first_token()
         if isinstance(ev, ReasoningDelta):
             yield _sse(
                 _chat_chunk(
@@ -643,6 +736,14 @@ async def stream_chat_completion_chunks(
             completion_tokens = ev.completion_tokens
             cached_tokens = ev.cached_tokens
             reasoning_tokens = ev.reasoning_tokens
+            trace.seal(
+                request_id=f"chatcmpl-{uid}",
+                prompt_tokens=prompt_tokens,
+                cached_tokens=cached_tokens,
+                output_tokens=completion_tokens,
+                reasoning_tokens=reasoning_tokens,
+                finish_reason=ev.finish_reason,
+            )
             chunk = _chat_chunk(
                 req, uid, [{"delta": {}, "index": 0, "finish_reason": ev.finish_reason}]
             )
@@ -683,17 +784,31 @@ async def handle_completion(
     if unsupported is not None:
         return create_error_response(unsupported)
     try:  # surfaces an out-of-range max_tokens as a 400 rather than a 500 from the worker
-        _resolve_sampling(req, model_sampling)
+        resolved_sampling = _resolve_sampling(req, model_sampling)
     except ValueError as exc:
         return create_error_response(str(exc), param="max_tokens")
 
     prompts = [req.prompt] if isinstance(req.prompt, str) else req.prompt
     assert isinstance(prompts, list)
+    # One row per REQUEST, not per prompt: a batched /v1/completions is one arrival with
+    # one queue-slot story, and the prompt list is its prefix chain.
+    trace = request_trace.NULL
+    if request_trace.enabled():
+        trace = request_trace.start(
+            "/v1/completions",
+            messages=prompts,
+            model=req.model,
+            session_id=req.session_id,
+            stream=bool(req.stream),
+            max_tokens=resolved_sampling.max_tokens,
+            sampling=_trace_sampling(req, resolved_sampling),
+        )
     # Same overflow contract as chat: a 400 with `context_length_exceeded` before a
     # queue slot (and, on the stream path, before the response headers commit).
     for prompt in prompts:
         err = await preflight_text_error(prompt, state)
         if err is not None:
+            trace.seal(status="error", error_code=err.code)
             return create_error_response(str(err), code=err.code)
     if req.stream:
         if len(prompts) != 1:
@@ -708,7 +823,7 @@ async def handle_completion(
                 session_ttl_seconds=req.session_ttl_seconds,
             )
         )
-        chunks = stream_completion_chunks(uid, req, state)
+        chunks = _traced_stream(stream_completion_chunks(uid, req, state, trace=trace), trace)
         if request is not None:
             chunks = (
                 state.stream_with_cancellation(chunks, request, uid, req.session_id)
@@ -737,6 +852,9 @@ async def handle_completion(
         try:
             async for ack in aiter_or_disconnect(state.wait_for_ack(uid), request):
                 if getattr(ack, "error", None):
+                    trace.seal(status="error", error_code=getattr(ack, "error_code", None),
+                               prompt_tokens=prompt_tokens, cached_tokens=cached_tokens,
+                               output_tokens=completion_tokens)
                     return create_error_response(
                         ack.error, code=getattr(ack, "error_code", None)
                     )
@@ -747,11 +865,15 @@ async def handle_completion(
                 if ack.finished:
                     finish_reason = getattr(ack, "finish_reason", None) or "stop"
                     break
+                trace.first_token()
         except asyncio.CancelledError:
+            trace.seal(status="abort", error_code="client_disconnect")
             await state.abort_user(uid, session_id=req.session_id)
             raise
         choices.append({"index": index, "text": text, "finish_reason": finish_reason, "logprobs": None})
 
+    trace.seal(prompt_tokens=prompt_tokens, cached_tokens=cached_tokens,
+               output_tokens=completion_tokens, finish_reason=finish_reason)
     return {
         "id": f"cmpl-{uuid.uuid4().hex}",
         "object": "text_completion",
@@ -762,7 +884,12 @@ async def handle_completion(
     }
 
 
-async def stream_completion_chunks(uid: int, req: CompletionRequest, state: Any) -> AsyncIterator[bytes]:
+async def stream_completion_chunks(
+    uid: int,
+    req: CompletionRequest,
+    state: Any,
+    trace: Any = request_trace.NULL,
+) -> AsyncIterator[bytes]:
     prompt_tokens = 0
     completion_tokens = 0
     cached_tokens = 0
@@ -776,12 +903,17 @@ async def stream_completion_chunks(uid: int, req: CompletionRequest, state: Any)
                 "type": "invalid_request_error",
                 "code": getattr(ack, "error_code", None),
             }})
+            trace.seal(request_id=f"cmpl-{uid}", status="error",
+                       error_code=getattr(ack, "error_code", None),
+                       prompt_tokens=prompt_tokens, cached_tokens=cached_tokens,
+                       output_tokens=completion_tokens)
             yield b"data: [DONE]\n\n"
             return
         prompt_tokens += ack.prompt_tokens_delta
         completion_tokens += ack.completion_tokens_delta
         cached_tokens += ack.cached_tokens
         if ack.incremental_output:
+            trace.first_token()
             yield _sse(
                 {
                     "id": f"cmpl-{uid}",
@@ -802,6 +934,9 @@ async def stream_completion_chunks(uid: int, req: CompletionRequest, state: Any)
             finish_reason = getattr(ack, "finish_reason", None) or "stop"
             break
 
+    trace.seal(request_id=f"cmpl-{uid}", prompt_tokens=prompt_tokens,
+               cached_tokens=cached_tokens, output_tokens=completion_tokens,
+               finish_reason=finish_reason)
     yield _sse(
         {
             "id": f"cmpl-{uid}",

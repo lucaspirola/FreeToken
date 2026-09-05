@@ -185,6 +185,16 @@ SCENARIOS_ORNITH = [
     ("agent-4k",       4_096, 15),
     ("agent-32k",     32_768, 10),
 ]
+# The "trace" profile: not a hand-written geometry at all, but one derived from a captured
+# server trace by benchmarks/trace_to_profile.py (--profile-file). It exists so this gate
+# can be run against the traffic shape that actually occurred rather than against the soak's
+# synthetic mix -- the five profiles above encode failures we have already seen, and a trace
+# encodes the load we have not yet reasoned about. Installed by apply_profile_file(), which
+# also overrides the module-level constants below that a profile file carries.
+TRACE_PROFILE: dict | None = None
+#: Bumped when the profile-file schema changes meaning; trace_to_profile.py stamps it.
+PROFILE_VERSION = 1
+
 # Per-profile overrides of the module-level Switchyard constants. Absent keys keep them.
 PROFILE_KNOBS = {
     "ornith-ada": {
@@ -202,6 +212,41 @@ TURN_GROWTH = 512         # tokens a conversation gains per turn on top of its o
 STALL_POLL = 0.01         # scheduler poll quantum: a stalled loop still burns wall clock
 FAMILIES = 4
 REUSE_FRAC = 0.75  # stage route measured 73.6% prefix reuse pre-fix
+
+
+def apply_profile_file(path: str) -> str:
+    """Install a trace-derived profile under the name ``trace``; return that name.
+
+    The module's constants (OUTPUT_LEN, TURN_GROWTH, FAMILIES, WIDTH, the two timeouts) are
+    read as globals by ``Traffic``, ``build_pool`` and ``run``, so a file-driven profile
+    installs itself by rebinding them rather than by threading a spec object through every
+    call site -- which keeps the five hand-written profiles bit-identical to what their
+    recorded floors were measured under.
+
+    WIDTH is raised, never lowered below what the scenarios need: ``Req`` asserts
+    ``max_device_len <=`` the page-table row width, so a trace with longer contexts than
+    the Switchyard soak's would otherwise assert deep inside the scheduler.
+    """
+    global TRACE_PROFILE, OUTPUT_LEN, TURN_GROWTH, FAMILIES, CLIENT_TIMEOUT
+    global SESSION_TTL, WIDTH
+    with open(path, encoding="utf-8") as fh:
+        spec = json.load(fh)
+    if spec.get("profile_version") != PROFILE_VERSION:
+        raise SystemExit(
+            f"{path}: profile_version {spec.get('profile_version')!r}, expected "
+            f"{PROFILE_VERSION}; regenerate it with benchmarks/trace_to_profile.py")
+    if not spec.get("scenarios"):
+        raise SystemExit(f"{path}: no scenarios")
+    TRACE_PROFILE = spec
+    OUTPUT_LEN = max(1, int(spec.get("output_len", OUTPUT_LEN)))
+    TURN_GROWTH = max(0, int(spec.get("turn_growth", TURN_GROWTH)))
+    FAMILIES = max(1, int(spec.get("families", FAMILIES)))
+    CLIENT_TIMEOUT = float(spec.get("client_timeout", CLIENT_TIMEOUT))
+    SESSION_TTL = float(spec.get("session_ttl", SESSION_TTL))
+    longest = max(int(row[1]) for row in spec["scenarios"])
+    WIDTH = max(int(spec.get("width", WIDTH)), longest + OUTPUT_LEN + TURN_GROWTH + 1)
+    PROFILE_KNOBS["trace"] = dict(spec.get("knobs") or {})
+    return "trace"
 
 
 def build_pool(pool_pages: int = POOL, interleave: bool = True,
@@ -265,9 +310,20 @@ class Traffic:
                  "switchyard-stage": SCENARIOS_SWITCHYARD,
                  "switchyard-deadlock": SCENARIOS_DEADLOCK,
                  "ornith-ada": SCENARIOS_ORNITH}.get(profile, SCENARIOS)
-        self.sessions = profile.startswith("switchyard")
-        self.reuse = 0.0 if profile == "fanout" else REUSE_FRAC
-        self.jitter = (0.95, 1.05) if profile == "fanout" else (0.8, 1.2)
+        spec = TRACE_PROFILE if profile == "trace" else None
+        if spec is not None:
+            table = [(str(n), int(length), int(w)) for n, length, w in spec["scenarios"]]
+        self.sessions = profile.startswith("switchyard") or bool(
+            spec and spec.get("sessions"))
+        self.reuse = 0.0 if profile == "fanout" else float(
+            spec.get("reuse", REUSE_FRAC) if spec else REUSE_FRAC)
+        self.jitter = (
+            tuple(spec["jitter"]) if spec and spec.get("jitter")
+            else ((0.95, 1.05) if profile == "fanout" else (0.8, 1.2))
+        )
+        # Turns per conversation before a client rotates to a new one. Fixed at 2-5 for the
+        # hand-written profiles; a trace measures it.
+        self.turns = tuple(spec["turns"]) if spec and spec.get("turns") else (2, 5)
         self.pop = [s for s in table for _ in range(s[2])]
         self.prefix = {
             f: torch.arange(f * 10_000_000, f * 10_000_000 + WIDTH, dtype=torch.int32)
@@ -304,7 +360,7 @@ class Traffic:
                 "name": name,
                 "len": length,
                 "turn": 0,
-                "turns": self.rng.randint(2, 5),
+                "turns": self.rng.randint(*self.turns),
                 "sid": f"sess-{slot}-{self.generation}",
                 "fam": self.generation % FAMILIES,
                 # The shared head is the family's system prompt / tool catalog: it is what
@@ -1197,7 +1253,11 @@ if __name__ == "__main__":
     ap.add_argument("--label", default="")
     ap.add_argument("--profile", default="stage",
                     choices=["stage", "pressure", "fanout", "switchyard-stage",
-                             "switchyard-deadlock", "ornith-ada"])
+                             "switchyard-deadlock", "ornith-ada", "trace"])
+    ap.add_argument("--profile-file", default="",
+                    help="a benchmarks/trace_to_profile.py profile: run the traffic shape "
+                         "of a captured trace instead of a hand-written scenario mix "
+                         "(implies --profile trace)")
     ap.add_argument("--diagnose", action="store_true")
     ap.add_argument("--abort-inflight", dest="abort_inflight",
                     action="store_true", default=None,
@@ -1210,6 +1270,10 @@ if __name__ == "__main__":
     ap.add_argument("--pool", type=int, default=POOL)
     ap.add_argument("--no-interleave", action="store_true")
     a = ap.parse_args()
+    if a.profile_file:
+        a.profile = apply_profile_file(a.profile_file)
+    elif a.profile == "trace":
+        ap.error("--profile trace requires --profile-file")
     if a.gate:
         # --ticks/--seed stay honoured so the gate can be shortened while bisecting;
         # CI runs it at the defaults the floors above were measured at.
@@ -1225,4 +1289,7 @@ if __name__ == "__main__":
         else PROFILE_KNOBS.get(a.profile, {}).get("pool_pages", POOL)
     )
     out["interleave"] = not a.no_interleave
+    if a.profile_file:
+        out["profile_file"] = a.profile_file
+        out["profile_source"] = (TRACE_PROFILE or {}).get("source")
     print(json.dumps(out))

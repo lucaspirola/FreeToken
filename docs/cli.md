@@ -97,6 +97,8 @@ See [models.md](models.md#moe-backends) for what each backend does.
 | `--json-retry` | 1 | Greedy repair resubmissions when a `response_format` json answer is not valid JSON; 0 disables |
 | `--hidden-states-dir` | off | Enable the Switchyard prefill-probe export and make this directory its only permitted root; a request opts in per call with top-level `kv_transfer_params` and gets the artifact path back ([switchyard.md](switchyard.md#6-hidden-state-probe-target)) |
 | `--hidden-states-max-tokens` | 4096 | Prompt-token cap for one hidden-state probe; a longer prompt is a 400 `context_length_exceeded` (the artifact is tokens x layers x hidden) |
+| `--trace-dir` | off | Append one JSON line per completed request here (arrival, session, route, token counts, sampling, TTFT, abort) for `benchmarks/trace_replay.py`; the prompt is stored as a hash chain, never as text ([switchyard.md](switchyard.md#9-capturing-and-replaying-traces)) |
+| `--trace-include-text` | off | Also write the prompt messages into the trace; only for replaying one's own traffic. Requires `--trace-dir` |
 
 ## ft shell
 

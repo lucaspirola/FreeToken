@@ -485,7 +485,114 @@ Claude Code points `ANTHROPIC_BASE_URL` at the router (`switchyard-server` serve
 
 ---
 
-## 9. Troubleshooting
+## 9. Capturing and replaying traces
+
+Everything in §8 is *synthetic*: a fixed scenario mix, fixed prompt lengths, a closed
+16-client loop. That is the right shape for a regression gate — every profile in it is a
+failure we have already had — and the wrong shape for "does this change help the traffic we
+actually serve". A trace closes that gap: capture what really arrived, then replay it.
+
+### Capturing
+
+```bash
+ft serve --model ... --trace-dir /var/tmp/ft-trace          # everything else as in §1
+```
+
+One JSON line per **completed** request, appended to
+`/var/tmp/ft-trace/trace-<stamp>-<pid>.jsonl` (mode 0600, one file per process, created if
+absent). Covers `/v1/chat/completions` and `/v1/completions`, success, error and client
+disconnect alike. Off by default.
+
+| Field | Meaning |
+|---|---|
+| `t` | arrival, epoch seconds — the frontend's, not the scheduler's |
+| `route`, `model`, `rid`, `stream` | which endpoint, which model id, the response id |
+| `session` | the **resolved** session id (§3), i.e. what the KV lease was bound to |
+| `prompt_tokens`, `cached_tokens` | prompt length and prefix-cache hit. `cached_tokens` is the raw count, **not** gated on `--enable-cache-report`: the flag gates the wire, and a trace whose cached fraction depended on a reporting flag could not be replayed |
+| `max_tokens`, `sampling` | the *resolved* params (model defaults folded in), plus `tools` as a catalog size, `reasoning_effort`, `response_format` and `chat_template_kwargs` |
+| `output_tokens`, `reasoning_tokens`, `finish_reason` | what came back |
+| `ttft_ms`, `duration_ms` | time to first token (streaming only — the non-streaming path has no first-token hook and records `null` rather than inventing one), and arrival to completion |
+| `status`, `error_code` | `ok` / `error` / `abort`; `abort` is a client disconnect, `error` carries e.g. `context_length_exceeded` |
+| `prompt_sha256`, `msg_chain`, `msg_chars`, `msg_roles` | the prompt's shape — see below |
+
+**No prompt text is written.** What is written instead is the *prefix chain*:
+
+```
+chain[i] = sha256(chain[i-1] || canonical(message_i))        (16 hex chars kept)
+```
+
+Two requests share exactly the first `m` messages iff their chains agree for `m` entries,
+which is precisely the boundary the radix prefix cache keys on. With `msg_chars` and
+`msg_roles` beside it, a replay can rebuild prompts of the right length, the right role
+sequence and the right sharing graph while holding none of the content. `--trace-include-text`
+adds the messages themselves, for replaying one's own traffic; the file then carries
+everything the clients sent.
+
+Overhead is off the request path: the record is built from values the handler already has and
+handed to a writer thread through a bounded queue, exactly as `request_logger` does, and a
+full queue drops records rather than applying back-pressure to serving. With the flag absent
+the call sites cost one boolean.
+
+### Replaying
+
+```bash
+python benchmarks/trace_replay.py --trace /var/tmp/ft-trace \
+  --base-url http://127.0.0.1:1919 --model nemotron-3.5-lightning --out replay.json
+```
+
+It preserves inter-arrival times (`--speed 2.0` halves them) and session affinity: each
+traced session becomes one replay session bound with `x-switchyard-session-id`, and its turns
+are issued strictly in order, one at a time. Overlapping the turns of one conversation would
+destroy the prefix structure the whole exercise reconstructs.
+
+It prints its own p50/p95/p99 TTFT and latency, tok/s, cached fraction and error rate **beside
+the trace's own**, so the comparison is against measured behaviour rather than a synthetic
+baseline.
+
+With text stored it replays verbatim. With only hashes it regenerates deterministic filler,
+seeded by `chain[i]`, whose length is **a pure function of that message's own `msg_chars`**:
+
+```
+words_i = max(1, round(msg_chars[i] * scale))
+```
+
+Purity is the load-bearing property. Turn *k+1* contains turn *k*'s messages, so a length that
+depended on the request a message sits in would make the same message come out at two lengths
+in two turns; the shared prefix would break at message 0 and the replay would run at ~0 %
+reuse against a trace that measured 74 %. The price is that `scale` is one global constant —
+fitted so the median replayed prompt matches the median traced one, against a
+three-probe calibration of the live server's tokenizer (`tokens = a·words + b + c·messages`;
+the per-message term is the chat template's per-turn cost, and omitting it mis-sizes long
+conversations specifically). Read `prompt_tokens_err_p50/p95` in the output before trusting a
+run: above ~10 % the trace mixes prompt kinds (code, CJK, base64) too different for one
+constant, and you want `--trace-include-text` or a per-kind split.
+
+`--dry-run` builds every prompt and reports reconstruction fidelity without a server.
+
+### Converting to a CPU-gate profile
+
+```bash
+python benchmarks/trace_to_profile.py --trace /var/tmp/ft-trace --out trace.profile.json
+python benchmarks/scheduler_replay.py --profile-file trace.profile.json --ticks 4000
+```
+
+`scheduler_replay.py`'s five profiles are hand-written geometries. `trace_to_profile.py`
+derives a sixth from real traffic — prompt-length quantile buckets as scenarios, median
+`cached_tokens/prompt_tokens` as the reuse fraction, median `output_tokens` as the decode
+cost, turns-per-session and per-turn growth as the session-residency model, distinct first
+messages as the prefix families, and the peak of the arrival/finish interval sweep as the
+client population. Pool size, prefill budget and the lane cap are server flags a trace cannot
+observe: they are passed through (`--pool-pages`, `--prefill-budget`) and default to the P2
+profile's. The result runs on the real `PrefillManager` / `CacheManager` with no GPU and no
+model, exactly as the other profiles do.
+
+CPU coverage: `tests/server/test_request_trace.py` (writer, prefix-chain sharing, no text
+leak) and `tests/benchmarks/test_trace_replay.py` (capture → replay → metrics against a
+stdlib fake server, and trace → profile → a real `scheduler_replay` run).
+
+---
+
+## 10. Troubleshooting
 
 | Symptom | Cause |
 |---|---|
