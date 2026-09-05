@@ -4,8 +4,9 @@ Handover: `tasks/nemotron35-handover.md`. Plan: `tasks/nemotron35-plan.md`. Rule
 `tasks/lessons.md`. Results files below are in `benchmarks/results/` unless stated;
 `N35 =nemotron35_lightning_5080_`.
 
-HEAD `d960467`; the four 2026-09-05 tickets below are **uncommitted in the working tree**.
-`fork/nemotron35` == HEAD (pushed); `fork/main` (`62f5a66`) is 82 behind, 0 ahead.
+HEAD `ca7e74b`, working tree clean; the four 2026-09-05 tickets are committed in it and the
+end state is **soak-validated** (`N35switchyard_soak_2026-09-04.md` §W: traffic PASS on both
+routes, 9 invariant warnings ticketed below). `fork/main` (`62f5a66`) is behind, 0 ahead.
 
 ---
 
@@ -38,6 +39,15 @@ HEAD `d960467`; the four 2026-09-05 tickets below are **uncommitted in the worki
       **22 minutes of one-off Triton JIT** at `BLOCK_K = 1024`; if the threshold is ever raised,
       that compile has to happen at warmup, never on a live request.
       Evidence: `N35misc_tickets_2026-09-05.md` §3.
+- [ ] **`--moe-collect-stats` publishes only at an idle boundary, so no soak can report an
+      expert-cache hit rate.** Every `MoE decode miss stats` / `GPU batch profile` line is emitted
+      from `Scheduler.run_when_idle` (`scheduler.py:346-408`), and `Scheduler is idle` appeared
+      **0 times in 41 minutes** at c=16 — the flag was on for the whole `ca7e74b` soak and returned
+      nothing. `decode_miss_stats()` is already a dict of ints; hang it off `/v1/stats` next to
+      `scheduler.prefill`, the way `78f29d3` did for the admission counters. Add a counter to the
+      **extend-cache gate** (`use_cached_extend`) in the same change — today it can only be
+      inferred from `#new-token <= --moe-extend-cache-tokens` (76 of 1,522 passes, 5.0 %, vs 70 of
+      1,210 at `13af13d`). soak §W7.
 - [ ] **The M=256 GEMM bucket** runs at 20 % of ceiling with +53 % padding waste at `BLOCK_M=16`;
       `_ensure_experts_sized_kernel` evicts serially in a `(1,)` grid. `--moe-collect-stats` and
       the pageable-layer profile now also count sub-threshold extend routings.
@@ -53,6 +63,29 @@ HEAD `d960467`; the four 2026-09-05 tickets below are **uncommitted in the worki
       Evidence: `N35decode16_2026-09-05.md` §0/§2/§7.2–7.3.
 
 ### Scheduler / server tickets
+- [ ] **9 finishability-invariant warnings in the `ca7e74b` soak (BLOCKER for an unqualified
+      PASS).** 18:38:30–18:38:49 of the passthrough phase, 9 of 702 checks: two in-flight chunked
+      prefills over-promise the pool by a **constant 1,401 tokens** (0.5 % of 262,144) while both
+      `owed` and `available_size` fall by one 8,192-token chunk per pass. It resolved itself —
+      queue drained 14 → 0, no error, no stall, no fatal, graceful shutdown in 2 s. Leading
+      hypothesis: a **cold session restore** materialises committed pages *after* admission
+      (four restores, one of 79,104 tokens, in the 2 s before the first warning), shrinking
+      `cache_manager.available_size` without shrinking the standing reservation that
+      `_check_finishability` compares it against (`prefill.py:503-546`). Not proven — §V had 441
+      restores and 0 warnings. **Next step is CPU-only:** extend `benchmarks/scheduler_replay.py`
+      with a restore landing between a chunked prefill's admission and its next chunk and assert
+      the invariant; if it reproduces, charge the restore against the standing reservation (or
+      re-check finishability after a restore) rather than loosening the invariant.
+      **Do not run `FREETOKEN_SCHEDULER_INVARIANT=raise` in a soak until this is understood** —
+      it would have killed an otherwise clean run. Evidence: `N35switchyard_soak_2026-09-04.md` §W6.
+- [ ] **`max_chunked_prefills = 8` binds: `fresh_admits_blocked_by_cap` = 435** (27 stage / 408
+      passthrough) over the `ca7e74b` soak, plus 500 `refusals`. §U5 could not prove the cap ever
+      bound; `78f29d3` now proves it does. Goodput went *up* in the same run, so this is evidence
+      for the §U8-ticket-9 reservation arithmetic, not a demonstrated cost. soak §W3/§W9.
+- [ ] **The `client_disconnect` abort counter stays 0 through a probe that demonstrably aborted.**
+      `78f29d3` publishes `requests.aborts`, and the §W5 disconnect probe took `active` 0 → 1 → 0
+      in 2 s while `client_disconnect` never left 0 — the counter exists but the disconnect path
+      does not increment it. Half of §U8 ticket 12. soak §W5.
 - [ ] **An over-pool prompt has no client rejection path.** `PrefillManager.schedule_next_batch`
       skips a fresh request whose `input_len + output_len > cache_manager.max_size`, logs one
       warning and `continue`s — never removing it from `pending_list`, never failing the request,
@@ -81,7 +114,8 @@ HEAD `d960467`; the four 2026-09-05 tickets below are **uncommitted in the worki
       *resident* session is never checkpointed, so a restart loses it (spill-on-shutdown flag);
       `_evict_one_lru` can evict the record the pending admission is about to restore.
 - [ ] **Watch mean lanes per prefill batch every soak.** 1.83 → 3.43 (stage) and 3.53 → 4.92
-      (passthrough) at `13af13d`, now that the divisor no longer caps it. Stage >~5 **together
+      (passthrough) at `13af13d`; **3.18 / 4.96 at `ca7e74b`**, stage moving *down* while requests
+      rose 30 %, now that the divisor no longer caps it. Stage >~5 **together
       with** rising errors or p95 is the §R6/§R7 failure mode returning. Passthrough sitting in the
       old 4.7–6.6 band is not a regression — that band was a *stage-route* measurement.
 - [ ] `num_kv_splits_ptr` is passed to both decode kernels and dereferenced in neither (the split
@@ -348,3 +382,47 @@ on copy and neutral elsewhere, but it doubles the price of the break-even gate's
 at long context, and that trade wants its own confirming session. **That session ran on
 2026-09-05 and 8 is now the pinned answer** — k = 16 is 0.870x of off at 131K and the gate stops
 closing entirely (`N35misc_tickets_2026-09-05.md` §4).
+
+---
+
+## 2026-09-05 — final validation soak of the end state (`ca7e74b`)
+
+- [x] **Run** — `SOAK_EXTRA_ARGS="--moe-collect-stats" benchmarks/switchyard_soak/run.sh ca7e74b 20m`;
+      stage 20 m then passthrough 20 m at c=16, `FREETOKEN_SCHEDULER_INVARIANT=warn`,
+      `--enable-cache-report`, server under `scripts/gpu_lock.sh`. 17:55:01 → 18:39:17,
+      READY in 33 s, both phases `exit=0`, GPU back to **0 MiB**, no leftover venv processes.
+- [x] **Grade** — `split.py`, `analyze.py` (logs **and** the four `/v1/stats` snapshots),
+      `gaps.py`. Full write-up: `N35switchyard_soak_2026-09-04.md` **§W**.
+- [x] **Disconnect probe** on the same server — `active` 0 → 1 → 0, back to 0 **2 s** after the
+      socket close (§V measured 5 s, §U 7 s).
+
+### Review
+
+**Traffic: PASS on both routes, and every headline beats the §V (`13af13d`) baseline.**
+Stage 492 → **639** requests (+29.9 %) at p95 109,395 → **72,094 ms** (−34.1 %) and p99 −22.8 %.
+Passthrough 1,904 → **2,155** (+13.2 %) at p50 −13.3 % but p95 **+9.7 %** and p99 **+15.3 %** —
+goodput bought with a slightly worse tail, not a slower engine: per-stream decode at 16 lanes is
+11.91 → **13.58 tok/s** (+14 %) and the effective new-token prefill rate 2,008 → **2,410** (+20 %).
+0 errors, 0 STALLED, 0 fatals, 0 tracebacks, 0 ERROR/CRITICAL lines, trailing silence 1 s / 3 s,
+scheduling wall clock 99.8 % / 99.5 %, 0 spill or restore failures in 1,734 spills and 642 restores.
+
+**The dense graph ladder is confirmed live and is the cleanest result of the run.** `13af13d`
+captured `(1, 2, 3, 4, 8)` at every elastic tier and ran **314 of 427 decode batches (73.5 %)
+eager**; `ca7e74b` captures `1..16` at the 16-request tier and ran **0 of 485 eager**.
+
+**Verdict is a qualified PASS: 9 finishability-invariant warnings** in the last 20 s of the
+passthrough phase break the stated "0 invariant violations" criterion. Nothing downstream went
+wrong — the episode is a constant 1,401-token over-promise that resolved itself — but it is the
+one open blocker and is ticketed above with a CPU-only repro to try.
+
+**Two measurement lessons this run bought.**
+1. **A counter that only publishes at an idle boundary does not exist on a busy server.**
+   `--moe-collect-stats` was on for 41 minutes at c=16 and emitted nothing, because every one of
+   its log lines comes out of `run_when_idle` and `Scheduler is idle` never fired. The soak
+   therefore has **no expert-cache hit rate**, and no future soak will until the counters move to
+   `/v1/stats`. Before asking a run to report a metric, check that the metric's publication path
+   is reachable in that run's regime.
+2. **A 14-sample bucket is not a measurement.** Stage `#running-req == 16` aggregate reads
+   99.9 → 85.7 tok/s and would look like a 14 % regression; both sides are n=14 out of ~170
+   decode batches. The `>= 12` bucket (n=79 → 114) has identical medians (86.2) and a *rising*
+   mean. Report the sample size next to any bucketed soak number, or do not report the bucket.

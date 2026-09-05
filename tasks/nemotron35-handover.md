@@ -1,9 +1,11 @@
 # Nemotron 3.5 Lightning on FreeToken — handover
 
-State as of 2026-09-05, HEAD `d960467` on `main`. **The four tickets closed below (graph ladder,
-A-operand deinterleave, extend-cache guard, spec draft length) are in the working tree,
-uncommitted** — commit them before branching. `fork/nemotron35` is at HEAD (pushed); `fork/main`
-(`62f5a66`) is 82 commits behind and 0 ahead — a fast-forward is available and is the user's
+State as of 2026-09-05, HEAD `ca7e74b` on `main`, working tree clean. The four 2026-09-05
+tickets (graph ladder, A-operand deinterleave, extend-cache guard, spec draft length) are
+**committed** in `ca7e74b`, and the end state has been **validated by a 16-way soak** against it
+(soak §W): 0 errors, 0 STALLED, 0 fatals on both routes, but **9 finishability-invariant warnings**
+in the passthrough tail — the one open blocker, ticketed in soak §W6. `fork/main`
+(`62f5a66`) is behind and 0 ahead — a fast-forward is available and is the user's
 call. Read this, then `tasks/nemotron35-plan.md` (spec),
 `tasks/todo.md` (open checklist), `tasks/lessons.md` (rules — read before touching the GPU),
 `docs/nemotron.md` (profiles + numbers), `docs/switchyard.md`, `docs/oracle.md`,
@@ -11,12 +13,20 @@ call. Read this, then `tasks/nemotron35-plan.md` (spec),
 
 ## Status
 Serving is correct and fast on the RTX 5080; the 262K/1M recall, scheduler-stall and
-16-way-soak blockers are all closed, and what remains is a ranked ticket list plus one
-merge decision.
+16-way-soak blockers are all closed. The final 16-way soak against `ca7e74b` (soak §W,
+2026-09-05 17:55–18:39) passes on traffic — 639 stage / 2,155 passthrough requests, 0 errors,
+0 STALLED, 0 fatals, trailing silence 1 s / 3 s, disconnect abort clean, GPU back to 0 MiB — and
+confirms the dense graph ladder live (**0 of 485 decode batches ran eager**, against 73.5 % at
+`13af13d`). Two things came out of it: **9 finishability-invariant warnings** in the last 20 s of
+the passthrough phase (a constant 1,401-token over-promise that resolved itself; soak §W6 has the
+evidence and the CPU-only repro to try), and the discovery that `--moe-collect-stats` publishes
+**only at an idle boundary**, which a saturated soak never reaches — so expert-cache hit rate is
+unobtainable from a soak until those counters move to `/v1/stats` (soak §W7). What remains is
+those two, plus a ranked ticket list and one merge decision.
 
 ## Performance (start of effort → now)
 
-| metric | start (2026-09-04, ~`508ea32`) | now (`d960467` + the 2026-09-05 tickets) | evidence |
+| metric | start (2026-09-04, ~`508ea32`) | now (`ca7e74b`) | evidence |
 |---|---|---|---|
 | decode 131K | 82.8 tok/s | **145.3** (1.75x) | decode_launch_2026-09-04 |
 | decode 262K | 58.7 | **132.4** (2.26x) | decode_launch_2026-09-04 |
@@ -27,11 +37,13 @@ merge decision.
 | prefill 524K | 1,064 | **2,297** (2.16x, measured live in the oracle run) | oracle_2026-09-05 |
 | prefill 1M | 573–576 | **1,307** (2.28x; MoE-GEMM gain not re-measured at 1M) | prefill_profile |
 | 1M TTFT | 1,810–1,824 s | **795.8 s** | prefill_profile |
-| 16-way decode aggregate (soak) | 81.6 stage / 161.4 passthrough tok/s | **96.8 / 177.5** | soak §U |
+| 16-way decode aggregate (soak, @16 lanes) | 81.6 stage / 161.4 passthrough tok/s | 85.7 / **217.3** | soak §W |
 | 16-way decode (engine, 12 lanes) | 143.21 eager | **153.84** (1.074x; 1.039x at 16) | decode16 |
-| soak stage | FAIL (crash, then stalls/deadlock at `81ab30e`/`ea7ed7c`) | **PASS** 492 req / 0 err / 0 STALLED, p95 109.4 s (−25%) | soak §V |
-| soak passthrough | FAIL | **PASS** 1,904 req / 0 err / 0 STALLED, p95 24.6 s (−25%) | soak §V |
-| prefill starvation signature | 61% stage / 19% passthrough of passes | **0 / 1,202 passes** | soak §V |
+| soak stage | FAIL (crash, then stalls/deadlock at `81ab30e`/`ea7ed7c`) | **PASS** 639 req / 0 err / 0 STALLED, p95 **72.1 s** | soak §W |
+| soak passthrough | FAIL | **PASS** 2,155 req / 0 err / 0 STALLED, p95 27.0 s | soak §W |
+| prefill starvation signature | 61% stage / 19% passthrough of passes | **2 / 1,514 passes** (0.1%) | soak §W |
+| soak decode batches run eager | — | 73.5% at `13af13d` → **0.0%** (0 of 485) | soak §W3 |
+| soak effective prefill rate | 1,830 stage / 1,879 passthrough tok/s | **2,566 / 2,410** | soak §W3 |
 
 Oracle recall by question shape (needles all present in state; **0 `retention`, 0 `selection`
 at every length on both engines**):
@@ -94,8 +106,25 @@ run on either engine (cheap open rung).
 - **CI** — `.github/workflows/cpu-checks.yml` (ruff + CPU unit tests + scheduler replay gate),
   `508ea32`; `docs/cpu-checks.md`.
 - **Soak drivers in-repo** — `benchmarks/switchyard_soak/` (`f6ed0b5`).
+- **Final 16-way soak against the end state** — `ca7e74b`, 2026-09-05: PASS on traffic both
+  routes (639 / 2,155 requests, 0 errors, 0 STALLED, 0 fatals), stage p95 −34%, 0% of decode
+  batches eager, disconnect abort 0→1→0 in 2 s. Two new tickets (§W6, §W7) above. soak §W.
 
 ## Open, ranked by value
+0. **9 finishability-invariant warnings in the `ca7e74b` soak's passthrough tail.** The only
+   thing between the end state and an unqualified PASS. 19-second episode, constant 1,401-token
+   over-promise, resolved itself, no error/stall/fatal. Leading hypothesis: a cold session restore
+   materialises committed pages *after* admission, shrinking `available_size` without shrinking
+   the standing reservation the gate proved against (`prefill.py:503-546`). CPU-only next step:
+   extend `benchmarks/scheduler_replay.py` with a restore landing between a chunked prefill's
+   admission and its next chunk. **Do not run `FREETOKEN_SCHEDULER_INVARIANT=raise` in a soak
+   until this is understood.** soak §W6.
+0b. **`--moe-collect-stats` publishes only at an idle boundary**, and a saturated server never
+   reaches one (`Scheduler is idle` appeared 0 times in 41 minutes at c=16). So no soak can report
+   expert-cache hit rate. `decode_miss_stats()` is already a dict of ints — hang it off `/v1/stats`
+   next to `scheduler.prefill` the way `78f29d3` did. Add a counter to the extend-cache gate
+   (`use_cached_extend`) at the same time; today it can only be inferred from `#new-token <= 64`
+   (76 of 1,522 passes, 5.0 %). soak §W7.
 1. **n-gram verify overhead** — ~40% of a verify step is not the forward (~52 ms vs a ~30 ms
    extend forward): 46 eager kernel launches in the commit, `_prepare_batch` rebuilding pinned
    staging for a one-request batch. Taking the step from 7x to 4x a decode step moves the copy
@@ -130,7 +159,10 @@ run on either engine (cheap open rung).
    `_maybe_shrink_growable_kv` wipes the prefix cache at idle; `scheduler_replay.py` scored the
    commit that then failed the live soak, so it is not an acceptance gate for policy.
 8. **Watch mean lanes per prefill batch** every soak: 3.43 stage / 4.92 passthrough at
-    `13af13d`. Stage >~5 **together with** rising errors or p95 is the §R6/§R7 mode returning.
+    `13af13d`, **3.18 / 4.96 at `ca7e74b`** (stage moved down while requests rose 30%). Stage >~5
+    **together with** rising errors or p95 is the §R6/§R7 mode returning. Also new at `ca7e74b`:
+    `fresh_admits_blocked_by_cap` = 435, i.e. `max_chunked_prefills = 8` **does** bind (§U5 could
+    not prove it either way), and host `MemAvailable` bottomed at 3.1 GiB against §V's 5.1.
 9. **CI follow-ups** — re-run the full unit-test step with no GPU job live and record the wall
     time; fold `tests/moe`+`tests/kernels` in once `test_offload.py::test_adjust_config_*` skips
     without flashinfer; pay down the `[tool.ruff.lint] ignore` list.

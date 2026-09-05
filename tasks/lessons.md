@@ -1164,3 +1164,27 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   before it ran. **Bound a flag at the kernel's real ceiling rather than at the value you
   measured, and treat a minutes-long first compile as a production hazard — a warmup job, never a
   live request — not a benchmark annoyance.**
+
+## 2026-09-05 (final validation soak of `ca7e74b` — what a 40-minute run can and cannot tell you)
+- **A counter that only publishes at an idle boundary does not exist on a busy server.**
+  `--moe-collect-stats` was on for the whole 41-minute c=16 soak and emitted **nothing**: every
+  `MoE decode miss stats` / `GPU batch profile` line comes out of `Scheduler.run_when_idle`, and
+  `Scheduler is idle` fired **0 times**. The run was asked for an expert-cache hit rate and could
+  never have produced one. **Before asking a run to report a metric, check that the metric's
+  publication path is reachable in that run's regime** — saturation is exactly the regime you
+  want the number for, and exactly the one that suppresses it.
+- **Report the sample size next to any bucketed soak number, or do not report the bucket.** The
+  stage `#running-req == 16` decode aggregate read 99.9 → 85.7 tok/s and looks like a 14 %
+  regression. Both sides are **n = 14** out of ~170 decode batches. The `>= 12` bucket (n = 79 →
+  114) has identical medians and a rising mean. A soak's headline buckets are not uniformly
+  sampled — the deep ones are rare by construction.
+- **A `warn`-level invariant is worth more than a `raise` one, and this is the run that proves
+  it.** 9 finishability warnings fired in the last 20 s of an otherwise perfect soak: constant
+  1,401-token over-promise, resolved itself, 0 errors. Under `=raise` the run would have died and
+  reported nothing about the 2,794 requests that succeeded. Keep soaks on `warn`, and treat a
+  precondition warning as a ticket with evidence, not as a failure to escalate on the spot.
+- **When a soak beats its baseline on every axis but the tail, check goodput before calling it a
+  regression.** Passthrough p95 went **up** 9.7 % — while requests went up 13.2 %, per-stream
+  decode at 16 lanes up 14 %, and effective prefill rate up 20 %. The tail was queueing, not a
+  slower engine. Latency percentiles at a fixed concurrency are a function of how much work the
+  server accepted; they are not comparable across runs that accepted different amounts.

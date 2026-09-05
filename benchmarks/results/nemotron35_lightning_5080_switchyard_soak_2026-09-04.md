@@ -1330,3 +1330,241 @@ stats_{before,after}_probe.json,soakStage/,soakPass/}`.
 with it — drivers, analyzers and a running soak's logs, all unrecoverable. A benchmark harness
 that only exists in a session scratchpad is one host event away from having never existed.
 `sample.sh` now also records host `MemAvailable`, and `run.sh` refuses to start below 26 GiB.
+
+---
+
+# Run against `ca7e74b` (2026-09-05, final validation of the end state) — traffic PASS on both routes, **9 invariant warnings** in the passthrough tail
+
+Tree: `ca7e74b` clean (`git status --porcelain` empty in the driver log). What is new since the
+§V baseline (`13af13d`): extend-path MoE cache `89b632b`; n-gram speculation infrastructure
+`e4070da`/`b84ecb7` (**off** — `spec decode: off` in every snapshot); MoE prefill GEMM `2a139ad`
+plus the A-operand deinterleave in `ca7e74b`; the dense decode-graph ladder `14c1bd8`/`ca7e74b`;
+scheduler observability `78f29d3`; the `52a6503` session-spill / CPU-capability-probe fix.
+
+## W1. Exact commands
+
+```bash
+SOAK_EXTRA_ARGS="--moe-collect-stats" benchmarks/switchyard_soak/run.sh ca7e74b 20m
+#   -> gpu_lock.sh benchmarks/switchyard_soak/serve.sh  (§U1 serve line + --enable-cache-report,
+#      FREETOKEN_SCHEDULER_INVARIANT=warn), stage 20 m then passthrough 20 m, c=16
+#   -> disconnect-abort probe, then TERM the ft serve python directly
+uv run python benchmarks/switchyard_soak/split.py   runs/ca7e74b
+uv run python benchmarks/switchyard_soak/analyze.py runs/ca7e74b/phase_{stage,pass}.log
+uv run python benchmarks/switchyard_soak/analyze.py runs/ca7e74b/stats_after_soak{Stage,Pass}.json \
+                                                    runs/ca7e74b/stats_after_probe.json
+uv run python benchmarks/switchyard_soak/gaps.py    runs/ca7e74b/phase_stage.log 30 1788616536 1788617831
+uv run python benchmarks/switchyard_soak/gaps.py    runs/ca7e74b/phase_pass.log  30 1788617831 1788619142
+```
+
+**Profile deviation from §V:** `--moe-collect-stats` was added (the only difference in the serve
+line). It cost nothing measurable — and it also **returned nothing**, see §W7.
+
+## W2. Result
+
+| | stage | passthrough |
+|---|---|---|
+| verdict (client) | **PASS** | **PASS** |
+| requests / successes / failures | **639 / 639 / 0** | **2155 / 2155 / 0** |
+| error rate | 0.0000 % | 0.0000 % |
+| STALLED intervals | **0** | **0** |
+| p50 / p95 / p99 ms | 25,207 / **72,094** / 115,094 | 5,974 / **26,973** / 53,861 |
+| health / metrics checks, failures | 20 + 20, 0 | 20 + 20, 0 |
+| invalid-request canaries / failures | 3 / 0 | 3 / 0 |
+| detected server restarts | 0 | 0 |
+| scenario failures | none (5/5) | none (5/5) |
+| error records | 0 | 0 |
+| **finishability invariant violations** | **0** | **9** ⚠ |
+
+Per-scenario successes — stage: prefix-reuse 136, growing-conversation 132, tool-call-burst 126,
+large-tool-catalog 124, long-context 121. Passthrough: 432 / 432 / 432 / 430, long-context 429.
+
+**Verdict against the acceptance criteria** (0 errors, ≤1 STALLED per route, 0 invariant
+violations, 0 fatals, trailing silence ≈ 0): everything passes **except the invariant**, which
+records 9 warnings in the last 20 s of the passthrough phase. Nothing downstream of them went
+wrong — no error, no stall, no fatal, the queue drained and the server shut down in 2 s — so this
+is a *precondition* warning, not a failure that reached a client. Ticketed in §W6.
+
+## W3. Against §V (`13af13d`)
+
+| | §V stage | §W stage | §V pass | §W pass |
+|---|---|---|---|---|
+| requests | 492 | **639** (+29.9 %) | 1,904 | **2,155** (+13.2 %) |
+| errors / STALLED | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| p50 ms | 29,820 | **25,207** (−15.5 %) | 6,888 | **5,974** (−13.3 %) |
+| p95 ms | 109,395 | **72,094** (−34.1 %) | 24,580 | 26,973 (**+9.7 %**) |
+| p99 ms | 149,081 | **115,094** (−22.8 %) | 46,695 | 53,861 (**+15.3 %**) |
+| mean lanes / prefill batch | 3.43 | **3.18** | 4.92 | **4.96** |
+| mean `#running-req` (decode) | 9.82 | 11.22 | 12.38 | 12.17 |
+| decode agg tok/s, median all | 55.4 | **74.6** | 150.1 | **185.5** |
+| decode agg tok/s @ `#running-req == 16` | 99.9 (n=14) | 85.7 (n=14) | 190.6 (n=135) | **217.3** (n=137) |
+| decode per-stream tok/s @ 16 | 6.24 | 5.36 | 11.91 | **13.58** |
+| prefill instant tok/s (median) | 2,799 | **2,964** | 1,547 | **2,226** |
+| effective new-token prefill rate | 2,310 | **2,566** (+11 %) | 2,008 | **2,410** (+20 %) |
+| prefix reuse | 82.3 % | 83.7 % | 89.6 % | 88.8 % |
+| starvation signature | 0/603 = 0.0 % | **2/813 = 0.2 %** | 0/599 = 0.0 % | **0/701 = 0.0 %** |
+| trailing silence | 1 s (0.1 %) | 1 s (0.1 %) | 2 s (0.2 %) | 3 s (0.2 %) |
+| scheduling wall clock | 99.8 % | **99.8 %** | 99.8 % | 99.5 % |
+| gaps ≥ 30 s | 0 | **0** | 1 (31 s) | 2 (40 s, 36 s) |
+| **decode batches run eager** | **314/427 = 73.5 %** | **0/485 = 0.0 %** | (same run) | (same run) |
+
+Read the two routes differently. **Stage** is unambiguous: +30 % requests at −34 % p95 and −23 %
+p99, on the route that carries the long prompts. **Passthrough** trades ~10 % of p95 for +13 %
+requests and +20 % effective prefill rate — goodput up, tail slightly worse; per-stream decode at
+16 lanes is up 14 % (11.91 → 13.58 tok/s), so the tail is queueing, not a slower engine.
+
+The one number that moved *down* on a large sample is stage `#running-req == 16` aggregate
+(99.9 → 85.7). **Do not read it**: n=14 batches on each side, out of 180/158. On the
+`#running-req ≥ 12` bucket (n=114 vs 79) the medians are identical at 86.2 and the means go
+82.1 → 89.1.
+
+**The dense graph ladder is confirmed live and is the cleanest result of the run.** §V's engine
+captured `(1, 2, 3, 4, 8)` at every elastic tier, so 314 of 427 decode batches (73.5 %) — every
+batch of 9–16 lanes — fell off the graph. This run captures `1..16` at the 16-request tier and
+**every one of 485 decode batches ran graphed (0 eager)**. Method: the ladder in force is the
+last `Start capturing CUDA graphs with sizes: [...]` line before the batch line;
+`can_use_cuda_graph` gates on `max(sizes)`.
+
+Two scheduler counters that §V could not report at all (`13af13d` predates `78f29d3`; its
+snapshots print `scheduler counters: NOT REPORTED by this engine`) have no baseline here and are
+recorded for the next run: `fresh_admits_blocked_by_cap` **435** (27 stage / 408 passthrough) and
+`refusals` **500**.
+
+## W4. Invariant, fatals, markers
+
+| check | stage | passthrough | whole run |
+|---|---|---|---|
+| `finishability invariant violated` (`=warn`) | 0 | **9** | **9** |
+| invariant checks (counter) | 841 | 702 | **1,543** |
+| `committed_pages_required` | 0 | 0 | **0** |
+| `LinearStatePool exhausted` | 0 | 0 | **0** |
+| `Eviction did not free enough space` | 0 | 0 | **0** |
+| oversize `can never be admitted` | 0 | 0 | **0** |
+| `Traceback (most recent call last)` | 0 | 0 | **0** |
+| ERROR / CRITICAL lines | 0 | 0 | **0** |
+| `/health` non-ok | 0 | 0 | **0** |
+| aborts (`client_disconnect` / `error` / `explicit`) | 0/0/0 | 0/0/0 | **0/0/0** |
+
+Deadlock signature (§T): leading silence 1 s / 3 s, **trailing silence 1 s / 3 s**, scheduling
+wall clock **99.8 % / 99.5 %** of the phase windows. Stage has 0 gaps ≥ 30 s; passthrough has two
+(40 s at 18:30:00, 36 s at 18:37:51) and **neither is a stall** — both windows are soft-session
+spill/restore bursts with `KV protection (admission pressure)` releases (the 18:37:51 window holds
+154 release lines, 8 cold restores and a stream of disk spills), the same benign signature as §V's
+31 s gap.
+
+`#mamba-slot` full occupancy: 36 stage prefill passes and 17 passthrough at 96/96, 5 and 2 decode
+batches at mamba usage 1.00; `LinearStatePool exhausted` stays 0.
+
+Session traffic (cumulative, `/v1/stats.scheduler.session_spill`): **1,734 spills / 0 failed,
+642 restores / 0 failed, 1,046 diverged, 0 prefetches.** No spill or restore failed all run.
+
+## W5. Disconnect-abort (`ff470e7`) — verified again
+
+`/v1/stats.requests.active` **0 → 1 → 0, back to 0 two seconds after the socket close** on a
+~60 K-token non-streaming request dropped mid-prefill (§V measured 5 s, §U 7 s). The abort
+counters now exist (`78f29d3`) and read `client_disconnect=0` — **the probe's own abort is not
+counted**, which is ticket 12 half-closed: the counter is published but the disconnect path does
+not increment it. The 7 prefill passes the probe consumed are visible in the snapshot delta.
+
+## W6. NEW TICKET — 9 finishability-invariant warnings in the passthrough tail
+
+All 9 fall in a 19-second window, 18:38:30 → 18:38:49, i.e. the last 32 s of the passthrough
+phase. They are the same episode:
+
+```
+18:38:30 WARNING  ... 2 in-flight chunked prefills plus 24 decode tokens owe 74462,
+                      but only 72723 tokens are obtainable (short by 1739).
+18:38:31 ... owe 66246, only 64845 (short by 1401)
+18:38:33 ... owe 58054, only 56653 (short by 1401)      <- 8,192 per pass, shortfall CONSTANT
+...
+18:38:49 ... owe  8902, only  7501 (short by 1401)
+18:38:51 Prefill batch, #new-seq: 2, #new-token: 6127 ...   <- final chunk, episode ends
+18:38:54 Prefill batch, #new-seq: 13, #new-token: 2323, #cached-token: 1298688, #queue-req: 1
+```
+
+What the numbers say:
+
+* **The shortfall is a constant 1,401 tokens** while both `owed` and `available_size` fall by
+  exactly one 8,192-token chunk per pass. So the pool was over-promised **once**, by 1,401 tokens
+  (0.5 % of the 262,144-token pool), and then tracked in lockstep. This is not a runaway.
+* **It resolved on its own.** The two chunked prefills finished, `#queue-req` went 14 → 1 → 0,
+  `token usage` peaked at 0.97 and fell back to 0.47, and the server shut down gracefully in 2 s
+  with GPU at 0 MiB. `_reclaim_for_blocked_prefill` never got stuck; there is no §T signature.
+* **Leading hypothesis: a cold restore can retroactively invalidate the finishability the
+  admission gate proved.** The 2 s immediately before the first warning contain four
+  `Restored cold session` lines (14,336 / 14,336 / **79,104** / 14,336 tokens from disk). A
+  restore materialises committed pages *after* admission, shrinking
+  `cache_manager.available_size` without shrinking the standing reservation of prefills already
+  in flight. `_check_finishability` compares exactly those two quantities
+  (`prefill.py:503-546`), so a post-admission restore is a mechanism that can push it negative.
+  This is a hypothesis, not a proof: §V's passthrough phase had 441 cold restores and 0 warnings,
+  so restore alone is not sufficient — this run is also ~13 % deeper in requests and had an
+  elastic `16 -> 14` downshift at 18:38:41, mid-episode.
+* **Next step (cheap, CPU only):** extend `benchmarks/scheduler_replay.py` with a restore that
+  lands between the admission of a chunked prefill and its next chunk, and assert the invariant.
+  If it reproduces, the fix is to charge a restore against the standing reservation (or re-check
+  finishability after a restore) rather than to loosen the invariant.
+* **Do not run `FREETOKEN_SCHEDULER_INVARIANT=raise` in a soak until this is understood** — it
+  would have killed a run that was otherwise clean.
+
+## W7. `--moe-collect-stats` returns nothing under a saturated soak (second new ticket)
+
+`moe_collect_stats=True` is in the run's `ServerArgs`, but the log contains **zero**
+`MoE decode miss stats`, `MoE decode miss stats per layer`, `MoE highest-miss layers` and
+`GPU batch profile` lines. Cause: every one of them is emitted from
+`Scheduler.run_when_idle` (`scheduler.py:346-408`), and **`Scheduler is idle` appears 0 times in
+41 minutes** at c=16 — a saturated server never reaches an idle boundary, which is precisely the
+regime whose expert-cache hit rate anyone would want to know.
+
+**So this run has no expert-cache hit rate**, and neither will any future soak until the counters
+are published somewhere a busy server reaches. `decode_miss_stats()` is already a dict of ints;
+the fix is to hang it off `/v1/stats` next to `scheduler.prefill`, the way `78f29d3` did for the
+admission counters. Until then, expert-cache hit rate has to come from `bench_decode_moe.py`,
+which drives the server to idle.
+
+The flag's cost was not measurable and it is safe to leave off: it adds one CUDA event record and
+two `perf_counter` calls per forward, both read after the `copy_done.synchronize()` the step
+already pays.
+
+**Extend-cache gate (`89b632b`) has no counter either.** Proxy from the batch log — prefill
+passes whose `#new-token ≤ --moe-extend-cache-tokens` (64), which is what
+`use_cached_extend` gates on: **76 of 1,522 passes (5.0 %)**, 26 stage / 50 passthrough, against
+70 of 1,210 (5.8 %) in the §V run. So the cached extend path engaged on roughly one prefill pass
+in twenty and the soak does not exercise it hard; the 9–10x it is worth was measured on the
+extend microbenchmark, not here. A counter on the gate would make this a measurement instead of
+an inference.
+
+## W8. Host behaviour
+
+* Busiest FreeToken process: **median 106.1 % CPU** (no spin), max 853 %.
+* GPU **13.9 GiB median, 15.4 GiB peak**; top-process RSS peak **25.6 GB**; host `MemAvailable`
+  median 6.5 GiB, **bottomed at 3.1 GiB** (§V: median 7.5, min 5.1). Tighter than §V and the
+  closest this effort has come to the OOM that destroyed the soak7 artifacts — `run.sh`'s 26 GiB
+  start gate does not bound the *running* floor.
+* Elastic capacity changes: 50 (§V: 57), with the same start-of-phase `16 -> 4 -> 16` thrash
+  (~20 flips in 30 s at 18:17:16–18:17:46), each one recapturing the graph ladder — 54 capture
+  events (§V: 61). Not a regression, but a dense 1..16 ladder makes each recapture cost more
+  than it did when the ladder was `(1, 2, 3, 4, 8)`.
+* `KV grew` 3 times in stage (65,536 → 262,144) and stayed; `KV shrank` 0.
+* **Graceful shutdown in 2 s, GPU back to 0 MiB**, no leftover venv processes.
+* 1,046 `client tokens diverge` INFO lines (§V: 826) — still the benign reused-auto-session case.
+
+## W9. Still open after this run
+
+1. **The invariant ticket in §W6** — the only thing between this tree and an unqualified PASS.
+2. **Publish the MoE/expert-cache counters on `/v1/stats`** (§W7); add a counter to the
+   extend-cache gate while there.
+3. `fresh_admits_blocked_by_cap = 435` — the `max_chunked_prefills = 8` cap **binds** on this
+   profile. §U5 could not prove it ever bound; `78f29d3` now proves it does. Whether that costs
+   anything is unmeasured (this run's goodput went up), but §U8 ticket 9's reservation arithmetic
+   now has evidence to work from.
+4. `client_disconnect` abort counter stays 0 through a probe that demonstrably aborted (§W5).
+5. Lane watch (§V7 ticket 1): stage **3.18**, passthrough **4.96**. Stage moved *down* while
+   requests rose 30 %, so the §R6/§R7 mode is not returning.
+6. `--moe-prefill-hit-d2d` is still off in the P2 profile, so `13af13d`'s probe fix is still
+   unexercised by a soak (§V7 ticket 3, unchanged).
+
+## W10. Artifacts
+
+`benchmarks/switchyard_soak/runs/ca7e74b/` (gitignored): `driver.log`, `server.log` (2.4 MB),
+`resources.csv`, `soakStage.log`, `soakPass.log`, `phase_{stage,pass}.log`,
+`stats_after_soak{Stage,Pass}.json`, `stats_{before,after}_probe.json`, `soakStage/`, `soakPass/`.
