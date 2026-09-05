@@ -379,3 +379,9 @@ fail the restore with "Eviction did not free enough space"); non-reclaimable/exp
 which age out only on TTL; GDN state slots and the `mamba-slot 96/96` regime; and the real
 per-pass CPU cost, which is reported as `match_calls`/`match_tokens` rather than charged to
 the clock. A live 16-way soak on both routes remains the acceptance test.
+- [ ] Server bug (found by replay work, b030c7f): a client that disconnects while its request is
+      still in prefill is never aborted (stream_with_cancellation checks is_disconnected only
+      after the first yielded chunk; non-streaming path only on CancelledError) → its table
+      slot + forwarded KV leak for the server's life. Fix: poll is_disconnected while parked on
+      the ack queue / before first token; send AbortMsg. Test with a fake client.
+- [ ] Live soak against b030c7f with FREETOKEN_SCHEDULER_INVARIANT=warn (after prefill profile)
