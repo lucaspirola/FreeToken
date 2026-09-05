@@ -14,9 +14,10 @@ FIXTURE = Path(__file__).resolve().parent.parent / "fixtures" / "laguna-s-2.1-me
 
 @pytest.fixture(scope="module", autouse=True)
 def _tp_one():
-    from freetoken.distributed import set_tp_info
+    from freetoken.distributed import set_tp_info, try_get_tp_info
 
-    set_tp_info(rank=0, size=1)
+    if try_get_tp_info() is None:  # another module in the same session may have set it
+        set_tp_info(rank=0, size=1)
 
 
 def _tiny_config():
