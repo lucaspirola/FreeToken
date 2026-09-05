@@ -74,6 +74,12 @@ class CacheRebuildReply(BaseFrontendMsg):
 
 
 @dataclass
+class SchedulerCountersReply(BaseFrontendMsg):
+    # Passthrough of SchedulerCountersMsg: the tokenizer worker has nothing to add to it.
+    counters: dict
+
+
+@dataclass
 class SessionClosedReply(BaseFrontendMsg):
     session_id: str
     request_id: str

@@ -22,6 +22,8 @@ from freetoken.message import (
     DetokenizeMsg,
     ErrorReplyMsg,
     PromptAdmittedMsg,
+    SchedulerCountersMsg,
+    SchedulerCountersReply,
     SessionClosedReply,
     SessionClosedResultMsg,
     TokenizeMsg,
@@ -204,6 +206,9 @@ def tokenize_worker(
                             session_id=m.session_id, request_id=m.request_id
                         )
                     )
+                elif isinstance(m, SchedulerCountersMsg):
+                    # Nothing to translate: the frontend stores the document whole.
+                    send_frontend.put(SchedulerCountersReply(counters=m.counters))
                 elif isinstance(m, SessionClosedResultMsg):
                     send_frontend.put(
                         SessionClosedReply(
@@ -222,6 +227,7 @@ def tokenize_worker(
                         SessionClosedResultMsg,
                         ErrorReplyMsg,
                         PromptAdmittedMsg,
+                        SchedulerCountersMsg,
                     ),
                 )
                 for m in pending_msg

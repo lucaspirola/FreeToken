@@ -392,10 +392,19 @@ Command: `ft serve --model ~/ai/models/Ornith-1.5-35B-Q4_K_M.gguf
       on that code path changed in `acc91e9..2a139ad`. **Fixed: the flag is now in
       `docs/oracle.md`'s Phase-A line, and the runbook's re-prefill check says to corroborate
       with TTFT and the server log.**
-- [ ] Consider making the omission impossible to misread: either have
-      `benchmarks/oracle_cross_engine.py` record "cache reporting not enabled" when the server
-      never sends `prompt_tokens_details`, or emit `prompt_tokens_details` unconditionally when
-      `enable_cache_report` is on (`openai_api.py:955`). One line either way.
+- [x] **Made the omission impossible to misread -- DONE.** The flag gates *reporting*, never
+      work (`PromptAdmittedMsg.cached_tokens` is populated for every admission regardless), so
+      the fix is a presence rule rather than a value: `prompt_tokens_details` is emitted
+      **whenever reporting is on**, carrying an explicit `cached_tokens: 0` for a genuine
+      miss, and is **absent entirely** when it is off. `_reported_cached` now returns
+      `int | None` and `_usage` keys off `is not None`. `/v1/messages` follows the same rule
+      (`cache_read_input_tokens = cached if cache_report else None`), keeping the flag's
+      `input_tokens`-excludes-the-prefix billing semantics untouched. `/v1/responses` is the
+      one exception and is documented as such: `usage.input_tokens_details` is **mandatory**
+      in the Responses schema, so it cannot express "not reported" by omission and a gated 0
+      would be the same lie -- that route now always reports the true hit and the flag no
+      longer gates it (its dead `cache_report` plumbing is gone). `docs/oracle.md` carries the
+      three-row wire table; `docs/switchyard.md` and the `--enable-cache-report` help updated.
 - [ ] Small lead from 524K: `direct:harbour` is the one leak-free direct probe llama.cpp holds
       and FreeToken loses (returned the *orchard* code — `interference-cross`, and
       `reverse:harbour` recovers it two turns later). It is also **turn 2, the one turn whose
@@ -528,13 +537,39 @@ the clock. A live 16-way soak on both routes remains the acceptance test.
       (§R6 2.37) -- the standing reservation seats fewer and that is the trade that bought
       0 STALLED. Graceful shutdown 3 s, GPU 0 MiB. Write-up: soak results §U ("Run against
       4a99e34"); drivers `scratchpad/soak7/`.
-- [ ] Scheduler/server observability the soak could not get (new, from §U5/§U6):
-      `chunked_prefills_inflight` + `fresh_admits_blocked_by_cap` + `deferred_prefill_chunks`
-      on `/v1/stats` (whether `max_chunked_prefills=8` ever binds is currently only
-      *inferable* -- 282/2,091 stage passes carried `#cached-token > 0`, i.e. a fresh admit,
-      median 2 s apart, max window 73 s), and a cumulative `aborted` counter on
-      `StatsTracker` (`"Aborting request %d"` is debug-only, so disconnect-aborts cannot be
-      counted from a soak log).
+- [x] **Scheduler/server observability the soak could not get (§U5/§U6) -- DONE.**
+      `/v1/stats` gains a `scheduler` block (`null` until the engine publishes one, which it
+      never does offline or on a non-primary TP rank -- deliberately distinct from an
+      all-zero document) and `requests.aborts`.
+      - New `python/freetoken/scheduler/counters.py` owns the document's shape:
+        `PrefillCounters` (`passes`, `fresh_admits_blocked_by_cap`, `deferred_chunks`,
+        `refusals`, `chunked_inflight` + `_max`, `seatable_lanes_last` + a per-lane/geometric
+        histogram, and `invariant.{checks,violations,worst_shortfall}`), `SpillCounters`
+        (spills/restores/prefetches, each with its failure channel, plus
+        `restores_diverged`), and `build_scheduler_counters()`, which renders them next to
+        `SpecStats.as_dict()` (declines by reason + a new accepted-token histogram).
+      - **The finishability invariant is now evaluated and counted on EVERY pass**, not only
+        under `FREETOKEN_SCHEDULER_INVARIANT`: the comparison is three attribute reads next
+        to the radix walk the same pass runs, and the env var now only decides whether a
+        violation is additionally logged (`warn`) or raised. The soak that needed the number
+        was not running with the var set, which is why it had none.
+      - Transport: `SchedulerCountersMsg` -> `SchedulerCountersReply`, published at most
+        every 2 s and only when the document moved, plus one forced flush before the
+        scheduler parks on a blocking receive (so an idle poll is never 2 s stale).
+      - Aborts are counted at the frontend call site (`abort_user(..., reason=)`), the only
+        place the reason is knowable -- the wire carries one untagged `AbortMsg`:
+        `client_disconnect` / `explicit` (prepare-stop drain) / `error`. The `error` count
+        lives inside `observe`'s not-aborting branch: an abort's own terminal ack is an
+        `ErrorReplyMsg("request aborted")`, so counting outside it scores every disconnect
+        twice.
+      - Batch log line gains `#seatable-lane` and `#chunked-inflight` (optional in
+        `analyze.py`'s regex, so old soak logs still parse).
+      - `benchmarks/switchyard_soak/analyze.py` now also reads `stats_*.json` snapshots and
+        prints the per-phase delta between consecutive ones (the counters are cumulative for
+        the server process).
+      Tests: `tests/scheduler/test_scheduler_counters.py` (13, real `PrefillManager`),
+      `tests/server/test_stats_counters.py` (10), plus two log-line tests in
+      `test_scheduler_status.py`.
 - [x] **§R7 ticket 1 CLOSED live (2026-09-05, `13af13d`).** `812bc57` divides the interleave
       share by the lanes the pass will actually SEAT instead of by queue depth. The starvation
       signature (`#new-seq: 1`, `#new-token <= 512`, `#queue-req >= 8`) goes 1,278/2,091 (61 %)

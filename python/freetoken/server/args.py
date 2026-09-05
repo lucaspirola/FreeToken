@@ -657,10 +657,16 @@ def parse_args(
         action="store_true",
         default=ServerArgs.enable_cache_report,
         help=(
-            "Return the number of prefix-cached prompt tokens in each response's usage block "
+            "Report the number of prefix-cached prompt tokens in each response's usage block "
             "(OpenAI usage.prompt_tokens_details.cached_tokens, Anthropic "
-            "usage.cache_read_input_tokens, Responses usage.input_tokens_details.cached_tokens). "
-            "On /v1/messages this also makes input_tokens EXCLUDE the cached prefix, matching "
+            "usage.cache_read_input_tokens). With the flag ON the field is always present, "
+            "including an explicit 0 for a genuine miss; with it OFF the field is absent "
+            "entirely -- so presence means 'this server reports cache hits' and can never be "
+            "confused with a miss. /v1/responses is the exception: its schema makes "
+            "usage.input_tokens_details mandatory, so that route always reports the true hit "
+            "and this flag does not gate it. The count itself is free (the scheduler computes "
+            "it for every admission either way); the flag gates reporting only. On /v1/messages "
+            "the flag additionally makes input_tokens EXCLUDE the cached prefix, matching "
             "Anthropic billing semantics."
         ),
     )

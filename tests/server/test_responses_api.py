@@ -431,11 +431,15 @@ def test_route_nonstream_usage_cached_tokens_with_cache_report():
     assert usage["input_tokens_details"]["cached_tokens"] == 3
 
 
-def test_route_nonstream_usage_cached_tokens_zero_without_flag():
+def test_route_nonstream_usage_reports_the_true_hit_without_the_flag():
+    """/v1/responses cannot express "not reported": the Responses schema makes
+    usage.input_tokens_details mandatory, so a gated 0 would be indistinguishable from a
+    genuine miss. The count is free, so this route always reports the truth and
+    --enable-cache-report does not gate it (see openai_api._reported_cached)."""
     client = _client(FakeState([("Hello world", True, 5, 2)], cached_tokens=3))
     r = client.post("/v1/responses", json={"model": "gpt-x", "input": "hi"})
     assert r.status_code == 200, r.text
-    assert r.json()["usage"]["input_tokens_details"]["cached_tokens"] == 0
+    assert r.json()["usage"]["input_tokens_details"]["cached_tokens"] == 3
 
 
 def test_route_stream_completed_usage_carries_cached_tokens():

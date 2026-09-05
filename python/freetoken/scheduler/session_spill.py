@@ -41,6 +41,8 @@ import torch
 
 from freetoken.utils import init_logger
 
+from .counters import SpillCounters
+
 logger = init_logger(__name__)
 
 MANIFEST_NAME = "manifest.json"
@@ -203,6 +205,10 @@ class SessionSpillStore:
         self.model_id = str(model_id)
         self.state_stride_tokens = max(1, int(state_stride_tokens))
         self.max_states = max(1, int(max_states))
+        # Checkpoint traffic for ``/v1/stats``; see freetoken.scheduler.counters. The
+        # failures are the ones a soak cannot otherwise see -- a prefetch that never starts
+        # is silent, and a spill that did not fit its budget is one warning line.
+        self.counters = SpillCounters()
         self._prefetch: _Prefetch | None = None
         # A promotion installed by a reap nobody asked for (``start_prefetch``'s own
         # housekeeping), held until the caller that does ask for it collects it.
@@ -503,6 +509,7 @@ class SessionSpillStore:
         self.discard(self.get(session_id))
         tier = self._reserve_tier(byte_size, session_id)
         if tier is None:
+            self.counters.spills_failed += 1
             return None
 
         now = time.time()
@@ -564,9 +571,11 @@ class SessionSpillStore:
         except Exception:
             if target is not None:
                 shutil.rmtree(target, ignore_errors=True)
+            self.counters.spills_failed += 1
             return None
 
         self._track(record)
+        self.counters.spills += 1
         return record
 
     def _prepare_dir(self, session_id: str) -> Path:
@@ -723,8 +732,12 @@ class SessionSpillStore:
             return False
         files = [chunk.file for chunk in record.chunks]
         if any(path is None for path in files):
+            self.counters.prefetches_failed += 1
             return False
         if not self._make_ram_room(record.byte_size, set(protect) | {session_id}):
+            # There WAS something to promote and RAM could not hold it: the look-ahead is
+            # an optimization, but a budget that never lets it run is worth seeing.
+            self.counters.prefetches_failed += 1
             return False
         cancel = threading.Event()
         state = _Prefetch(session_id, record, cancel, time.perf_counter())
@@ -743,6 +756,7 @@ class SessionSpillStore:
         state.thread = threading.Thread(target=_read, name="session-prefetch", daemon=True)
         self._prefetch = state
         state.thread.start()
+        self.counters.prefetches += 1
         return True
 
     def _take_promoted(self, session_id: str | None) -> str | None:
@@ -774,8 +788,13 @@ class SessionSpillStore:
             or len(values) != len(record.chunks)
             or not self._ram_has_room(record.byte_size)
         ):
+            if not state.cancel.is_set():
+                # Not a cancellation: the read tore, the record was evicted under it, or RAM
+                # moved. The promotion is lost and the restore reads from disk.
+                self.counters.prefetches_failed += 1
             return None
         self._promote_to_ram(record, values)
+        self.counters.prefetches_collected += 1
         logger.info_rank0(
             "Prefetched cold session %s to RAM (%.2f GiB in %.2f s)",
             record.session_id,

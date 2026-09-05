@@ -420,13 +420,18 @@ def _anthropic_usage(
     prompt_tokens: int, completion_tokens: int, cached_tokens: int, cache_report: bool
 ) -> AnthropicUsage:
     """Anthropic billing semantics under --enable-cache-report: input_tokens EXCLUDES
-    the cached prefix and cache_read_input_tokens carries it (absent when 0, matching
-    sglang). With the flag off, input_tokens is the full prompt length."""
+    the cached prefix and cache_read_input_tokens carries it. With the flag off,
+    input_tokens is the full prompt length and the field is absent.
+
+    ``cache_read_input_tokens`` is now emitted for a 0 hit too (Anthropic's own API sends
+    an explicit 0). Its PRESENCE means this server reports cache hits; its absence means
+    reporting is off. Under the old ``cached or None`` rule a real miss and a disabled
+    report were the same bytes -- see ``_reported_cached`` in openai_api.py."""
     cached = cached_tokens if cache_report else 0
     return AnthropicUsage(
         input_tokens=max(prompt_tokens - cached, 0),
         output_tokens=completion_tokens,
-        cache_read_input_tokens=cached or None,
+        cache_read_input_tokens=cached if cache_report else None,
     )
 
 

@@ -934,15 +934,24 @@ def _sse(payload: dict[str, Any]) -> bytes:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
 
 
-def _reported_cached(state: Any, cached_tokens: int) -> int:
-    """The prefix-cache hit to report; 0 unless --enable-cache-report is set."""
-    return cached_tokens if getattr(state.config, "enable_cache_report", False) else 0
+def _reported_cached(state: Any, cached_tokens: int) -> int | None:
+    """The prefix-cache hit to report, or None when --enable-cache-report is off.
+
+    None and 0 are deliberately different answers: None serializes as no
+    ``prompt_tokens_details`` at all ("this server does not report cache hits"), 0 as an
+    explicit zero ("it does, and this prompt missed"). Under the previous rule both of
+    those -- and a genuine miss -- serialized identically, which is how a whole oracle run
+    read a working prefix cache as broken (`docs/oracle.md`, todo §oracle).
+    """
+    if not getattr(state.config, "enable_cache_report", False):
+        return None
+    return cached_tokens
 
 
 def _usage(
     prompt_tokens: int,
     completion_tokens: int,
-    cached_tokens: int = 0,
+    cached_tokens: int | None = None,
     reasoning_tokens: int = 0,
 ) -> dict[str, Any]:
     usage: dict[str, Any] = {
@@ -950,9 +959,10 @@ def _usage(
         "completion_tokens": completion_tokens,
         "total_tokens": prompt_tokens + completion_tokens,
     }
-    # sglang convention: the details object appears only for a nonzero hit, so a
-    # disabled report and a 0-token hit serialize identically.
-    if cached_tokens > 0:
+    # The details object's PRESENCE is the signal that this server reports cache hits, so
+    # it is emitted for a 0 hit too and omitted only when reporting is off. (sglang omits
+    # it on zero as well, which is what made "off" and "missed" indistinguishable.)
+    if cached_tokens is not None:
         usage["prompt_tokens_details"] = {"cached_tokens": cached_tokens}
     # Same rule for the reasoning half (Switchyard treats an absent details object
     # as zero), so a non-reasoning model's usage is byte-identical to before.

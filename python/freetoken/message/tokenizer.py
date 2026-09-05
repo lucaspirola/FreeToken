@@ -71,6 +71,19 @@ class PromptAdmittedMsg(BaseTokenizerMsg):
 
 
 @dataclass
+class SchedulerCountersMsg(BaseTokenizerMsg):
+    """Scheduler -> frontend snapshot of the cumulative scheduler counters.
+
+    Not per-request, so it carries no uid: the frontend stores it whole as the
+    ``scheduler`` block of ``/v1/stats``. Emitted at most once every couple of seconds and
+    only when something moved, so it costs a scheduling loop nothing on the common path.
+    See :mod:`freetoken.scheduler.counters` for the document's shape.
+    """
+
+    counters: dict
+
+
+@dataclass
 class TokenizeMsg(BaseTokenizerMsg):
     uid: int
     text: str | List[Dict[str, Any]]

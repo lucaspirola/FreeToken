@@ -83,7 +83,9 @@ async def prepare_stop_accounting(
                     f"accounting drain timed out with {stats.active} unidentified request(s)"
                 )
             try:
-                await asyncio.gather(*(state.abort_user(uid) for uid in inflight))
+                await asyncio.gather(
+                    *(state.abort_user(uid, reason="explicit") for uid in inflight)
+                )
             except Exception as exc:  # noqa: BLE001 -- preserve engine on any abort transport error
                 raise AccountingDrainError(f"failed to abort active requests: {exc}") from exc
             if not await _wait_for_idle(stats, abort_timeout_s):

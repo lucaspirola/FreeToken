@@ -11,6 +11,7 @@ from .frontend import (
     BaseFrontendMsg,
     BatchFrontendMsg,
     CacheRebuildReply,
+    SchedulerCountersReply,
     SessionClosedReply,
     UserReply,
 )
@@ -24,6 +25,7 @@ from .tokenizer import (
     DetokenizeMsg,
     ErrorReplyMsg,
     PromptAdmittedMsg,
+    SchedulerCountersMsg,
     SessionClosedResultMsg,
     TokenizeMsg,
 )
@@ -45,11 +47,13 @@ __all__ = [
     "DetokenizeMsg",
     "ErrorReplyMsg",
     "PromptAdmittedMsg",
+    "SchedulerCountersMsg",
     "SessionClosedResultMsg",
     "TokenizeMsg",
     "BaseFrontendMsg",
     "BatchFrontendMsg",
     "CacheRebuildReply",
+    "SchedulerCountersReply",
     "SessionClosedReply",
     "UserReply",
 ]

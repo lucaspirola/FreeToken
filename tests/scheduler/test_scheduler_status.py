@@ -54,6 +54,37 @@ def test_prefill_line_reports_tokens_and_throughput():
     assert "60.00 average" in line
 
 
+def test_prefill_line_carries_the_lane_fields_when_the_scheduler_passes_them():
+    """``#seatable-lane`` (the interleave share's divisor) and ``#chunked-inflight`` were
+    previously only inferable from this line -- the §R7 starvation signature had to be
+    reconstructed from `#new-seq`/`#new-token`/`#queue-req`.
+
+    The `benchmarks/switchyard_soak/analyze.py` PRE regex matches them optionally, so this
+    also pins the field ORDER and spelling it parses.
+    """
+    rep, logs, clock = _reporter()
+    clock["t"] = 0.5
+    rep.report_batch(
+        _prefill_batch(new_tokens=30, cached_tokens=12, n_seqs=2),
+        running_reqs=2, queue_reqs=5, kv_used_pages=50, kv_total_pages=200, page_size=16,
+        seatable_lanes=3, chunked_inflight=2,
+    )
+    assert "#queue-req: 5, #seatable-lane: 3, #chunked-inflight: 2, input throughput" in logs[0]
+
+
+def test_prefill_line_is_unchanged_when_the_lane_fields_are_not_supplied():
+    """The low-level loop tests and any caller that predates the fields must keep the old
+    line byte-for-byte, so an older analyze.py still reads a new log."""
+    rep, logs, clock = _reporter()
+    clock["t"] = 0.5
+    rep.report_batch(
+        _prefill_batch(new_tokens=30, cached_tokens=12, n_seqs=2),
+        running_reqs=2, queue_reqs=5, kv_used_pages=50, kv_total_pages=200, page_size=16,
+    )
+    assert "#queue-req: 5, input throughput" in logs[0]
+    assert "#seatable-lane" not in logs[0]
+
+
 def test_prefill_line_keeps_cumulative_average_for_same_request():
     rep, logs, clock = _reporter()
     batch = _prefill_batch(new_tokens=30, cached_tokens=0, n_seqs=1)

@@ -300,13 +300,19 @@ def test_full_response_cache_report_flips_input_tokens():
     assert "cache_read_input_tokens" not in resp.model_dump(exclude_none=True)["usage"]
 
 
-def test_full_response_cache_report_zero_hit_keeps_field_absent():
+def test_full_response_cache_report_spells_out_a_zero_hit():
+    """Same rule as OpenAI's prompt_tokens_details: with reporting ON the field is always
+    there (an explicit 0 for a real miss, as Anthropic's own API sends), so its ABSENCE
+    unambiguously means the server was started without --enable-cache-report."""
     result = GenResult(
         reasoning="", content="hi", tool_calls=[], finish_reason="stop",
         prompt_tokens=11, completion_tokens=5,
     )
     resp = A.anthropic_full_response(result, "claude-x", uid=9, cache_report=True)
     assert resp.usage.input_tokens == 11
+    assert resp.usage.cache_read_input_tokens == 0
+
+    resp = A.anthropic_full_response(result, "claude-x", uid=9)
     assert "cache_read_input_tokens" not in resp.model_dump(exclude_none=True)["usage"]
 
 

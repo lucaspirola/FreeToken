@@ -24,7 +24,7 @@ from freetoken.server.stats import StatsTracker
 def _state(*, maintenance: str = "serving", ready_at: float | None = None):
     stats = StatsTracker()
 
-    async def abort_user(uid: int) -> None:
+    async def abort_user(uid: int, reason: str = "client_disconnect") -> None:
         stats.on_abort(uid)
         stats.observe(UserReply(uid=uid, incremental_output="", finished=True, error="aborted"))
 
@@ -105,7 +105,7 @@ def test_missing_abort_terminal_fails_closed_and_keeps_admission_shut():
     state = _state()
     state.stats.on_new_user(6)
 
-    async def abort_without_ack(uid: int) -> None:
+    async def abort_without_ack(uid: int, reason: str = "client_disconnect") -> None:
         state.stats.on_abort(uid)
 
     state.abort_user = abort_without_ack
@@ -141,7 +141,7 @@ def test_prepare_stop_route_reports_fail_closed_timeout():
     state = _state()
     state.stats.on_new_user(7)
 
-    async def abort_without_ack(uid: int) -> None:
+    async def abort_without_ack(uid: int, reason: str = "client_disconnect") -> None:
         state.stats.on_abort(uid)
 
     state.abort_user = abort_without_ack

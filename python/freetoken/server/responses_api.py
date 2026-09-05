@@ -182,14 +182,12 @@ async def handle_responses(
     except ValueError as exc:
         return _error_response(400, str(exc))
 
-    cache_report = getattr(state.config, "enable_cache_report", False)
     response_headers = (
         {"X-FreeToken-Session-Id": spec.session_id} if spec.session_id is not None else None
     )
     if req.stream:
         events = responses_stream_generator(
             generate_events(uid, spec, state, source="/v1/responses"), req, response_id, created,
-            cache_report=cache_report,
         )
         if request is not None:
             events = (
@@ -211,7 +209,7 @@ async def handle_responses(
         raise
     except GenerationError as exc:
         return _error_response(400, str(exc), exc.code)
-    response = build_responses_response(result, req, response_id, created, cache_report=cache_report)
+    response = build_responses_response(result, req, response_id, created)
     return JSONResponse(
         content=response.model_dump(mode="json"), headers=response_headers
     )
@@ -424,7 +422,6 @@ def build_responses_response(
     req: ResponsesRequest,
     response_id: str,
     created: int,
-    cache_report: bool = False,
 ) -> Response:
     truncated = result.finish_reason == "length"
     item_status = "incomplete" if truncated else "completed"
@@ -465,8 +462,7 @@ def build_responses_response(
         response_id, created, req.model, output,
         status="incomplete" if truncated else "completed",
         usage=_usage(
-            result.prompt_tokens, result.completion_tokens,
-            result.cached_tokens if cache_report else 0,
+            result.prompt_tokens, result.completion_tokens, result.cached_tokens,
         ),
         incomplete_reason="max_output_tokens" if truncated else None,
     )
@@ -494,8 +490,15 @@ def _response_obj(
 
 
 def _usage(prompt_tokens: int, completion_tokens: int, cached_tokens: int = 0) -> ResponseUsage:
-    # input_tokens stays inclusive of the cached prefix (OpenAI semantics);
-    # cached_tokens is nonzero only under --enable-cache-report.
+    # input_tokens stays inclusive of the cached prefix (OpenAI semantics).
+    #
+    # ``input_tokens_details`` is REQUIRED by the Responses schema, so this route cannot
+    # express "not reported" by omitting it the way chat/completions and /v1/messages do.
+    # A gated 0 would therefore be indistinguishable from a genuine miss -- the exact
+    # ambiguity this ticket removes -- so the route reports the true hit unconditionally.
+    # The count is free: the scheduler computes it for every admission regardless of the
+    # flag (PromptAdmittedMsg.cached_tokens), and --enable-cache-report gates reporting,
+    # never work. See _reported_cached in openai_api.py.
     return ResponseUsage(
         input_tokens=prompt_tokens,
         output_tokens=completion_tokens,
@@ -513,7 +516,6 @@ async def responses_stream_generator(
     req: ResponsesRequest,
     response_id: str,
     created: int,
-    cache_report: bool = False,
 ) -> AsyncIterator[str]:
     seq = _Seq()
 
@@ -721,7 +723,7 @@ async def responses_stream_generator(
             elif isinstance(ev, GenDone):
                 finish_reason = ev.finish_reason
                 usage_pt, usage_ct = ev.prompt_tokens, ev.completion_tokens
-                usage_cached = ev.cached_tokens if cache_report else 0
+                usage_cached = ev.cached_tokens
                 for f in close_current():
                     yield f
                 if finish_reason == "length":

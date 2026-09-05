@@ -38,6 +38,8 @@ class SchedulerStatusReporter:
         mamba_slots: tuple[int, int] | None = None,
         swa_tokens: tuple[int, int] | None = None,
         generated_tokens: int | None = None,
+        seatable_lanes: int | None = None,
+        chunked_inflight: int | None = None,
     ) -> None:
         if batch.is_prefill:
             self._report_prefill(
@@ -48,6 +50,8 @@ class SchedulerStatusReporter:
                 kv_total_pages=kv_total_pages,
                 mamba_slots=mamba_slots,
                 swa_tokens=swa_tokens,
+                seatable_lanes=seatable_lanes,
+                chunked_inflight=chunked_inflight,
             )
         elif batch.is_decode:
             self._report_decode(
@@ -72,6 +76,8 @@ class SchedulerStatusReporter:
         kv_total_pages: int,
         mamba_slots: tuple[int, int] | None = None,
         swa_tokens: tuple[int, int] | None = None,
+        seatable_lanes: int | None = None,
+        chunked_inflight: int | None = None,
     ) -> None:
         now = self.clock()
         gap = now - self._last_prefill_time
@@ -103,6 +109,7 @@ class SchedulerStatusReporter:
             f"{_mamba_msg(mamba_slots)}"
             f"#running-req: {running_reqs}, "
             f"#queue-req: {queue_reqs}, "
+            f"{_lane_msg(seatable_lanes, chunked_inflight)}"
             f"input throughput (token/s): {input_throughput:.2f} instant, "
             f"{average_throughput:.2f} average"
         )
@@ -144,6 +151,24 @@ class SchedulerStatusReporter:
             f"gen throughput (token/s): {gen_throughput:.2f}, "
             f"#queue-req: {queue_reqs}"
         )
+
+
+def _lane_msg(seatable_lanes: int | None, chunked_inflight: int | None) -> str:
+    """The interleave share's divisor and the chunked-prefill population, per pass.
+
+    Both were previously only inferable from the batch line (`#new-token` divided by the
+    budget, and `#cached-token > 0` as proof of a fresh admit). Printed only when the
+    scheduler passed them, so a caller that does not -- the low-level loop tests, and the
+    non-interleaved path -- keeps its line byte-identical.
+    """
+    if seatable_lanes is None and chunked_inflight is None:
+        return ""
+    parts = []
+    if seatable_lanes is not None:
+        parts.append(f"#seatable-lane: {seatable_lanes}")
+    if chunked_inflight is not None:
+        parts.append(f"#chunked-inflight: {chunked_inflight}")
+    return ", ".join(parts) + ", "
 
 
 def _usage_ratio(used: int, total: int) -> float:

@@ -37,6 +37,18 @@ class StatsTracker:
         self.swa_used_tokens = 0
         self.swa_total_tokens = 0
         self.vram_bytes = 0
+        # Cumulative aborts by reason. "Aborting request %d" is debug-only in the scheduler,
+        # so a soak log cannot count these -- and the three reasons are only distinguishable
+        # HERE, at the call site: the wire carries one untagged AbortMsg for all of them.
+        #   client_disconnect  the HTTP client went away mid-request (disconnect.py)
+        #   explicit           the server aborted it deliberately (prepare-stop drain)
+        #   error              the request ended on a terminal error reply from the engine
+        # `error` is counted in observe(), not on_abort(): a failed request is never aborted,
+        # it simply finishes with `error` set, and a soak otherwise cannot tell the two apart.
+        self.aborts = {"client_disconnect": 0, "explicit": 0, "error": 0}
+        # Last scheduler-counter snapshot (SchedulerCountersReply). None until the engine
+        # publishes one -- which it does not do offline or on a non-primary TP rank.
+        self.scheduler_counters: dict | None = None
 
     @property
     def active(self) -> int:
@@ -51,9 +63,17 @@ class StatsTracker:
         self._inflight.add(uid)
         self._aborting.discard(uid)
 
-    def on_abort(self, uid: int) -> None:
+    def on_abort(self, uid: int, reason: str = "client_disconnect") -> None:
+        # The reason is counted even for a uid that has already finished: the abort was
+        # still dispatched, and suppressing it would hide exactly the disconnect-during-
+        # teardown case. Only the terminal barrier below is membership-gated.
+        self.aborts[reason] = self.aborts.get(reason, 0) + 1
         if uid in self._inflight:
             self._aborting.add(uid)
+
+    def on_scheduler_counters(self, counters: dict) -> None:
+        """Absorb the scheduler's cumulative counters wholesale (last-known-value)."""
+        self.scheduler_counters = counters
 
     def observe(self, reply: Any, now: float | None = None) -> None:
         t = time.monotonic() if now is None else now
@@ -82,6 +102,12 @@ class StatsTracker:
                     self._aborting.discard(uid)
                 else:
                     self.completed += 1
+                    # Inside the not-aborting branch on purpose: an abort's own terminal
+                    # ack is an ErrorReplyMsg ("request aborted"), so counting errors
+                    # outside it would score every disconnect twice -- once as a
+                    # disconnect and again as an error.
+                    if getattr(reply, "error", None):
+                        self.aborts["error"] += 1
 
     def _rate(self, window: "deque[tuple[float, int]]", now: float | None) -> float:
         t = time.monotonic() if now is None else now
@@ -169,5 +195,12 @@ def build_stats(state: Any, p95_ms: int, ttft_mean_ms: int) -> dict:
             "ttft_mean_ms": ttft_mean_ms,
             "prompt_tokens_total": tr.prompt_tokens_total,
             "completion_tokens_total": tr.completion_tokens_total,
+            "aborts": dict(tr.aborts),
         },
+        # Cumulative scheduler decisions (chunked-prefill deferrals and cap hits, the
+        # interleave share's divisor, finishability-invariant violations, speculative-decode
+        # declines, session checkpoint traffic). None until the engine has published a
+        # snapshot -- distinct from an all-zero document, which means "published, idle".
+        # See freetoken.scheduler.counters.
+        "scheduler": tr.scheduler_counters,
     }

@@ -4,6 +4,7 @@ import re
 import time
 from types import SimpleNamespace
 
+from freetoken.scheduler.counters import SpillCounters
 from freetoken.scheduler.scheduler import Scheduler, SessionLease
 
 
@@ -177,6 +178,7 @@ class _SpillStore:
     """Minimal cold-tier double: records what the scheduler asks it to do."""
 
     def __init__(self) -> None:
+        self.counters = SpillCounters()
         self.records: dict[str, object] = {}
         self.discarded: list[object] = []
         self.touched: list[object] = []

@@ -8,6 +8,7 @@ import torch
 from freetoken.core import Batch, Req
 from freetoken.utils import align_down, div_ceil, init_logger
 
+from .counters import PrefillCounters
 from .utils import PendingReq
 
 if TYPE_CHECKING:
@@ -429,6 +430,10 @@ class PrefillManager:
     # Set well above the 2.4 mean lanes the passing tree seats, so in ordinary operation it
     # never binds -- if it starts binding, the reservation arithmetic is wrong.
     max_chunked_prefills: int = 8
+    # Cumulative record of what each pass decided, published on ``/v1/stats``. See
+    # :mod:`freetoken.scheduler.counters` -- every increment sits on a branch this
+    # scheduler already takes.
+    counters: PrefillCounters = field(default_factory=PrefillCounters)
 
     def _standing_reservation(self) -> int:
         """Unforwarded footprint of every prompt already mid-prefill.
@@ -496,7 +501,7 @@ class PrefillManager:
                 break
         return seatable
 
-    def _check_finishability(self, standing: int, mode: str = "raise") -> None:
+    def _check_finishability(self, standing: int, mode: str = "") -> None:
         """Debug assertion: is the set already admitted still finishable?
 
             owed = standing reservation of the in-flight prefills
@@ -519,7 +524,15 @@ class PrefillManager:
         """
         owed = standing + self.decode_manager.inflight_tokens
         budget = self.cache_manager.available_size
+        # Counted on EVERY pass, whatever the mode: the comparison is three attribute reads
+        # (the same ``available_size`` the adder built two lines later reads anyway), so
+        # there is nothing to save by gating it -- and a violation that only a soak with the
+        # env var set can see is a violation nobody sees. ``mode`` still decides whether it
+        # is also logged or raised.
+        self.counters.note_invariant(owed - budget)
         if owed <= budget:
+            return
+        if not mode:
             return
         chunked = sum(1 for r in self.pending_list if r.chunked_req is not None)
         msg = (
@@ -566,12 +579,12 @@ class PrefillManager:
 
         # estimated offset due to in-flight decode
         standing = self._standing_reservation()
-        if mode := _invariant_mode():
-            # Checked BEFORE this pass admits anything: the gate below makes the invariant
-            # true by construction for what it admits, so the only interesting question is
-            # whether it still holds for the set admitted in EARLIER passes, against a pool
-            # that has moved since.
-            self._check_finishability(standing, mode)
+        # Checked BEFORE this pass admits anything: the gate below makes the invariant
+        # true by construction for what it admits, so the only interesting question is
+        # whether it still holds for the set admitted in EARLIER passes, against a pool
+        # that has moved since. Always evaluated (and counted); FREETOKEN_SCHEDULER_INVARIANT
+        # only decides whether a violation is additionally logged (``warn``) or raised.
+        self._check_finishability(standing, _invariant_mode())
         adder = PrefillAdder(
             token_budget=prefill_budget,
             # Every claim on ``available_size`` that this pass did not create: the growth the
@@ -607,12 +620,14 @@ class PrefillManager:
             if self.interleave_chunks and len(self.pending_list) > 1
             else 0
         )
+        self.counters.note_pass(seatable=seatable, chunked_inflight=chunked_inflight)
         for index, pending_req in enumerate(self.pending_list):
             is_continuation = pending_req.chunked_req is not None
             if not is_continuation and chunked_inflight >= self.max_chunked_prefills:
                 # Belt and braces on top of the standing reservation; see the knob. Skipped
                 # rather than breaking, so the continuations behind it -- which are what
                 # brings the count back down -- still get their chunk this pass.
+                self.counters.fresh_admits_blocked_by_cap += 1
                 continue
             chunk_limit = None
             if seatable:
@@ -628,6 +643,8 @@ class PrefillManager:
                 if isinstance(req, ChunkedReq):
                     pending_req.chunked_req = req
                     chunked_list.append(pending_req)
+                    # This lane took a chunk and still owes a remainder: one deferral.
+                    self.counters.deferred_chunks += 1
                     if not was_chunked:
                         chunked_inflight += 1
                 elif was_chunked:
@@ -650,6 +667,10 @@ class PrefillManager:
                     stopped_for_lane_cap = index + 1 < len(self.pending_list)
                     break
             else:
+                # Refused for pool / table / budget, not for lanes: the queue tail behind it
+                # goes unserved this pass. Distinguished from the lane-cap stop above, which
+                # is a fair rotation rather than back-pressure.
+                self.counters.refusals += 1
                 break  # We cannot add more requests
         if len(reqs) == 0:
             return None

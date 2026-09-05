@@ -22,6 +22,7 @@ from freetoken.message import (
     ErrorReplyMsg,
     ExitMsg,
     PromptAdmittedMsg,
+    SchedulerCountersMsg,
     SessionClosedResultMsg,
     UserMsg,
 )
@@ -34,6 +35,7 @@ from freetoken.utils import (
 
 from .cache import CacheManager
 from .config import SchedulerConfig
+from .counters import build_scheduler_counters
 from .decode import DecodeManager
 from .io import SchedulerIOMixin
 from .prefill import ChunkedReq, PrefillManager
@@ -49,6 +51,10 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _ELASTIC_INTERMEDIATE_SHRINK_GRACE_SECONDS = 2.0
+# How often the cumulative scheduler counters may be pushed to the frontend. A
+# diagnostic that /v1/stats polls at human cadence; anything faster spends messages on
+# a document nobody reads between polls.
+_COUNTERS_PUBLISH_INTERVAL_S = 2.0
 
 Indice2D: TypeAlias = Tuple[torch.Tensor, torch.Tensor]
 
@@ -221,6 +227,10 @@ class Scheduler(SchedulerIOMixin):
         # tombstone so an abort-before-admission request can never be resurrected after its
         # terminal accounting acknowledgement has already been published.
         self._abort_tombstones: dict[int, None] = {}
+        # Last published scheduler-counter document and when: the publisher is both
+        # rate-limited and change-gated against these.
+        self._counters_published: dict | None = None
+        self._counters_published_at = 0.0
         self._forward_iter = (
             0  # global forward counter; drives the SWA proactive-eviction cadence
         )
@@ -604,6 +614,11 @@ class Scheduler(SchedulerIOMixin):
             or getattr(self, "_growable_shrink_pending", False)
             or self._sessions_need_service()
         )
+        if blocking:
+            # About to park: publish now (bypassing the rate limit) so a poll taken while
+            # the scheduler is idle sees the burst that just finished, not a 2 s-old
+            # snapshot that never gets refreshed because nothing is scheduling.
+            self._publish_scheduler_counters(force=True)
         messages = self.receive_msg(blocking=blocking)
         if not messages and not blocking and self._only_idle_sessions(last_data):
             time.sleep(0.01)
@@ -665,6 +680,7 @@ class Scheduler(SchedulerIOMixin):
         self.stream.wait_stream(self.engine.stream)
         self._process_last_data(last_data)
         self._flush_abort_acks()
+        self._publish_scheduler_counters()
         return ongoing_data
 
     def normal_loop(self) -> None:
@@ -678,6 +694,11 @@ class Scheduler(SchedulerIOMixin):
             or getattr(self, "_growable_shrink_pending", False)
             or self._sessions_need_service()
         )
+        if blocking:
+            # About to park: publish now (bypassing the rate limit) so a poll taken while
+            # the scheduler is idle sees the burst that just finished, not a 2 s-old
+            # snapshot that never gets refreshed because nothing is scheduling.
+            self._publish_scheduler_counters(force=True)
         messages = self.receive_msg(blocking=blocking)
         if not messages and not blocking and self._only_idle_sessions(None):
             time.sleep(0.01)
@@ -711,6 +732,7 @@ class Scheduler(SchedulerIOMixin):
 
         self._process_last_data(ongoing_data)
         self._flush_abort_acks()
+        self._publish_scheduler_counters()
 
     @torch.inference_mode()
     def run_forever(self) -> NoReturn:
@@ -898,6 +920,11 @@ class Scheduler(SchedulerIOMixin):
             page_size=self.config.page_size,
             mamba_slots=mamba_slots,
             swa_tokens=swa_tokens,
+            # What the pass decided, straight off the counters it just wrote: the interleave
+            # share's divisor and the chunked-prefill population. Both were previously only
+            # inferable from this line. Ignored for a decode batch.
+            seatable_lanes=self.prefill_manager.counters.seatable_lanes_last,
+            chunked_inflight=self.prefill_manager.counters.chunked_inflight,
         )
         self.send_result(reply)
 
@@ -1504,6 +1531,7 @@ class Scheduler(SchedulerIOMixin):
         )
         length = record.restorable_length(matched)
         if length <= 0:
+            store.counters.restores_diverged += 1
             self._discard_session_spill(session)
             logger.info_rank0(
                 "Discarded cold session %s: client tokens diverge at %d, before the "
@@ -1535,6 +1563,7 @@ class Scheduler(SchedulerIOMixin):
             started = time.perf_counter()
             session.handle = cm.restore_hybrid_session_prefix(record, store, length)
             elapsed = time.perf_counter() - started
+            store.counters.restores += 1
             self._discard_session_spill(session)
             logger.info_rank0(
                 "Restored cold session %s: %d/%d tokens from %s, %.2f GiB in %.3f s "
@@ -1552,6 +1581,7 @@ class Scheduler(SchedulerIOMixin):
             # Keep the checkpoint: the usual failure is a pool that the resident session
             # still owns, and the retry after its release (_reclaim_for_blocked_prefill)
             # is exactly what makes a queued 1M session restore instead of recompute.
+            store.counters.restores_failed += 1
             logger.warning(
                 "Cold restore for session %s failed (%r); will retry before admission",
                 session_id,
@@ -2282,6 +2312,33 @@ class Scheduler(SchedulerIOMixin):
                 for uid, prompt_tokens, cached_tokens in batch.prompt_admissions
             ]
         )
+
+    def _publish_scheduler_counters(self, force: bool = False) -> None:
+        """Push the cumulative scheduler counters to the frontend for ``/v1/stats``.
+
+        Rate-limited and change-gated: the counters are a diagnostic, not a stream, and the
+        scheduling loop runs thousands of times a second. Skipped entirely offline (the
+        offline reply handler only knows about generation messages) and on TP ranks other
+        than 0 (``send_result`` is a no-op there, but building the document is not).
+        """
+        # ``getattr``: the low-level loop tests drive these loops with a scheduler-shaped
+        # stub that has no config -- and no counters worth publishing either.
+        config = getattr(self, "config", None)
+        if config is None or config.offline_mode or not config.tp_info.is_primary():
+            return
+        now = time.monotonic()
+        if not force and now - self._counters_published_at < _COUNTERS_PUBLISH_INTERVAL_S:
+            return
+        self._counters_published_at = now
+        doc = build_scheduler_counters(
+            self.prefill_manager,
+            getattr(self, "_spec", None),
+            getattr(self, "_session_spill_store", None),
+        )
+        if doc == self._counters_published:
+            return  # nothing moved since the last snapshot; do not spend a message on it
+        self._counters_published = doc
+        self.send_result([SchedulerCountersMsg(counters=doc)])
 
     def _flush_abort_acks(self) -> None:
         pending = getattr(self, "_pending_abort_acks", None)

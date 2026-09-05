@@ -178,6 +178,11 @@ class SpecStats:
     declined_budget: int = 0
     declined_stale_match: int = 0
     declined_uneconomic: int = 0
+    # Accepted-token histogram, one entry per verify step, keyed by the accepted count as a
+    # string (the wire document is JSON). The mean alone hides the shape that decides whether
+    # speculation pays: lambda 3.6 from "half the steps accept 0 and half accept 7" is a
+    # different engine than lambda 3.6 from "every step accepts 3-4".
+    accepted_hist: dict = field(default_factory=dict)
 
     @property
     def accept_rate(self) -> float:
@@ -186,6 +191,36 @@ class SpecStats:
     @property
     def tokens_per_verify(self) -> float:
         return self.emitted_tokens / self.verify_steps if self.verify_steps else 0.0
+
+    @property
+    def declines(self) -> dict:
+        """Per-reason decline counts. A drafter that fires and then never runs is otherwise
+        indistinguishable from one that never fires."""
+        return {
+            "shape": self.declined_shape,
+            "no_slot": self.declined_no_slot,
+            "budget": self.declined_budget,
+            "stale_match": self.declined_stale_match,
+            "uneconomic": self.declined_uneconomic,
+        }
+
+    def note_accepted(self, accepted: int) -> None:
+        key = str(accepted)
+        self.accepted_hist[key] = self.accepted_hist.get(key, 0) + 1
+
+    def as_dict(self) -> dict:
+        """The ``/v1/stats["scheduler"]["spec"]`` block."""
+        return {
+            "verify_steps": self.verify_steps,
+            "plain_peeks": self.plain_peeks,
+            "drafted_tokens": self.drafted_tokens,
+            "accepted_tokens": self.accepted_tokens,
+            "emitted_tokens": self.emitted_tokens,
+            "accept_rate": round(self.accept_rate, 4),
+            "tokens_per_verify": round(self.tokens_per_verify, 4),
+            "declined": self.declines,
+            "accepted_hist": dict(self.accepted_hist),
+        }
 
 
 @dataclass
@@ -419,6 +454,7 @@ class SpecNgramDecoder:
         self.stats.drafted_tokens += len(draft)
         self.stats.accepted_tokens += accepted
         self.stats.emitted_tokens += len(emitted)
+        self.stats.note_accepted(accepted)
         self._report(req, reply, len(emitted))
         return True
 

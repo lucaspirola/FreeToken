@@ -25,6 +25,7 @@ from freetoken.message import (
     CacheRebuildMsg,
     CloseSessionMsg,
     CacheRebuildReply,
+    SchedulerCountersReply,
     SessionClosedReply,
     TokenizeMsg,
     UserReply,
@@ -300,6 +301,9 @@ class FrontendManager:
             if isinstance(msg, CacheRebuildReply):
                 self._resolve_rebuild(msg)
                 continue
+            if isinstance(msg, SchedulerCountersReply):
+                self.stats.on_scheduler_counters(msg.counters)
+                continue
             if isinstance(msg, SessionClosedReply):
                 fut = self.session_close_futures.pop(msg.request_id, None)
                 if fut is not None and not fut.done():
@@ -429,22 +433,31 @@ class FrontendManager:
             self.spawn_abort(uid, session_id=session_id)
             raise
 
-    def spawn_abort(self, uid: int, session_id: str | None = None) -> None:
+    def spawn_abort(
+        self, uid: int, session_id: str | None = None, reason: str = "client_disconnect"
+    ) -> None:
         """Fire-and-forget abort, holding a strong reference. The abort cannot be awaited
         here (this runs while a generator is being torn down), and a bare create_task is
         only weakly referenced by the loop — collecting it early would drop the very
         AbortMsg that frees the request."""
-        task = asyncio.create_task(self.abort_user(uid, session_id=session_id))
+        task = asyncio.create_task(
+            self.abort_user(uid, session_id=session_id, reason=reason)
+        )
         self.abort_tasks.add(task)
         task.add_done_callback(self.abort_tasks.discard)
 
-    async def abort_user(self, uid: int, session_id: str | None = None):
+    async def abort_user(
+        self, uid: int, session_id: str | None = None, reason: str = "client_disconnect"
+    ):
+        """``reason`` is for /v1/stats only -- the wire carries one untagged AbortMsg. It
+        defaults to the disconnect case because every caller but the prepare-stop drain is
+        an ``asyncio.CancelledError`` handler."""
         await asyncio.sleep(0.1)
         if uid in self.ack_map:
             del self.ack_map[uid]
         if uid in self.event_map:
             del self.event_map[uid]
-        self.stats.on_abort(uid)
+        self.stats.on_abort(uid, reason)
         logger.warning("Aborting request for user %s", uid)
         await self.send_one(AbortMsg(uid=uid, session_id=session_id))
 

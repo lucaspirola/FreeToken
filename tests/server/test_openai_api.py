@@ -641,12 +641,23 @@ def test_non_stream_chat_usage_reports_cached_tokens_only_with_flag():
     assert "prompt_tokens_details" not in response["usage"]
 
 
-def test_non_stream_chat_usage_omits_details_on_zero_hit():
-    state = FakeState(
-        [UserReply(uid=42, incremental_output="hi", finished=True, prompt_tokens_delta=5, completion_tokens_delta=1)]
-    )
+def test_non_stream_chat_usage_reports_an_explicit_zero_hit_with_the_flag_on():
+    """A genuine miss must not serialize like a disabled report.
+
+    The details object's PRESENCE is the signal that this server reports cache hits, so
+    with the flag on a 0-token hit is spelled out. `docs/oracle.md` reads the wire this
+    way: no `prompt_tokens_details` at all == the flag is off.
+    """
+    replies = [
+        UserReply(uid=42, incremental_output="hi", finished=True, prompt_tokens_delta=5, completion_tokens_delta=1)
+    ]
+    state = FakeState(list(replies))
     state.config.enable_cache_report = True
     response = run(handle_chat_completion(chat_request(tools=None), request=None, state=state, model_sampling={}))
+    assert response["usage"]["prompt_tokens_details"] == {"cached_tokens": 0}
+
+    # Flag off: the field is gone entirely, which is the only thing that means "off".
+    response = run(handle_chat_completion(chat_request(tools=None), request=None, state=FakeState(list(replies)), model_sampling={}))
     assert "prompt_tokens_details" not in response["usage"]
 
 

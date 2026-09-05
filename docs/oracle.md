@@ -228,10 +228,24 @@ in it.
 
 **This check only works if the FreeToken server was started with `--enable-cache-report`**
 (the Phase-A line above now has it; it did not on 2026-09-05, and the whole 524K recording
-came back reading `cached_tokens: 0`). Without the flag `openai_api.py` returns 0 and then
-omits `prompt_tokens_details` entirely, so *flag off*, *genuine zero* and *field absent* look
-identical on the wire. Corroborate before condemning a run: turn 2+ TTFT (2.5 s on a 524K
-prompt = cached, 200 s+ = re-prefill) and the server log's own
+came back reading `cached_tokens: 0`).
+
+That ambiguity is now closed on the wire: `prompt_tokens_details` is present **whenever
+reporting is on**, carrying an explicit `cached_tokens: 0` for a genuine miss, and is
+**absent entirely** when the flag is off. So on a FreeToken response:
+
+| wire | means |
+|---|---|
+| no `prompt_tokens_details` | the server was started without `--enable-cache-report` |
+| `prompt_tokens_details.cached_tokens: 0` | reporting is on and this prompt genuinely missed |
+| `prompt_tokens_details.cached_tokens: N` | N tokens served from the prefix cache |
+
+(`/v1/messages` follows the same rule with `usage.cache_read_input_tokens`. `/v1/responses`
+cannot express "not reported" — `usage.input_tokens_details` is mandatory in the Responses
+schema — so it always reports the true hit and the flag does not gate it.)
+
+Corroborate before condemning a run anyway: turn 2+ TTFT (2.5 s on a 524K prompt = cached,
+200 s+ = re-prefill) and the server log's own
 `Prefill batch, ... #new-token: 55, #cached-token: 524287`. llama.cpp always reports it.
 
 ## Logprobs: the current gap

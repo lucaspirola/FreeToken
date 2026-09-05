@@ -38,7 +38,7 @@ The serving-compliance half of that line:
 | `--served-model-name nemotron-3.5-lightning` | The id `GET /v1/models` advertises; `[targets.*].id` in `routes.toml` must match. |
 | `--reasoning-parser nemotron_v3` | Splits `<think>…</think>` into `reasoning_content` and escapes to a tool call when the model opens `<tool_call>` without closing the think block. (`auto` also selects it for Nemotron-3.x.) |
 | `--tool-call-parser qwen3_coder` | Lightning emits Qwen3-Coder nested-XML tool calls. |
-| `--enable-cache-report` | Populates `usage.prompt_tokens_details.cached_tokens`. Without it the router sees no prefix reuse and the soak's `prefix-reuse` scenario cannot be graded. |
+| `--enable-cache-report` | Populates `usage.prompt_tokens_details.cached_tokens` (always present with the flag on, absent without it). Without it the router sees no prefix reuse and the soak's `prefix-reuse` scenario cannot be graded. |
 | `--force-nonempty-content` | A thinking turn that produces only reasoning answers with the reasoning text instead of an empty `content`. Switchyard treats empty content as a failed turn. |
 | `--max-output-tokens 16384` | Ceiling for a request that sends no `max_completion_tokens`. |
 | `--kv-cache-dtype q8_0` | FP8 KV (FreeToken block scales; the checkpoint's `k_scale`/`v_scale` are ignored). Requires `--attention-backend triton`. |
@@ -489,7 +489,7 @@ Claude Code points `ANTHROPIC_BASE_URL` at the router (`switchyard-server` serve
 
 | Symptom | Cause |
 |---|---|
-| `cached_tokens` always 0 | `--enable-cache-report` missing. |
+| `prompt_tokens_details` missing from `usage` | `--enable-cache-report` missing. With the flag on the field is always present, so `cached_tokens: 0` means a real miss, not a disabled report. |
 | Router `WARN … reuses model id … the other is dropped` | Two targets share `id` on one `llm_client`; give the efficient tier its own id. |
 | `could not read api_key_env X: environment variable not found` | `api_key_env` names an unset variable — export it or drop the key. |
 | Soak fails immediately with an unknown model | `--model` must be a **route** `id`, not a target id or FreeToken's model name. |
