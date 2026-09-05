@@ -322,6 +322,27 @@ Command: `ft serve --model ~/ai/models/Ornith-1.5-35B-Q4_K_M.gguf
       (2) MoE prefill is now the flat term at 33 TFLOP/s and `b12x` was not measurable at
       M=8192; (3) sweep the extend tile on an sm_89/sm_90 part (`128/64/8/1` still spills 148
       slots) before extending the cap above 4 warps.
+- [x] Q5.1 (follow-up 1 above): native-Q8 extend attention — **measured 2026-09-05, CLOSED
+      NEGATIVE, kernel unchanged**
+      (`benchmarks/results/nemotron35_lightning_5080_prefill_q8_2026-09-05.md`).
+      The ticket's premise fails on three independent measurements: (a) **225 TFLOP/s is the
+      spec sheet, not the part** — cuBLAS does 123.0 TFLOP/s bf16 and Triton's own `tl.dot`
+      118.4, so the extend kernel is at **57-60 % of achievable**, not 31 %; (b) **int8 is not
+      faster than bf16 here** — `torch._int_mm` 128.0 TOP/s = 1.04x bf16, so a native int8 dot
+      cannot speed up the QK; (c) **the whole q8_0 dequant is worth 1.206x** — the same kernel,
+      same launch, over a bf16 KV pool, flat to ±0.4 % at 131K/262K/524K/1M. Desk result: the
+      q8_0 scale is per 32 `head_dim` elements, so folding it after the dot costs
+      `BLOCK_M*BLOCK_N*D/QBLOCK` multiplies vs `BLOCK_D*BLOCK_N` to dequantize in place —
+      cheaper only when **`BLOCK_M < QBLOCK`** (decode's `_Q8_NATIVE_QK` has `BLOCK_M=16`
+      heads and pays; extend's 64-token tile does not), and the V scale sits on the PV
+      *reduction* axis where no fold exists at all. `num_stages>1` re-swept with the masks
+      removed (the pipeliner's precondition): still loses at all 18 tiles. Best combination
+      found (`split`+`exp2`+`bf16deq`+`qfold`, §5 of the write-up) is 1.14x and **fails the
+      accuracy gate** — 7.6e-4 vs the fp32 oracle against the tree's 3.7e-4, because q8_0's
+      fp16 scale does not fit bf16's 7 mantissa bits. Accuracy-neutral subset is 1.05x. A
+      *perfect* native-Q8 kernel would put 1M TTFT at 680 s, not the ticketed 470-530 s.
+      **Next prefill work is follow-up (2), the MoE: 33 TFLOP/s of the same measured 123 =
+      3.7x off, against attention's 1.7x.**
 - [x] Q1: standing cross-engine oracle — tool landed in `5f7c0d6`, **first live sweep run
       2026-09-05 at 262K** (`benchmarks/results/nemotron35_lightning_5080_oracle_2026-09-05.md`):
       FreeToken 19/24 vs llama.cpp 17/24, 2 `freetoken-only-miss` (both composition, not

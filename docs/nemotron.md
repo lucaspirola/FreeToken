@@ -207,8 +207,22 @@ is confined to attention, and the non-attention position-dependent term solves t
 `O(prefix)` page-index build are not measurable. The Mamba-2 SSD scan is flat in position by
 construction (1.068 ms/layer/8K chunk, 0.2 % of a 1M prefill); the flat term is **79 % MoE
 expert GEMMs** (23 layers x 29.5 ms at M=8192), which is now what a short-prompt prefill
-costs. Attention is still 91 % of the last chunk at 1M and the kernel is at 31 % of the
-card's bf16 peak — see §9 of the write-up for the remaining tickets.
+costs. Attention is still 91 % of the last chunk at 1M.
+
+The follow-up ticket — *"the extend kernel is at 31 % of peak, dequantizes q8_0 in the inner
+loop, and a native-Q8 QK is worth another 1.5–2x"* — was measured on 2026-09-05 and **closed
+negative** (`benchmarks/results/nemotron35_lightning_5080_prefill_q8_2026-09-05.md`). The
+5080 does **123.0 TFLOP/s** bf16 through cuBLAS and 118.4 through Triton's own `tl.dot`, not
+the 225 of the spec sheet, so the extend kernel is at **57–60 % of the achievable rate**, not
+31 %; its int8 GEMM rate is **128.0 TOP/s = 1.04x bf16**, so a native int8 dot cannot make the
+QK cheaper. Removing the q8_0 dequant *entirely* — the same kernel over a bf16 KV pool — is
+worth **1.206x, flat at 131K/262K/524K/1M**, and that is the hard ceiling. A native-Q8 QK
+cannot reach it: q8_0's scale is per 32 elements of `head_dim`, so folding it after the dot
+costs `BLOCK_M * BLOCK_N * D/QBLOCK` multiplies against `BLOCK_D * BLOCK_N` for dequantizing in
+place — cheaper only when `BLOCK_M < QBLOCK`, which is why decode's `_Q8_NATIVE_QK`
+(`BLOCK_M = 16` heads) pays and extend's 64-token tile does not; and the V scale sits on the
+PV *reduction* axis, where no fold exists. The kernel is unchanged. The next prefill target is
+the MoE (33 TFLOP/s of the same 123, i.e. 3.7x off, against attention's 1.7x).
 
 To reproduce the old behaviour for an A/B, start the server with
 `FREETOKEN_EXTEND_BLOCK_M=128 FREETOKEN_EXTEND_BLOCK_N=64 FREETOKEN_EXTEND_NUM_WARPS=4

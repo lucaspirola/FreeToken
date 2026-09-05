@@ -660,3 +660,48 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   server-side counter, so it was verified by dropping a raw socket mid-prefill and watching
   `/v1/stats.requests.active` go 1 -> 0 in 7 s, plus "0 client failures on 2,070 requests" as
   the no-spurious-aborts half. Two cheap observations beat one missing metric.
+
+## 2026-09-05 (native-Q8 extend attention — a ticket closed negative in 35 GPU minutes)
+- **Measure the denominator before filing a "% of peak" ticket.** The prefill profile filed
+  "the extend kernel is at 31 % of peak (70.4 of ~225 TFLOP/s)" off the RTX 5080's spec sheet.
+  The part actually does **123.0 TFLOP/s** bf16 through cuBLAS and **118.4** through Triton's
+  own `tl.dot` — the kernel was at 57-60 % of achievable, and the bf16-KV variant at 72 %,
+  which is where a good flash kernel sits. One 30-line `torch.matmul` benchmark would have
+  stopped a projected "1.5-2x" from being written down. Vendor tensor-TFLOPS figures are
+  fp8/fp4 and/or sparse; never use one as a kernel's denominator.
+- **Never assume int8 tensor cores are 2x bf16.** `torch._int_mm` on sm_120 (consumer
+  Blackwell): 128.0 TOP/s against 123.0 TFLOP/s bf16 = **1.04x**. The 2:1 int8:bf16 ratio is a
+  datacenter-part property. A "native int8 dot" plan whose payoff is the dot is dead on
+  consumer silicon before any code is written.
+- **The cheapest upper bound on a dequant optimisation is the same kernel over an
+  unquantized pool.** q8_0 vs bf16 KV, same launch, same shapes: **1.206x, flat at
+  131K/262K/524K/1M**. That bounds *every* possible native-Q8/dequant rewrite, perfect ones
+  included, in two microbenchmark runs and with no new kernel. Do this before designing one.
+- **Fold a per-block quant scale after the dot only when the tile's row count is below the
+  quant block size.** Dequantizing K in place costs `BLOCK_D*BLOCK_N` multiplies per KV tile;
+  folding the scale onto `D/QBLOCK` int32 partials costs `BLOCK_M*BLOCK_N*BLOCK_D/QBLOCK`.
+  Folding wins iff `BLOCK_M < QBLOCK`. That is exactly why `_Q8_NATIVE_QK` pays in decode
+  (`BLOCK_M` = 16 query heads) and loses in extend (64 tokens) — the *absence* of the fast path
+  in the second kernel was arithmetic, not an oversight. Always check the direction of the
+  inequality before porting an optimisation between two kernels.
+- **A scale on the reduction axis cannot be folded at all.** q8_0's V scale varies along `n`,
+  which is PV's reduction dimension, so half of any "native Q8 attention" is unreachable by
+  construction. Write the index expression out before estimating a gain.
+- **`num_stages>1` never helping is not proof the kernel is ALU-bound** — loop-variant masks on
+  the loads inhibit Triton's pipeliner. Re-sweep stages *after* removing the masks; here it
+  still lost at all 18 tiles, which is what makes "not latency-bound" an observation instead of
+  an assumption.
+- **Grade a micro-optimisation against the fp32 oracle, not against the old kernel.** The 1.14x
+  combination looked fine at 1.8e-4 from the production output and was **2.0x worse than
+  production against the oracle** (7.6e-4 vs 3.7e-4). The culprit: dequantizing into bf16
+  multiplies by a scale that is stored fp16 (10 mantissa bits) in a format with 7, so every
+  32-element block picks up a systematic relative error. Agreement with the thing you are
+  replacing is not accuracy.
+- **A negative result is a deliverable, and it is cheap if you sequence it right.** Peak +
+  bf16-KV control + variant sweep + oracle = ~35 GPU minutes and no model load; the planned
+  end-to-end A/B (two servers, a 1M prefill, a needle) was ~2 GPU hours and had nothing left to
+  measure once the kernel was not going to change. Ask "what would the e2e run answer that the
+  microbench has not?" before booking the lock.
+- `ncu` needs admin-enabled performance counters (`ERR_NVGPUCTRPERM`) and there is no root on
+  this host. Do not plan a profile-counter step here; a wall-clock A/B against a variant that
+  removes the suspected term answers the same question and is not permission-gated.
