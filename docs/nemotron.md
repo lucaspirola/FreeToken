@@ -229,6 +229,47 @@ To reproduce the old behaviour for an A/B, start the server with
 FREETOKEN_EXTEND_NUM_STAGES=1`. Both the decode and the extend launch are logged once at
 startup (`Triton decode launch: ...`, `Triton extend launch: ...`).
 
+### Speculative decoding — NO-GO 2026-09-05, and why
+
+Prompt-lookup (n-gram) speculative decoding was measured and refused, like Phase 4's MTP but
+for a different reason
+(`benchmarks/results/nemotron35_lightning_5080_ngram_spec_2026-09-05.md`).
+
+**Acceptance is not the problem.** Under greedy decoding a prompt-lookup drafter is verified
+against exactly the greedy continuation, so its acceptance is computable offline from ordinary
+transcripts. On a copy-heavy agent tool-output prompt (a file pasted in, "output the complete
+updated file") an **8-gram** drafter reaches **λ = 3.6 accepted tokens per step at 93–97 %
+per-token acceptance**, while code and prose stay within ±0.5 % of neutral because the drafter
+almost never fires on them. The standard n = 3 setting is *wrong here*: it fires on 12 % of code
+steps and is right 23 % of the time, costing 12–14 %. **When verification is expensive, draft for
+precision, not recall.**
+
+**Mamba-2 state rollback is not the problem either.** The verify forward points
+`fla.cache_indices` at the request's already-reserved ping-pong scratch slot, so the live state is
+never advanced speculatively and there is nothing to roll back; each mixer caches its scan inputs
+(`x`, `dt`, `B`, `C`, `conv_in` ≈ 24.7 KiB per layer per token, **~5 MiB at k = 8**) and a commit
+pass runs one varlen SSD scan over the accepted j positions (~0.2–0.5 ms). No 47 MiB state copy.
+
+**The blocker is that there is no cheap multi-token forward.** The only path that carries k > 1
+query tokens for a running request is the prefill/extend path, and that path costs **290 ms of
+host time per forward, flat from 1 to 32 tokens**, against 33.9 ms for a 1-token forward on the
+decode path. Per-mixer attribution puts **267 ms of it in the 23 MoE layers — 11.6 ms per MoE
+layer per forward, independent of token count**: the prefill MoE path plans and issues its expert
+gather per layer per forward and does not reuse the decode expert cache. That is 36–42× a 6.9–8.0 ms
+graphed decode step, so break-even would need λ ≈ 40 against a ceiling of k + 1 ≤ 17.
+
+It is invisible in normal serving because an 8 192-token chunk does ~861 ms of GPU work and the
+host runs ahead of it. It also means **prefill chunks below ~3K tokens go host-bound**, which is a
+second reason not to lower `--max-prefill-length`.
+
+Order of work if this is revisited: (1) make the extend path reuse the decode expert cache;
+(2) capture a fixed-width verify forward; (3) only then build `--speculative ngram` (default
+`--spec-ngram-n 8`, `--spec-draft-len 8`, greedy only). With (1) alone the copy class projects
+**1.52×**; with (2) as well, **1.74×** — both clear of the 1.25× bar MTP failed. This also
+corrects the Phase 4 write-up: its 1.63× verify cost came from a bs=2 *decode* step, but a real
+verify step takes the *extend* path, so MTP's projection was ~25× optimistic about its own verify
+step.
+
 ### 1M single-session profile
 
 Many long-lived agent sessions, each up to 1M tokens, few decoding at any instant.

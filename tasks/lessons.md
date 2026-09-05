@@ -705,3 +705,51 @@ check for `Discarded cold session ...: client token prefix changed` before blami
 - `ncu` needs admin-enabled performance counters (`ERR_NVGPUCTRPERM`) and there is no root on
   this host. Do not plan a profile-counter step here; a wall-clock A/B against a variant that
   removes the suspected term answers the same question and is not permission-gated.
+
+## 2026-09-05 (prompt-lookup speculative decoding — NO-GO in ~40 GPU minutes)
+- **Under greedy decoding, a drafter's acceptance rate is computable offline from an ordinary
+  transcript.** Speculative decoding is verified against exactly the greedy continuation, so
+  λ(n, k) is a deterministic function of a plain generation — no verify step, no engine change,
+  no second GPU run. One 3-prompt generation plus a CPU replay answered half the go/no-go.
+  Ask "is this quantity a function of something I can already record?" before building the thing.
+- **Record token *ids*, not text.** The offline `LLM` returns `token_ids`; the HTTP API has no
+  logprobs, so an API-based transcript would have forced a retokenization approximation into the
+  one number the decision rests on.
+- **When verification is expensive, draft for precision, not recall.** The published
+  prompt-lookup setting (n=3, maximize hit rate) assumes a nearly-free verify step. Here n=3
+  fires on 12% of code steps and is right 23% of the time, costing 12–14%; **n=8** drops the
+  code/prose draft rate 30x, keeps 93% of the copy-class λ, and turns a 12% regression into
+  0.0%. A hyperparameter default imported from a paper carries the paper's cost model with it.
+- **A monkeypatched Python hook records nothing on a CUDA-graph path.** The router probe on
+  `NemotronHMoE.forward` captured zero decode tokens: graph replay never enters Python. Routing
+  is a pure function of the residual stream, so re-prefilling the transcript recorded the same
+  thing. Check whether the path you are hooking is captured before believing an empty result.
+- **CUDA events measured 304 ms for a forward inside a 279 ms call.** A subinterval cannot
+  exceed its container — that contradiction, not any profiler, is what proved the events were
+  straddling host idle rather than timing kernels. Sanity-check a timing against a wall clock
+  that must bound it.
+- **`perf_counter` inside `model.forward` split the answer in one run.** Host 303.6 ms vs
+  GPU-event 310.6 ms for the same 1-token extend: the stream is *waiting on the host*, so it is
+  a CPU-side fixed cost, not bandwidth. Then per-mixer `perf_counter` put 267 of 290 ms in the
+  23 MoE layers — 11.6 ms per MoE layer per forward, **flat from 1 to 32 tokens**. Two hooks,
+  no `ncu` (which is permission-gated on this host anyway).
+- **Flat in the variable you are sweeping is the whole finding.** Once the extend forward cost
+  the same at m=1 and m=32, it was a fixed per-forward cost, and no acceptance rate could pay
+  it. Sweep the width first; the shape of the curve decides faster than any single point.
+- **A cost proxy must be measured on the path the feature would take.** Phase 4 (MTP) priced its
+  verify step with a bs=2 *decode* step: 1.63x. A real verify step takes the *extend* path:
+  42x. Same model, same host, 25x apart — because the decode path reuses the expert cache and
+  the extend path re-gathers per layer per forward. Before trusting a proxy, name the code path
+  it exercises and check it is the one the feature will run on.
+- **A fixed cost hidden by latency-hiding reappears the moment the batch shrinks.** 290 ms of
+  host work per prefill forward is invisible behind an 8 192-token chunk's ~861 ms of GPU work
+  and is the *entire* cost of a 9-token verify step. The same measurement says prefill chunks
+  below ~3K tokens go host-bound — a second result the feature investigation was not looking for.
+- **The part flagged as hard was the easy part.** Mamba-2 state rollback was the item's stated
+  risk; the answer is to never advance the live state at all (verify into the already-reserved
+  ping-pong slot, cache ~5 MiB of scan inputs, commit with one varlen SSD scan over the accepted
+  j for ~0.3 ms). Write the design down even when the verdict is NO-GO: it is what makes the
+  follow-up ticket executable instead of a re-investigation.
+- **Do not pipe `scripts/gpu_lock.sh`, and read the exit code with that in mind.** Every run here
+  ended `Killed` / 137 from its own cleanup trap *after* writing complete output. Grep the
+  redirected file; do not conclude the job died.

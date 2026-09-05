@@ -366,7 +366,21 @@ Command: `ft serve --model ~/ai/models/Ornith-1.5-35B-Q4_K_M.gguf
       and 524K rungs, and the llama.cpp 1M leg.
 
 ## Backlog
-- [ ] Prompt-lookup (n-gram) speculative decoding for agent-session decode
+- [x] Prompt-lookup (n-gram) speculative decoding for agent-session decode — **NO-GO 2026-09-05**
+      (`benchmarks/results/nemotron35_lightning_5080_ngram_spec_2026-09-05.md`). Acceptance is
+      fine (n=8 drafter: copy-heavy agent tool output λ=3.615 at 92.6% per-token accept; code and
+      prose within ±0.5% of neutral because it almost never fires), and Mamba-2 rollback is cheap
+      (never advance the live state — verify into the ping-pong scratch slot, cache ~5 MiB of scan
+      inputs, commit with one varlen SSD scan over the accepted j: ~0.3 ms). The blocker is that
+      **the extend path costs 290 ms host per forward, flat 1→32 tokens, of which 267 ms is the
+      23 MoE layers** (11.6 ms/layer/forward regardless of token count) against 33.9 ms for a
+      1-token decode forward — 36–42x a graphed decode step, so break-even needs λ≈40 vs a ceiling
+      of k+1≤17.
+- [ ] **Extend-path MoE: reuse the decode expert cache** (blocker above; worth more than spec
+      decoding — it also means prefill chunks below ~3K tokens go host-bound). Repro:
+      `benchmarks/probe_ngram_spec.py --layer-profile`. Then: a graph-captured fixed-width verify
+      forward, then `--speculative ngram` (n=8, k=8, greedy). With the cache fix alone the
+      copy class projects 1.52x; with the captured forward, 1.74x.
 - [ ] Replay real Switchyard traces as the benchmark instead of synthetic soaks/needles
 - [ ] NOTE 2026-09-04: fork/main has 14 Ada/Ornith commits (cefa4bd..62f5a66) not in local main;
       local main pushed as fork/nemotron35 (58e5f04). Merge/rebase decision pending (user).
