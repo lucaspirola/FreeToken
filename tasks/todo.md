@@ -4,7 +4,8 @@ Handover: `tasks/nemotron35-handover.md`. Plan: `tasks/nemotron35-plan.md`. Rule
 `tasks/lessons.md`. Results files below are in `benchmarks/results/` unless stated;
 `N35 =nemotron35_lightning_5080_`.
 
-HEAD `14c1bd8`, tree clean. `fork/nemotron35` == HEAD (pushed); `fork/main` is 77 behind, 0 ahead.
+HEAD `d960467`; the four 2026-09-05 tickets below are **uncommitted in the working tree**.
+`fork/nemotron35` == HEAD (pushed); `fork/main` (`62f5a66`) is 82 behind, 0 ahead.
 
 ---
 
@@ -15,33 +16,32 @@ HEAD `14c1bd8`, tree clean. `fork/nemotron35` == HEAD (pushed); `fork/main` is 7
       extend forward): 46 eager kernel launches in the commit, `_prepare_batch` rebuilding pinned
       staging for a one-request batch. 7x → 4x a decode step moves the copy class 1.03x → ~1.12x.
       Same ticket list: burst-entry hysteresis costs ~4x in draft rate (0.079 measured vs 0.353
-      offline) — decidable in one run at latch 0/2/4; `--spec-draft-len` 4/8/16/24 on the 131K
-      needle; the soak tail (p95 +22 %, p99 +131 % on one 10-minute pair — re-run at 20 min);
-      batched (bs>1) verify; a graph-captured fixed-width verify forward; non-greedy speculation
-      needs `Sampler.prepare` to repeat-interleave parameter rows by k; the drafter indexes the
-      whole prompt on first engagement (~0.1–0.2 s at 131K).
-      Evidence: `N35ngram_spec_impl_2026-09-05.md` §6.
-- [ ] **`graph.py::_determine_cuda_graph_bs` padding defect on the NON-elastic path.**
-      `[1,2,4] + range(8, max_bs+1, 8)` pads 3→4, 5-8→8, 9-16→16; the 12→16 case measured
-      **−6.7 %** on this checkpoint (a padded row routes its own experts). Blast radius is every
-      model and profile, so measure one dense model first — the experiment is already written as
-      `benchmarks/decode16/phaseE.sh` (two servers, `--cuda-graph-max-bs 8` vs `16`, c=12).
-      Evidence: `N35decode16_2026-09-05.md` §7.1. Expected: ~1.07x at partial lane counts.
-- [ ] **MoE A-operand vectorization.** `a_ptrs_lo`/`a_ptrs_hi` read the same span at a 2-element
-      stride so neither activation load vectorizes; a one-off deinterleave of `A` per GEMM is
-      ~0.5 ms of HBM. Most likely remaining Triton-side win against b12x's residual 1.34x (the
-      no-scale ablation is *slower* than the shipped kernel, so the gap is the operand path, not
-      the dequant; adopting b12x's swizzled bank layout is a load-time global decision that costs
-      decode 1.6–1.9x and is therefore rejected).
-      Evidence: `N35moe_prefill_gemm_2026-09-05.md` §10(a)(b).
-- [ ] **Extend-cache threshold vs the scheduler's 512-token chunks.** One run decides it:
-      per-chunk time and the following decode's miss rate at `--moe-extend-cache-tokens`
-      64 / 512 / 2048 on a 131K prompt. Related from the same write-up: `--moe-collect-stats` and
-      the pageable-layer profile now also count sub-threshold extend routings;
-      `_ensure_experts_sized_kernel` evicts serially in a `(1,)` grid (first suspect if M=32 lands
-      above prediction). And the M=256 GEMM bucket runs at 20 % of ceiling with +53 % padding
-      waste at `BLOCK_M=16`.
-      Evidence: `N35extend_moe_2026-09-05.md`; `N35moe_prefill_gemm_2026-09-05.md` §10(e).
+      offline) — decidable in one run at latch 0/2/4; the soak tail (p95 +22 %, p99 +131 % on one
+      10-minute pair — re-run at 20 min); batched (bs>1) verify; a graph-captured fixed-width
+      verify forward; non-greedy speculation needs `Sampler.prepare` to repeat-interleave
+      parameter rows by k; the drafter indexes the whole prompt on first engagement (~0.1–0.2 s at
+      131K). **The 131K regression is this same ticket**: at the shipped k=8 the needle case
+      measures **0.898x** of spec-off (k=16 0.870x), and the gate cannot refund its own two probe
+      steps (163 ms at k=8, 279 ms at k=16, against a 10.4 ms decode step) — a cheaper long-context
+      verify step is the only fix, not a draft-length or threshold setting.
+      Evidence: `N35ngram_spec_impl_2026-09-05.md` §6; `N35misc_tickets_2026-09-05.md` §4.
+- [ ] **Fold gemm2's deinterleave prepass into gemm1's store.** gemm2's A *is* gemm1's output, so
+      its 182 MB prepass is removable by having gemm1's store emit the two k-planes directly —
+      **~0.3 ms of the 0.551 ms** the prepass costs at M=8192.
+      Evidence: `N35misc_tickets_2026-09-05.md` §2.
+- [ ] **The extend-cache guard is conservative under LFU, and its JIT is a production hazard.**
+      Two leftovers from the threshold study: (a) `use_cached_extend` excludes
+      `_size_class_enabled` but not `cache_policy_id == 1`, and LFU takes the **in-repo** sized
+      kernel (`offload_kernels.py:50`), which has no `BLOCK_K` width limit — so the new
+      1,024-routed-id refusal costs the LFU profile widths it could actually serve (it costs
+      nothing today, because the stream wins above the crossover anyway). (b) The m=128 cell cost
+      **22 minutes of one-off Triton JIT** at `BLOCK_K = 1024`; if the threshold is ever raised,
+      that compile has to happen at warmup, never on a live request.
+      Evidence: `N35misc_tickets_2026-09-05.md` §3.
+- [ ] **The M=256 GEMM bucket** runs at 20 % of ceiling with +53 % padding waste at `BLOCK_M=16`;
+      `_ensure_experts_sized_kernel` evicts serially in a `(1,)` grid. `--moe-collect-stats` and
+      the pageable-layer profile now also count sub-threshold extend routings.
+      Evidence: `N35moe_prefill_gemm_2026-09-05.md` §10(e); `N35extend_moe_2026-09-05.md`.
 - [ ] **16-way decode is at the hardware ceiling — do not re-litigate.** 74 % of the step is the
       PCIe expert gather at 51–52 GB/s against a measured 52.9 GB/s link; working set ~1,417
       expert-layer slots against 976 in the pool. Attention (64 splits, 80 % roofline), the MoE
@@ -214,6 +214,42 @@ HEAD `14c1bd8`, tree clean. `fork/nemotron35` == HEAD (pushed); `fork/main` is 7
       / 0.89x at 131K; commit self-check bit-exact; 16-way soak PASS both arms. The earlier NO-GO
       (`193da80`, `N35ngram_spec_2026-09-05.md`) was correct at the time and was unblocked by the
       extend-MoE fix.
+- [x] **Non-elastic CUDA-graph ladder, dense to 16** — `_determine_cuda_graph_bs` built
+      `[1,2,4] + range(8, max_bs+1, 8)`, so a 12-lane batch replayed the bs-16 graph with four
+      dummy rows that route their own top-6 experts. It now unions `range(1, min(max_bs,16)+1)`
+      **for offload-MoE models only** (`GraphRunner` passes `offload_moe=moe_offload_cache is not
+      None`); dense models keep the historical list byte-for-byte, pinned by a test. Three
+      alternating repeats per arm out of one binary at 12 lanes: **140.43 → 150.90 tok/s
+      (1.074x)**, perfect separation, event-gap p50 83.0–87.0 → 77.2–79.3 ms; 11 extra graphs,
+      ~80 MiB, ~0.8 s of startup. Hatch `FREETOKEN_GRAPH_DENSE_BS=0|1`; 8 new tests in
+      `tests/engine/test_elastic_graph_sizes.py`. `N35misc_tickets_2026-09-05.md` §1.
+- [x] **NVFP4 MoE prefill A-operand deinterleave — shipped ON by default.** Both `a_ptrs_lo/hi`
+      were stride-2 on the contiguous axis; a `DEINTERLEAVED_A` constexpr arm plus a host prepass
+      (`a.view(M, K//2, 2).permute(0,2,1)`) makes them unit-stride at an unchanged reduction order.
+      **16.960 → 13.961 ms at M=8192 (1.215x), bit-exact (0.000e+00) at every M**, 70.3 TFLOP/s =
+      59 % of `tl.dot`; residual gap to b12x **1.34x → 1.10x**. End to end at 131K:
+      **6,124.7 → 6,577.8 tok/s (1.074x)**, engine average 5,728.6 → 6,177.6, **TTFT 21.6 → 19.8 s**,
+      decode unchanged, needle PASS ×4. Hatch `FREETOKEN_NVFP4_PREFILL_DEINTERLEAVE_A=0`; test
+      `tests/moe/test_nvfp4_backends.py::test_deinterleaved_a_is_bit_identical_to_the_interleaved_kernel`.
+      `N35misc_tickets_2026-09-05.md` §2.
+- [x] **`--moe-extend-cache-tokens` stays 64, plus a crash guard.** New harness
+      `benchmarks/bench_extend_moe_threshold.py` + `benchmarks/extend_moe/run_threshold.sh`
+      (one model load, 7 timed extends per cell, fresh tail per call, arm proven per row).
+      Wall ms stream/cached: 64 → 281.1/**249.4**, 80 → **285.3**/294.8, 96 → **284.0**/330.5,
+      128 → **274.1**/370.3 — **crossover between 64 and 80**, i.e. the shipped default. At m=256
+      the cached path does not merely lose, it **cannot execute**: flashlib's `lru_ensure` builds a
+      `[BLOCK_K, BLOCK_K]` dedup block at `BLOCK_K = next_pow2(num_tokens*top_k)` and Triton caps a
+      tensor at 1,048,576 elements, so `m ≤ 170` at top-6 and `--moe-extend-cache-tokens 256`
+      killed the engine mid-forward. `use_cached_extend` now refuses above 1,024 routed ids and
+      falls back to the stream; 3 new tests plus `test_every_copy_of_the_default_agrees` pinning
+      the four hardcoded copies of the default. `N35misc_tickets_2026-09-05.md` §3.
+- [x] **`--spec-draft-len 16` as the default — NO-GO, stays 8.** 131K non-copy measures **0.870x**
+      of spec-off at k=16 (k=8 0.898x) against a ±2 % criterion and a 1 % control spread, and at
+      k=16 the break-even gate **never closed** (`declined_uneconomic` 0 of 55 peeks, vs 16 at
+      k=8): a longer draft raises `emit` about as fast as `verify_ms`. Short-context step cost
+      35.8 ms at k=8 vs 49.8 at k=16. Pinned by `test_spec_draft_len_default_stays_8` and
+      `test_the_gate_does_not_close_at_the_k16_operating_point`; copy-heavy traffic still passes
+      16 explicitly. `N35misc_tickets_2026-09-05.md` §4.
 - [x] **Ornith/Ada line merged** (`32cc504`, 14 commits `cefa4bd..62f5a66`): sm_120 GGUF dispatch
       thresholds, the upstream int8-MMA MMQ port (Q4_K/Q6_K, ~1.75x prefill on Ornith), the Ada
       sm_89 port, asymmetric KV, elastic multi-agent, counter-guided expert cache. `Scheduler.
@@ -309,4 +345,6 @@ per-step costs, the copy class goes **1.11× → 1.61×** at the shipped `k = 8`
 
 **Not done, deliberately.** The default `--spec-draft-len` is left at 8: k = 16 is worth ~1.17×
 on copy and neutral elsewhere, but it doubles the price of the break-even gate's two probe steps
-at long context, and that trade wants its own confirming session.
+at long context, and that trade wants its own confirming session. **That session ran on
+2026-09-05 and 8 is now the pinned answer** — k = 16 is 0.870x of off at 131K and the gate stops
+closing entirely (`N35misc_tickets_2026-09-05.md` §4).

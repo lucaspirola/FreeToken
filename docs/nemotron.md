@@ -67,7 +67,8 @@ only, I=1856) plus one shared expert.
   wins the kernel microbenchmark outright at every width except the widest prefill chunk
   (per MoE layer, cold L2, `--routings 8`): decode **1.64× b12x at M=1, 1.85× at M=8**,
   prefill **1.43× at M=256**, and b12x keeps only 1.29× at M=2048 and **1.34× at M=8192**
-  (was 2.3×). `auto` still resolves to b12x here (sm_120, ungated relu2,
+  (was 2.3×; the A-operand deinterleave of 2026-09-05 takes that last residual to **1.10×** —
+  see *MoE prefill GEMM* below). `auto` still resolves to b12x here (sm_120, ungated relu2,
   `moe_intermediate_size` 1856 ≥ the 1024 threshold) and that resolution is now wrong on
   this geometry. End to end on the offload path b12x already lost before the rewrite
   (task 2B4, `benchmarks/results/nemotron35_lightning_5080_cache_study_2026-09-04.md`):
@@ -144,6 +145,19 @@ Full study: `benchmarks/results/nemotron35_lightning_5080_decode16_2026-09-05.md
 Check it in any server log: `Start capturing CUDA graphs with sizes:` must reach the number
 `Elastic capacity ... -> N requests` last reported, with no gaps below 16.
 `FREETOKEN_ELASTIC_GRAPH_MAX_BS` caps the set for an A/B (`=8` is the old ceiling).
+
+**The non-elastic ladder too (2026-09-05).** Without `--elastic-initial-requests` the graph set
+came from `_determine_cuda_graph_bs`, which still built `[1, 2, 4] + range(8, max_bs + 1, 8)`, so
+at `--cuda-graph-max-bs 16` a 12-lane batch replayed the bs-16 graph with four dummy rows — and a
+dummy row routes its own top-6 experts. `_determine_cuda_graph_bs` now unions
+`range(1, min(max_bs, 16) + 1)` into the ladder **for offload-MoE models only**
+(`GraphRunner.__init__` passes `offload_moe=moe_offload_cache is not None`); a dense model keeps
+the historical list byte-for-byte, and that is pinned by a test. Three alternating repeats of each
+arm out of **one binary** at 12 lanes: sparse `[1,2,4,8,16]` **140.43** tok/s aggregate (event-gap
+p50 83.0–87.0 ms) against dense `[1..16]` **150.90** (77.2–79.3 ms) — **1.074x**, every dense run
+above every sparse run, the same 1.074x the elastic tier measures at 12 lanes. Cost: 11 extra
+graphs, ~80 MiB, ~0.8 s of startup. `FREETOKEN_GRAPH_DENSE_BS=0|1` forces either arm.
+`benchmarks/results/nemotron35_lightning_5080_misc_tickets_2026-09-05.md` §1.
 
 **Where a 16-lane decode step goes** (same study, §2). It is movement-bound and nothing else
 is close: **74 % PCIe expert misses** (23 MoE layers × 31.45 misses × 5.612 MB at a measured
@@ -301,6 +315,34 @@ Because the MoE GEMM is the *flat* term the win scales inversely with prompt len
 prefill tile (the twins of `FREETOKEN_EXTEND_*` / `FREETOKEN_DECODE_*`), and
 `FREETOKEN_NVFP4_NO_NATIVE_CVT=1` forces the arithmetic FP4 decode.
 
+#### The A operand — a further 1.215x on the kernel, 1.074x at 131K (2026-09-05)
+
+The follow-up ticket ("neither activation load vectorizes") is closed and **shipped on by
+default**. `_prefill_nvfp4_moe_kernel` walks K in *packed bytes* and issues one `tl.dot` per
+nibble, so against a plain `[M, K]` bf16 activation both `a_ptrs_lo` / `a_ptrs_hi` are stride-2 on
+the contiguous axis — neither gather vectorizes and A's K span is read twice per K-block. A
+`DEINTERLEAVED_A: tl.constexpr` arm plus a host prepass that rewrites A into an **even-k plane
+followed by an odd-k plane** (`a.view(M, K//2, 2).permute(0,2,1)`) makes both gathers unit-stride.
+The per-`tl.dot` reduction order is unchanged, so it is a numerics no-op and measures as one.
+
+| M | tree (old) | deint (incl. prepass) | speedup | of which prepass | max abs diff |
+|---:|---:|---:|---:|---:|---|
+| 256 | 1.271 ms | **1.091** | 1.165x | 0.015 ms | 0.000e+00 |
+| 1024 | 2.937 | **2.595** | 1.132x | 0.039 | 0.000e+00 |
+| 2048 | 5.103 | **4.459** | 1.144x | 0.142 | 0.000e+00 |
+| 4096 | 9.171 | **7.782** | 1.178x | 0.279 | 0.000e+00 |
+| **8192** | **16.960** | **13.961** | **1.215x** | 0.551 | 0.000e+00 |
+
+At M=8192 that is **70.3 TFLOP/s, 59 % of the card's Triton `tl.dot` ceiling**, and the residual
+gap to b12x falls **1.34x → 1.10x**. End to end on a cold 131K synthetic-needle request (two pairs,
+`FREETOKEN_NVFP4_PREFILL_DEINTERLEAVE_A` the only difference): prefill **6,124.7 → 6,577.8 tok/s
+(1.074x)**, engine average 5,728.6 → 6,177.6 (1.078x), **TTFT 21.6 s → 19.8 s**, decode unchanged
+(140.5–140.9 tok/s — the decode GEMV kernels were not touched, nor was the fp8 sibling), needle
+PASS in all four runs. `FREETOKEN_NVFP4_PREFILL_DEINTERLEAVE_A=0` disables it for an A/B.
+Still on the table: gemm2's A *is* gemm1's output, so its prepass is removable by having gemm1's
+store emit the two k-planes directly (~0.3 ms of the 0.551 at M=8192).
+`benchmarks/results/nemotron35_lightning_5080_misc_tickets_2026-09-05.md` §2.
+
 ### Speculative decoding — `--speculative ngram`, shipped 2026-09-05
 
 Prompt-lookup (n-gram) speculative decoding was measured and refused
@@ -361,6 +403,32 @@ every M above the threshold.
 m = 32 it is 11.1 ms against Mamba-2's 15.6). 131K prefill 5,059 → 5,105 tok/s (+0.9 %, noise),
 needle recalled in both arms, and a long prompt whose last chunk is short is greedy token-identical.
 Write-up: `benchmarks/results/nemotron35_lightning_5080_extend_moe_2026-09-05.md`.
+
+**The threshold was re-measured on 2026-09-05 and stays 64**
+(`benchmarks/bench_extend_moe_threshold.py` + `benchmarks/extend_moe/run_threshold.sh`,
+one model load, 7 timed extends per cell on a
+4,096-token base with a fresh tail per call). Wall time per extend forward, stream vs cached:
+64 → 281.1 / **249.4** ms, 80 → **285.3** / 294.8, 96 → **284.0** / 330.5, 128 → **274.1** / 370.3.
+**The crossover is between 64 and 80**, i.e. exactly at the shipped default. The mechanism is the
+miss column: the cached path fetches only the routed experts, but by m=128 it is fetching 107.8 of
+128 rows per layer anyway, at the scattered gather rate (52.9 GB/s) instead of the contiguous
+stream rate (61.9 GB/s), and it pays a decode GEMV where the stream pays a grouped GEMM. The
+following decode burst shows no eviction penalty worth the name (6.7–7.5 ms/step either way).
+Read wall (or the CUDA-event GPU span, which agrees to ~2 %), never host time: the stream arm
+blocks the host on its PCIe copies while the cached arm returns in ~60 ms and leaves the GPU
+gathering for another ~250.
+
+**There is also a hard servable width, and it is below 256 tokens.** `ensure_experts` reaches
+flashlib's `lru_ensure`, whose `_seq`/`_insert` build a `[BLOCK_K, BLOCK_K]` dedup matrix at
+`BLOCK_K = next_pow2(query.numel())`; Triton caps a tensor at 1,048,576 elements, so `BLOCK_K` can
+never exceed 1024 and the query is `num_tokens * top_k` ids — a ceiling of **m ≤ 170 at top-6**.
+`--moe-extend-cache-tokens 256` used to kill the engine mid-forward with
+`ValueError: numel (4194304) exceeds triton maximum tensor numel (1048576)`; `use_cached_extend`
+now refuses when `topk_ids.numel() > 1024` and the forward falls back to the full-layer stream,
+which is faster at every width above the crossover anyway. Widths that *do* compile are still
+pathological — the m=128 cell (`BLOCK_K = 1024`) cost **22 minutes of one-off Triton JIT** before
+it ran, so do not raise the flag on a live server.
+`benchmarks/results/nemotron35_lightning_5080_misc_tickets_2026-09-05.md` §3.
 
 This also corrects the Phase 4 (MTP) write-up: its 1.63× verify cost came from a bs=2 *decode*
 step, but a real verify step takes the *extend* path, so MTP's projection was ~25× optimistic
@@ -438,9 +506,24 @@ the load-bearing number, because it is not subject to the stream lottery:
 
 **`--spec-draft-len 16` is worth another ~1.17× on copy-heavy traffic** and is neutral (0.99×) on
 code and prose: acceptance does not decay with the draft length on verbatim copy (15.7 of 17
-tokens kept) while the verify step grows only ~1.8 ms per drafted token. The default is still 8 —
-raising it doubles the price of the break-even gate's two probe steps at long context — so set it
-explicitly for agent traffic. **`--spec-draft-len 4` is a regression** and should not be used.
+tokens kept) while the verify step grows only ~1.8 ms per drafted token. **The default stays 8**
+(confirmed 2026-09-05, below) — set 16 explicitly for copy-heavy agent traffic and nothing else.
+**`--spec-draft-len 4` is a regression** and should not be used.
+
+**Why 16 is not the default (measured 2026-09-05, NO-GO).** The criterion was "raise it only if
+the 131K non-copy case stays within 2 % of spec-off". At 131K (123,612 prompt tokens, needle) k=16
+measures **0.870x** of off and k=8 **0.898x**, against a control spread of 1 % — 13 % below, so it
+fails outright. Two costs, and the second is the reason: a gate probe at 131K costs
+`_GATE_MIN_SAMPLES = 2` verify steps (163 ms at k=8, 279 ms at k=16 against a 10.4 ms decode
+step), and at k=16 the break-even gate **never closed** — `declined_uneconomic` 0 of 55 peeks, vs
+16 at k=8 — because a longer draft raises `emit` (9.0 tokens/verify) about as fast as it raises
+`verify_ms`, so the drafter keeps paying near-break-even steps for the whole generation. Raising k
+weakens the one mechanism that is supposed to make long-context speculation free. The short-context
+copy arms of that run are *not* a copy verdict (both landed at 0.98x of off with draft rates of
+0.02–0.04 — the copy-class lottery of `..._ngram_spec_fast_2026-09-05.md` §1); what they do
+contribute is the step cost, 35.8 ms at k=8 vs 49.8 ms at k=16. Pinned by
+`tests/scheduler/test_spec_ngram.py::test_spec_draft_len_default_stays_8`.
+`benchmarks/results/nemotron35_lightning_5080_misc_tickets_2026-09-05.md` §4.
 
 **Two things to know before enabling it.**
 
@@ -462,12 +545,11 @@ explicitly for agent traffic. **`--spec-draft-len 4` is a regression** and shoul
 A 16-way passthrough soak passes with zero errors in both arms and flat p50 / request count; its
 p95/p99 tail differs but one 10-minute pair cannot separate that from variance (write-up §11).
 
-Still open, by upside: raising the default draft length to 16 (one confirming session), a
-cheaper long-context verify step — the extend attention reads the whole KV history once per
+Still open, by upside: a cheaper long-context verify step — the extend attention reads the whole KV history once per
 query token, and a fused multi-query kernel that reads it once for all `m` is the shape of the
 fix, and the only thing that makes speculation pay above ~64K — batched (bs > 1) speculation, and
-sampling support. The 46-launch commit, the batch-prep overhead, the burst-entry hysteresis and
-the graph-captured verify forward are all closed above.
+sampling support. The 46-launch commit, the batch-prep overhead, the burst-entry hysteresis, the
+graph-captured verify forward and the draft-length default are all closed above.
 
 ### 1M single-session profile
 

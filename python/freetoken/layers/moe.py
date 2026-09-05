@@ -451,12 +451,15 @@ class OffloadMoELayer(MoELayer):
 
         A whole layer is ``num_experts`` expert rows per forward whatever the token
         count, which is the right trade behind a full chunk's GPU work and the wrong
-        one for a handful of tokens; below ``extend_cache_tokens`` the forward takes
-        the decode slot cache instead (``_cached_extend_routed``), where the ids ARE
-        remapped to slot ids."""
+        one for a handful of tokens; below ``extend_cache_tokens`` -- and only at a
+        routed-id width the slot cache's admission kernel can serve, which the gate
+        also refuses -- the forward takes the decode slot cache instead
+        (``_cached_extend_routed``), where the ids ARE remapped to slot ids."""
         cache = self.offload_cache
         assert cache is not None
-        if cache.use_cached_extend(self.layer_id, hidden_states.shape[0]):
+        if cache.use_cached_extend(
+            self.layer_id, hidden_states.shape[0], topk_ids.numel()
+        ):
             return self._cached_extend_routed(cache, hidden_states, topk_weights, topk_ids)
         if cache.prefill_overlap:
             views = self._wait_prefill_overlap(cache)

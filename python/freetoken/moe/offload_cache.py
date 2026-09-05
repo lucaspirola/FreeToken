@@ -43,6 +43,22 @@ logger = init_logger(__name__)
 # full-layer prefill stream on the extend path.
 _CACHED_EXTEND_FORMATS = frozenset({"nvfp4", "nvfp4_marlin", "nvfp4_b12x"})
 
+# Widest ``topk_ids.numel()`` the slot-cache admission kernel can serve, i.e. the widest
+# query ``ensure_experts`` may hand to flashlib's ``lru_ensure``.
+#
+# Both of that kernel's strategies (``_seq`` and ``_insert``) share ``_phase1``, which
+# dedups the query with a ``[BLOCK_K, BLOCK_K]`` block where
+# ``BLOCK_K = triton.next_power_of_2(query.numel())``. Triton caps a tensor at 1,048,576
+# elements, so ``BLOCK_K > 1024`` cannot compile: a wider query raises
+# ``ValueError('numel (4194304) exceeds triton maximum tensor numel (1048576)')`` from a
+# CompilationError, mid-forward. With top_k = 6 that is a hard ceiling of 170 tokens --
+# well under a mis-set ``--moe-extend-cache-tokens 256``, which is how it was found.
+# The last width that does compile is already pathological anyway: a 768-id query
+# (m = 128, BLOCK_K = 1024) cost 22 minutes of one-off Triton JIT on an RTX 5080, and the
+# measured extend forward at m = 128 is a 1.25x GPU-time LOSS against the full-layer
+# stream. So refusing here costs nothing real: the forward falls back to the stream.
+_MAX_ENSURE_QUERY = 1024
+
 _BANK_SCHEMAS: dict[str, tuple[str, ...]] = {
     # dense bf16 expert weights
     "bf16": ("gate_up", "down"),
@@ -950,7 +966,9 @@ class OffloadMoeCache:
         ``copy_missing`` takes the whole-layer pageable branch, which presumes materialize's position == expert id (never ``ensure_experts``'s LRU slot remap)."""
         return layer_id in self._unpinned_layers
 
-    def use_cached_extend(self, layer_id: int, num_tokens: int) -> bool:
+    def use_cached_extend(
+        self, layer_id: int, num_tokens: int, num_routed: int | None = None
+    ) -> bool:
         """Whether an extend forward of ``num_tokens`` should take the DECODE slot
         cache for ``layer_id`` instead of the full-layer prefill stream.
 
@@ -961,7 +979,16 @@ class OffloadMoeCache:
         cached path would also evict the whole decode working set). Restricted to
         the NVFP4 bank layouts, which are the ones whose GEMM entry points take
         arbitrary bank-row ids; every other format keeps the legacy path.
+
+        ``num_routed`` is ``topk_ids.numel()`` (``num_tokens * top_k``), the width of
+        the query ``ensure_experts`` would hand the slot-cache admission kernel. Passing
+        it bounds the gate by what that kernel can actually compile
+        (``_MAX_ENSURE_QUERY``), so a mis-set ``extend_cache_tokens`` refuses the cached
+        path instead of crashing the forward. Omitting it keeps the token-count gate
+        alone, for callers that have no routing to hand (tests, capability probes).
         """
+        if num_routed is not None and num_routed > _MAX_ENSURE_QUERY:
+            return False
         return (
             self.extend_cache_tokens > 0
             and 0 < num_tokens <= self.extend_cache_tokens

@@ -231,6 +231,8 @@ benchmarks/cross_framework
 # Local scratch / agent worktrees (never committed)
 .claude/
 
-# 16-way decode study run artifacts (drivers are tracked, outputs are not)
+# Benchmark run artifacts (drivers are tracked, outputs are not)
 benchmarks/decode16/runs/
+benchmarks/extend_moe/runs/
+benchmarks/spec_k/runs/
 scratchpad/

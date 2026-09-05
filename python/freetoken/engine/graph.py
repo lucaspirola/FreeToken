@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List
 
@@ -65,10 +66,35 @@ class GraphCaptureBuffer:
             self.table_idx[_slice] = batch.linear_table_idx
 
 
+# Every batch size up to this gets its own decode graph when the dense rule applies; above
+# it the ladder stays sparse. Mirrors ``engine._DENSE_GRAPH_BS`` (the elastic path).
+_DENSE_GRAPH_BS = 16
+
+
+def _dense_small_graph_bs(offload_moe: bool) -> bool:
+    """Whether the small end of the non-elastic graph ladder is dense (1..16).
+
+    A padded row is NOT free on an **offload-MoE** model: it carries a hidden state, so it
+    routes its own top-k experts and adds rows to every expert GEMV. On a dense model a
+    padded row is nearly free, which is why the rule is gated rather than global.
+    ``FREETOKEN_GRAPH_DENSE_BS=0|1`` forces it off/on so both arms are one binary.
+    """
+    raw = os.environ.get("FREETOKEN_GRAPH_DENSE_BS", "")
+    if raw.strip():
+        try:
+            return bool(int(raw))
+        except ValueError:
+            logger.warning_rank0(
+                f"FREETOKEN_GRAPH_DENSE_BS={raw!r} is not an integer; ignoring it"
+            )
+    return offload_moe
+
+
 def _determine_cuda_graph_bs(
     cuda_graph_bs: List[int] | None,
     cuda_graph_max_bs: int | None,
     free_memory: int,
+    offload_moe: bool = False,
 ) -> List[int]:
     if cuda_graph_bs is not None:
         return cuda_graph_bs
@@ -84,7 +110,9 @@ def _determine_cuda_graph_bs(
         return []
 
     candidates = [1, 2, 4] + list(range(8, cuda_graph_max_bs + 1, 8))
-    return [bs for bs in candidates if bs <= cuda_graph_max_bs]
+    if _dense_small_graph_bs(offload_moe):
+        candidates += list(range(1, min(cuda_graph_max_bs, _DENSE_GRAPH_BS) + 1))
+    return sorted({bs for bs in candidates if bs <= cuda_graph_max_bs})
 
 
 def get_free_memory(device: torch.device) -> int:
@@ -111,6 +139,7 @@ class GraphRunner:
             cuda_graph_bs=cuda_graph_bs,
             cuda_graph_max_bs=cuda_graph_max_bs,
             free_memory=free_memory,
+            offload_moe=moe_offload_cache is not None,
         )
         self.attn_backend = attn_backend
         self.max_graph_bs = max(cuda_graph_bs) if cuda_graph_bs else 0

@@ -629,6 +629,53 @@ def test_break_even_gate_closes_when_a_verify_step_stops_paying():
     assert dec.peek() is req
 
 
+def test_spec_draft_len_default_stays_8():
+    """The default draft length is 8, re-confirmed at 131K on 2026-09-05.
+
+    benchmarks/probe_spec_ngram_impl.py, one model load, 123,612-token needle prompt,
+    greedy, 79-token generation, arms off / n8k8 / n8k16 / off2:
+
+        off  95.97 tok/s, off2 95.02 (a 1 % control spread)
+        k=8  86.22 tok/s = 0.898x of off; verify step 81.5 ms total (89.0 ms GPU forward)
+             against a ~10.4 ms decode step; 2 verify steps spent, then
+             ``declined_uneconomic`` 16
+        k=16 83.52 tok/s = 0.870x of off; verify step 92.9 ms total (101.3 ms GPU);
+             3 verify steps, ``declined_uneconomic`` 0 -- at k=16 the break-even gate
+             never closed, because a longer draft raises ``emit`` (9.0 tokens/verify)
+             about as fast as it raises ``verify_ms``, so ``emit * _GATE_MARGIN >
+             verify_ms / decode_ms`` stays true at break-even.
+
+    The criterion was "raise the default to 16 only if the 131K non-copy case stays within
+    2 % of off". It is 13 % below, so the default STAYS 8. Copy-heavy traffic should still
+    pass ``--spec-draft-len 16`` explicitly: the fixed-transcript replay in
+    nemotron35_lightning_5080_ngram_spec_fast_2026-09-05.md §8 measures 1.88x at k=16
+    against 1.61x at k=8. Re-measure both of those before changing this number.
+    """
+    from freetoken.scheduler.config import SchedulerConfig
+    from freetoken.server.args import ServerArgs
+
+    assert SchedulerConfig.spec_draft_len == 8
+    assert ServerArgs.spec_draft_len == 8
+
+
+def test_the_gate_does_not_close_at_the_k16_operating_point():
+    """Why k=16 lost without ever being gated off (``declined_uneconomic`` 0 at 131K).
+
+    A longer draft buys proportionally more ``emit``, so the break-even test
+    ``emit * 1.25 > verify_ms / decode_ms`` never trips: 9.0 * 1.25 = 11.25 against
+    92.9 / 10.4 = 8.93. The gate is a cost gate, not a throughput gate -- it cannot
+    notice that the ordinary path was faster anyway, which is why the default is chosen
+    by measurement rather than left to the gate.
+    """
+    tokens = [1, 2, 3, 7, 8, 9, 1, 2, 3]
+    req = _make_req(tokens)
+    dec = _decoder(_FakeScheduler(req, []))
+    state = dec._state_for(req)
+    state.verify_samples = spec_ngram._GATE_MIN_SAMPLES
+    state.decode_ms, state.verify_ms, state.emit = 10.4, 92.9, 9.0   # k=16 at 131K
+    assert dec._pays_off(state) is True
+
+
 def test_a_closed_gate_still_re_probes():
     """A closed gate has to stay falsifiable: acceptance and context both move."""
     tokens = [1, 2, 3, 7, 8, 9, 1, 2, 3]

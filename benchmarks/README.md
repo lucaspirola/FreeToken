@@ -76,6 +76,18 @@ last JSON/JSONL row a paired performance control; the three
 `--max-*-regression-pct` options and absolute `--min-*-tok-s` floors turn coherence,
 prefill, and decode into one fail-closed optimization gate.
 
+**`bench_extend_moe_threshold.py`** — where `--moe-extend-cache-tokens` should sit. One
+model load; the extend forward at m = 64/128/256/512 on both movement paths (the decode
+slot-cache gather vs the full-layer prefill stream), split across the mixer kinds, plus a
+decode burst after each cell so the cached path's cost to the following decode's working
+set is on the same row. Every timed call gets a fresh tail and asserts the token count
+that actually reached the forward, and every row carries the gate's own `hits/calls`.
+Run it through the wrapper under `scripts/gpu_lock.sh` (never piped):
+
+```bash
+FREETOKEN_GPU_LOCK_WAIT=7200 scripts/gpu_lock.sh benchmarks/extend_moe/run_threshold.sh
+```
+
 For host RAM vs PCIe bandwidth and the offload/hybrid backend pick, use `ft bench bw`
 instead — it writes the JSON profile the engine reads.
 

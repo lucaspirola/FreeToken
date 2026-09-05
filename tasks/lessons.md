@@ -1135,3 +1135,32 @@ check for `Discarded cold session ...: client token prefix changed` before blami
 - 2026-09-05: `git add -A` swept two agents' repo-root `scratchpad/` files into e4070da/b84ecb7
   (removed in c8d42c9, now gitignored). RULE for the lead: stage by explicit path lists, never
   `-A`; agents write scratch only under the session scratchpad dir, never the repo root.
+
+## 2026-09-05 (four ranked tickets in one session — measurement design, and a flag with no ceiling)
+- **Two repeats of one arm cannot resolve a few percent — alternate three of each out of one
+  binary.** The same phaseE arms (`--cuda-graph-max-bs 8` vs `16`, 12 lanes) read 148.75 / 139.16
+  tok/s on one run and 145.42 / 144.95 on the next: the *same* effect measured as **−6.7 %** and
+  **−0.3 %** hours apart, on the same box and the same commit. A server-restart pair carries the
+  whole day's drift — cache state, bank layout, host pressure — inside the comparison. phaseE2
+  alternated three repeats of each arm out of **one binary** (`FREETOKEN_GRAPH_DENSE_BS=0|1`,
+  identical flags) and got 140.43 vs 150.90 with *every* dense run above *every* sparse run —
+  perfect separation, the smallest p a 3-vs-3 rank test can give. **Before believing a
+  single-digit-percent delta, ask how many times each arm ran and whether they interleaved.**
+- **A benchmark must score the metric the user pays.** The extend-threshold harness scored
+  `forward_host_ms` and named **96** as the crossover; scored on wall time — and the CUDA-event
+  GPU span, which agrees with it to ~2 % — the crossover is **between 64 and 80**, which is where
+  the shipped default already sat. The two arms hide their cost in different places: the stream
+  arm blocks the host on its PCIe copies (host ≈ wall), while the cached arm returns in ~60 ms and
+  leaves the GPU gathering scattered rows for another ~250. A host timer measured the arm that
+  happens to be synchronous and called the asynchronous one free. **Pick the metric first, prove
+  the two arms account for their time the same way, and keep a second clock (CUDA events) that
+  can contradict the first.**
+- **A user-settable threshold that feeds a Triton kernel needs a servable-width bound.**
+  `--moe-extend-cache-tokens 256` did not merely lose to the stream, it **killed the engine
+  mid-forward**: `ensure_experts` reaches flashlib's `lru_ensure`, which builds a
+  `[BLOCK_K, BLOCK_K]` dedup block at `BLOCK_K = next_pow2(num_tokens * top_k)` against Triton's
+  1,048,576-element cap — a hard ceiling of **m ≤ 170 at top-6**, and the flag had no upper bound
+  at all. The width just below it (`BLOCK_K = 1024`, m=128) cost **22 minutes of one-off JIT**
+  before it ran. **Bound a flag at the kernel's real ceiling rather than at the value you
+  measured, and treat a minutes-long first compile as a production hazard — a warmup job, never a
+  live request — not a benchmark annoyance.**

@@ -363,7 +363,23 @@ def _prefill_nvfp4_moe_kernel(
     top_k: tl.constexpr,
     ACT: tl.constexpr,
     compute_type: tl.constexpr,
+    DEINTERLEAVED_A: tl.constexpr = False,
 ):
+    """Grouped GEMM over the packed NVFP4 experts, two ``tl.dot``s per packed byte.
+
+    ``DEINTERLEAVED_A`` selects A's k-layout (a compile-time branch; the False path is
+    the historical one, byte-for-byte):
+
+      * False -- A is the plain ``[M, K]`` activation, so the even-k and odd-k halves of
+        a byte-block are two stride-2 gathers on the contiguous axis (neither vectorizes).
+      * True  -- A is pre-deinterleaved on the host into two contiguous k-planes,
+        logically ``[M, 2, K // 2]`` flattened to ``[M, K]``: even k at column ``kk`` and
+        odd k at column ``K // 2 + kk``.  Both loads are then unit-stride.
+
+    Only the *addressing* of A changes; masks, the ``// top_k`` row indexing, the
+    per-``tl.dot`` reduction order, the accumulator and the epilogue are identical, so
+    the two paths are bit-identical up to the loads themselves.
+    """
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -384,8 +400,14 @@ def _prefill_nvfp4_moe_kernel(
 
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     offs_kb = tl.arange(0, BLOCK_SIZE_KB)
-    a_ptrs_lo = a_ptr + (offs_token[:, None] // top_k * stride_am + (2 * offs_kb)[None, :] * stride_ak)
-    a_ptrs_hi = a_ptr + (offs_token[:, None] // top_k * stride_am + (2 * offs_kb + 1)[None, :] * stride_ak)
+    a_row = offs_token[:, None] // top_k * stride_am
+    if DEINTERLEAVED_A:
+        # Even-k plane then odd-k plane: both gathers are unit-stride in k.
+        a_ptrs_lo = a_ptr + (a_row + offs_kb[None, :] * stride_ak)
+        a_ptrs_hi = a_ptrs_lo + (K // 2) * stride_ak
+    else:
+        a_ptrs_lo = a_ptr + (a_row + (2 * offs_kb)[None, :] * stride_ak)
+        a_ptrs_hi = a_ptr + (a_row + (2 * offs_kb + 1)[None, :] * stride_ak)
 
     slot = tl.load(expert_ids_ptr + pid_m).to(tl.int64)
     packed_base = packed_ptr + slot * stride_pe + offs_bn[None, :] * stride_pn
@@ -434,8 +456,12 @@ def _prefill_nvfp4_moe_kernel(
         accumulator += tl.dot(a_lo, b_lo.to(a_lo.dtype))
         accumulator += tl.dot(a_hi, b_hi.to(a_hi.dtype))
 
-        a_ptrs_lo += BLOCK_SIZE_KB * 2 * stride_ak
-        a_ptrs_hi += BLOCK_SIZE_KB * 2 * stride_ak
+        if DEINTERLEAVED_A:
+            a_ptrs_lo += BLOCK_SIZE_KB * stride_ak
+            a_ptrs_hi += BLOCK_SIZE_KB * stride_ak
+        else:
+            a_ptrs_lo += BLOCK_SIZE_KB * 2 * stride_ak
+            a_ptrs_hi += BLOCK_SIZE_KB * 2 * stride_ak
 
     g = tl.load(global_ptr + slot * stride_ge + offs_bn * stride_gn).to(tl.float32)
     accumulator = accumulator * g[None, :]

@@ -937,7 +937,11 @@ def parse_args(
             "route to -- instead of streaming every expert of every layer over PCIe. "
             "The prefill stream costs num_experts rows per layer per forward whatever "
             "the token count, which is hidden behind a full chunk's GPU work and is the "
-            "entire cost of a short extend. 0 disables (always stream the full layer)."
+            "entire cost of a short extend. 0 disables (always stream the full layer). "
+            "Measured on Nemotron 3.5 Lightning NVFP4 (RTX 5080): the cached path wins "
+            "3x on GPU time at 64 tokens and loses 1.25x at 128, hence the default. A "
+            "forward whose routed-id count (tokens * top_k) exceeds what the slot cache "
+            "can serve falls back to the full-layer stream whatever this is set to."
         ),
     )
 

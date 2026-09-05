@@ -428,6 +428,48 @@ def nvfp4_moe_config(
     return _prefill_launch_env_override(cfg)
 
 
+# --- A-operand k-deinterleave (on by default) --------------------------------------
+# ``_prefill_nvfp4_moe_kernel`` walks K in *packed bytes* (two e2m1 codes per byte) and
+# issues one ``tl.dot`` per nibble, so against a plain ``[M, K]`` activation both A loads
+# are stride-2 on the contiguous axis and neither vectorizes.  With this on, the host
+# rewrites A into two contiguous k-planes (all even k, then all odd k) and the kernel's A
+# gathers become unit-stride -- at the cost of one extra full read+write of A.
+#
+# Measured 2026-09-05 on the RTX 5080 (bench_moe_prefill_gemm.py, shipped tiles, the
+# prepass INCLUDED in the arm), bit-exact (max|d| = 0.000e+00) at every M:
+#   M=256 1.271 -> 1.091 ms (1.165x) | 1024 2.937 -> 2.595 (1.132x)
+#   M=2048 5.103 -> 4.459 (1.144x)   | 4096 9.171 -> 7.782 (1.178x)
+#   M=8192 16.960 -> 13.961 (1.215x), of which the prepass is 0.551 ms
+# See benchmarks/results/nemotron35_lightning_5080_misc_tickets_2026-09-05.md.
+#
+# Read once, at import, from ``FREETOKEN_NVFP4_PREFILL_DEINTERLEAVE_A``: 0/false/no/off
+# disables it (the A/B hatch), anything else -- including unset -- leaves it on.  To flip
+# it *in process* -- a benchmark timing both arms out of one binary -- assign the module
+# attribute:
+#
+#     from freetoken.moe import fused_nvfp4
+#     fused_nvfp4.NVFP4_PREFILL_DEINTERLEAVE_A = False
+#
+# ``_prefill_gemm``'s ``deinterleave`` argument overrides both, per call.
+NVFP4_PREFILL_DEINTERLEAVE_A = os.environ.get(
+    "FREETOKEN_NVFP4_PREFILL_DEINTERLEAVE_A", ""
+).strip().lower() not in ("0", "false", "no", "off")
+
+
+def deinterleave_a(a: torch.Tensor) -> torch.Tensor:
+    """``[M, K]`` -> ``[M, K]`` with every even-k value first, then every odd-k value.
+
+    ``out[m, kk] == a[m, 2 * kk]`` and ``out[m, K // 2 + kk] == a[m, 2 * kk + 1]``: the
+    ``[M, 2, K // 2]`` transpose of A's k axis, flattened.  Always returns a fresh
+    contiguous tensor; a non-contiguous input is materialized first (``view`` needs it).
+    """
+    m, k = a.shape
+    assert k % 2 == 0, f"K must be even to deinterleave, got {k}"
+    if not a.is_contiguous():
+        a = a.contiguous()
+    return a.view(m, k // 2, 2).permute(0, 2, 1).contiguous().view(m, k)
+
+
 def _prefill_gemm(
     a: torch.Tensor,
     packed: torch.Tensor,
@@ -443,11 +485,22 @@ def _prefill_gemm(
     mul_routed_weight: bool,
     cfg: Dict[str, Any],
     act: int = 0,
+    deinterleave: bool | None = None,
 ) -> None:
     N = packed.shape[1]
     K = packed.shape[2] * 2
     EM = sorted_ids.shape[0]
     scale = e4m3_kernel_view(scale)
+    # Standalone prepass: one extra read+write of A (44 MiB for gemm1 at M=8192, 182 MiB
+    # for gemm2).  For gemm2 that is pure overhead in principle -- its A *is* gemm1's
+    # output, so a gemm1 epilogue storing the two k-planes directly would fold the whole
+    # gemm2 prepass into a store that already happens.  Kept standalone here so the
+    # experiment can price the prepass separately from the kernel win (bench variant
+    # ``prepass``); fold it into gemm1's store only if the kernel win pays for it.
+    deint = NVFP4_PREFILL_DEINTERLEAVE_A if deinterleave is None else deinterleave
+    if deint:
+        assert a.shape[-1] == K, (a.shape, K)
+        a = deinterleave_a(a)
     grid = lambda META: (  # noqa: E731
         triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
     )
@@ -465,6 +518,7 @@ def _prefill_gemm(
         top_k=kernel_top_k,
         ACT=act,
         compute_type=_tl_dtype(c.dtype),
+        DEINTERLEAVED_A=deint,
         **cfg,
     )
 
@@ -534,6 +588,8 @@ __all__ = [
     "decode_marlin_config",
     "nvfp4_config_filename",
     "nvfp4_moe_config",
+    "NVFP4_PREFILL_DEINTERLEAVE_A",
+    "deinterleave_a",
     "fused_experts_decode_nvfp4_marlin",
     "fused_experts_decode_nvfp4_serial",
     "fused_experts_nvfp4",

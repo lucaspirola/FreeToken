@@ -1092,3 +1092,51 @@ def test_b12x_relu2_real_lightning_layer_matches_triton():
         b12x_out.flatten(), triton_out.flatten(), dim=0
     )
     assert float(cos) > 0.999, f"b12x vs triton cosine on a real layer: {float(cos)}"
+
+
+@cuda
+def test_deinterleaved_a_is_bit_identical_to_the_interleaved_kernel():
+    """The A-operand k-deinterleave changes addressing only, so both arms must agree
+    to the bit.
+
+    ``_prefill_nvfp4_moe_kernel`` walks K in packed bytes and dots one nibble at a
+    time, so against a plain ``[M, K]`` activation both A gathers are stride-2 on the
+    contiguous axis. With ``FREETOKEN_NVFP4_PREFILL_DEINTERLEAVE_A`` on (the default)
+    the host first rewrites A into an even-k plane followed by an odd-k plane and the
+    gathers become unit-stride; the per-``tl.dot`` reduction order is unchanged, which
+    is why this is an equality and not an allclose. Measured 2026-09-05 on the RTX
+    5080 at the shipped tiles, prepass included: M=8192 16.960 -> 13.961 ms (1.215x),
+    M=256 1.165x, and 131K end-to-end prefill 6,124.7 -> 6,577.8 tok/s (1.074x).
+    """
+    from freetoken.moe import fused_nvfp4 as fn
+
+    device = torch.device("cuda")
+    sources = _make_native_sources(device, seed=17)
+    torch.manual_seed(18)
+    banks = [
+        sources[name][0].to(device)
+        for name in (
+            "gate_up_packed", "gate_up_scale", "gate_up_global",
+            "down_packed", "down_scale", "down_global",
+        )
+    ]
+    prev = fn.NVFP4_PREFILL_DEINTERLEAVE_A
+    try:
+        for m in (1, 8, 33):
+            hidden = torch.randn(m, H, dtype=torch.bfloat16, device=device) / 4
+            topk_ids = torch.randint(0, E, (m, TOPK), dtype=torch.int32, device=device)
+            topk_weights = torch.rand(m, TOPK, dtype=torch.float32, device=device)
+            outs = []
+            for arm in (False, True):
+                fn.NVFP4_PREFILL_DEINTERLEAVE_A = arm
+                outs.append(
+                    fn.fused_experts_nvfp4(
+                        hidden, *banks, topk_weights, topk_ids, E, "silu", False,
+                    ).clone()
+                )
+            assert torch.equal(outs[0], outs[1]), (
+                f"m={m}: deinterleaved A diverged, max|d|="
+                f"{(outs[0].float() - outs[1].float()).abs().max().item():.3e}"
+            )
+    finally:
+        fn.NVFP4_PREFILL_DEINTERLEAVE_A = prev

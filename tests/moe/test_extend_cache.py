@@ -20,7 +20,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from freetoken.moe.offload_cache import OffloadMoeCache
+from freetoken.moe.offload_cache import _MAX_ENSURE_QUERY, OffloadMoeCache
 
 CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
@@ -98,12 +98,74 @@ def test_unpinned_layer_is_excluded():
     assert not cache.use_cached_extend(2, 4)
 
 
+def test_routed_width_above_the_kernel_limit_is_refused():
+    """``ensure_experts`` hands ``topk_ids`` straight to flashlib's ``lru_ensure``,
+    whose ``_phase1`` dedups it with a ``[BLOCK_K, BLOCK_K]`` block at
+    ``BLOCK_K = next_power_of_2(numel)``. Past 1024 that block exceeds Triton's
+    1,048,576-element tensor cap and the kernel will not compile."""
+    cache = _cache(extend_cache_tokens=64)
+    assert cache.use_cached_extend(0, 8, _MAX_ENSURE_QUERY)
+    assert not cache.use_cached_extend(0, 8, _MAX_ENSURE_QUERY + 1)
+
+
+def test_omitting_the_routed_width_keeps_the_token_gate_alone():
+    cache = _cache(extend_cache_tokens=64)
+    assert cache.use_cached_extend(0, 8)
+    assert cache.use_cached_extend(0, 8, None)
+    assert not cache.use_cached_extend(0, 65)
+
+
+def test_threshold_wider_than_the_servable_width_is_refused():
+    """``--moe-extend-cache-tokens`` has no upper bound, and a mis-set one used to
+    crash the engine mid-forward: at 256 tokens x top_k 6 the slot-cache admission
+    kernel raised ``ValueError('numel (4194304) exceeds triton maximum tensor numel
+    (1048576)')`` out of a Triton CompilationError. The gate must refuse the width
+    the flag asked for and fall back to the full-layer stream -- which at those
+    widths is the faster path anyway -- rather than accept it.
+
+    top_k 6 puts the real ceiling at 170 tokens, far below the 512 asked for here.
+    """
+    cache = _cache(extend_cache_tokens=512)
+    top_k = 6
+    assert not cache.use_cached_extend(0, 512, 512 * top_k)
+    assert not cache.use_cached_extend(0, 256, 256 * top_k)  # the measured crash
+    assert cache.use_cached_extend(0, 64, 64 * top_k)  # still served, still 3x faster
+
+
 def test_engine_config_default_and_arg():
     from freetoken.engine.config import EngineConfig
     from freetoken.server.args import ServerArgs
 
     assert EngineConfig.moe_extend_cache_tokens == 64
     assert ServerArgs.moe_extend_cache_tokens == 64
+
+
+def test_every_copy_of_the_default_agrees():
+    """The default is written down in four places and nothing joined them up.
+
+    ``OffloadMoeCache.extend_cache_tokens`` is the value the gate reads; ``EngineConfig``
+    is what the engine passes it; ``ServerArgs`` is what ``--moe-extend-cache-tokens``
+    defaults to; and ``_DENSE_MOE_SETTINGS`` is what a *dense* model silently resolves the
+    knob to, so a dense run warns only when the user asked for something other than the
+    default. That last copy had no test at all, which makes retuning the threshold (the
+    2026-09-05 §7 ticket 2 measurement) a two-line change with a third line nobody edits:
+    the sweep's answer would ship for MoE models and the old 64 would keep suppressing the
+    dense warning. Pin all four to each other rather than to a literal, so raising the
+    default is one deliberate edit per site and this test is the thing that notices a miss.
+    """
+    from freetoken.engine.config import EngineConfig
+    from freetoken.engine.engine import _DENSE_MOE_SETTINGS
+    from freetoken.server.args import ServerArgs
+
+    # The declared field default, not a constructed cache: ``__post_init__`` applies
+    # FREETOKEN_MOE_EXTEND_CACHE_TOKENS, which would make this compare the environment.
+    gate_default = OffloadMoeCache.__dataclass_fields__["extend_cache_tokens"].default
+    assert EngineConfig.moe_extend_cache_tokens == gate_default
+    assert ServerArgs.moe_extend_cache_tokens == gate_default
+    assert _DENSE_MOE_SETTINGS["moe_extend_cache_tokens"] == gate_default
+    # A dense model resolves every MoE knob to a no-op; the extend gate's no-op is the
+    # value that changes nothing, and the resolved default must be a real one either way.
+    assert isinstance(_DENSE_MOE_SETTINGS["moe_extend_cache_tokens"], int)
 
 
 # ---------------------------------------------------------------------------

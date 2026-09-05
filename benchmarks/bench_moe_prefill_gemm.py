@@ -72,7 +72,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help='an explicit grid, e.g. \'{"BLOCK_SIZE_M":[64,128]}\' (missing keys '
                         "take the shipped value)")
     p.add_argument("--variant", nargs="+", default=["tree"],
-                   help="kernel variant(s); 'tree' is the production kernel")
+                   help="kernel variant(s), timed back to back in one process: 'tree' is "
+                        "the production kernel, 'deint' the same call with the host "
+                        "A-deinterleave prepass on, 'prepass' that prepass alone")
     p.add_argument("--skew", type=float, default=None,
                    help="Dirichlet alpha for the expert distribution (default: uniform)")
     p.add_argument("--routing-file", default=None,
@@ -176,16 +178,57 @@ def apply_cfg_env(cfg: dict | None) -> None:
             os.environ[var] = str(cfg[key])
 
 
-def variant_runner(name: str):
-    """-> a callable (hidden, banks, weights, ids, num_experts) -> out."""
-    from freetoken.moe.fused_nvfp4 import fused_experts_nvfp4
+# Variants whose output is not comparable to the production kernel's, so `--verify`
+# skips them and they never become the reference.
+NO_VERIFY = frozenset({"prepass"})
 
-    if name == "tree":
+
+def variant_runner(name: str):
+    """-> a callable (hidden, banks, weights, ids, num_experts) -> out.
+
+    ``tree``    the production kernel (plain interleaved-k A operand).
+    ``deint``   the same call with the host A-deinterleave prepass on
+                (``FREETOKEN_NVFP4_PREFILL_DEINTERLEAVE_A``): both A gathers in the
+                kernel's K-loop become unit-stride, paid for with an extra read+write
+                of each GEMM's A.  Numerically identical to ``tree``.
+    ``prepass`` *only* the two deinterleave prepasses ``deint`` adds (gemm1's A [M, H]
+                and gemm2's A [M*top_k, I]), so the A/B delta can be attributed
+                between the kernel win and the prepass cost.  Its TFLOP/s column is
+                meaningless (no GEMM runs); read the ms.
+    """
+    import torch
+
+    from freetoken.moe import fused_nvfp4
+    from freetoken.moe.fused_nvfp4 import deinterleave_a, fused_experts_nvfp4
+
+    if name in ("tree", "deint"):
+        want = name == "deint"
+
         def run(hidden, banks, weights, ids, num_experts):
-            return fused_experts_nvfp4(
-                hidden, *banks, weights, ids, num_experts, ACTIVATION, False,
-            )
+            prev = fused_nvfp4.NVFP4_PREFILL_DEINTERLEAVE_A
+            fused_nvfp4.NVFP4_PREFILL_DEINTERLEAVE_A = want
+            try:
+                return fused_experts_nvfp4(
+                    hidden, *banks, weights, ids, num_experts, ACTIVATION, False,
+                )
+            finally:
+                fused_nvfp4.NVFP4_PREFILL_DEINTERLEAVE_A = prev
         return run
+
+    if name == "prepass":
+        scratch: dict = {}
+
+        def run(hidden, banks, weights, ids, num_experts):
+            m = hidden.shape[0]
+            buf = scratch.get(m)
+            if buf is None:
+                buf = scratch[m] = torch.empty(
+                    (m * TOP_K, I), device=hidden.device, dtype=hidden.dtype
+                )
+            deinterleave_a(hidden)
+            return deinterleave_a(buf)
+        return run
+
     raise SystemExit(f"unknown variant {name!r}")
 
 
@@ -239,8 +282,12 @@ def main(argv: list[str] | None = None) -> int:
             run = variant_runner(vname)
             for cfg in sweep_configs(args.grid, args.grid_json, m, device):
                 if ref is None:
+                    # Always the production kernel at the shipped tile, whatever the
+                    # variant order -- it is what every other arm is verified against.
                     apply_cfg_env(None)
-                    ref = run(hidden, banks, weights, ids, args.experts).clone()
+                    ref = variant_runner("tree")(
+                        hidden, banks, weights, ids, args.experts
+                    ).clone()
                     torch.cuda.synchronize()
                 apply_cfg_env(cfg)
                 try:
@@ -251,13 +298,16 @@ def main(argv: list[str] | None = None) -> int:
                     apply_cfg_env(None)
                     torch.cuda.empty_cache()
                     continue
-                if args.verify:
+                if args.verify and vname not in NO_VERIFY:
                     scale = ref.float().abs().max().item()
                     d = (out.float() - ref.float()).abs().max().item()
                     if d > 2e-2 * scale + 2e-2:
                         print(f"  {vname:12s} {cfg} MISMATCH max|d|={d:.3e} (ref max {scale:.3e})")
                         apply_cfg_env(None)
                         continue
+                    exact = " (bit-exact)" if d == 0.0 else ""
+                    print(f"  {vname:12s} {cfg} ok max|d|={d:.3e} "
+                          f"(ref max {scale:.3e}){exact}")
                 us = _time_us(
                     lambda: run(hidden, banks, weights, ids, args.experts),
                     args.warmup, args.iters,
