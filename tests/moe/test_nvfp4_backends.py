@@ -1140,3 +1140,73 @@ def test_deinterleaved_a_is_bit_identical_to_the_interleaved_kernel():
             )
     finally:
         fn.NVFP4_PREFILL_DEINTERLEAVE_A = prev
+
+
+@cuda
+def test_fused_k_planes_are_bit_identical_to_the_gemm2_prepass():
+    """gemm1 emitting gemm2's k-planes must be a pure addressing change.
+
+    ``FREETOKEN_NVFP4_PREFILL_FUSED_PLANES`` turns on ``PLANAR_OUT`` in gemm1: tile
+    column ``d`` takes weight row ``(d % (N//2)) * 2 + d // (N//2)``, so gemm1's C
+    store stays contiguous and *is* the two k-plane layout gemm2's A gather wants.
+    gemm2 then runs with ``DEINTERLEAVED_A`` and **no host prepass** -- a whole
+    read+write of the ``[M*top_k, I]`` intermediate removed (182 MiB at M=8192, ~0.3 ms
+    of the 0.551 ms the two prepasses cost). The operands and the per-``tl.dot``
+    reduction order are untouched, which is why this is an equality.
+
+    Ungated ReLU^2 only: a gated activation runs ``_run_act`` over gemm1's output
+    row-wise and a permuted column order would silently corrupt it, so the flag must be
+    inert there -- the second arm pins that.
+    """
+    from freetoken.moe import fused_nvfp4 as fn
+
+    device = torch.device("cuda")
+    sources, banks = _ungated_gpu_banks(device)
+    prev_deint = fn.NVFP4_PREFILL_DEINTERLEAVE_A
+    prev_planes = fn.NVFP4_PREFILL_FUSED_PLANES
+    try:
+        fn.NVFP4_PREFILL_DEINTERLEAVE_A = True
+        for m in (1, 8, 17, 33):
+            hidden = torch.randn(m, H, dtype=torch.bfloat16, device=device) / 8
+            ids, weights = _ungated_routing(m, device)
+            outs = []
+            for arm in (False, True):
+                fn.NVFP4_PREFILL_FUSED_PLANES = arm
+                outs.append(
+                    fn.fused_experts_nvfp4(
+                        hidden, *banks, weights, ids, E, "relu2", False,
+                    ).clone()
+                )
+            assert torch.equal(outs[0], outs[1]), (
+                f"m={m}: fused k-planes diverged from the prepass, max|d|="
+                f"{(outs[0].float() - outs[1].float()).abs().max().item():.3e}"
+            )
+            # ...and both still answer the dense dequant reference.
+            _assert_close_relu2(outs[1], _ref_moe_relu2(sources, 0, hidden, weights, ids))
+
+        # Gated: gemm1's output feeds _run_act, so the flag must not engage at all.
+        gated = [
+            _make_native_sources(device, seed=17)[name][0].to(device)
+            for name in (
+                "gate_up_packed", "gate_up_scale", "gate_up_global",
+                "down_packed", "down_scale", "down_global",
+            )
+        ]
+        torch.manual_seed(18)
+        hidden = torch.randn(8, H, dtype=torch.bfloat16, device=device) / 4
+        ids = torch.randint(0, E, (8, TOPK), dtype=torch.int32, device=device)
+        weights = torch.rand(8, TOPK, dtype=torch.float32, device=device)
+        gated_outs = []
+        for arm in (False, True):
+            fn.NVFP4_PREFILL_FUSED_PLANES = arm
+            gated_outs.append(
+                fn.fused_experts_nvfp4(
+                    hidden, *gated, weights, ids, E, "silu", False,
+                ).clone()
+            )
+        assert torch.equal(gated_outs[0], gated_outs[1]), (
+            "the fused-planes flag must be inert for a gated activation"
+        )
+    finally:
+        fn.NVFP4_PREFILL_DEINTERLEAVE_A = prev_deint
+        fn.NVFP4_PREFILL_FUSED_PLANES = prev_planes

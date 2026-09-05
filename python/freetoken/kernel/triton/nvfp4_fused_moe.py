@@ -364,6 +364,7 @@ def _prefill_nvfp4_moe_kernel(
     ACT: tl.constexpr,
     compute_type: tl.constexpr,
     DEINTERLEAVED_A: tl.constexpr = False,
+    PLANAR_OUT: tl.constexpr = False,
 ):
     """Grouped GEMM over the packed NVFP4 experts, two ``tl.dot``s per packed byte.
 
@@ -379,6 +380,18 @@ def _prefill_nvfp4_moe_kernel(
     Only the *addressing* of A changes; masks, the ``// top_k`` row indexing, the
     per-``tl.dot`` reduction order, the accumulator and the epilogue are identical, so
     the two paths are bit-identical up to the loads themselves.
+
+    ``PLANAR_OUT`` is the *producer* side of the same layout: it writes C already
+    deinterleaved, so a consumer GEMM can set ``DEINTERLEAVED_A`` on it with no host
+    prepass at all.  It is expressed on the **load** side, not the store side -- the
+    output column ``d`` of this tile is computed from source row
+    ``perm(d) = (d % (N // 2)) * 2 + d // (N // 2)`` of the expert weight, so C's store
+    stays a plain contiguous run while the B/scale/global gathers (whose ``n`` axis is
+    the strided one either way, ``stride_pn == K // 2``) simply walk a stride-2 set of
+    rows.  Every output element is still the same k-ordered dot of the same operands --
+    only *which tile column it lands in* moves -- so this too is bit-identical to
+    ``PLANAR_OUT=False`` followed by :func:`freetoken.moe.fused_nvfp4.deinterleave_a`.
+    Requires an even ``N``; the host asserts it.
     """
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
@@ -398,7 +411,14 @@ def _prefill_nvfp4_moe_kernel(
     offs_token = tl.load(sorted_token_ids_ptr + offs_token_id).to(tl.int64)
     token_mask = offs_token < num_valid_tokens
 
-    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    n_dst = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    if PLANAR_OUT:
+        # This tile's column ``d`` holds source row ``perm(d)``: the even-k plane
+        # (2*d) for d < N//2, the odd-k plane (2*(d - N//2) + 1) above it.
+        n_half = N // 2
+        offs_bn = (n_dst % n_half) * 2 + n_dst // n_half
+    else:
+        offs_bn = n_dst
     offs_kb = tl.arange(0, BLOCK_SIZE_KB)
     a_row = offs_token[:, None] // top_k * stride_am
     if DEINTERLEAVED_A:

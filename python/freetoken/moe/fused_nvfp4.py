@@ -456,6 +456,41 @@ NVFP4_PREFILL_DEINTERLEAVE_A = os.environ.get(
 ).strip().lower() not in ("0", "false", "no", "off")
 
 
+# --- Fused k-planes: gemm1 stores what gemm2's A-gather wants (default OFF) -----------
+# ``deinterleave_a`` above is a standalone read+write of A.  For gemm1 that is
+# unavoidable (its A is the layer's hidden states, produced elsewhere).  For **gemm2**
+# it is pure overhead: gemm2's A *is* gemm1's output buffer, so gemm1's epilogue can
+# emit the two k-planes itself and gemm2 can read them with no prepass at all --
+# ``PLANAR_OUT`` in ``_prefill_nvfp4_moe_kernel``, which permutes the *source* row each
+# tile column takes (the weight ``n`` axis is the strided one either way) and leaves the
+# C store contiguous.  Measured cost of the prepass this removes: 0.551 ms of both
+# prepasses at M=8192, of which gemm2's 182 MiB read+write is ~0.3 ms
+# (misc_tickets_2026-09-05.md S2, "left on the table").
+#
+# Only applies when gemm1's activation is fused into its epilogue (``ACT != 0``, i.e.
+# ungated ReLU^2): a gated activation runs ``_run_act`` over gemm1's output and mixes
+# the two halves of a row, which a permuted column order would silently break.  It also
+# requires ``NVFP4_PREFILL_DEINTERLEAVE_A`` -- with the deinterleave off, gemm2 wants
+# the plain interleaved A.
+#
+# Measured 2026-09-05 on the RTX 5080 (bench_moe_prefill_gemm.py, shipped tiles,
+# `--variant tree deint fused --verify`), **bit-exact against the production kernel at
+# every M** (max|d| = 0.000e+00), never slower:
+#   M=256  1.091 -> 1.078 ms | 1024 2.596 -> 2.533 | 2048 4.465 -> 4.334
+#   M=4096 7.793 -> 7.660    | 8192 13.965 -> 13.708 (1.018x; 1.237x over `tree`)
+# The gemm2 prepass it removes measures 0.445 ms at M=8192 (bench variant ``prepass2``)
+# and the arm recovers 0.250 ms of it -- the permuted B/scale row set is not quite free,
+# so take the delta, not the prepass, as the win.
+#
+# On by default; ``FREETOKEN_NVFP4_PREFILL_FUSED_PLANES=0`` is the hatch.  Same
+# in-process override convention as the flag above:
+#
+#     fused_nvfp4.NVFP4_PREFILL_FUSED_PLANES = False
+NVFP4_PREFILL_FUSED_PLANES = os.environ.get(
+    "FREETOKEN_NVFP4_PREFILL_FUSED_PLANES", ""
+).strip().lower() not in ("0", "false", "no", "off")
+
+
 def deinterleave_a(a: torch.Tensor) -> torch.Tensor:
     """``[M, K]`` -> ``[M, K]`` with every even-k value first, then every odd-k value.
 
@@ -486,21 +521,31 @@ def _prefill_gemm(
     cfg: Dict[str, Any],
     act: int = 0,
     deinterleave: bool | None = None,
+    a_is_planar: bool = False,
+    planar_out: bool = False,
 ) -> None:
     N = packed.shape[1]
     K = packed.shape[2] * 2
     EM = sorted_ids.shape[0]
     scale = e4m3_kernel_view(scale)
     # Standalone prepass: one extra read+write of A (44 MiB for gemm1 at M=8192, 182 MiB
-    # for gemm2).  For gemm2 that is pure overhead in principle -- its A *is* gemm1's
-    # output, so a gemm1 epilogue storing the two k-planes directly would fold the whole
-    # gemm2 prepass into a store that already happens.  Kept standalone here so the
-    # experiment can price the prepass separately from the kernel win (bench variant
-    # ``prepass``); fold it into gemm1's store only if the kernel win pays for it.
+    # for gemm2).  For gemm1 it is unavoidable -- its A is the layer's hidden states.
+    # For gemm2 it is removable, and ``a_is_planar`` is that path: gemm1 was launched
+    # with ``planar_out`` and its store already emitted the two k-planes, so there is
+    # nothing left to rewrite (module flag ``NVFP4_PREFILL_FUSED_PLANES``).  The bench's
+    # ``prepass`` / ``prepass2`` variants price the two rewrites separately.
     deint = NVFP4_PREFILL_DEINTERLEAVE_A if deinterleave is None else deinterleave
-    if deint:
+    if a_is_planar:
+        # A already carries the two k-planes -- the producing GEMM's epilogue wrote
+        # them (``planar_out``), so the prepass is skipped and the kernel takes the
+        # unit-stride A path unconditionally.
+        assert a.shape[-1] == K, (a.shape, K)
+        deint = True
+    elif deint:
         assert a.shape[-1] == K, (a.shape, K)
         a = deinterleave_a(a)
+    if planar_out:
+        assert N % 2 == 0, f"planar_out needs an even N, got {N}"
     grid = lambda META: (  # noqa: E731
         triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
     )
@@ -519,6 +564,7 @@ def _prefill_gemm(
         ACT=act,
         compute_type=_tl_dtype(c.dtype),
         DEINTERLEAVED_A=deint,
+        PLANAR_OUT=planar_out,
         **cfg,
     )
 
@@ -560,11 +606,17 @@ def fused_experts_nvfp4(
     tw = topk_weights.reshape(-1).contiguous()
     num_valid = topk_ids.numel()
 
+    # gemm2's A is gemm1's output buffer, so gemm1 can store the k-planes gemm2's
+    # A-gather wants and gemm2's 182 MiB (M=8192) deinterleave prepass disappears.
+    # Needs the epilogue-fused activation (a gated ``_run_act`` reads gemm1's output
+    # row-wise) and the deinterleaved A path (otherwise gemm2 wants plain [M, K]).
+    fuse_planes = bool(act) and NVFP4_PREFILL_DEINTERLEAVE_A and NVFP4_PREFILL_FUSED_PLANES
+
     ic1 = torch.empty((M, top_k, two_i), device=dev, dtype=dt)
     _prefill_gemm(
         hidden_states, gate_up_packed, gate_up_scale, gate_up_global, ic1,
         tw, sorted_ids, expert_ids, ntpp, num_valid, top_k,
-        apply_router_weight_on_input, cfg, act,
+        apply_router_weight_on_input, cfg, act, planar_out=fuse_planes,
     )
     if act:
         ic2 = ic1.view(-1, two_i)  # activated in gemm1's epilogue, in fp32
@@ -575,7 +627,7 @@ def fused_experts_nvfp4(
     _prefill_gemm(
         ic2, down_packed, down_scale, down_global, ic3,
         tw, sorted_ids, expert_ids, ntpp, num_valid, 1,
-        not apply_router_weight_on_input, cfg_down,
+        not apply_router_weight_on_input, cfg_down, a_is_planar=fuse_planes,
     )
     out = torch.empty_like(hidden_states)
     moe_sum_reduce_triton(ic3, out)
@@ -589,6 +641,7 @@ __all__ = [
     "nvfp4_config_filename",
     "nvfp4_moe_config",
     "NVFP4_PREFILL_DEINTERLEAVE_A",
+    "NVFP4_PREFILL_FUSED_PLANES",
     "deinterleave_a",
     "fused_experts_decode_nvfp4_marlin",
     "fused_experts_decode_nvfp4_serial",
