@@ -476,3 +476,8 @@ the clock. A live 16-way soak on both routes remains the acceptance test.
       (19 %) passthrough. A 118 K prompt at 512 tokens/pass is why stage p95 is still 146 s.
       Size the interleave share by the lanes the pass will actually seat, or floor the chunk
       at ~2 K tokens.
+- [x] Merged fork/main (14 Ada/Ornith commits) into nemotron35 at 32cc504. Before deploying on Ada:
+      rebuild the _gguf extension (multiwarp bool→warps int64; stale .so silently picks 4-warp path).
+- [ ] Ticket: Scheduler.__init__ now calls torch.cuda.get_device_capability unconditionally (from
+      fork/main) — blocks constructing a Scheduler in CPU tests; guard it.
+- [ ] fork/main fast-forward to the merge is the user's call (nemotron35 branch carries it).
