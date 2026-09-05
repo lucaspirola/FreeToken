@@ -67,6 +67,53 @@ _REPROBE_EVERY = 16
 _GATE_MARGIN = 1.25
 _GATE_MIN_SAMPLES = 2
 
+# Seeded gate -- FREETOKEN_SPEC_GATE_SEED=1, OFF by default until it has a GPU measurement.
+#
+# _GATE_MIN_SAMPLES full-width verify steps is a real price at long context: 2 x ~82 ms at 131K
+# against a 10.4 ms decode step, which on the 79-token needle generation IS the whole -10 %
+# regression (misc_tickets_2026-09-05.md §4). A verify step's wall clock is well described by
+# ``t(m) = a + b*m`` -- a width-independent term (weights over PCIe, the eager launch path) plus
+# the extend attention, which reads the whole KV history once per query token. So a couple of
+# NARROW probes can price the full-width step without ever running one: at 131K, m = 2 and m = 4
+# cost ~88 ms together against ~163 ms for two full-width probes, and they measure the same thing.
+#
+# TWO probes, not one, and that is the whole design. With a single point ``a`` is unidentifiable,
+# and the obvious closed form -- scale ``t`` linearly through the origin -- over-estimates the
+# full-width step by ``(m_full/m_seed - 1) * a``. At 131K ``a`` is small next to ``b*m`` so that is
+# survivable; at short context ``a`` IS the step (b ~ 0.85 ms/token against a ~28 ms fixed term),
+# the estimate comes out ~4x high, and the gate closes on exactly the copy-class traffic the
+# feature exists for -- the failure that turned +11 % into -0.3 % once already. Two points fit both
+# terms, cost less than one full-width probe, and need no compensating margin.
+_SEED_WIDTHS = (1, 3)   # draft lengths k of the probe steps, i.e. m = 2 then m = 4
+
+
+def _fit_verify_ms(samples: Sequence[Tuple[int, float]], m_full: int) -> float | None:
+    """Price a full-width verify step from narrow probes, fitting ``t(m) = a + b*m``.
+
+    Least squares over the probes with both terms clamped non-negative (a fit that says a wider
+    extend is cheaper is noise, not a measurement) and the result floored at the largest sample --
+    extrapolating below a cost already paid is never right. Returns None when the probes do not
+    span at least two widths, in which case the caller falls back to timing real full-width steps
+    and the gate behaves exactly as it does with seeding off.
+    """
+    if len(samples) < 2:
+        return None
+    ms = [float(m) for m, _ in samples]
+    ts = [t for _, t in samples]
+    mean_m, mean_t = sum(ms) / len(ms), sum(ts) / len(ts)
+    var = sum((m - mean_m) ** 2 for m in ms)
+    if var <= 0.0:  # every probe landed on the same width: the slope is unidentifiable
+        return None
+    b = sum((m - mean_m) * (t - mean_t) for m, t in zip(ms, ts)) / var
+    if b < 0.0:
+        b, a = 0.0, mean_t
+    else:
+        a = mean_t - b * mean_m
+        if a < 0.0:  # refit through the origin rather than credit the step a negative fixed cost
+            a = 0.0
+            b = sum(m * t for m, t in zip(ms, ts)) / sum(m * m for m in ms)
+    return max(a + b * float(m_full), max(ts))
+
 
 def _ewma(old: float | None, sample: float) -> float:
     return sample if old is None else _EWMA_ALPHA * sample + (1.0 - _EWMA_ALPHA) * old
@@ -205,6 +252,11 @@ class SpecStats:
     declined_budget: int = 0
     declined_stale_match: int = 0
     declined_uneconomic: int = 0
+    # Seeded gate: narrow probe steps run, and requests whose gate was primed from them. A seeded
+    # request declines after ``probes`` narrow steps instead of _GATE_MIN_SAMPLES full-width ones,
+    # so these two next to ``declined.uneconomic`` are what the A/B reads.
+    seed_probe_steps: int = 0
+    seed_fits: int = 0
     # Wall-clock breakdown of a verify step, in ms, summed over ``verify_steps``. A verify
     # step is ~7x a decode step end to end against a ~30 ms forward, and "the rest" was one
     # undivided number until this existed -- so it is reported, not inferred: draft+stage,
@@ -284,6 +336,7 @@ class SpecStats:
             "accept_rate": round(self.accept_rate, 4),
             "tokens_per_verify": round(self.tokens_per_verify, 4),
             "declined": self.declines,
+            "seed": {"probes": self.seed_probe_steps, "fits": self.seed_fits},
             "cost_ms": self.cost_ms,
             "accepted_hist": dict(self.accepted_hist),
         }
@@ -307,6 +360,13 @@ class _SpecState:
     verify_samples: int = 0
     emit: float = 0.0
     gated: int = 0
+    # Seeded gate (_SEED_WIDTHS). ``seeding`` is set at construction from the decoder's flag and
+    # cleared once the probes are in; ``verify_seeded`` says the current ``verify_ms`` is an
+    # extrapolation, so the first real full-width step must REPLACE it rather than _floor()
+    # against it.
+    seeding: bool = False
+    seed_probes: List[Tuple[int, float]] = field(default_factory=list)
+    verify_seeded: bool = False
 
     def __post_init__(self) -> None:
         self.k = self.max_k
@@ -366,6 +426,7 @@ class SpecNgramDecoder:
     post_drain = True
     fused_commit = True
     fast_prep = True
+    gate_seed = False
     _prep = None
     _fla_cache: dict | None = None
     _ev = None
@@ -393,6 +454,10 @@ class SpecNgramDecoder:
         self.post_drain = os.environ.get("FREETOKEN_SPEC_POST_DRAIN", "1") == "1"
         self.fused_commit = os.environ.get("FREETOKEN_SPEC_FUSED_COMMIT", "1") == "1"
         self.fast_prep = os.environ.get("FREETOKEN_SPEC_FAST_PREP", "1") == "1"
+        #   gate_seed     price the break-even gate from two NARROW verify steps instead of
+        #                 _GATE_MIN_SAMPLES full-width ones (see _SEED_WIDTHS). OFF by default:
+        #                 it changes what the gate decides, and it has no GPU measurement yet.
+        self.gate_seed = os.environ.get("FREETOKEN_SPEC_GATE_SEED", "0") == "1"
         self._prep: _VerifyBuffers | None = None
         self._fla_cache: dict = {}
         self.enabled, self.disabled_reason = self._supported()
@@ -508,6 +573,11 @@ class SpecNgramDecoder:
         where ``k + 1 = 9`` can no longer reach it (measured, §5 of the write-up). Estimating
         both terms online is what keeps a long-context session from paying for a drafter that
         cannot win, without a context-length threshold anyone has to tune.
+
+        With ``FREETOKEN_SPEC_GATE_SEED=1`` the "measurement" the first drafts pay for is two
+        narrow probes fitted to ``t(m) = a + b*m`` (:func:`_fit_verify_ms`) rather than
+        ``_GATE_MIN_SAMPLES`` full-width steps. The fit targets the same quantity, so the test
+        below and its margin are unchanged; only the price of learning it moves.
         """
         if state.decode_ms is None or state.verify_samples < _GATE_MIN_SAMPLES:
             return True  # not measured yet: the first drafts ARE the measurement
@@ -521,6 +591,10 @@ class SpecNgramDecoder:
                 drafter=NgramDrafter(self.n),
                 max_k=self.draft_len,
                 adaptive=self.adaptive,
+                # Per request, like every other term of the gate: the verify/decode ratio is a
+                # function of THIS request's context length, so the probes must be too. A draft
+                # length that does not leave room for two distinct narrow widths cannot be seeded.
+                seeding=self.gate_seed and self.draft_len > max(_SEED_WIDTHS),
             )
             self._state = state
         return state
@@ -576,11 +650,45 @@ class SpecNgramDecoder:
             t, prev = time.perf_counter(), t
             st.t_finish += (t - prev) * 1e3
 
-        st.t_total += (time.perf_counter() - started) * 1e3
-        state.verify_ms = _floor(state.verify_ms, (time.perf_counter() - started) * 1e3)
-        state.verify_samples += 1
-        state.emit = _ewma(state.emit, float(len(emitted)))
-        state.note(len(draft), accepted)
+        elapsed = (time.perf_counter() - started) * 1e3
+        st.t_total += elapsed
+        if state.seeding:
+            # A narrow probe. Its wall clock prices the full-width step (below), but its emitted
+            # count describes a k=1/k=3 draft, so `emit` may only see it when the probe says
+            # something a full-width step would have said too.
+            #
+            # Under greedy decoding it sometimes does, exactly: the drafted tokens are a prefix of
+            # the same continuation whatever k is, and the model's greedy token at each position
+            # does not depend on how many more were drafted -- so a probe that REJECTS at position
+            # j has found the divergence a full-width draft would have found at the same j, and its
+            # accepted count IS the full-width accepted count. A probe that accepts everything it
+            # drafted has only run out of width and bounds nothing, so it is dropped rather than
+            # allowed to drag the EWMA down towards closing the gate it exists to inform.
+            state.seed_probes.append((len(draft) + 1, elapsed))
+            st.seed_probe_steps += 1
+            if accepted < len(draft):
+                state.emit = _ewma(state.emit, float(len(emitted)))
+                state.note(self.draft_len, accepted)   # a full-width-equivalent rejection
+            if len(state.seed_probes) >= len(_SEED_WIDTHS):
+                state.seeding = False
+                fit = _fit_verify_ms(state.seed_probes, self.draft_len + 1)
+                if fit is not None:
+                    state.verify_ms = fit
+                    state.verify_seeded = True
+                    state.verify_samples = max(state.verify_samples, _GATE_MIN_SAMPLES)
+                    st.seed_fits += 1
+        else:
+            if state.verify_seeded:
+                # The first real full-width step REPLACES the extrapolation. A _floor() against a
+                # seed that came out high would pin verify_ms there for the life of the request
+                # and starve the gate of the samples that reopen it -- the same trap the EWMA fell
+                # into on the first, autotuning verify step.
+                state.verify_ms, state.verify_seeded = elapsed, False
+            else:
+                state.verify_ms = _floor(state.verify_ms, elapsed)
+            state.verify_samples += 1
+            state.emit = _ewma(state.emit, float(len(emitted)))
+            state.note(len(draft), accepted)
         self.stats.verify_steps += 1
         self.stats.drafted_tokens += len(draft)
         self.stats.accepted_tokens += accepted
@@ -628,6 +736,11 @@ class SpecNgramDecoder:
             and req.cached_len < anchor
         ):
             k = min(k, anchor - req.cached_len - 1)
+        if state.seeding and len(state.seed_probes) < len(_SEED_WIDTHS):
+            # Price the step with a narrow probe before ever paying for a full-width one. The
+            # hard bounds above still win -- a clamped probe is a valid sample, it just may land
+            # on a width a previous probe already took, which _fit_verify_ms then declines.
+            k = min(k, _SEED_WIDTHS[len(state.seed_probes)])
         if k <= 0:
             self.stats.declined_budget += 1
             return 0

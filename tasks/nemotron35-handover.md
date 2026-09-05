@@ -159,14 +159,18 @@ run on either engine (cheap open rung).
 0c. **The restore-deferral path is unexercised by a soak** — 568 restores, `restores_deferred`
    **0**, invariant violations 0. The charging alone held; the deferral arm's only evidence stays
    `benchmarks/scheduler_replay.py`'s `switchyard-restore` profile plus the unit tests. soak §X4.
-1. **n-gram verify overhead** — ~40% of a verify step is not the forward (~52 ms vs a ~30 ms
-   extend forward): 46 eager kernel launches in the commit, `_prepare_batch` rebuilding pinned
-   staging for a one-request batch. Taking the step from 7x to 4x a decode step moves the copy
-   class 1.03x → ~1.12x. Also: burst-entry hysteresis costs ~4x in draft rate (0.079 measured
-   vs 0.353 offline). The **131K regression is this ticket** and nothing else: at the shipped k=8
-   the needle case is 0.898x of spec-off and the gate cannot refund its own two probe steps
-   (163 ms at k=8, 279 at k=16, against a 10.4 ms decode step) — draft length is settled, the
-   verify step is not. `ngram_spec_impl_2026-09-05.md` §6; `misc_tickets_2026-09-05.md` §4.
+1. **n-gram verify step at long context.** The launch-overhead half is **closed by `b84ecb7`**
+   (one fused SSD scan for 23 layers, verify batch built from its own fixed shape): step
+   54.0 → 35.6 ms, commit 1.24 → 0.18, prep 0.80 → 0.34 — non-forward is now ~0.5 ms of 35.6 — and
+   "hysteresis costs 4x in draft rate" was **stream variance**, real gap 2 %
+   (`ngram_spec_fast_2026-09-05.md` §2/§4/§5/§8). What is left is 131K, still **0.898x** at k=8,
+   for two reasons that are not the launch path: (a) the extend attention reads the whole KV
+   history once per query token, so verify/decode is ~9–12x against a `k+1 = 9` ceiling — a fused
+   multi-query extend kernel is the shape of the fix; (b) the gate cannot refund its own probe:
+   `_pays_off` needs `_GATE_MIN_SAMPLES` **full-width** steps before it may decline, and 2 × ~82 ms
+   on a 79-token generation IS the −10 %. A default-off seeded gate (`FREETOKEN_SPEC_GATE_SEED=1`,
+   two narrow probes fit `t(m) = a + b·m`) is in the tree, **unmeasured**.
+   `misc_tickets_2026-09-05.md` §4.
 2. **MoE prefill leftovers.** (a) gemm2's A *is* gemm1's output, so its deinterleave prepass is
    removable by having gemm1's store emit the two k-planes — ~0.3 ms of the 0.551 at M=8192.
    (b) The M=256 GEMM bucket runs at 20% of ceiling with +53% padding waste at `BLOCK_M=16`.

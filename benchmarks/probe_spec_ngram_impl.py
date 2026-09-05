@@ -71,6 +71,10 @@ def _stats(spec):
         "declined_budget": s.declined_budget,
         "declined_stale_match": s.declined_stale_match,
         "declined_uneconomic": s.declined_uneconomic,
+        # Seeded gate. Without these the only evidence that the probes ran is arithmetic on
+        # ``drafted_tokens``, which is unambiguous only while the step count is tiny.
+        "seed_probe_steps": s.seed_probe_steps,
+        "seed_fits": s.seed_fits,
         "cost_ms": s.cost_ms,
     }
 
@@ -78,11 +82,16 @@ def _stats(spec):
 # Each optimisation of the 2026-09-05 verify-step work, switchable so one model load can
 # measure the shipped path and the new one against the same off/off2 control.
 VARIANTS = {
-    "v0": dict(post_drain=False, fused_commit=False, fast_prep=False),
-    "v1": dict(post_drain=True, fused_commit=True, fast_prep=True),
-    "drain": dict(post_drain=True, fused_commit=False, fast_prep=False),
-    "commit": dict(post_drain=False, fused_commit=True, fast_prep=True),
+    "v0": dict(post_drain=False, fused_commit=False, fast_prep=False, gate_seed=False),
+    "v1": dict(post_drain=True, fused_commit=True, fast_prep=True, gate_seed=False),
+    "drain": dict(post_drain=True, fused_commit=False, fast_prep=False, gate_seed=False),
+    "commit": dict(post_drain=False, fused_commit=True, fast_prep=True, gate_seed=False),
 }
+# The break-even gate priced from two NARROW verify steps (m = 2, m = 4) fitted to
+# t(m) = a + b*m, instead of _GATE_MIN_SAMPLES full-width ones. ``gate_seed`` is carried by
+# EVERY variant above, not only this one: a key absent from VARIANTS["v1"] inherits the
+# previous arm's value, which is how a "v0, k = 8" arm once ran at the preceding arm's k = 16.
+VARIANTS["seed"] = dict(VARIANTS["v1"], gate_seed=True)
 # Repeats of v1 under different labels: the copy class's draft rate depends on the token
 # stream, which speculation itself perturbs, so "is this arm reproducible?" needs arms that
 # differ in nothing at all.

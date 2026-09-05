@@ -777,3 +777,158 @@ def test_verify_prep_builds_its_metadata_once_per_shape(monkeypatch):
     assert len(cached.calls) == 1                       # ... does not rebuild it
     # the verify step allocated pages for L .. L+k before the forward, not after the commit
     assert sch.cache_manager.allocations == [[(8, 13)]]
+
+
+# ------------------------------------------------------- the seeded break-even gate
+
+
+def test_the_seed_fit_recovers_a_verify_step_that_is_linear_in_the_width():
+    """``t(m) = a + b*m``: a width-independent term plus the extend attention, which reads the
+    whole KV history once per query token. Two narrow probes identify both terms exactly."""
+    # 131K needle: a = 25.0 ms fixed, b = 6.3 ms per query token -> t(9) = 81.7, and the
+    # measured full-width step there is 81.5 (misc_tickets_2026-09-05.md §4).
+    assert spec_ngram._fit_verify_ms([(2, 37.6), (4, 50.2)], 9) == pytest.approx(81.7)
+    # copy class, short context: a = 28.0, b = 0.85 -> t(9) = 35.65 against a measured 35.6.
+    assert spec_ngram._fit_verify_ms([(2, 29.7), (4, 31.4)], 9) == pytest.approx(35.65)
+
+
+def test_one_probe_cannot_price_a_verify_step_and_two_can():
+    """Why the seed takes two widths. This is the whole design, as a number.
+
+    With one point the fixed term is unidentifiable, and the obvious closed form -- scale the
+    sample through the origin -- over-estimates by ``(m_full/m_seed - 1) * a``. At 131K that is
+    survivable; at short context ``a`` IS the step, the estimate lands ~4x high, and the gate
+    closes on exactly the copy-class traffic the feature exists for.
+    """
+    tokens = [1, 2, 3, 7, 8, 9, 1, 2, 3]
+    dec = _decoder(_FakeScheduler(_make_req(tokens), []), draft_len=8)
+    state = _SpecState(req=None, drafter=NgramDrafter(3), max_k=8, adaptive=False)
+    state.decode_ms, state.emit = 7.3, 9.0        # short context, the optimistic emit prior
+    state.verify_samples = spec_ngram._GATE_MIN_SAMPLES
+
+    through_origin = 29.7 * 9 / 2                  # the one-point estimate
+    assert through_origin == pytest.approx(133.65)
+    state.verify_ms = through_origin
+    assert dec._pays_off(state) is False           # ... would gate off the copy class
+
+    state.verify_ms = spec_ngram._fit_verify_ms([(2, 29.7), (4, 31.4)], 9)
+    assert state.verify_ms == pytest.approx(35.65)  # the true full-width cost, to 0.1 %
+    assert dec._pays_off(state) is True             # ... and the gate correctly stays open
+
+
+def test_the_seed_fit_declines_rather_than_guess():
+    fit = spec_ngram._fit_verify_ms
+    assert fit([(2, 30.0)], 9) is None                     # one sample: no slope
+    assert fit([(2, 30.0), (2, 31.0)], 9) is None          # one width: no slope
+    # A fit that says a wider extend is cheaper is noise: clamp the slope, keep the level, and
+    # never extrapolate below a cost already paid.
+    assert fit([(2, 40.0), (4, 30.0)], 9) == pytest.approx(40.0)
+    # A steep fit whose intercept goes negative refits through the origin instead of crediting
+    # the step a negative fixed cost.
+    assert fit([(2, 10.0), (4, 30.0)], 9) >= 30.0
+
+
+def test_the_seeded_gate_is_off_by_default():
+    """It changes what the gate decides and has no GPU measurement yet."""
+    assert SpecNgramDecoder.gate_seed is False
+    tokens = [1, 2, 3, 7, 8, 9, 1, 2, 3]
+    dec = _decoder(_FakeScheduler(_make_req(tokens), []), draft_len=8)
+    state = dec._state_for(_make_req(tokens))
+    assert state.seeding is False and state.seed_probes == []
+
+
+def test_the_seed_narrows_the_first_drafts_and_then_gets_out_of_the_way():
+    tokens = [1, 2, 3, 7, 8, 9, 1, 2, 3]
+    req = _make_req(tokens, output_len=64)
+    dec = _decoder(_FakeScheduler(req, []), draft_len=8)
+    dec.gate_seed = True
+    state = dec._state_for(req)
+    assert state.seeding is True
+
+    assert dec._budget(req, state) == spec_ngram._SEED_WIDTHS[0]
+    state.seed_probes.append((2, 40.0))
+    assert dec._budget(req, state) == spec_ngram._SEED_WIDTHS[1]
+    state.seed_probes.append((4, 50.0))
+    assert dec._budget(req, state) == 8            # probes done: full width from here on
+    # A draft length with no room for two distinct narrow widths is never seeded.
+    narrow = _decoder(_FakeScheduler(req, []), draft_len=max(spec_ngram._SEED_WIDTHS))
+    narrow.gate_seed = True
+    narrow._state = None
+    assert narrow._state_for(req).seeding is False
+
+
+def _seeded_chain(monkeypatch):
+    """A stream whose 3-gram keeps matching across three full-acceptance verify steps."""
+    monkeypatch.setattr(spec_ngram, "_make_capture", _FakeCapture)
+    _FakeCapture.instances.clear()
+    tokens = [1, 2, 3] + list(range(10, 40)) + [1, 2, 3]
+    req = _make_req(tokens, output_len=64)
+    script = [
+        [10, 11],                                  # k = 1 probe, full acceptance
+        [12, 13, 14, 15],                          # k = 3 probe, full acceptance
+        [16, 17, 18, 19, 20, 21, 22, 23, 24],      # full width, k = 8
+    ]
+    sch = _FakeScheduler(req, script, pool=_FakePool(), max_len=256)
+    _seed_token_pool(sch, req)
+    dec = _decoder(sch, draft_len=8, adaptive=True)
+    dec.gate_seed = True
+    return req, sch, dec
+
+
+def test_two_narrow_probes_price_the_gate_before_a_full_width_step_is_ever_run(monkeypatch):
+    req, sch, dec = _seeded_chain(monkeypatch)
+    state = dec._state_for(req)
+
+    assert dec.run_step(req) is True
+    assert sch.engine.forward_widths == [2]        # m = k + 1 at the first seed width
+    assert state.verify_samples == 0               # a narrow step is not a full-width sample
+    assert state.verify_ms is None
+    assert dec.stats.seed_probe_steps == 1 and dec.stats.seed_fits == 0
+
+    assert dec.run_step(req) is True
+    assert sch.engine.forward_widths == [2, 4]
+    # Both probes in: the gate is primed without a single full-width verify step.
+    assert state.seeding is False and state.verify_seeded is True
+    assert [m for m, _ in state.seed_probes] == [2, 4]
+    assert state.verify_ms == spec_ngram._fit_verify_ms(state.seed_probes, dec.draft_len + 1)
+    assert state.verify_samples == spec_ngram._GATE_MIN_SAMPLES
+    assert dec.stats.seed_probe_steps == 2 and dec.stats.seed_fits == 1
+
+    # ... and the first real full-width step REPLACES the extrapolation rather than _floor()ing
+    # against it, so a seed that came out high cannot pin verify_ms for the life of the request.
+    assert dec.run_step(req) is True
+    assert sch.engine.forward_widths == [2, 4, 9]
+    assert state.verify_seeded is False
+    assert state.verify_samples == spec_ngram._GATE_MIN_SAMPLES + 1
+    assert dec.stats.seed_probe_steps == 2
+
+
+def test_a_saturated_probe_does_not_move_the_accepted_length_estimate(monkeypatch):
+    """A probe that accepts everything it drafted ran out of WIDTH, not of agreement, so its
+    emitted count bounds nothing about a full-width step."""
+    req, _sch, dec = _seeded_chain(monkeypatch)
+    state = dec._state_for(req)
+    assert state.emit == 9.0 and state.k == 8      # the optimistic priors
+    assert dec.run_step(req) is True               # k = 1, accepted 1 of 1
+    assert state.emit == 9.0                       # untouched: 2 emitted says nothing about k=8
+    assert state.k == 8                            # ... and the adaptive ladder is not fed either
+
+
+def test_a_probe_that_rejects_is_a_full_width_rejection(monkeypatch):
+    """Under greedy decoding the drafted tokens are a prefix of the same continuation whatever
+    ``k`` is, so a probe that diverges at position j found the divergence a full-width draft
+    would have found at the same j. That count IS the full-width count and must be used."""
+    monkeypatch.setattr(spec_ngram, "_make_capture", _FakeCapture)
+    _FakeCapture.instances.clear()
+    tokens = [1, 2, 3] + list(range(10, 40)) + [1, 2, 3]
+    req = _make_req(tokens, output_len=64)
+    sch = _FakeScheduler(req, [[99, 100]], pool=_FakePool())  # drafted [10], model says 99
+    _seed_token_pool(sch, req)
+    dec = _decoder(sch, draft_len=8, adaptive=True)
+    dec.gate_seed = True
+    state = dec._state_for(req)
+
+    assert dec.run_step(req) is True
+    assert dec.stats.accepted_tokens == 0
+    assert state.emit < 9.0                        # the rejection reaches the EWMA
+    assert state.k == 4                            # ... and halves the ladder, as at full width
