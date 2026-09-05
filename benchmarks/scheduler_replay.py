@@ -1018,6 +1018,17 @@ def run(ticks: int, seed: int, verbose: bool = False, profile: str = "stage",
 #   pressure         prefilled_tokens 5,000,774  completed  60
 #   switchyard-stage prefilled_tokens 1,873,120  completed 219  error_rate 0.3578
 #
+# Re-measured after the chunk share was made to divide by the lanes the pass will SEAT
+# instead of by the queue depth (soak §R7 ticket 1 / §U8; the divisor came from f3c3ac4).
+# Same seed, ticks and interpreter; 797d23e -> this tree:
+#   stage            2,756,687 -> 5,024,311  (+82%)  completed 183 -> 297  util 0.144 -> 0.851
+#   pressure         5,000,774 -> 8,238,023  (+65%)  completed  60 ->  91  util 0.121 -> 0.917
+#   switchyard-stage 1,995,035 -> 2,398,186  (+20%)  completed 247 -> 256  util 0.088 -> 0.620
+#   switchyard-dead    903,157 -> 1,163,345  (+29%)  completed 118 -> 185  util 0.115 -> 0.707
+# ``invariant_violations`` 0 and ``deadlock`` False on all four, before and after: the
+# change moves no admission gate, it only stops under-spending the prefill budget on the
+# lanes a pass has already decided to seat.
+#
 # d685e99 is the ONLY tree that has passed the live 16-way Switchyard soak
 # (stage route: 471 req / 0 err / 1 STALLED). Two successive rewrites scored far higher
 # here and failed live, so these floors are deliberately set to the *live-passing* tree
@@ -1034,18 +1045,26 @@ GATE_TICKS = 20_000
 GATE_SEED = 7
 GATE_CASES = [
     # profile, min prefilled_tokens, min completed, max error_rate (None = not checked)
-    ("stage",            2_670_000, 171, None),
-    ("pressure",         4_750_000,  57, None),
+    ("stage",            4_773_000, 282, None),
+    ("pressure",         7_826_000,  86, None),
     # The residency profile is graded on goodput AND on the soak's own acceptance metric.
-    ("switchyard-stage", 1_779_000, 208, 0.376),
+    # The error ceiling moved 0.376 -> 0.410 with the chunk-share fix, and that is jitter,
+    # not a regression: over seeds {1,3,5,7,11,13,17,23} the mean error rate is 0.288
+    # before and 0.285 after, with the per-seed spread 0.214-0.338 before and 0.198-0.391
+    # after -- seed 7 is simply this profile's worst seed on the new tree, while its
+    # completions rise 263 -> 337 (+28%) on the same eight seeds. The ceiling tracks the
+    # seed-7 measurement (+5%) like every other floor here; the SPREAD is what says whether
+    # a future move is real, so re-run the sweep before touching this number again.
+    ("switchyard-stage", 2_278_000, 243, 0.410),
     # The deadlock profile is the regression test for soak report T. Its floors come from
-    # the shipped tree (standing reservation + chunked-prefill cap: 903,157 tokens / 118
-    # completed / 0.2625 error rate, identical to d685e99 on this profile) -- but the
-    # checks that matter on it are the two every case now carries, ``deadlock`` and
-    # ``invariant_violations``. ea7ed7c beats every throughput floor here (1,716,024 / 278,
-    # error rate 0.1965) and fails those two: 2,181 violations, the admitted set owing up
-    # to 42,477 tokens more than the pool could obtain.
-    ("switchyard-deadlock", 857_000, 112, 0.276),
+    # the shipped tree -- but the checks that matter on it are the two every case now
+    # carries, ``deadlock`` and ``invariant_violations``. ea7ed7c beats every throughput
+    # floor here (1,716,024 / 278, error rate 0.1965) and fails those two: 2,181
+    # violations, the admitted set owing up to 42,477 tokens more than the pool could
+    # obtain. Seed 7 is this profile's BEST seed for error rate (0.1355 against a
+    # 0.136-0.246 spread over the eight seeds above), so the 0.143 ceiling is tight by
+    # construction; widen it from a sweep, not from a single failing run.
+    ("switchyard-deadlock", 1_105_000, 176, 0.143),
 ]
 
 

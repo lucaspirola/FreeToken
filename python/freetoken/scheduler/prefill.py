@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, List, Tuple
 
 import torch
@@ -90,6 +90,45 @@ class PrefillAdder:
         ps = self.cache_manager.page_size
         return (div_ceil(end, ps) - div_ceil(start, ps)) * ps
 
+    # ---- the three admission gates -----------------------------------------------------
+    # Factored out so the seat scan (:meth:`would_seat`, driven by
+    # ``PrefillManager._seatable_lanes``) asks the pools exactly the questions the real
+    # admission below asks them, off the same reservation counters. A second, drifting copy
+    # of this arithmetic is precisely how the previous chunk-share attempt became a no-op:
+    # it modelled a lane as costing one page and a table slot, which every pass could
+    # afford, so its count was always the queue depth it was meant to replace.
+
+    def _kv_gate_ok(self, estimated_len: int) -> bool:
+        """Whole-footprint admission gate for a FRESH prompt.
+
+        ``owed(admitted set) + owed(this prompt) <= available_size`` -- see the long note in
+        :meth:`_try_allocate_one`, which is the only caller that may act on a True.
+        """
+        return estimated_len + self.reserved_size <= self.cache_manager.available_size
+
+    def _swa_seat_ok(self, extend_len: int) -> bool:
+        """Can the swa pool seat this fresh request's first chunk / one window?"""
+        cm = self.cache_manager
+        if not cm.swa_paged:
+            return True
+        ps = cm.page_size
+        # swa is charged per WHOLE page (allocate_paged -> alloc_swa), so the seat check is
+        # in page units too; identical at page_size==1.
+        need = div_ceil(min(max(extend_len, 1), cm.sliding_window_size) + 1, ps) * ps
+        return cm.swa_available_size - self.reserved_swa >= need
+
+    def _kv_chunk_end(self, cached_len: int) -> int:
+        """Highest token offset the pool's remaining pages can back for this lane THIS pass.
+
+        ``available_size`` (evictable prefix + free slots + the not-yet-committed growable
+        suffix) is exactly the ceiling ``committed_pages_required`` tests against, and
+        ``reserved_pages`` is the page demand the reqs admitted earlier in this pass have
+        already placed on it.
+        """
+        ps = self.cache_manager.page_size
+        pages = max(0, self.cache_manager.available_size - self.reserved_pages) // ps
+        return (div_ceil(cached_len, ps) + pages) * ps
+
     def _try_allocate_one(self, req: PendingReq):
         if self.table_manager.available_size == 0:
             return None
@@ -113,11 +152,11 @@ class PrefillAdder:
         # i.e. the admitted SET stays finishable, not merely each arrival at the instant it
         # arrives. That distinction is the whole of soak report T5: 14 prefills each passed
         # a gate that measured only itself, and between them owed 1.76x the pool.
-        if estimated_len + self.reserved_size > self.cache_manager.available_size:
+        if not self._kv_gate_ok(estimated_len):
             return None
         self.cache_manager.lock(handle)
         # Re-read: lock() moved the matched prefix out of ``evictable``, so the budget shrank.
-        if estimated_len + self.reserved_size > self.cache_manager.available_size:
+        if not self._kv_gate_ok(estimated_len):
             return self.cache_manager.unlock(handle)
 
         # Second currency (hybrid GDN): reserve 1 live + 2 ping-pong state slots; evict tree
@@ -134,15 +173,8 @@ class PrefillAdder:
         # chunk / one window (the per-chunk charge is in _add_one_req; the reclaim -- radix
         # evict_swa -- happens in allocate_paged, so no ensure here; swa_available_size already
         # folds the evictable tree). For naive (no tree) this can only refuse, which is correct.
-        if self.cache_manager.swa_paged:
-            ps = self.cache_manager.page_size
-            # swa is charged per WHOLE page (allocate_paged -> alloc_swa), so the seat check is
-            # in page units too; identical at page_size==1.
-            need_swa = div_ceil(
-                min(max(extend_len, 1), self.cache_manager.sliding_window_size) + 1, ps
-            ) * ps
-            if self.cache_manager.swa_available_size - self.reserved_swa < need_swa:
-                return self.cache_manager.unlock(handle)
+        if not self._swa_seat_ok(extend_len):
+            return self.cache_manager.unlock(handle)
 
         table_idx = self.table_manager.allocate()
         if cached_len > 0:  # NOTE: set the cached part
@@ -187,16 +219,10 @@ class PrefillAdder:
         # that the pool can back its NEXT chunk: it owns its table slot, its GDN slots and its
         # already-forwarded pages, but the pages this chunk writes are allocated later, in
         # allocate_paged -- after committed_pages_required has already found the batch
-        # unbackable and killed the scheduler. ``available_size`` (evictable prefix + free
-        # slots + the not-yet-committed growable suffix) is exactly the ceiling
-        # committed_pages_required tests against, and ``reserved_pages`` is the page demand the
-        # reqs admitted earlier in this pass have already placed on it. On a fresh admit this
-        # is a no-op: _try_allocate_one just reserved the WHOLE remainder plus output_len
-        # against the same budget, which is never smaller than this chunk.
-        kv_ps = self.cache_manager.page_size
-        kv_pages = max(0, self.cache_manager.available_size - self.reserved_pages) // kv_ps
-        max_kv_end = (div_ceil(cached_len, kv_ps) + kv_pages) * kv_ps
-        chunk_size = min(chunk_size, max(max_kv_end - cached_len, 0))
+        # unbackable and killed the scheduler. See :meth:`_kv_chunk_end`. On a fresh admit
+        # this is a no-op: _try_allocate_one just reserved the WHOLE remainder plus
+        # output_len against the same budget, which is never smaller than this chunk.
+        chunk_size = min(chunk_size, max(self._kv_chunk_end(cached_len) - cached_len, 0))
         if chunk_size <= 0:
             # The pool cannot back one page for this request right now. Defer instead of
             # raising: the request keeps its place at the head of the pending list and the
@@ -276,6 +302,65 @@ class PrefillAdder:
         req.mamba_restore_src = restore_src
         req.swa_evicted_seqlen = swa_evicted_seqlen  # carry the extend-free watermark across chunks
         return req
+
+    def would_seat(self, pending_req: PendingReq, table_free: int, mamba_free: int) -> bool:
+        """Non-mutating mirror of :meth:`try_add_one`: does this lane get a page this pass?
+
+        Run on a throwaway copy of the adder (``dataclasses.replace``), so the reservations
+        it charges accumulate exactly as the real admission loop's would -- which is the
+        whole point: the constraint that decides how many lanes a pass seats is the FRESH
+        gate's ``reserved_size``, and it only bites once the earlier admits of the same pass
+        have been charged to it.
+
+        Each seated lane is charged ONE page, not a chunk: the question this scan answers is
+        whether the lane appears in the batch at all, and its chunk size is what the count
+        being computed decides. That makes the scan optimistic about pages, so the real pass
+        may seat fewer lanes than it predicted -- the loop recomputes the share against the
+        lanes it has actually seated, so the budget the missing lanes would have taken goes
+        to the ones behind them instead of being lost. It can never make a pass UNSAFE:
+        ``chunk_limit`` is only ever an upper bound handed to :meth:`_add_one_req`, and every
+        hard cap (the whole-footprint gate, the per-lane KV page cap, the swa cap, the
+        finishability invariant) is re-applied there against the real pools.
+
+        ``table_free`` / ``mamba_free`` are the caller's simulated slot counts; the pools
+        themselves cannot be decremented without allocating.
+        """
+        if chunked := pending_req.chunked_req:
+            # A continuation owns its table slot and GDN slots already; the only thing that
+            # can keep it out of the batch is the pool being unable to back one more page.
+            cached_len = chunked.cached_len
+            if self._kv_chunk_end(cached_len) - cached_len <= 0:
+                return False
+            self.reserved_pages += self.cache_manager.page_size
+            return True
+
+        if table_free <= 0:
+            return False
+        # Same radix walk the real admit will run a moment later, on the same tokens: it
+        # bumps the same LRU timestamps and takes the same node splits, so the scan cannot
+        # reorder eviction. The loop below stops at the first refusal exactly as the real
+        # one does, so this doubles the pass's match calls over the SEATED prefix only --
+        # in the measured stage regime that is one extra walk per pass.
+        handle = self.cache_manager.match_req(pending_req).cuda_handle
+        cached_len = handle.cached_len
+        extend_len = pending_req.input_len - cached_len
+        if not self._kv_gate_ok(extend_len + pending_req.output_len):
+            return False
+        # 1 live + 2 ping-pong, as _try_allocate_one reserves. The scan does not escalate
+        # into eviction or the session-lease spill the way reserve_mamba_slots does, so it
+        # is conservative here; being conservative only shrinks the divisor, which the
+        # per-iteration recompute then corrects upward as lanes are actually seated.
+        if self.cache_manager.is_hybrid and mamba_free < 3:
+            return False
+        if not self._swa_seat_ok(extend_len):
+            return False
+        if self._kv_chunk_end(cached_len) - cached_len <= 0:
+            return False
+        self.reserved_size += extend_len + pending_req.output_len
+        self.reserved_pages += self.cache_manager.page_size
+        if self.cache_manager.swa_paged:
+            self.reserved_swa += self.cache_manager.page_size
+        return True
 
     def try_add_one(self, pending_req: PendingReq, chunk_limit: int | None = None) -> Req | None:
         if self.token_budget <= 0:
@@ -366,6 +451,50 @@ class PrefillManager:
             if chunked is not None:
                 total += max(0, req.input_len - chunked.cached_len) + req.output_len
         return total
+
+    def _seatable_lanes(
+        self, adder: PrefillAdder, lane_cap: int, chunked_inflight: int
+    ) -> int:
+        """How many lanes will this pass actually seat? -- the interleave share's divisor.
+
+        The 8,192-token prefill budget has to be split between the lanes that end up in the
+        batch, and the admission loop below is FIFO with a single stopping rule, so that set
+        is a prefix of the queue: continuations (seatable whenever the pool can back a page)
+        and fresh prompts that clear the standing-reservation gate, minus the fresh prompts
+        the ``max_chunked_prefills`` cap skips, cut short by the first refusal and by
+        ``lane_cap``. This walks that prefix on a copy of the adder and counts it.
+
+        Dividing by the QUEUE DEPTH instead -- what ``f3c3ac4`` shipped and what soak report
+        §R7 ticket 1 / §U8 measured -- is the stage route's starvation: sixteen queued
+        requests cost a 16x smaller chunk in a pass whose pools will seat one lane, so a
+        118 K-token prompt advanced 512 tokens per pass (1,278 of 2,091 stage passes carried
+        the ``1 lane / <=512 new tokens / >=8 queued`` signature) and prefill budget
+        utilisation collapsed to 14 %. The divisor has to be the seat count, and the seat
+        count is dominated by the fresh gate's whole-prompt reservation -- which is why a
+        cheaper approximation of "admissible lanes" that models a lane as one page and a
+        table slot returned the queue depth again and changed nothing.
+        """
+        scan = replace(adder)
+        table_free = self.table_manager.available_size
+        mamba_free = (
+            self.cache_manager.mamba_available_size if self.cache_manager.is_hybrid else 0
+        )
+        inflight = chunked_inflight
+        seatable = 0
+        for pending_req in self.pending_list:
+            is_fresh = pending_req.chunked_req is None
+            if is_fresh and inflight >= self.max_chunked_prefills:
+                continue  # skipped, not stopped on -- mirrors the loop below
+            if not scan.would_seat(pending_req, table_free, mamba_free):
+                break
+            seatable += 1
+            if is_fresh:
+                table_free -= 1
+                mamba_free -= 3
+                inflight += 1
+            if lane_cap and seatable >= lane_cap:
+                break
+        return seatable
 
     def _check_finishability(self, standing: int, mode: str = "raise") -> None:
         """Debug assertion: is the set already admitted still finishable?
@@ -469,6 +598,15 @@ class PrefillManager:
         log_cached_tokens = 0
         admitted_index: set[int] = set()
         stopped_for_lane_cap = False
+        # Divisor for the interleave share: the lanes this pass will actually seat, not the
+        # queue depth. Computed once, then spent down as lanes are seated (below), so a lane
+        # that takes less than its share -- a short remainder, or a cap the pools imposed --
+        # hands the difference to the lanes behind it instead of leaving the budget unspent.
+        seatable = (
+            self._seatable_lanes(adder, lane_cap, chunked_inflight)
+            if self.interleave_chunks and len(self.pending_list) > 1
+            else 0
+        )
         for index, pending_req in enumerate(self.pending_list):
             is_continuation = pending_req.chunked_req is not None
             if not is_continuation and chunked_inflight >= self.max_chunked_prefills:
@@ -477,14 +615,12 @@ class PrefillManager:
                 # brings the count back down -- still get their chunk this pass.
                 continue
             chunk_limit = None
-            if self.interleave_chunks:
-                waiting = len(self.pending_list) - index
-                available_lanes = (
-                    max(lane_cap - len(reqs), 1)
-                    if lane_cap
-                    else waiting
-                )
-                chunk_limit = max(1, adder.token_budget // min(waiting, available_lanes))
+            if seatable:
+                # ``seatable - len(reqs)`` are the seats left to fill. Floored at 1: the scan
+                # is optimistic about pages and blind to the eviction tiers a real admit can
+                # escalate through, so the pass can outrun it -- and the lane that does is by
+                # construction the last one, which may as well have what is left.
+                chunk_limit = max(1, adder.token_budget // max(1, seatable - len(reqs)))
             if req := adder.try_add_one(pending_req, chunk_limit=chunk_limit):
                 admitted_index.add(index)
                 was_chunked = pending_req.chunked_req is not None
@@ -508,6 +644,9 @@ class PrefillManager:
                 if not is_continuation:
                     log_cached_tokens += req.cache_handle.cached_len
                 if lane_cap and len(reqs) >= lane_cap:
+                    # The queue tail was never REFUSED, only never reached: it is safe (and
+                    # fair) to rotate it in front of the lanes that just ran. See the
+                    # re-queue below -- this is the only stop for which that holds.
                     stopped_for_lane_cap = index + 1 < len(self.pending_list)
                     break
             else:
@@ -517,11 +656,26 @@ class PrefillManager:
         remaining = [
             req for i, req in enumerate(self.pending_list) if i not in admitted_index
         ]
-        # Interleaved mode rotates unfinished lanes behind requests that did not run this pass.
-        # The default preserves the original strict chunked-prefill ordering.
-        # If admission stopped on a resource-constrained request, keep the active continuations
-        # first. Putting the blocked request at the head would make the next pass return no batch
-        # forever while a runnable continuation sat behind it.
+        # Re-queue order. Unfinished lanes go back to the HEAD unless the pass stopped
+        # because it ran out of LANES: any other stop means the pass was refused, and putting
+        # the refused request in front of a live continuation makes the next pass break on it
+        # and return no batch while a runnable lane sits behind it (pinned by
+        # ``test_interleaved_prefill_does_not_queue_blocked_agent_before_active_lane``).
+        #
+        # ``stopped_for_lane_cap`` is therefore narrower than the sentence below used to
+        # claim: ``lane_cap`` is ``max_batch_seqs``, which ``_resolve_max_prefill_seqs``
+        # leaves at 0 for every non-GGUF model, so this rotation does NOT run on the soaked
+        # Nemotron tree and never has -- bisect §R5 called it dead on that evidence. It is not
+        # dead in general (a GGUF lane cap reaches it; see
+        # ``test_single_lane_prefill_rotates_long_prompts_without_grouping_them``), so it
+        # stays, with the scope stated rather than implied. Generalising it to "rotate
+        # whenever the pass stopped for capacity, budget included" was tried and the blocked-
+        # agent test above rejects it: the token budget runs out with a request at the head
+        # that cannot reserve KV, and the admitted lane never gets its second chunk.
+        #
+        # What makes chunked lanes fair on the non-GGUF path is the chunk SHARE, not this
+        # ordering: every lane the pass seats gets ``token_budget / seatable`` (see
+        # :meth:`_seatable_lanes`).
         self.pending_list = (
             remaining + chunked_list
             if self.interleave_chunks and stopped_for_lane_cap
