@@ -70,6 +70,17 @@ class PrefillCounters:
     # this pass (interleaving off, or a single queued request).
     seatable_lanes_last: int = 0
     seatable_lanes: Dict[str, int] = field(default_factory=_empty_lane_hist)
+    # What a pass spends on the radix tree. ``match_tokens`` is the O(prompt) part -- the
+    # tokens ``match_prefix`` actually compares -- and is the number that scales with
+    # QUEUE x PROMPT on a pass that refuses its way down the queue; ``match_memo_hits``
+    # counts the walks the per-pass memo avoided. The replay has measured
+    # ``match_tokens_per_prefill_pass`` since the §R7 work and the server could not report
+    # it at all, so no soak could say whether the scheduler's CPU was going into scheduling
+    # or into prefix matching. Divide by ``passes`` for the per-pass figure ``as_dict``
+    # publishes.
+    match_calls: int = 0
+    match_tokens: int = 0
+    match_memo_hits: int = 0
     # Finishability invariant. ``checks`` counts every pass (the comparison is three
     # attribute reads next to the radix walk the same pass runs), so ``violations`` is
     # meaningful even with FREETOKEN_SCHEDULER_INVARIANT unset -- which is the whole point:
@@ -84,6 +95,11 @@ class PrefillCounters:
         self.seatable_lanes[lane_bucket(seatable)] += 1
         self.chunked_inflight = chunked_inflight
         self.chunked_inflight_max = max(self.chunked_inflight_max, chunked_inflight)
+
+    def note_match(self, prompt_tokens: int) -> None:
+        """One real ``match_prefix`` walk over ``prompt_tokens`` tokens (memo miss)."""
+        self.match_calls += 1
+        self.match_tokens += max(0, prompt_tokens)
 
     def note_invariant(self, shortfall: int) -> None:
         """``shortfall = owed - budget``; <= 0 is the invariant holding."""
@@ -104,6 +120,14 @@ class PrefillCounters:
             "max_chunked_prefills": max_chunked_prefills,
             "seatable_lanes_last": self.seatable_lanes_last,
             "seatable_lanes": dict(self.seatable_lanes),
+            "match": {
+                "calls": self.match_calls,
+                "tokens": self.match_tokens,
+                "memo_hits": self.match_memo_hits,
+                # The replay's headline for this cost, computed the same way (every pass
+                # counts, batch or no batch) so a soak number and a gate number compare.
+                "tokens_per_pass": self.match_tokens // max(1, self.passes),
+            },
             "invariant": {
                 "checks": self.invariant_checks,
                 "violations": self.invariant_violations,

@@ -55,6 +55,13 @@ _ELASTIC_INTERMEDIATE_SHRINK_GRACE_SECONDS = 2.0
 # diagnostic that /v1/stats polls at human cadence; anything faster spends messages on
 # a document nobody reads between polls.
 _COUNTERS_PUBLISH_INTERVAL_S = 2.0
+# How far down the prefill queue ``_reclaim_for_blocked_prefill`` looks for a request a
+# lease release would unblock. It used to look at the head and nothing else, which stopped
+# being the right question at 125da19: a pass now admits PAST a prompt it cannot seat, so
+# the blocked request is often behind the head. Bounded because each fresh entry costs one
+# ``match_req`` radix walk; 4 covers the head plus the ~2.3 lanes a stage pass actually
+# seats, and the per-pass match memo makes the repeat walks free inside one pass.
+_RECLAIM_SCAN_DEPTH = 4
 
 Indice2D: TypeAlias = Tuple[torch.Tensor, torch.Tensor]
 
@@ -1397,6 +1404,14 @@ class Scheduler(SchedulerIOMixin):
             return False
         self._spill_soft_session(session_id, session)
         self.cache_manager.unlock(session.handle)
+        # The unlock hands a whole conversation's prefix back to the evictable pool, so
+        # every ``match_req`` result the current pass memoized described a tree that no
+        # longer exists. (The memo's other invalidations live inside the pass; this is the
+        # one mutation that reaches it from outside. See ``PrefillAdder._match``.)
+        # Doubly defensive on purpose: this runs from ``mamba_reclaim_hook`` as well as from
+        # admission, and that hook is installed on schedulers built with no prefill manager
+        # at all (the pool-exhaustion tests drive the cache manager directly).
+        self._invalidate_match_memo()
         session.handle = None
         session.protected_until = None
         # The lease no longer pins GPU state, so the idle TTL may now reap the identity.
@@ -1704,6 +1719,27 @@ class Scheduler(SchedulerIOMixin):
         ``cached_len`` overrides the prefix match: an in-flight chunked prompt already knows
         how much of itself is forwarded, and matching its full prompt against the tree would
         both cost a lookup and under-report what it still needs.
+
+        The pressure test has to be the gate's test, taken against the budget the gate will
+        actually see. ``PrefillAdder._try_allocate_one`` locks the matched prefix *first* and
+        re-checks ``_kv_gate_ok`` against what is left, so measuring against the pre-lock
+        ``available_size`` is measuring the wrong number: a turn that reuses a large
+        EVICTABLE prefix looks comfortable here (its own cached tokens are counted as
+        capacity it could take) and is refused there (they have just left the evictable
+        pool). Soak §Y5b is that mismatch in the field -- 576 s of refused admission passes
+        with **zero** ``Released soft session ... KV protection (admission pressure)`` lines,
+        because this function kept answering "not pressured" while admission kept failing.
+        :meth:`CacheManager.lock_delta` is the missing term and costs one ``node..root``
+        walk, no mutation.
+
+        NOT included, deliberately: the gate also charges
+        ``PrefillManager.finishability_reservation()`` (in-flight decode growth plus the
+        standing reservation of every prompt mid-prefill). Adding it would make this test
+        exact, and would also make the MESSAGE-path caller
+        (:meth:`_reclaim_soft_sessions_for_admission`, which runs on every arriving request,
+        refused or not) spill idle conversations more eagerly than any measurement asks for.
+        The lock delta is the term §Y5b's evidence names; the reservation term is left for a
+        run that shows it costing something.
         """
         candidates = sorted(
             (
@@ -1719,17 +1755,40 @@ class Scheduler(SchedulerIOMixin):
         if not candidates:  # cheap gate: skip the prefix match when nothing can be freed
             return False
         cm = self.cache_manager
+        lock_delta = 0
         if cached_len is None:
             try:
-                cached_len = cm.match_req(pending).cuda_handle.cached_len
+                # The pass that just refused this request matched it against the same,
+                # still-unmoved tree a moment ago; reuse that walk rather than paying an
+                # O(prompt) one per queued prompt per stalled iteration. The memo is dropped
+                # by every mutation, including the lease release below.
+                pm = getattr(self, "prefill_manager", None)
+                memo = getattr(pm, "match_memo", None)
+                counters = getattr(pm, "counters", None)
+                mr = memo.get(pending.uid) if memo is not None else None
+                if mr is None:
+                    mr = cm.match_req(pending)
+                    if memo is not None:
+                        memo[pending.uid] = mr
+                    if counters is not None:
+                        counters.note_match(pending.input_len)
+                elif counters is not None:
+                    counters.match_memo_hits += 1
+                handle = mr.cuda_handle
+                cached_len = handle.cached_len
+                # What admission will lock away from itself a moment from now. A
+                # CONTINUATION (cached_len passed in) has already locked its prefix in the
+                # pass that admitted it, so its delta is 0 and no match is needed.
+                lock_delta = cm.lock_delta(handle)
             except (
                 Exception
             ):  # matching is repeated by admission; stay conservative on failure
                 cached_len = 0
+                lock_delta = 0
         needed = max(0, pending.input_len - cached_len) + pending.output_len
 
         def pressured() -> bool:
-            kv_short = needed > cm.available_size
+            kv_short = needed > cm.available_size - lock_delta
             state_short = cm.is_hybrid and cm.mamba_available_size < 3
             return kv_short or state_short
 
@@ -1739,6 +1798,18 @@ class Scheduler(SchedulerIOMixin):
                 break
             released |= self._release_soft_session_handle(sid, "admission pressure")
         return released
+
+    def _invalidate_match_memo(self) -> None:
+        """Drop the prefill pass's ``match_req`` memo, if there is a pass to drop it for.
+
+        ``getattr`` rather than an attribute read: the GDN reclaim hook and the session
+        machinery run on schedulers assembled without a ``prefill_manager`` (the hybrid
+        pool-exhaustion tests build a cache manager and a hook and nothing else), and a
+        cache-invalidation call must never be the thing that decides whether they work.
+        """
+        memo = getattr(getattr(self, "prefill_manager", None), "match_memo", None)
+        if memo is not None:
+            memo.clear()
 
     def _reclaim_soft_sessions_for_state_slot(self, n: int = 1) -> bool:
         """Checkpoint LRU idle automatic leases until ``n`` GDN state slots are reachable.
@@ -1785,21 +1856,31 @@ class Scheduler(SchedulerIOMixin):
         queue. Skipping it here would leave that head permanently unserviced.
         """
         self._prefetch_queued_session()
-        for pending in getattr(self.prefill_manager, "pending_list", ()):
+        for pending in list(getattr(self.prefill_manager, "pending_list", ()))[
+            :_RECLAIM_SCAN_DEPTH
+        ]:
             chunked = pending.chunked_req
             released = self._reclaim_soft_sessions_for_pending(
                 pending,
                 pending.session_id,
                 cached_len=None if chunked is None else chunked.cached_len,
             )
+            if not released:
+                # Head-of-line again, in the reclaim: since 125da19 a pass admits PAST a
+                # prompt it cannot seat, so the request a lease release would actually
+                # unblock is often not ``pending_list[0]``. Try the next one instead of
+                # giving up on the whole queue. Bounded, because each fresh entry costs a
+                # ``match_req`` radix walk -- one that the per-pass match memo has already
+                # paid for when the same pass just refused this request.
+                continue
             # Only a fresh admit may install a checkpoint: a continuation is mid-prefill with
             # live state, and restoring over it would strand the chunks already forwarded.
-            if released and pending.session_id and chunked is None:
+            if pending.session_id and chunked is None:
                 # The competitor's KV and state slot are free now, so a checkpoint that
                 # could not be installed at message receipt gets its second chance -- from
                 # RAM if the look-ahead above finished in time.
                 self._restore_cold_session(pending.session_id, pending.input_ids)
-            return released
+            return True
         return False
 
     def _prefetch_queued_session(self) -> str | None:
@@ -1876,6 +1957,26 @@ class Scheduler(SchedulerIOMixin):
         step = grow_step_tokens // self.config.page_size
         initial = min(cm.num_pages, step)
         if cm.committed_pages <= initial:
+            return
+
+        # Ask whether a shrink is POSSIBLE before paying for it with the prefix cache.
+        # ``page_usage()``'s used_pages is ``committed - free - evictable``, which is exactly
+        # what ``evict_all_unlocked_prefixes()`` would leave occupied, so the best target any
+        # continuation of this function can reach is computable here -- and
+        # ``compact_active_pages`` returns ``max(target_pages, required)``, so compaction can
+        # only raise it, never beat it. If that best case cannot get below the current
+        # commitment, the eviction is pure loss: the whole prefix cache thrown away at an
+        # idle moment for a shrink that was never going to happen. §Y5b's timeline opens with
+        # two of those, 4 s apart, immediately before a 576 s stall spent re-prefilling.
+        used_pages, _total_pages = cm.page_usage()
+        best_target = max(initial, math.ceil(used_pages / step) * step)
+        if best_target >= cm.committed_pages:
+            logger.debug_rank0(
+                "Growable KV teardown skipped: protected/live pages already need %d of %d "
+                "committed pages, so no step can be released; prefix cache kept",
+                used_pages,
+                cm.committed_pages,
+            )
             return
 
         evicted = cm.evict_all_unlocked_prefixes()

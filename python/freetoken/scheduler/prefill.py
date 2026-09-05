@@ -81,10 +81,72 @@ class PrefillAdder:
     # every prompt already mid-prefill: a cross-pass admission claim, not a page demand this
     # pass can be asked for. Inheriting that here would re-create the starvation above.
     reserved_pages: int = -1
+    # Per-PASS memo of ``CacheManager.match_req``, owned by the manager and handed in here.
+    # ``dataclasses.replace`` passes the same dict object to the seat scan's throwaway copy,
+    # which is the point: the scan and the admission loop ask the tree the same question
+    # about the same prompts a few microseconds apart, and each answer costs an O(prompt)
+    # radix walk. See :meth:`_match` for the validity rule -- it is strict, not "probably
+    # fine": the memo is dropped the instant this pass does anything that can move the tree.
+    # ``None`` disables it (a caller that builds an adder by hand, e.g. a benchmark).
+    match_memo: dict | None = None
+    # Where the walk is counted. Optional for the same reason.
+    counters: PrefillCounters | None = None
 
     def __post_init__(self) -> None:
         if self.reserved_pages < 0:
             self.reserved_pages = self.reserved_size
+
+    # ---- the radix walk, and the one thing that may skip it ----------------------------
+
+    def _match(self, req: PendingReq):
+        """``cache_manager.match_req(req)``, at most once per request per pass.
+
+        **Validity rule.** What a memo entry carries is a node and a ``cached_len``, so the
+        only thing that can falsify it is a node LEAVING the tree. Enumerated over everything
+        a pass does:
+
+        * ``_seatable_lanes`` runs to completion before the admission loop and mutates
+          nothing -- it walks a ``dataclasses.replace`` copy of this adder and only reads the
+          pools -- so its entries describe the tree as it stands at the top of the pass;
+        * ``lock`` / ``unlock`` move tokens between ``evictable`` and ``protected`` and change
+          ``ref_count``; they change no node's length, parent or existence, and a refusal
+          restores every counter exactly. Safe;
+        * ``table_manager.allocate``, ``linear_state_pool.alloc`` and the ``token_pool``
+          writes never touch the tree. Safe;
+        * page allocation, prefix commits and the SWA reclaim all run in ``allocate_paged``,
+          i.e. AFTER the pass. Safe;
+        * ``reserve_mamba_slots`` is the one exception: short of free slots it escalates into
+          ``evict_mamba`` and then into the session-lease spill, either of which deletes
+          nodes. The call site invalidates first, and only when it is actually about to
+          escalate (a reserve served from the free list moves nothing).
+
+        Outside a pass the scheduler drops the memo on the one mutation that reaches it
+        there, a released session lease, and ``schedule_next_batch`` clears it again at the
+        top of every pass.
+
+        This is deliberately NOT the "match memo" of ``ea7ed7c`` (see tasks/lessons.md): that
+        one cached ACROSS passes, so a stale ``cached_len`` outlived the forward that
+        invalidated it and re-sold capacity. Nothing here survives a pass, and no admission
+        gate reads a memoized number that the real allocation does not re-derive.
+        """
+        memo = self.match_memo
+        if memo is not None:
+            hit = memo.get(req.uid)
+            if hit is not None:
+                if self.counters is not None:
+                    self.counters.match_memo_hits += 1
+                return hit
+        if self.counters is not None:
+            self.counters.note_match(req.input_len)
+        mr = self.cache_manager.match_req(req)
+        if memo is not None:
+            memo[req.uid] = mr
+        return mr
+
+    def _invalidate_match_memo(self) -> None:
+        """Called immediately before anything that can move the tree. See :meth:`_match`."""
+        if self.match_memo is not None:
+            self.match_memo.clear()
 
     @property
     def headroom(self) -> int:
@@ -154,7 +216,7 @@ class PrefillAdder:
             return None
 
         # TODO: consider host cache match case
-        mr = self.cache_manager.match_req(req)
+        mr = self._match(req)
         handle = mr.cuda_handle
         cached_len = handle.cached_len
         # TODO: better estimate policy
@@ -186,6 +248,13 @@ class PrefillAdder:
             # automatic lease pins its snapshot node, so without that tier a small pool (the 1M
             # profile runs five slots: padding + live + 2 ping-pong + one lease) admits nothing
             # once a second conversation arrives.
+            pool = self.cache_manager.linear_state_pool
+            if pool is None or pool.num_free_slots < 3:
+                # About to escalate past the free list into evict_mamba and the session-lease
+                # spill, both of which delete radix nodes. This is the ONLY thing a pass does
+                # that can falsify a memoized match; see :meth:`_match`. A reserve the free
+                # list can serve moves nothing and keeps the memo.
+                self._invalidate_match_memo()
             if not self.cache_manager.reserve_mamba_slots(3):
                 return self.cache_manager.unlock(handle)
 
@@ -361,7 +430,7 @@ class PrefillAdder:
         # reorder eviction. The loop below stops at the first refusal exactly as the real
         # one does, so this doubles the pass's match calls over the SEATED prefix only --
         # in the measured stage regime that is one extra walk per pass.
-        handle = self.cache_manager.match_req(pending_req).cuda_handle
+        handle = self._match(pending_req).cuda_handle
         cached_len = handle.cached_len
         extend_len = pending_req.input_len - cached_len
         if not self._kv_gate_ok(extend_len + pending_req.output_len):
@@ -453,6 +522,12 @@ class PrefillManager:
     # :mod:`freetoken.scheduler.counters` -- every increment sits on a branch this
     # scheduler already takes.
     counters: PrefillCounters = field(default_factory=PrefillCounters)
+    # One entry per queued request, cleared at the top of every pass and again by any
+    # mutation inside it (:meth:`PrefillAdder._match`). Lives on the manager rather than the
+    # adder so that the scheduler's post-refusal reclaim -- which runs in the same iteration,
+    # against the same untouched tree -- can answer its own admission question without
+    # re-walking the radix tree for every prompt in the queue.
+    match_memo: dict = field(default_factory=dict)
 
     def _standing_reservation(self) -> int:
         """Unforwarded footprint of every prompt already mid-prefill.
@@ -617,6 +692,9 @@ class PrefillManager:
     def schedule_next_batch(self, prefill_budget: int) -> Batch | None:
         if len(self.pending_list) == 0:
             return None
+        # A pass starts against whatever the last forward left behind: allocations, evictions
+        # and prefix commits all happened since the previous one. Nothing carries over.
+        self.match_memo.clear()
 
         lane_cap = self.max_batch_seqs
         if (
@@ -652,6 +730,8 @@ class PrefillManager:
             reserved_pages=self.decode_manager.inflight_tokens,
             cache_manager=self.cache_manager,
             table_manager=self.table_manager,
+            match_memo=self.match_memo,
+            counters=self.counters,
         )
         chunked_inflight = sum(
             1 for req in self.pending_list if req.chunked_req is not None

@@ -190,31 +190,72 @@ over 1,541 checks — §W's blocker closed). `fork/main` (`62f5a66`) is behind, 
       --locals`), so the interleaved `pending_list = remaining + chunked_list` branch is
       unreachable exactly on the profile that turns interleaving on. Its comment describes
       `blocked_fresh` / the refusals break. Set the flag there or delete the branch.
-- [ ] **A refused prefill pass costs O(queue × prompt) radix walks — and the §Y5b fix made it
-      2.6x worse per pass.** 16 pending 118K-token prompts are re-`match_prefix`ed from scratch
-      on every pass that returns `None` (4 of 5 py-spy samples during the `81ab30e` stall were
-      inside `fast_compare_key`), and now a pass that skips past a refused fresh admit walks
-      further down the queue before it stops. Measured on the replay, seed 7:
-      `match_tokens_per_prefill_pass` 167,629 -> 518,410 on `switchyard-stage`,
-      158,925 -> 444,522 on `pressure`. In absolute terms the fix still spends far LESS
-      (§Y5b's spin ran 3,240 passes/s; a stalled pass now runs at most ~100/s), and the
-      healthy path is untouched because it never refuses — but this is now the top scheduler
-      CPU ticket. Cache the match per pending request per pass (the adder is rebuilt every
-      pass, so a per-pass memo is enough; note the lessons flag a "match memo" as one of
-      `ea7ed7c`'s ingredients, so keep it strictly a memo and change no gate).
-- [ ] **`_reclaim_soft_sessions_for_pending` measures the pressure the admission gate does
-      NOT feel, so it frees nothing at exactly the moment it should.** It computes
-      `needed = (input_len - cached_len) + output_len` and calls it pressure only when
-      `needed > cm.available_size` — the *pre-lock* budget. `_try_allocate_one` locks the
-      matched prefix first, which moves it out of `full_evictable_size`, and only then
-      re-checks the same gate; a turn with a large evictable prefix therefore fails admission
-      while the reclaim decides there is no pressure and releases no lease. Soak §Y5b is the
-      evidence: zero `Released soft session ... KV protection (admission pressure)` lines in
-      the whole 576 s window, and none in the 9m36s before the clients gave up. It also only
-      ever looks at `pending_list[0]` (the `for` body ends in `return released`). The §Y5b fix
-      stops this wedging the queue, but the request itself still waits for a lease to expire
-      on its own. Fix needs the lock delta in the pressure test; do not just add
-      `cached_len` (that over-triggers the spill).
+- [~] **PARTLY DONE (uncommitted) — a refused prefill pass costs O(queue × prompt) radix
+      walks.** Shipped: a **strict per-pass memo** of `CacheManager.match_req`, owned by
+      `PrefillManager.match_memo`, shared by the seat scan, the admission loop and the
+      post-refusal reclaim, so each queued prompt is walked **at most once per scheduler
+      iteration** instead of up to three times. Validity is enumerated rather than assumed
+      (`PrefillAdder._match`): the only thing that can falsify an entry is a node LEAVING the
+      tree, `lock`/`unlock`/slot-allocation/page-table writes cannot, so the sole in-pass
+      invalidation is `reserve_mamba_slots` — and only when it is about to escalate past the
+      free list into `evict_mamba`/the lease spill. Outside a pass the memo is dropped by a
+      released lease and cleared at the top of every pass. This is NOT `ea7ed7c`'s memo: that
+      one lived ACROSS passes.
+      New counters `scheduler.prefill.match.{calls,tokens,memo_hits,tokens_per_pass}` on
+      `/v1/stats` and in `analyze.py`, so a soak can be read against the replay's
+      `match_tokens_per_prefill_pass`. **Measured** (replay, seed 7, 20,000 ticks, 9dc283e ->
+      this tree):
+
+      | profile | tokens/pass before | after | delta | match_calls |
+      |---|---|---|---|---|
+      | stage | 213,006 | 174,144 | **-18.2 %** | 2,545 -> 2,124 |
+      | pressure | 444,522 | 403,736 | **-9.2 %** | 3,758 -> 3,419 |
+      | switchyard-stage | 518,410 | 437,907 | **-15.5 %** | 5,265 -> 4,725 |
+      | switchyard-deadlock | 453,395 | 412,720 | **-9.0 %** | 7,339 -> 6,697 |
+      | switchyard-restore | 563,156 | 477,331 | **-15.2 %** | 5,455 -> 4,897 |
+
+      Every outcome metric is byte-identical on all five profiles — `prefilled_tokens`,
+      `completed`, `error_rate`, `stall_frac`, `prefill_batches`, `empty_prefill_passes`,
+      `session_restores`, `invariant_violations` — which is the evidence that the memo moved
+      no scheduling decision, only the cost of reaching it.
+      **Residual, deliberately not taken:** the walk still scales with queue × prompt WITHIN a
+      pass, because a pass must ask each queued request whether it fits. The remaining win is
+      a memo that survives a *run of identical refused passes*, and the scheduler already has
+      the exact predicate for "nothing changed since the last pass" — `_admission_stalled`
+      (125da19), which is true precisely when no batch was scheduled, none drained and no
+      message arrived. Keeping the memo across passes gated on it would be sound, but it means
+      enumerating every mutation that can reach the manager from outside a pass, and a missed
+      one is exactly `ea7ed7c`'s stale `cached_len`. Not worth it before a soak measures what
+      the per-iteration memo already saved.
+- [x] **DONE (uncommitted) — `_reclaim_soft_sessions_for_pending` measured a budget the
+      admission gate does not feel, so it froze nothing at exactly the moment it should.**
+      It called it pressure only when `needed > cm.available_size` — the *pre-lock* budget —
+      while `_try_allocate_one` locks the matched prefix first and re-checks the gate against
+      what is left. A turn reusing a large evictable prefix therefore looked comfortable here
+      and was refused there. Soak §Y5b: **zero** `Released soft session ... KV protection
+      (admission pressure)` lines across the whole 576 s window.
+      Fix: new `CacheManager.lock_delta(handle)` — a pure `node..root` walk summing `length`
+      over `ref_count == 0` nodes, which is exactly what `lock()` moves out of `evictable` in
+      all three tree flavours, computed without touching a ref count. The pressure test is now
+      `needed > available_size - lock_delta`. A continuation passes `cached_len` and is charged
+      no delta (it locked its prefix in the pass that admitted it) and costs no match.
+      `_reclaim_for_blocked_prefill` also stops after `pending_list[0]`: it now scans up to
+      `_RECLAIM_SCAN_DEPTH = 4` and returns on the first release, because since 125da19 a pass
+      admits PAST a prompt it cannot seat, so the blocked request is often behind the head.
+      Bounded because each fresh entry costs a radix walk — one the per-pass memo has usually
+      already paid for.
+      **Deliberately NOT added:** the gate also charges
+      `PrefillManager.finishability_reservation()`. Including it would make the test exact and
+      would also make the message-path caller (`_reclaim_soft_sessions_for_admission`, which
+      runs on every arriving request, refused or not) spill idle conversations more eagerly
+      than any measurement asks for. The lock delta is the term §Y5b's evidence names; the
+      reservation term waits for a run that shows it costing something.
+      Behavioural A/B on the §Y shape (same pool, same request, `needed` 255, pre-lock budget
+      824, `cached_len` 700): before -> `released=False`, nothing spilled; after ->
+      `824 - 700 = 124 < 255`, the lease is released and the pool goes back to 1,024. Note the
+      replay does NOT cover this: `scheduler_replay.py` re-implements the loop's reclaim
+      inline rather than calling `Scheduler._reclaim_for_blocked_prefill`, so the gate is
+      blind to it and `tests/scheduler/test_reclaim_and_match_memo.py` is its only coverage.
 
 - [ ] **The streaming disconnect path still raises `CancelledError` out of the ASGI app.**
       `FrontendManager.stream_with_cancellation` re-raises after `spawn_abort`, so uvicorn
@@ -224,9 +265,19 @@ over 1,541 checks — §W's blocker closed). `fork/main` (`62f5a66`) is behind, 
       `raise`, once the abort is spawned) — left out of the §Y8.4 fix because §Y's 10
       tracebacks were all on the non-stream path.
 
-- [ ] **`_maybe_shrink_growable_kv` calls `evict_all_unlocked_prefixes()` before computing
-      whether a shrink is possible**, so above the initial KV step every idle moment wipes the
-      whole prefix cache and often shrinks nothing (`server.gen1.log` 09:44–09:47).
+- [x] **DONE (uncommitted) — `_maybe_shrink_growable_kv` evicted the whole prefix cache
+      before computing whether a shrink was possible**, so above the initial KV step every
+      idle moment wiped it and often shrank nothing (`server.gen1.log` 09:44–09:47; soak
+      §Y5b's timeline opens with two such lines 4 s apart, immediately before 576 s spent
+      re-prefilling).
+      The small targeted fix exists and is exact. `page_usage()` already returns
+      `committed - free - evictable`, which is precisely what `evict_all_unlocked_prefixes()`
+      would leave occupied, so the best target the rest of the function could reach is
+      computable *before* the eviction — and `compact_active_pages` returns
+      `max(target_pages, required)`, so compaction can only raise that target, never beat it.
+      When `max(initial, ceil(used_pages / step) * step) >= committed_pages` the eviction was
+      always going to be pure loss, and the function now returns (at debug level) with the
+      prefix cache intact. Provably never skips a shrink that would have happened.
 - [ ] **`benchmarks/scheduler_replay.py` is not an acceptance gate for scheduler policy.** It
       scored `81ab30e` at 2.49x tokens / 2.14x completions — the commit that then failed the live
       soak on both routes. It still models no spill/cold-restore cost for a reclaimed lease, no

@@ -209,6 +209,12 @@ def report_stats(path: str, previous: tuple[str, dict] | None) -> dict:
             print(f"  chunked prefills in flight: last={pre.get('chunked_inflight', 0)} "
                   f"max={pre.get('chunked_inflight_max', 0)}")
             print(f"  seatable lanes: last={pre.get('seatable_lanes_last', 0)}")
+            mt = pre.get("match") or {}
+            print(f"  radix match: {mt.get('calls', 0)} walks over "
+                  f"{mt.get('tokens', 0):,} tokens, {mt.get('memo_hits', 0)} memo hits, "
+                  f"{mt.get('tokens_per_pass', 0):,} tokens/pass"
+                  "   <- scales with queue x prompt when passes refuse; compare to the "
+                  "replay's match_tokens_per_prefill_pass")
             print(_hist(pre.get("seatable_lanes"), "seatable-lane histogram", indent="    "))
             inv = pre.get("invariant") or {}
             print(f"  finishability invariant: checks={inv.get('checks', 0)} "

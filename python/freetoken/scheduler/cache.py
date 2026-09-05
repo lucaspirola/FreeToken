@@ -449,6 +449,36 @@ class CacheManager:
         else:
             self.prefix_cache.lock_handle(handle, unlock=True)
 
+    def lock_delta(self, handle: BaseCacheHandle) -> int:
+        """Tokens :meth:`lock` would take OUT of ``available_size`` for this handle.
+
+        All three tree flavours do the same thing to the KV currency: walk ``node..root``
+        and, for every node whose ``ref_count`` is still 0, move ``node.length`` from
+        evictable to protected (``radix_cache.lock_handle``, ``hybrid_radix_cache.inc_lock``,
+        ``swa_radix_cache.inc_lock``). This counts that without touching a ref count, so a
+        caller can ask what the admission gate will see *after* the lock rather than before
+        it.
+
+        Why anyone needs it: ``PrefillAdder._try_allocate_one`` locks the matched prefix and
+        then re-checks ``_kv_gate_ok`` against the smaller budget, so a request that reuses a
+        large EVICTABLE prefix can pass the gate before the lock and fail it after. Anything
+        that predicts admission off the pre-lock ``available_size`` -- soak §Y5b's
+        ``_reclaim_soft_sessions_for_pending`` did exactly that -- concludes there is no
+        pressure at the precise moment admission is failing, and frees nothing.
+
+        Never larger than ``handle.cached_len``, and 0 for a cache whose handles carry no
+        tree node (the naive/no-cache paths, where nothing is evictable to begin with).
+        """
+        node = getattr(handle, "node", None)
+        total = 0
+        # ``is_root`` terminates the walk; a node without it (a stub handle in a low-level
+        # test) simply contributes nothing rather than raising in a probe.
+        while node is not None and not getattr(node, "is_root", lambda: True)():
+            if getattr(node, "ref_count", 1) == 0:
+                total += getattr(node, "length", 0)
+            node = getattr(node, "parent", None)
+        return total
+
     def retain_prefix(self, input_ids: torch.Tensor, cached_len: int) -> BaseCacheHandle:
         """Lock the deepest reusable prefix after a session turn has finished.
 
