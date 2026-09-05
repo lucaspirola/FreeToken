@@ -46,6 +46,10 @@ MODELS = {
     # gpt-oss MXFP4 (block-32 e2m1 codes + e8m0 scales), H == I == 2880, top-4 routing
     "gpt-oss-20b": ModelProfile(24, 32, 4, "mxfp4_triton", 2880, 2880),
     "gpt-oss-120b": ModelProfile(36, 128, 4, "mxfp4_triton", 2880, 2880),
+    # NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4: 52 blocks = 23 mamba + 23 moe + 6
+    # attention, so 23 MoE layers; 128 routed experts, top-6, 1 shared; H=2688,
+    # moe_intermediate=1856; triton 6-bank NVFP4 on sm_120. 8.04 MiB/expert-layer.
+    "nemotron35-lightning": ModelProfile(23, 128, 6, "nvfp4", 2688, 1856),
 }
 
 

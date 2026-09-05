@@ -1006,3 +1006,63 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   "reporting disabled", "genuinely nothing cached" and "field absent" are the same bytes on
   the wire. I spent a subagent proving there was no regression to find. Fields that gate on a
   config flag should say so in the payload, or the consumer should record "not enabled".
+
+## 2026-09-05 (16-way batched decode — a graph set that stopped short of the ceiling)
+- **A capture list and the gate that reads it must agree on the ceiling.**
+  `_elastic_graph_batch_sizes` returned `(1,2,3,4,8)` while
+  `GraphRunner.can_use_cuda_graph` gates on `max(list)`, so on the 16-lane profile every
+  decode batch of 9-16 lanes silently ran eager — **73.5 % of the passing soak's decode
+  batches, 149 of them at the full width the profile exists for**. The docstring said
+  "larger optional bursts keep the sparse power-of-two set"; the tuple just stopped. When
+  a helper produces a *set of supported sizes*, assert the invariant
+  `max(sizes) == capacity` in a test, not the literal list — the literal list test
+  (`== [1,2,3,4,8]`) was already there and passed happily through the bug.
+- **The evidence for a live-serving bug was already in a tracked log.** `server.log` from
+  the `13af13d` soak carries `Start capturing CUDA graphs with sizes: [1,2,3,4,8]` next to
+  `Elastic capacity 4 -> 16 requests`, and a one-line awk over its `Decode batch` lines
+  gives the batch-size histogram. Grep the artifacts you already have before booking GPU.
+- **Do the weightless kernel sweep first; it costs 5 minutes and rules out three of five
+  hypotheses.** `bench_decode_launch` / `bench_nvfp4_moe_kernels` / `bench_mamba2_decode` /
+  `bench_offload_cache_copy` all already took a batch-size sweep, and together they said:
+  attention is fine at bs=16 (64 splits still optimal, 80 % of roofline), the MoE GEMV is
+  fine (11k CTAs, 71.5 % of roofline), Mamba-2 is 1 % of the step, and the PCIe gather is
+  pinned at 52 GB/s = the link. Only then is a server run worth loading weights for.
+- **A CUDA-graph capture set is a padding policy, not just a coverage list — and on an
+  offload-MoE model padding is expensive.** The first fix appended only the tier's capacity
+  (`[1,2,3,4,8,16]`). Measured: a 12-lane batch padded up to the bs-16 graph costs **88.0 ms
+  vs 82.2 ms running eagerly (-6.7 %)**, because `pad_batch`'s dummy rows carry a hidden
+  state, route their own top-k experts and add rows to every expert GEMV. An exact graph is
+  ~2 ms *faster* than eager, so a sparse ladder is worse than no graph at all for every size
+  that has to pad. **Always ask what a capture set does to the sizes it does NOT contain.**
+  The set is now dense to 16 (~5 MiB and ~50 ms per graph makes that free).
+- **Check how often the fixed path is actually taken, in the artifact, before shipping.**
+  Correlating the soak's `Elastic capacity` lines against its `Decode batch` lines took one
+  30-line script and said: **421 of 427 decode batches ran at capacity 16**, 164 of them at
+  9-15 lanes. That is what turned "the fix is +3 %" into "the first version of the fix is a
+  net loss", and it was free — the log was already in the repo. Elastic capacity grows on
+  demand and does not come back down, so "wide pool, narrow batch" is the steady state, not
+  a transient.
+- **A fixed per-step host cost does NOT carry over to a large batch — it hides behind the
+  GPU.** The CUDA graph is worth ~27 ms at bs=1 on this checkpoint (33.9 ms eager forward vs
+  6.88 ms graphed), and the naive projection said the same 27 ms at bs=16, i.e. 1.3x. Measured:
+  **4.2 ms, 3.7-4.9 %.** A 16-lane step is ~120 ms of GPU work and the eager launch path's
+  ~30 ms of Python runs *ahead* of it, so almost all of it overlaps. Before promising a
+  launch-overhead fix at a batch size you have not measured, ask whether the GPU step is
+  already longer than the host work — if it is, the graph recovers only the non-overlapping
+  residue. (The fix is still right: silently falling off the graph for 73.5 % of decode
+  batches is a defect at any price, and the term reappears the moment the GPU term shrinks.)
+- **Report the engine's own per-step number next to the client's aggregate.** The mixed-context
+  arm's client aggregate said 1.204x and its engine `gen throughput` at the same batch size
+  said 1.049x; the difference was entirely lane stagger inside the client's first-token-to-
+  last-token window. The uniform arm (all lanes start together) agreed with its engine row.
+  When lanes can start at different times, the client aggregate measures the schedule, not
+  the step.
+- **"At the roofline" is a finding, not a dead end — it relocates the question.** The
+  expert gather cannot go faster, so the 74 % of the step it owns is a *bytes* problem
+  (cache capacity vs a 1,417-expert working set), and no launch-config or kernel change
+  can touch it. Say that explicitly instead of tuning the kernel that is already maxed.
+- **Padding concurrent lanes with the SAME filler makes them share radix pages.** Eight
+  16K-token lanes reported `#token: 24369`, not 131K, on the second pass: identical
+  prefixes collapse in the prefix cache. Per-request `device_len` (what attention costs)
+  is still the full length, so the mixed-context regime is real — but `#token` is unique
+  pages, and reading it as "the contexts did not materialize" is a wrong turn.

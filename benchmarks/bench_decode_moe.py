@@ -129,6 +129,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--cuda-graph-max-bs to N",
     )
     p.add_argument(
+        "--pad-lanes",
+        type=int,
+        default=0,
+        help="prepend digit-free filler to the first N streams, so the batch decodes "
+        "with MIXED context lengths (what a saturated Switchyard route actually runs) "
+        "rather than N copies of one short prompt. Needs --pad-tokens",
+    )
+    p.add_argument(
+        "--pad-tokens",
+        type=int,
+        default=0,
+        help="approximate filler tokens prepended to each --pad-lanes stream",
+    )
+    p.add_argument(
         "--cache",
         type=int,
         default=0,
@@ -215,6 +229,30 @@ def add_server_passthrough_args(p: argparse.ArgumentParser) -> None:
         help="extra flags appended verbatim to the ft serve command, split on whitespace "
         "(repeatable), e.g. --server-arg '--host-ram-reserve-gb 3'",
     )
+
+
+# One digit-free filler line, ~11 tokens on this tokenizer family. Digit-free on
+# purpose (2026-09-04 lesson): a padded lane must not turn an answer check into a
+# distractor test. The line carries no question, so the lane's task is still its AIME
+# problem -- only the KV footprint and the attention working set change.
+_PAD_LINE = "The orchard ledger notes that the copper marker remains inactive.\n"
+_PAD_TOKENS_PER_LINE = 11
+
+
+def pad_prompts(texts: list[str], lanes: int, tokens: int) -> list[str]:
+    """Prepend ~``tokens`` of digit-free filler to the first ``lanes`` prompts.
+
+    Produces a MIXED-context decode batch: ``lanes`` long streams and the rest short.
+    A batch of identical-length prompts measures neither the attention term nor the
+    per-step page-table gather that a real 16-lane route pays.
+    """
+    if lanes <= 0 or tokens <= 0:
+        return texts
+    repeats = max(1, tokens // _PAD_TOKENS_PER_LINE)
+    filler = _PAD_LINE * repeats
+    return [
+        (f"{filler}\n{text}" if i < lanes else text) for i, text in enumerate(texts)
+    ]
 
 
 def load_problem(path: str | None, index: int) -> tuple[str, str]:
@@ -756,6 +794,15 @@ def run_one(args: argparse.Namespace, backend: str) -> dict:
                     flush=True,
                 )
             texts = [p for p, _ in problems]
+            pad_lanes = min(int(getattr(args, "pad_lanes", 0) or 0), streams)
+            pad_tokens = int(getattr(args, "pad_tokens", 0) or 0)
+            if pad_lanes and pad_tokens:
+                texts = pad_prompts(texts, pad_lanes, pad_tokens)
+                print(
+                    f"[bench] mixed contexts: {pad_lanes}/{streams} lanes padded with "
+                    f"~{pad_tokens} filler tokens",
+                    flush=True,
+                )
 
             seen = scrape_moe_stats(log_path)[2] if args.moe_collect_stats else 0
 
@@ -804,6 +851,8 @@ def run_one(args: argparse.Namespace, backend: str) -> dict:
         "model": args.model,
         "backend": backend,
         "problem": args.problem,
+        "pad_lanes": min(int(getattr(args, "pad_lanes", 0) or 0), concurrency_of(args)),
+        "pad_tokens": int(getattr(args, "pad_tokens", 0) or 0),
         "concurrency": streams,
         "nvfp4_backend": args.nvfp4_backend,
         "cache_rate": args.cache_rate,

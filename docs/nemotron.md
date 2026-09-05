@@ -129,6 +129,31 @@ ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
 16 concurrent requests. With `FREETOKEN_PIN_BUDGET_GB=17` every expert layer is pinned and
 `--moe-pageable-gpu` is not needed (keeping the decode CUDA graphs).
 
+**Decode CUDA graphs on this profile (fixed 2026-09-05).** `--elastic-initial-requests`
+recaptures the decode graphs at every capacity tier, and the tier's set used to stop at 8
+(`_elastic_graph_batch_sizes` returned `(1,2,3,4,8)`); `can_use_cuda_graph` gates on the
+largest captured size, so **every decode batch of 9-16 lanes ran eager** — 314 of the 427
+decode batches of the `13af13d` soak, 421 of which were taken at elastic capacity 16. The
+set is now **dense to 16** (then a 1.33-1.5x ladder, with the tier's capacity always
+appended), because on an offload-MoE model a *padded* row is not free — it routes its own
+top-6 experts — and padding a 12-lane batch up to a bs-16 graph measured **6.7 % slower than
+running it eagerly**, while an exact graph is **7.4 % faster**. The dense set costs 80 MiB
+and under a second per resize and does not shrink the expert cache (976 slots either way).
+Full study: `benchmarks/results/nemotron35_lightning_5080_decode16_2026-09-05.md`.
+
+Check it in any server log: `Start capturing CUDA graphs with sizes:` must reach the number
+`Elastic capacity ... -> N requests` last reported, with no gaps below 16.
+`FREETOKEN_ELASTIC_GRAPH_MAX_BS` caps the set for an A/B (`=8` is the old ceiling).
+
+**Where a 16-lane decode step goes** (same study, §2). It is movement-bound and nothing else
+is close: **74 % PCIe expert misses** (23 MoE layers × 31.45 misses × 5.612 MB at a measured
+51-52 GB/s gather — the PCIe roofline, so the copy kernel has no headroom), 12 % expert GEMV,
+8 % attention at 131K, 1 % Mamba-2, ~4 % launch. The decode attention split rule from
+`acc91e9` is still optimal at batch 16 (64 splits, 80 % of the card's bandwidth), the decode
+GEMV needs no kernel switch at m≥8 (its grid is 11k CTAs at m=16), and Mamba-2 is batched in
+one launch. Reducing the 74 % means moving fewer bytes — the step's working set is ~1,417
+expert-layer slots against the 976 the pool leaves at capacity 16 — not a decode-path change.
+
 Quantized KV requires `--attention-backend triton`; bf16 KV with the FlashInfer
 backend is the fallback (KV is only +0.75 GiB at 262K). `--tool-call-parser auto`
 resolves to `qwen3_coder` and `--reasoning-parser auto` to `qwen3` for this

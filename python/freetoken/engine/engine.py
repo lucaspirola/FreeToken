@@ -2103,14 +2103,53 @@ _DENSE_MOE_SETTINGS = {
 }
 
 
+# Every batch size up to this gets its own decode graph; above it the ladder goes sparse.
+# A padded row is NOT free on an offload-MoE model: it carries a hidden state, so it routes
+# its own top-k experts and adds rows to the expert GEMV. Measured 2026-09-05 on Nemotron
+# 3.5 Lightning at 12 lanes with a 16-request pool: running eagerly at 12 costs 82.2 ms per
+# step, padding up to a bs-16 graph costs 88.0 ms (-6.7 %), and an exact graph costs ~2 ms
+# LESS than eager -- so a sparse set is worse than no graph at all for every size that has
+# to pad. Capture cost is ~5 MiB and ~50 ms per graph, i.e. ~80 MiB for a dense set to 16
+# (~14 expert-cache slots). See
+# benchmarks/results/nemotron35_lightning_5080_decode16_2026-09-05.md.
+_DENSE_GRAPH_BS = 16
+_SPARSE_GRAPH_BS = (24, 32, 48, 64, 96, 128, 192, 256)
+
+
 def _elastic_graph_batch_sizes(capacity: int) -> list[int]:
     """Decode graphs retained by the on-request Hybrid-GDN capacity tier.
 
-    Three agents are a common main-plus-two-helpers shape. Capturing that exact
-    size avoids padding it to four, while larger optional bursts keep the sparse
-    power-of-two set so graph memory does not grow linearly with their ceiling.
+    Dense to ``_DENSE_GRAPH_BS`` so no batch in the common range ever pads or falls off the
+    graph, then a 1.33-1.5x ladder so graph memory does not grow linearly with a large
+    ceiling. **The tier's own capacity is always in the set**: ``can_use_cuda_graph`` gates
+    on ``max(sizes)``, so any size the ladder does not reach decodes eagerly -- and a
+    full-width batch is precisely what a saturated server runs.
+
+    Before 2026-09-05 this returned ``(1, 2, 3, 4, 8)`` for every tier, so on the 16-lane
+    Switchyard profile (``--max-running-requests 16 --elastic-initial-requests 4``) every
+    decode batch of 9-16 lanes ran eager: 314 of 427 decode batches (73.5 %) of the
+    ``13af13d`` soak, 421 of which were taken at elastic capacity 16.
     """
-    return [bs for bs in (1, 2, 3, 4, 8) if bs <= capacity]
+    # FREETOKEN_ELASTIC_GRAPH_MAX_BS caps the set, which is how the before/after of this
+    # fix is two runs of the SAME binary: =8 reproduces the pre-2026-09-05 CEILING, so a
+    # 9-16-lane batch decodes eagerly as it used to. The capture list is frozen at
+    # capacity-change time and cannot otherwise be varied inside a live process.
+    cap = capacity
+    raw = os.environ.get("FREETOKEN_ELASTIC_GRAPH_MAX_BS", "")
+    if raw.strip():
+        try:
+            cap = min(capacity, max(1, int(raw)))
+        except ValueError:
+            logger.warning_rank0(
+                f"FREETOKEN_ELASTIC_GRAPH_MAX_BS={raw!r} is not an integer; ignoring it"
+            )
+    if cap < 1:
+        return []
+    sizes = list(range(1, min(cap, _DENSE_GRAPH_BS) + 1))
+    sizes += [bs for bs in _SPARSE_GRAPH_BS if bs <= cap]
+    if cap not in sizes:
+        sizes.append(cap)
+    return sizes
 
 
 def _adjust_config(config: EngineConfig):

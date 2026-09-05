@@ -768,3 +768,62 @@ M=8192, 23 layers, 79 % of the position-independent per-chunk cost.
       triton at M=8/16"), which are now inverted and fail on a healthy tree; (e) the M=256
       bucket runs at 20 % of the ceiling with +53 % padding waste at `BLOCK_M=16`, and the
       scheduler's interleave share really does produce 512-token chunks.
+
+## 2026-09-05 — 16-way batched decode: profile + fix (Switchyard's real regime)
+
+Question: at 16 decode lanes the aggregate is 97 tok/s (stage) / 178-190 (passthrough),
+6-11 tok/s per stream, against 145 tok/s single-stream at 131K. Where does the step go?
+
+- [x] Phase A (weightless kernel sweep, one lock, 5 min) — attribution for (b) MoE GEMV
+      at m=16, (c) decode attention at 16 lanes x long ctx, (d) Mamba-2 at batch 16,
+      (a) expert-gather bandwidth. `benchmarks/decode16/phaseA.sh`.
+- [x] (a) from the existing cache study + a nemotron profile added to
+      `bench_offload_cache_copy`: the gather runs at 51-52 GB/s at every batch and miss
+      count, i.e. at the measured PCIe ceiling (52.9). Bytes, not the kernel.
+- [x] (c) ruled out: 64 splits is still the best config at bs=16 x 131K (1.476 ms/layer,
+      773 GB/s = 80 % roofline), 1.51x the old 8-split default. Not over-split.
+- [x] (d) ruled out: 38.4 us/layer graphed at bs=16 -> 0.9 ms/step over 23 mamba layers.
+- [x] (e) FOUND — `_elastic_graph_batch_sizes` returned `[1,2,3,4,8]`, and
+      `can_use_cuda_graph` gates on `max(list)`, so every decode batch of 9-16 lanes on
+      the P2 profile ran EAGER. 314/427 decode batches (73.5 %) of the 13af13d soak.
+- [x] Fix: always capture the tier's own capacity; keep the sparse power-of-two set.
+      `FREETOKEN_ELASTIC_GRAPH_MAX_BS` caps it so before/after is one binary.
+- [x] Tests: `tests/engine/test_elastic_graph_sizes.py` (+5 cases, incl. the invariant
+      `max(sizes) == capacity` for every tier 1..64).
+- [x] `bench_decode_moe --pad-lanes/--pad-tokens`: mixed-context decode batches.
+- [x] Phase B/C: before/after at 16 lanes (mixed and uniform contexts), single-stream,
+      131K needle. Engine-side +3.9 % at bs=16; the client aggregate cannot resolve it.
+- [x] **Phase E caught the first fix being a NET LOSS.** A sparse `[1,2,3,4,8,16]` set makes
+      a 12-lane batch pad up to bs-16 with dummy rows that route their own experts: 88.0 ms
+      vs 82.2 ms eager (−6.7 %). And 421 of the soak's 427 decode batches run at capacity 16
+      with batch sizes spread across the band (164 at 9-15). Sparse would have helped 149
+      batches by 3 % and hurt 164 by 7 %.
+- [x] Fix v2: the set is **dense to `_DENSE_GRAPH_BS = 16`**, then a 1.33-1.5x ladder, with
+      the tier's capacity always appended. Tests rewritten as invariants (no batch pads; the
+      capacity is always captured; the ladder stays sparse above 16).
+- [x] Phase F (headline): 12 lanes in a 16-request pool, eager -> exact graph,
+      **143.21 -> 153.84 tok/s = 1.074x**, step 83.8 -> 78.0 ms, P = 0.85, n = 11/10.
+      Dense set costs **80 MiB** and <1 s per resize; MoE cache unchanged at 976 slots.
+- [x] Write-up `benchmarks/results/nemotron35_lightning_5080_decode16_2026-09-05.md`,
+      docs/nemotron.md, tasks/lessons.md.
+
+### Review
+
+The largest term at 16 lanes is **not** fixable in a bounded way: 74 % of the step is the
+PCIe expert gather, measured at 51-52 GB/s = the link roofline, with a working set of
+~1,417 expert-layer slots against 976 in the pool. Attention (c), the MoE GEMV (b) and
+Mamba-2 (d) were all measured and are all fine at batch 16. What *was* broken is (e): the
+elastic decode-graph set stopped at 8, so 73.5 % of the soak's decode batches ran eager.
+Fixed, worth **1.074x at 12 lanes / 1.039x at 16**, and ~5 % weighted over the soak's own
+batch histogram. Single-stream and the 131K needle are untouched by construction (the helper
+is only consulted when `--elastic-initial-requests` is set) and were measured anyway:
+135.84 tok/s at bs=1, 132.32 tok/s decoding at a 130,016-token context with the needle exact.
+
+Not committed, per instruction. Open tickets in §7 of the write-up; the first
+(`_determine_cuda_graph_bs` has the same padding defect on the non-elastic path) is the one
+to pick up next, and its experiment is already written as `phaseE.sh`.
+
+Note (disagreeing with the brief): "8 lanes at 100K+" is not a regime this engine can
+reach — `--num-tokens 262144` is the whole KV budget, so 16 lanes average 16K each. The
+stage route's decode lines show `#token: 27733` at 15 running requests (1.8K/lane). The
+mixed arm therefore uses 8 lanes x 16K + 8 short, which is the honest saturated shape.
