@@ -302,8 +302,26 @@ Command: `ft serve --model ~/ai/models/Ornith-1.5-35B-Q4_K_M.gguf
   - [ ] Optional follow-up: the `[tool.ruff.lint] ignore` list in `pyproject.toml` is the
         pre-existing violation set (E741 x79, E702 x47, E731 x18, F401 x17, F841 x13, ...).
         Clearing any of them lets that line be deleted and the rule re-enabled.
-- [ ] Q5: profile the prefill curve (3,000 tok/s @131K → 1,064 @524K): attention vs SSD scan vs
-      KV grow; fix or file
+- [x] Q5: profile the prefill curve — **DONE 2026-09-05, root cause found and fixed**
+      (`benchmarks/results/nemotron35_lightning_5080_prefill_profile_2026-09-05.md`).
+      The whole superlinear term is the extend/prefill attention kernel, and it was a launch
+      configuration: `_select_extend_tile`'s `head_dim<=128` arm returned a hard-coded
+      `BLOCK_M=128` while sm_120 takes 4 warps, so the fp32 accumulator spilled (**396 spill
+      slots vs 14** at `BLOCK_M=64`) — 28.6 TFLOP/s instead of 70.4. `extend_launch_config`
+      now caps `BLOCK_M` by the accumulator's register budget; only that never-measured arm
+      moves, every `head_dim>=256` branch and every 8-warp device is byte-identical.
+      Paired A/B, needle recalled every run: **131,088 3,230 -> 5,288 tok/s (1.64x);
+      262,160 1,965 -> 3,683 (1.87x); 1,040,016 573-576 -> 1,307 (2.28x), TTFT 1,810-1,824 s
+      -> 795.8 s.** SSD scan exonerated (flat in position, 0.2 % of a 1M prefill); engine /
+      KV grow / page-index build exonerated (non-attention position-dependent slope solves to
+      **0 ± 0.2e-3 ms/token = ±13 s of a 1M prefill**); the flat term is **79 % MoE expert
+      GEMMs**. New: `benchmarks/bench_prefill_attention.py`, `FREETOKEN_EXTEND_*` overrides,
+      a `Triton extend launch:` startup line, 4 tests. Follow-ups filed in §9 of the
+      write-up: (1) the extend kernel is still at 31 % of peak and dequantizes q8_0 in the
+      inner loop with no native-Q8 QK path — another 1.5-2x, 1M TTFT ~470-530 s;
+      (2) MoE prefill is now the flat term at 33 TFLOP/s and `b12x` was not measurable at
+      M=8192; (3) sweep the extend tile on an sm_89/sm_90 part (`128/64/8/1` still spills 148
+      slots) before extending the cap above 4 warps.
 - [x] Q1: standing cross-engine oracle — tool landed in `5f7c0d6`, **first live sweep run
       2026-09-05 at 262K** (`benchmarks/results/nemotron35_lightning_5080_oracle_2026-09-05.md`):
       FreeToken 19/24 vs llama.cpp 17/24, 2 `freetoken-only-miss` (both composition, not
@@ -379,9 +397,33 @@ fail the restore with "Eviction did not free enough space"); non-reclaimable/exp
 which age out only on TTL; GDN state slots and the `mamba-slot 96/96` regime; and the real
 per-pass CPU cost, which is reported as `match_calls`/`match_tokens` rather than charged to
 the clock. A live 16-way soak on both routes remains the acceptance test.
-- [ ] Server bug (found by replay work, b030c7f): a client that disconnects while its request is
+- [x] Server bug (found by replay work, b030c7f): a client that disconnects while its request is
       still in prefill is never aborted (stream_with_cancellation checks is_disconnected only
       after the first yielded chunk; non-streaming path only on CancelledError) → its table
-      slot + forwarded KV leak for the server's life. Fix: poll is_disconnected while parked on
-      the ack queue / before first token; send AbortMsg. Test with a fake client.
+      slot + forwarded KV leak for the server's life. **DONE 2026-09-05**: new
+      `python/freetoken/server/disconnect.py` holds two primitives that race the awaited work
+      against a periodic `is_disconnected()` poll (`POLL_INTERVAL_S = 0.25`) and raise
+      `CancelledError` the moment the client is gone -- `aiter_or_disconnect` for the streaming
+      generators (the poll now covers the wait for the FIRST chunk, i.e. the whole prefill
+      window) and `await_or_disconnect` for the non-streaming `generate_full`. Every surface
+      that shares the path is covered: `/generate`, openai chat + completions (stream and
+      non-stream, including the session-busy resubmit), anthropic `/v1/messages`, responses
+      `/v1/responses`. The abort was NOT duplicated -- each caller's existing
+      `except asyncio.CancelledError` still sends the AbortMsg, so it stays exactly one per
+      request; `stream_with_cancellation` now keeps a strong reference to its fire-and-forget
+      abort task (`FrontendManager.spawn_abort`), which a bare `create_task` did not.
+      Tests: `tests/server/test_disconnect_abort.py` (12; fake client + fake engine, no GPU) --
+      prefill-time drop for streaming and for chat/completions/anthropic/responses non-stream,
+      exactly-one-AbortMsg, ack_map/event_map released, post-first-chunk drop still aborts,
+      normal completion unchanged, probe failure treated as a disconnect. tests/server 761
+      passed, tests/scheduler 194 passed, ruff clean, diff whitespace clean.
+      Scheduler side checked, no ticket needed: `PrefillManager.abort_req` pops the queued
+      `PendingReq` and returns `req.chunked_req`, which is `None` for a request that was never
+      admitted -- so aborting a queued request drops its reservation, frees nothing else (there
+      is nothing else), and `_pending_abort_acks` still emits the terminal ack that closes the
+      frontend's accounting. No scheduler change required.
+      Known pre-existing gap left alone: in the streaming chat path a disconnect AFTER an
+      auto-session-busy resubmit aborts the pre-fallback uid (the wrapper was bound to it);
+      the fallback request finishes on its own, so it does not leak -- see the comment in
+      `openai_api.py::stream_chat_completion_chunks`.
 - [ ] Live soak against b030c7f with FREETOKEN_SCHEDULER_INVARIANT=warn (after prefill profile)

@@ -60,6 +60,7 @@ from openai.types.responses.response_usage import (
 from pydantic import BaseModel, ConfigDict
 
 from .client_sessions import responses_session_id
+from .disconnect import await_or_disconnect
 from .generation import (
     DEFAULT_MAX_OUTPUT_TOKENS,
     KEEPALIVE,
@@ -200,8 +201,11 @@ async def handle_responses(
             events, media_type="text/event-stream", headers=response_headers
         )
 
+    # Polls the client while the answer is generated; see handle_chat_completion.
     try:
-        result = await generate_full(uid, spec, state, source="/v1/responses")
+        result = await await_or_disconnect(
+            generate_full(uid, spec, state, source="/v1/responses"), request
+        )
     except asyncio.CancelledError:
         await state.abort_user(uid, session_id=spec.session_id)
         raise

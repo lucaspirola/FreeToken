@@ -38,6 +38,7 @@ from freetoken.utils import (
 from pydantic import BaseModel
 
 from .args import ServerArgs
+from .disconnect import aiter_or_disconnect
 from .anthropic_api import register_anthropic_routes
 from .accounting import AdmissionClosedError, register_accounting_routes
 from .control_api import register_control_routes
@@ -247,6 +248,8 @@ class FrontendManager:
     _frontend_tokenizer_lock: Any = field(default_factory=threading.Lock)
     # One-shot guard for warm_frontend_tokenizer(); benign if two polls race it.
     _frontend_warm_started: bool = False
+    # Strong references to in-flight fire-and-forget abort tasks (see spawn_abort).
+    abort_tasks: set = field(default_factory=set)
 
     def __post_init__(self) -> None:
         if self.stats is None:
@@ -414,16 +417,26 @@ class FrontendManager:
     async def stream_with_cancellation(
         self, generator, request: Request, uid: int, session_id: str | None = None
     ):
+        # aiter_or_disconnect polls is_disconnected WHILE the next chunk is awaited, not
+        # only after one arrives: a request dropped during prefill has yielded nothing, so
+        # the old post-chunk check never ran and its slot/KV pages leaked for the life of
+        # the server.
         try:
-            async for chunk in generator:
-                # detect if the client has disconnected
-                if await request.is_disconnected():
-                    logger.info("Client disconnected for user %s", uid)
-                    raise asyncio.CancelledError
+            async for chunk in aiter_or_disconnect(generator, request):
                 yield chunk
         except asyncio.CancelledError:
-            asyncio.create_task(self.abort_user(uid, session_id=session_id))
+            logger.info("Client disconnected (or cancelled) for user %s", uid)
+            self.spawn_abort(uid, session_id=session_id)
             raise
+
+    def spawn_abort(self, uid: int, session_id: str | None = None) -> None:
+        """Fire-and-forget abort, holding a strong reference. The abort cannot be awaited
+        here (this runs while a generator is being torn down), and a bare create_task is
+        only weakly referenced by the loop — collecting it early would drop the very
+        AbortMsg that frees the request."""
+        task = asyncio.create_task(self.abort_user(uid, session_id=session_id))
+        self.abort_tasks.add(task)
+        task.add_done_callback(self.abort_tasks.discard)
 
     async def abort_user(self, uid: int, session_id: str | None = None):
         await asyncio.sleep(0.1)

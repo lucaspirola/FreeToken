@@ -34,6 +34,7 @@ from .anthropic_models import (
     AnthropicUsage,
 )
 from .client_sessions import anthropic_session_id
+from .disconnect import await_or_disconnect
 from .generation import (
     KEEPALIVE,
     ContentDelta,
@@ -155,8 +156,11 @@ async def handle_anthropic_messages(
             events, media_type="text/event-stream", headers=response_headers
         )
 
+    # Polls the client while the answer is generated; see handle_chat_completion.
     try:
-        result = await generate_full(uid, spec, state, source="/v1/messages")
+        result = await await_or_disconnect(
+            generate_full(uid, spec, state, source="/v1/messages"), request
+        )
     except asyncio.CancelledError:
         await state.abort_user(uid, session_id=spec.session_id)
         raise

@@ -26,6 +26,7 @@ from .api_models import (
     ToolChoiceObject,
 )
 from .client_sessions import chat_session_id
+from .disconnect import aiter_or_disconnect, await_or_disconnect
 from .function_call_parser import ToolCallItem
 from .json_output import apply_json_instruction, schema_instruction
 from .request_logger import log_request
@@ -375,8 +376,13 @@ async def handle_chat_completion(
             chunks, media_type="text/event-stream", headers=session_headers
         )
 
+    # await_or_disconnect polls the client while the answer is generated: a non-streaming
+    # request has nothing on the wire to fail, so without it a disconnect during prefill
+    # or decode goes unnoticed and the request runs to completion into a dead socket.
     try:
-        result = await generate_full(uid, spec, state, source="/v1/chat/completions")
+        result = await await_or_disconnect(
+            generate_full(uid, spec, state, source="/v1/chat/completions"), request
+        )
     except asyncio.CancelledError:
         await state.abort_user(uid, session_id=spec.session_id)
         raise
@@ -385,7 +391,9 @@ async def handle_chat_completion(
             return create_error_response(str(exc), code=exc.code)
         uid = await _resubmit_unbound(spec, state)
         try:
-            result = await generate_full(uid, spec, state, source="/v1/chat/completions")
+            result = await await_or_disconnect(
+                generate_full(uid, spec, state, source="/v1/chat/completions"), request
+            )
         except asyncio.CancelledError:
             await state.abort_user(uid)
             raise
@@ -727,7 +735,7 @@ async def handle_completion(
         text = ""
         finish_reason = "stop"
         try:
-            async for ack in state.wait_for_ack(uid):
+            async for ack in aiter_or_disconnect(state.wait_for_ack(uid), request):
                 if getattr(ack, "error", None):
                     return create_error_response(
                         ack.error, code=getattr(ack, "error_code", None)
