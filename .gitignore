@@ -233,3 +233,4 @@ benchmarks/cross_framework
 
 # 16-way decode study run artifacts (drivers are tracked, outputs are not)
 benchmarks/decode16/runs/
+scratchpad/
