@@ -2366,3 +2366,260 @@ lifetime (stage 6.2 % of 17,848; passthrough phase 6.8 % of 15,893), at `--moe-e
 `resources.csv`, `soakStage.log`, `soakPass.log`, `phase_{stage,pass}.log`,
 `stats_after_soak{Stage,Pass}.json`, `stats_{before,after}_probe.json`, `soakStage/`, `soakPass/`.
 Phase windows for `gaps.py`: stage `1788634705 1788636030`, passthrough `1788636031 1788637345`.
+
+---
+
+# Run against `8429411` (2026-09-06, fused MoE k-planes + reclaim/memo scheduler work) — **PASS on every criterion, both routes**
+
+Tree: `8429411`, **clean**. New since §Z (`785a278`): `9dc283e` — gemm1 emits gemm2's two
+k-planes via a permuted B gather (`PLANAR_OUT`), dropping the gemm2 deinterleave prepass, default
+on, bit-exact, 1.018x at M=8192 — and `8429411` itself: the reclaim pressure test now charges the
+prefix **lock delta** and scans **4 deep past the head**, a per-pass radix **match memo** with new
+`scheduler.prefill.match.{calls,tokens,memo_hits,tokens_per_pass}` counters on `/v1/stats`
+(printed by `analyze.py`), and the idle growable-KV shrink is skipped when it cannot shrink.
+
+**Verdict: PASS.** All six criteria met on both routes.
+
+| criterion | stage | passthrough |
+|---|---|---|
+| 0 errors | **0** ✅ | **0** ✅ |
+| ≤ 1 STALLED | **0** ✅ | **0** ✅ |
+| 0 invariant violations | **0** of 793 checks ✅ | **0** of 751 ✅ |
+| no gap ≥ 60 s | largest **13 s** ✅ | largest **36 s** ✅ |
+| `client_disconnect ≥ 2`, non-stream arm alone | **0 → 1 on its own**, then 1 → 2 ✅ | — |
+| zero `Exception in ASGI application` | **0** ✅ | **0** ✅ |
+
+## AA1. Exact commands
+
+```bash
+systemctl --user stop piro-board-embedder.service      # already inactive
+SOAK_EXTRA_ARGS="--moe-collect-stats" benchmarks/switchyard_soak/run.sh 8429411 20m
+uv run python benchmarks/switchyard_soak/split.py   benchmarks/switchyard_soak/runs/8429411
+uv run python benchmarks/switchyard_soak/analyze.py \
+  benchmarks/switchyard_soak/runs/8429411/phase_{stage,pass}.log
+uv run python benchmarks/switchyard_soak/analyze.py \
+  benchmarks/switchyard_soak/runs/8429411/stats_after_soak{Stage,Pass}.json \
+  benchmarks/switchyard_soak/runs/8429411/stats_{before,after}_probe.json
+uv run python benchmarks/switchyard_soak/gaps.py \
+  benchmarks/switchyard_soak/runs/8429411/phase_stage.log 30 1788641845 1788643184
+uv run python benchmarks/switchyard_soak/gaps.py \
+  benchmarks/switchyard_soak/runs/8429411/phase_pass.log  30 1788643184 1788644522
+```
+
+Serve line identical to §X/§Y/§Z (P2 profile + `--enable-cache-report` + `--moe-collect-stats`,
+`FREETOKEN_SCHEDULER_INVARIANT=warn`, c=16, stage 20 m then passthrough 20 m).
+
+## AA2. Result
+
+| | stage | passthrough |
+|---|---|---|
+| verdict (client) | **PASS** | **PASS** |
+| requests / successes / failures | **608 / 608 / 0** | **2138 / 2138 / 0** |
+| error rate | 0.0000 % | 0.0000 % |
+| STALLED intervals | **0** | **0** |
+| p50 / p95 / p99 ms | 24,642 / **77,765** / 137,978 | 6,408 / **25,991** / 38,757 |
+| health / metrics checks, failures | 20 + 20, 0 | 20 + 20, 0 |
+| invalid-request canaries / failures | 3 / 0 | 3 / 0 |
+| detected server restarts | 0 | 0 |
+| scenario failures | none (5/5) | none (5/5) |
+| error records | 0 | 0 |
+| **finishability invariant violations** | **0** | **0** ✅ |
+
+Per-scenario successes — stage: prefix-reuse 128, growing-conversation 123, tool-call-burst 122,
+large-tool-catalog 118, long-context 117. Passthrough: growing-conversation 432, prefix-reuse 432,
+tool-call-burst 432, large-tool-catalog 423, long-context 419.
+
+**Passthrough is the best passthrough phase of the effort on the tail**: p95 25,991 ms and p99
+38,757 ms, under §Z's 25,946 / 40,773 on p99 and under §X's 27,505 / 53,799 on both, at 2,138
+requests. Stage sits between §X and §Z (608 requests against 571 / 704).
+
+## AA3. Against §Z (`785a278`), with §X for reference
+
+| | §X stage | §Z stage | **§AA stage** | §X pass | §Z pass | **§AA pass** |
+|---|---|---|---|---|---|---|
+| requests | 571 | 704 | **608** | 2,149 | 2,016 | **2,138** |
+| errors / STALLED | 0 / 0 | 0 / 0 | **0 / 0** ✅ | 0 / 0 | 0 / 0 | **0 / 0** ✅ |
+| p50 ms | 26,909 | 22,160 | 24,642 | 5,996 | 6,651 | **6,408** |
+| p95 ms | 82,111 | 70,865 | 77,765 | 27,505 | 25,946 | **25,991** |
+| p99 ms | 115,737 | 103,773 | 137,978 | 53,799 | 40,773 | **38,757** |
+| **invariant violations** | 0 | 0 | **0** ✅ | 0 | 0 | **0** ✅ |
+| invariant checks / passes | 859 | 790 | 793 | 682 | 691 | 751 |
+| `refusals` | 418 | 190 | **163** | 142 | 93 | **170** |
+| `fresh_admits_deferred` | — | 317 | **1,151** | — | 107 | **82** |
+| `fresh_admits_blocked_by_cap` | 40 | 150 | **66** | 348 | 151 | **310** |
+| **`match.tokens_per_pass`** | — | — | **105,323** | — | — | **96,887** (phase) |
+| **`match.memo_hits` / `calls`** | — | — | **1,658 / 3,847 = 43.1 %** | — | — | **1,751 / 4,508 = 38.8 %** |
+| `Released … (admission pressure)` | — | 439 | **507** (+15 %) | — | 563 | **667** (+18 %) |
+| mean lanes / prefill batch | 3.13 | 3.79 | **3.04** | 4.88 | 4.43 | **4.62** |
+| mean `#running-req` (decode) | 9.50 | 10.32 | 10.29 | 12.06 | 11.92 | **12.10** |
+| decode agg tok/s, median all | 70.3 | 77.5 | 71.5 | 186.5 | 160.0 | **170.8** |
+| decode agg tok/s @ `== 16` | 75.7 (n=22) | 102.0 (n=23) | 87.2 (**n=9**) | 211.1 (n=126) | 196.2 (n=97) | **200.5 (n=122)** |
+| decode per-stream tok/s @ 16 | 4.73 | 6.38 | 5.45 | 13.19 | 12.26 | **12.53** |
+| prefill instant tok/s (median) | 3,469 | 2,819 | 2,719 | 1,777 | 1,846 | **2,317** |
+| **effective new-token prefill rate** | 2,894 | 2,570 | 2,411 (−6.2 %) | 2,238 | 2,181 | **2,448** (**+12.2 %**) |
+| prefix reuse | 79.8 % | 86.0 % | 83.6 % | 89.3 % | 88.9 % | 87.9 % |
+| starvation signature | 0.2 % | 0.1 % | **0.1 %** | 0.0 % | 0.0 % | **0.0 %** |
+| leading / trailing silence | 3 s / 1 s | 2 s / 3 s | **44 s** / 1 s | 3 s / 1 s | 0 s / 0 s | 2 s / **0 s** |
+| scheduling wall clock | 99.7 % | 99.6 % | 96.6 % | 99.9 % | 100.0 % | 99.9 % |
+| **gaps ≥ 30 s** | 0 | 0 | **0** ✅ | 1 (34 s) | 0 | **1 (36 s)** ✅ |
+| largest gap of any size | — | 13 s | **13 s** | — | 18 s | **36 s** |
+| decode batches run eager | 0/503 | 0/492 | **0/489** | (same run) | (same run) | (same run) |
+| session spills / restores | — | 1,377 / 439 | **1,542 / 479** | — | (same run) | (same run) |
+| `restores_deferred` | 0 | 1 | **3** | | | |
+| ASGI tracebacks | 0 | 0 | **0** ✅ | 0 | 0 | **0** ✅ |
+
+### The fused k-planes (`9dc283e`) are neutral-to-positive
+
+**Passthrough effective new-token prefill rate is 2,448 tok/s against §Z's 2,181 — +12.2 %**, and
+its instant prefill median is up 25 % (2,317 vs 1,846). Stage reads 2,411 vs 2,570 (**−6.2 %**),
+but stage prefix reuse fell 86.0 % → 83.6 % over 608 requests instead of 704, i.e. **5,309 new
+tokens per request against §Z's 4,838 (+9.7 %)** — heavier prompts, the same read as §X→§Y→§Z.
+Taken together the change is at worst neutral and on the higher-throughput route clearly positive.
+Decode is untouched as expected (passthrough @16 200.5 tok/s over n=122 against §Z's 196.2 over
+n=97).
+
+### The radix match memo, measured for the first time
+
+`scheduler.prefill.match` closes §Z9.2 (*"`match_tokens_per_prefill_pass` is not exposed"*) with
+numbers instead of an argument:
+
+* whole run: **8,360 walks over 156,758,498 matched tokens, 3,410 memo hits, 101,069
+  tokens/pass**.
+* stage: 3,847 walks / 83.5 M tokens / **1,658 memo hits (43.1 %)** / **105,323 tokens/pass**.
+* passthrough phase (delta): 4,508 walks / 72.8 M tokens / **1,751 memo hits (38.8 %)** /
+  **96,887 tokens/pass**.
+
+So a pass matches roughly **100 K tokens** of radix walk and the memo services **~4 walks in 10**.
+The cost is real but bounded and it does not show up as CPU: the busiest process still sits at a
+**107.9 % median** (§Z 108.9 %, §Y 107.9 %, §X 106.9 %) with no sustained-100 % window.
+
+### The reclaim arm fires, and it slightly over-spills
+
+`Released soft session … KV protection (admission pressure)` rose to **507 stage / 667
+passthrough (1,174 total)** from §Z's 439 / 563 (1,002) — **+15 % / +18 %**. It is doing what the
+lock-delta charge and the 4-deep scan were meant to do. The cost is visible but small:
+
+* session **spills 1,542** (§Z 1,377, **+12 %**) and **restores 479** (§Z 439, **+9 %**), all with
+  0 failures; `restores_deferred` 3 (§Z 1).
+* **prefix reuse fell**: stage 86.0 % → **83.6 %** (−2.4 pp), passthrough 88.9 % → **87.9 %**
+  (−1.0 pp).
+
+That is over-spill in the literal sense — more sessions evicted, more restored, less prefix
+retained — but it bought a **12 % higher passthrough prefill rate and the run's best p99**, and
+`fresh_admits_deferred` on stage went **317 → 1,151** (the deeper scan finding far more seatable
+work behind a refused head) while `refusals` stayed flat at 163 (§Z 190). Worth watching, not
+worth reverting; see §AA9.1.
+
+**Stage ran at markedly higher KV occupancy this run** — decode token-usage median 0.69 (§Z 0.58),
+48 prefill and 12 decode pressure episodes at usage ≥ 0.98 (§Z 13 and 3), 25 single-seq chunks
+capped under 8,192 tokens at usage ≥ 0.95 (§Z 8) — with mean lanes per prefill batch down to
+**3.04** (§Z 3.79) and only **n=9** decode batches at 16 lanes (§Z n=23). Errors, STALLED and the
+starvation signature are all unchanged at 0 / 0 / 0.1 %, so this is pressure the scheduler
+absorbed, not a stall; it is the same phase whose prompts were 9.7 % heavier.
+
+## AA4. Invariant, fatals, markers
+
+| check | stage | passthrough | whole run |
+|---|---|---|---|
+| `finishability invariant violated` (`=warn`) | 0 | 0 | **0** ✅ |
+| invariant checks (counter) | 793 | 751 | **1,551** |
+| worst shortfall (counter) | 0 | 0 | **0 tokens** |
+| `committed_pages_required` | 0 | 0 | **0** |
+| `LinearStatePool exhausted` | 0 | 0 | **0** |
+| `Eviction did not free enough space` | 0 | 0 | **0** |
+| oversize `can never be admitted` | 0 | 0 | **0** |
+| `Traceback (most recent call last)` | 0 | 0 | **0** ✅ |
+| `Exception in ASGI application` | 0 | 0 | **0** ✅ |
+| engine ERROR / CRITICAL lines | 0 | 0 | **0** |
+| `/health` non-ok | 0 | 0 | **0** (no `health_bad.log`) |
+| aborts (`client_disconnect`/`error`/`explicit`) | 0/0/0 | 0/0/0 | **2**/0/0 (the probe) |
+
+Deadlock signature (§T): leading silence **44 s** / 2 s, trailing silence 1 s / 0 s, scheduling
+wall clock 96.6 % / 99.9 %. The 44 s of stage leading silence is startup, not scheduling — this
+run was cold (`READY after 85 s` against §Z's 52 s and §Y's 26 s) and the harness's own
+`switchyard-server` came up behind it; the trailing figure, which is the deadlock signature, is
+1 s. **Zero gaps ≥ 30 s on stage** (largest 13 s); passthrough has **one 36 s gap** at 01:41:03 at
+`usage=0.63 queue=1 running=13` — the familiar spill / `KV protection (admission pressure)` burst,
+comfortably inside the 60 s criterion and in family with §X's 34 s.
+
+`#mamba-slot` full occupancy: 45 stage / 49 passthrough prefill passes at 96/96, 3 / 19 decode
+batches at mamba usage 1.00; `LinearStatePool exhausted` 0. `KV grew` 3 (stage), `KV shrank` 0;
+742 `Growable KV teardown` lines (219 stage / 521 passthrough). 924 `client tokens diverge`.
+
+## AA5. Disconnect probe
+
+| | active 0 → 1 → 0 | `requests.aborts.client_disconnect` |
+|---|---|---|
+| non-streaming | yes, back to 0 in 2 s | 0 → **1** ✅ **on its own** |
+| streaming | yes, back to 0 in 2 s | 1 → **2** ✅ |
+| **total across the probe** | active back to **0** | **+2** — required ≥ 2 ✅ |
+
+`client_disconnect` stayed **0 through both traffic phases** (as in §Z; §Y's 11 were its
+livelock's timed-out clients). Zero ASGI tracebacks: `125da19`'s quiet 499 holds.
+
+## AA6. MoE decode counters
+
+| snapshot | `layer_calls` | `active` | `missing` |
+|---|---|---|---|
+| after stage (uptime 1,247 s) | 180,895 | 6,930,587 | 3,550,565 |
+| after passthrough (uptime 2,498 s) | **455,837** | 12,482,343 | 6,141,202 |
+| after probe (uptime 2,505 s) | 457,884 | 12,499,142 | 6,144,424 |
+
+Monotone across **20 elastic capacity changes and 24 graph captures**. Passthrough phase:
+active +5,551,756, missing +2,590,637 → **53.3 % decode expert-cache hit rate at c=16**, against
+§Z's 52.9 % and §Y's 53.0 % — three independent soaks now inside 0.4 pp. Stage 48.8 %; lifetime
+50.8 %. Extend-cache gate 5.7 % of 35,167 routed extend layer-forwards (§Z 6.5 %, §Y 5.6 %).
+`Scheduler is idle` 0; `MoE decode miss stats` log lines 0.
+
+## AA7. Host behaviour
+
+* Busiest FreeToken process: **median 107.9 % CPU**, max 1,554.7 % — indistinguishable from §Z
+  (108.9 %) and §Y (107.9 %), with no sustained-100 % window. **The memo and the deeper reclaim
+  scan cost no measurable scheduler CPU.**
+* GPU **13.66 GiB median, 15.49 GiB peak** (§Z 13.91 / 15.44); top-process RSS median 19.7 GiB,
+  peak 23.0 GiB (§Z 21.7 / 23.4).
+* Host `MemAvailable` median 6.9 GiB; **floor while serving 4.6 GiB** (§Z 4.0, §Y 2.8, §X 2.1) —
+  the best running floor yet. But the all-samples floor is **1.1 GiB**, hit at 00:56:53 **during
+  the model load**, 32 s before `READY`. See §AA9.2: that window is unguarded.
+* Elastic capacity changes **20** (§Z 22), 24 graph captures; 0 of 489 decode batches ran eager.
+* **Graceful shutdown in 3 s, GPU back to 0 MiB**, no leftover venv processes.
+
+## AA8. What this run settles
+
+1. **`9dc283e` (fused k-planes) is safe and mildly positive live.** Passthrough effective
+   new-token prefill rate +12.2 % vs §Z with instant prefill median +25 %; stage −6.2 % against
+   9.7 % heavier prompts. 0 errors, bit-exactness unchanged from the offline result.
+2. **§Z9.2 is closed.** `scheduler.prefill.match` publishes the radix-walk volume: ~100 K matched
+   tokens per pass, **40.8 % memo hit rate** run-wide, at no CPU cost.
+3. **The reclaim change fires under pressure** (+15 % / +18 % admission-pressure releases) and
+   its price is measurable and modest: +12 % spills, +9 % restores, −2.4 pp / −1.0 pp prefix reuse.
+4. **§Z's fixes hold under a second soak.** `refusals` 333 (§Z 283), `fresh_admits_deferred` 1,233,
+   invariant violations 0 of 1,551, zero ASGI tracebacks, both probe arms counting, no gap ≥ 60 s.
+5. **The §Y5b livelock has not returned** in two consecutive soaks on the route that produced it.
+
+## AA9. Still open after this run
+
+1. **Reclaim over-spill watch (new).** Prefix reuse is down on both routes and spill/restore
+   traffic up ~10 % against §Z. It paid for itself this run; if a later soak shows reuse falling
+   further with restores still climbing, the 4-deep scan depth is the knob.
+2. **The model-load window is unguarded (new).** `run.sh` checks `MemAvailable ≥ 26 GiB` **once,
+   before** the load and arms its `SOAK_RAM_ABORT_GIB=2` watchdog **after** `READY`; the load
+   itself transiently drove the host to **1.1 GiB**, 0.9 GiB below the floor that would have
+   TERMed a running server. Start the watchdog before the lock, or gate on a load-phase floor.
+3. `fresh_admits_blocked_by_cap` = **376** (§Z 301, §Y 204) — `max_chunked_prefills = 8` still
+   binds; unchanged ticket and now the largest remaining admission knob.
+4. Lane watch (§V7 ticket 1): stage **3.04** (§Z 3.79, §Y 3.55), passthrough **4.62** (§Z 4.43).
+   Stage fell back this run under higher KV occupancy; both far under ~5 with 0 errors and 0
+   STALLED.
+5. Host `MemAvailable` running floor 4.6 GiB — comfortable; `serve.sh` still hard-codes
+   `--host-ram-reserve-gb 6` with no env override.
+6. `--moe-prefill-hit-d2d` still off in the P2 profile (`prefill_rows=0` in every snapshot), so
+   `13af13d`'s probe fix remains unexercised by a soak (§V7 ticket 3, unchanged).
+7. `Scheduler is idle` fired 0 times again; idle-gated diagnostics stay unreachable at c=16.
+
+## AA10. Artifacts
+
+`benchmarks/switchyard_soak/runs/8429411/` (gitignored): `driver.log`, `server.log`,
+`resources.csv`, `soakStage.log`, `soakPass.log`, `phase_{stage,pass}.log`,
+`stats_after_soak{Stage,Pass}.json`, `stats_{before,after}_probe.json`, `soakStage/`, `soakPass/`.
+Phase windows for `gaps.py`: stage `1788641845 1788643184`, passthrough `1788643184 1788644522`.
