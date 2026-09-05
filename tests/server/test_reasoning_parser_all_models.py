@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from freetoken.server.reasoning_parser import ReasoningParser
+from types import SimpleNamespace
+
+import pytest
+
+from freetoken.server.reasoning_parser import ReasoningParser, build_reasoning_parser
 
 
 def _stream(parser: ReasoningParser, chunks):
@@ -88,7 +92,6 @@ def test_harmony_streaming_splits_marker_across_chunks():
 
 
 # ---------------------------------------------------------------- think family
-import pytest
 
 
 @pytest.mark.parametrize("name", ["qwen3", "glm", "minimax"])
@@ -125,9 +128,6 @@ def test_gemma_thought_split():
 
 
 # ------------------------------------------------------- build_reasoning_parser
-from types import SimpleNamespace
-
-from freetoken.server.reasoning_parser import build_reasoning_parser
 
 
 def test_build_reasoning_parser_returns_none_when_unset():

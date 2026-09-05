@@ -116,6 +116,5 @@ def test_fused_copy_variable_source_rows_fill_cache_prefix(layer_id):
 
     for name, bank in zip(cache.bank_schema, views):
         source = sources[name][layer_id]
-        feat = source.shape[1]
         torch.testing.assert_close(bank[1], source[3])
         torch.testing.assert_close(bank[2], source[0])

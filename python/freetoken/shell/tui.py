@@ -14,7 +14,7 @@ import shutil
 import signal
 import time
 from dataclasses import dataclass
-from typing import Any, List, Tuple
+from typing import List, Tuple
 
 from freetoken.cache_report import (
     CACHE_UNITS,

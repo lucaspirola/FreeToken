@@ -223,7 +223,6 @@ def test_fused_experts_decode_activation_and_router_weight_modes(
     cache_size = 19
     hidden_size = 32
     intermediate_size = 24
-    top_k = 4
     dtype = torch.float16
     torch.manual_seed(123)
 

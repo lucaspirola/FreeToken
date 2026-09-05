@@ -8,6 +8,8 @@ Nemotron-3.5-Lightning geometry; compares SpecScanCapture._commit_fused against
     PYTHONPATH=python scripts/gpu_lock.sh .venv/bin/python -u \
       benchmarks/check_spec_fused_commit.py
 """
+import time
+
 import torch
 
 from freetoken.models.nemotron_h.spec_scan import SpecScanCapture, _plan
@@ -73,7 +75,6 @@ for m in (9, 17):
         assert rec <= 1e-4 * max(ref, 1e-3), "fused scan disagrees with the per-layer scan"
 
 # launch count, eager
-import time
 cap = SpecScanCapture(9)
 for li in range(L):
     cap.record(MIXERS[li],

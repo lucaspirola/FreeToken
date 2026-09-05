@@ -309,8 +309,6 @@ def _causal_conv1d_update_kernel(
         col1 = tl.load(prior_tokens + 1 * stride_conv_state_tok, mask_w, 0.0)
     if KERNEL_WIDTH >= 4:
         col2 = tl.load(prior_tokens + 2 * stride_conv_state_tok, mask_w, 0.0)
-    if KERNEL_WIDTH == 5:
-        col3 = tl.load(prior_tokens + 3 * stride_conv_state_tok, mask_w, 0.0)
 
     # STEP 2: shift conv_state left by seqlen, append new tokens from x
     idx_tokens = tl.arange(0, NP2_STATELEN)

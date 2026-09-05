@@ -112,7 +112,6 @@ def routed_experts_fp4(
     bf16 decode kernel is bit-identical to the reference's dequantized FP8 activation
     (validated max diff = 0 vs the tilelang ``fp4_gemm`` reference)."""
     T, top_k = slots.shape
-    H = x.shape[1]
     two_I = gate_up_packed.shape[1]
     I = two_I // 2
 

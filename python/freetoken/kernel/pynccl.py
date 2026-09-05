@@ -72,7 +72,7 @@ def init_pynccl(
         )
 
     nccl_id = id_list[0]
-    assert not nccl_id is None, f"Failed to get NCCL unique ID on {tp_rank = }"
+    assert nccl_id is not None, f"Failed to get NCCL unique ID on {tp_rank = }"
 
     # bypass type checking for the FFI object
     return cls(tp_rank, tp_size, max_size_bytes, nccl_id)  # type: ignore

@@ -31,8 +31,6 @@ passes; ``max_chunked_prefills`` is the belt-and-braces bound; and
 
 from __future__ import annotations
 
-import importlib
-
 import pytest
 import torch
 

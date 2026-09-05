@@ -19,8 +19,12 @@ if not ((8, 9) <= _CAPABILITY < (9, 0) or _CAPABILITY >= (12, 0)):
         "int8-MMA MMQ path is not enabled on this architecture", allow_module_level=True
     )
 
-import gguf
-from freetoken.models.gguf.dequant import BLOCK_SHAPE, GGML_Q4_K, GGML_Q6_K
+import gguf  # noqa: E402  -- imported after the architecture skip guard above
+from freetoken.models.gguf.dequant import (  # noqa: E402
+    BLOCK_SHAPE,
+    GGML_Q4_K,
+    GGML_Q6_K,
+)
 
 
 def _packed_rows(qtype: int, rows: int, seed: int) -> np.ndarray:

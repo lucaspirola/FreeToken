@@ -134,7 +134,7 @@ class Compressor(nn.Module):
         # table row (its cmp row).
         assert self.cmp_pool is not None
         bsz, seqlen, _ = x.size()
-        ratio, overlap, d, rd = self.compress_ratio, self.overlap, self.head_dim, self.rope_head_dim
+        ratio, overlap, rd = self.compress_ratio, self.overlap, self.rope_head_dim
         # start_pos>0 (radix re-prefill): carry-aware extend of the new tokens.
         if start_pos > 0:
             return self.extend(x, start_pos, window_slots, int(tail_window_slot), ti)
@@ -203,7 +203,7 @@ class Compressor(nn.Module):
         assert self.cmp_pool is not None
         assert start_pos % self.P == 0, "radix re-prefill boundary must be 128-aligned"
         bsz, seqlen, _ = x.size()
-        ratio, overlap, d, rd = self.compress_ratio, self.overlap, self.head_dim, self.rope_head_dim
+        ratio, overlap, rd = self.compress_ratio, self.overlap, self.rope_head_dim
         dtype = x.dtype
         # Seed the register carry FROM the ring (the matched tail page covering
         # [start_pos-128, start_pos)). The producing request wrote this boundary carry by value.

@@ -125,7 +125,7 @@ def launch_server(
         run_shell,
         prog=prog,
     )
-    logger = init_logger(__name__, "initializer")
+    init_logger(__name__, "initializer")
 
     def start_subprocess() -> "BackendHandle":
         import multiprocessing as mp

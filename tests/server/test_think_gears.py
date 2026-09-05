@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from freetoken.server.model_meta import derive_think_gears
 from freetoken.tokenizer.effort import (
-    EffortProfile,
     probe_effort_profile,
     probe_thinking_profile,
 )

@@ -442,7 +442,7 @@ def parse_args(
         ),
     )
 
-    assert ServerArgs.use_dummy_weight == False
+    assert ServerArgs.use_dummy_weight is False
     parser.add_argument(
         "--dummy-weight",
         action="store_true",
@@ -450,7 +450,7 @@ def parse_args(
         help="Use dummy weights for testing.",
     )
 
-    assert ServerArgs.use_pynccl == True
+    assert ServerArgs.use_pynccl is True
     parser.add_argument(
         "--disable-pynccl",
         action="store_false",

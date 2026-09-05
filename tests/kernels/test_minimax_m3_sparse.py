@@ -198,7 +198,6 @@ def test_decode_index_topk(kv_lens: list[int], topk: int):
     max_nb = max((L + BLK - 1) // BLK for L in kv_lens)
     iq = torch.randn(bs, H_IDX, D_IDX, device=DEV, dtype=torch.bfloat16)
     block_rows = torch.zeros(bs, max_nb, dtype=torch.int32, device=DEV)
-    slabs = []
     total = 0
     layouts = []
     for i, L in enumerate(kv_lens):

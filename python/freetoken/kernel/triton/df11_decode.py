@@ -13,8 +13,6 @@ import torch
 import triton
 import triton.language as tl
 
-from .df11 import DF11_CHUNK, DF11_LMAX
-
 
 @triton.jit
 def _df11_decode_kernel(

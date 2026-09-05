@@ -23,7 +23,7 @@ def _tp_one():
 def _tiny_config():
     from freetoken.models.gguf.config import build_gguf_shim
     from freetoken.models.laguna.gguf import parse_gguf_config
-    from freetoken.models.config import FullAttentionGroupConfig, RotaryConfig, SWAAttentionGroupConfig
+    from freetoken.models.config import FullAttentionGroupConfig, SWAAttentionGroupConfig
 
     cfg = parse_gguf_config(build_gguf_shim(str(FIXTURE)))
     full_rope = replace(cfg.attention_groups[0].rotary_config, head_dim=32, rotary_dim=32)
@@ -66,12 +66,12 @@ def test_attention_forward_applies_gate_independently(monkeypatch):
             class P:
                 def forward(self, z): seen[key] = z; return out
             return P()
-        class O:
+        class OutProj:
             def forward(self, z): seen["o"] = z; return z
         class N:
             def forward_inplace(self, z): return z
         attn.q_proj, attn.k_proj, attn.v_proj = proj("q", qv), proj("k", kv), proj("v", vv)
-        attn.gate_proj, attn.o_proj = proj("gate", gate), O(); attn.q_norm = attn.k_norm = N()
+        attn.gate_proj, attn.o_proj = proj("gate", gate), OutProj(); attn.q_norm = attn.k_norm = N()
         ctx = SimpleNamespace(batch=SimpleNamespace(positions=torch.arange(3)), attn_backend=SimpleNamespace(forward=lambda *a, **k: backend))
         monkeypatch.setattr(attention_mod, "get_global_ctx", lambda: ctx)
         got = attn.forward(x)
@@ -117,9 +117,11 @@ def test_deferred_gguf_linear_q8():
     from freetoken.models.gguf.dequant import GGML_Q8_0, row_bytes
     from freetoken.models.laguna.gguf import DeferredGGUFLinear
     layer = DeferredGGUFLinear(64, 32)
-    with pytest.raises(AssertionError): layer.forward(torch.randn(2, 64))
+    with pytest.raises(AssertionError):
+        layer.forward(torch.randn(2, 64))
     layer.materialize(GGML_Q8_0); assert layer.qweight.shape == (32, row_bytes(64, GGML_Q8_0))
-    if not torch.cuda.is_available(): pytest.skip("CUDA required for fused GGUF forward")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required for fused GGUF forward")
     import gguf
     rng = np.random.default_rng(1); weight = rng.standard_normal((32, 64), dtype=np.float32); packed = gguf.quants.quantize(weight, gguf.GGMLQuantizationType.Q8_0)
     layer.qweight = torch.from_numpy(np.ascontiguousarray(packed)).cuda(); x = torch.randn(2, 64, device="cuda", dtype=torch.bfloat16); got = layer.forward(x).float(); blocks = x.float().reshape(2, -1, 32); scale = (blocks.abs().amax(dim=-1, keepdim=True) / 127).half().float(); aq = torch.where(scale > 0, (blocks / scale).round().clamp(-127, 127), blocks).mul(scale).reshape_as(x); ref = F.linear(aq, torch.from_numpy(gguf.quants.dequantize(packed, gguf.GGMLQuantizationType.Q8_0)).float().cuda()); assert (got - ref).abs().max() <= 5e-3 * ref.abs().max().clamp(min=1.0)

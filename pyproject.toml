@@ -130,24 +130,18 @@ markers = [
 # tree is already clean under -- so the gate fails only on something newly introduced.
 # What stays on is the part that catches real bugs: syntax errors (E9), undefined names
 # and redefinitions (F821, F811), `is` against a literal (F632), broken %-format and
-# .format calls (F50x).
+# .format calls (F50x), unused imports and locals (F401, F841), placeholder-free
+# f-strings (F541), `== True`/`== False` (E712), `not x is y` (E714), ambiguous class
+# names (E742), colon-joined statements (E701) and late module-level imports (E402).
 [tool.ruff]
 target-version = "py310"
 line-length = 100
 
 [tool.ruff.lint]
-# Pre-existing debt, with the violation count at the commit that added this config.
+# Pre-existing stylistic debt, with the current violation count next to each rule.
 # To turn one back on, clear its violations in the same PR that removes the line.
 ignore = [
-    "E402",  #  5 -- module-level import after an env/availability guard, deliberate
-    "E701",  #  2
-    "E702",  # 47 -- `a = x; b = y` in kernel and benchmark code
-    "E712",  #  2
-    "E714",  #  1
+    "E702",  # 63 -- `a = x; b = y` in kernel, benchmark and dense test code
     "E731",  # 18 -- lambda assignment, mostly triton kernel dispatch tables
     "E741",  # 79 -- `l` as a length/level variable throughout the kernels
-    "E742",  #  1
-    "F401",  # 17 -- unused imports; several are deliberate re-exports
-    "F541",  #  1
-    "F841",  # 13 -- assigned-never-used locals
 ]

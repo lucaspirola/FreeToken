@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from freetoken.tokenizer.effort import (
-    EFFORT_SCALE,
     EffortProfile,
     KNOWN_REASONING_EFFORTS,
     probe_effort_profile,

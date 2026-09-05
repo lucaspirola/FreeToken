@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import os
 import signal
-import subprocess
 import sys
 import threading
 import time
@@ -19,7 +18,6 @@ from typing import Callable
 
 from . import osproc
 from .serve_manager import Conflict
-from .tailer import LogTailer
 
 
 @dataclass

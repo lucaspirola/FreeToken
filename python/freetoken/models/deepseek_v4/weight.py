@@ -13,7 +13,6 @@ import collections
 import json
 import os
 import re
-from typing import Iterator
 
 import safetensors
 import torch

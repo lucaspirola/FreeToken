@@ -83,7 +83,6 @@ class Attention(nn.Module):
         # only the pool HANDLE; buffers + slot maps are read off it per access via @property, so a
         # runtime pool rebuild needs no per-buffer unbind.
         L = self.layer_id
-        win = self.window_size
         self.P = pool.P
         self.freqs_cis = get_freqs_cis(*self._freqs_params, device)
         if self.compress_ratio:
@@ -174,7 +173,6 @@ class Attention(nn.Module):
         (grid (T, head)). Each query gathers only its own request's slots, so requests are isolated.
         """
         win, ratio, rd = self.window_size, self.compress_ratio, self.rope_head_dim
-        device = x.device
         _, T, _ = x.size()
         if len(segments) == 1:
             # single contiguous segment: a free slice view instead of a per-layer gather

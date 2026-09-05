@@ -576,7 +576,6 @@ def _topk_thr_ksum(probs, top_k):
 def top_k_renorm_probs(probs, top_k):
     probs = probs.float()
     B, V = probs.shape
-    dev = probs.device
     G, CHUNK = _plan(B, V)
     grid = (B * G,)
     thr, ksum = _topk_thr_ksum(probs, top_k)

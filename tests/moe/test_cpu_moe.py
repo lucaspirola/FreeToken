@@ -689,7 +689,6 @@ def test_cpu_moe_executor_is_collectable():
     re-derefs per tick): dropping the last reference collects the executor -- with its
     C++ worker pool and pinned banks -- and the watchdog daemon exits by itself."""
     import gc
-    import time
     import weakref
 
     from freetoken.moe.cpu_executor import CpuMoeExecutor

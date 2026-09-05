@@ -22,12 +22,24 @@ The whole job is a few minutes, almost all of it dependency installation.
 ### 1. `ruff check`
 
 Ruff's default rule set (`E4`, `E7`, `E9`, `F`) minus the codes listed under
-`[tool.ruff.lint] ignore` in `pyproject.toml`. That ignore list is *exactly* the set of
-rules the tree was already violating when the gate was introduced, with the violation
-count recorded next to each one — so the gate fires only on something newly introduced,
-and never on pre-existing style. What stays enabled is the part that catches real bugs:
-syntax errors (`E9`), undefined names and redefinitions (`F821`, `F811`), `is` against a
-literal (`F632`), and malformed `%`/`.format` calls (`F50x`).
+`[tool.ruff.lint] ignore` in `pyproject.toml`. That ignore list started as *exactly* the
+set of rules the tree was already violating when the gate was introduced; what is left of
+it is three purely stylistic rules the tree still violates in bulk, with the violation
+count recorded next to each one:
+
+| ignored | count | why it stays |
+|---------|-------|--------------|
+| `E702` | 63 | `a = x; b = y` in kernel, benchmark and deliberately dense test code |
+| `E731` | 18 | lambda assignment, mostly triton kernel dispatch tables |
+| `E741` | 79 | `l` as a length/level variable throughout the kernels |
+
+Everything else is enabled, so the gate now catches real bugs *and* the classes that hide
+them: syntax errors (`E9`), undefined names and redefinitions (`F821`, `F811`), `is`
+against a literal (`F632`), malformed `%`/`.format` calls (`F50x`), unused imports and
+locals (`F401`, `F841`), placeholder-free f-strings (`F541`), `== True` / `== False`
+(`E712`), `not x is y` (`E714`), ambiguous class names (`E742`), two statements separated
+by a colon (`E701`), and module-level imports below the top of a file (`E402` — the few
+deliberate ones, after an availability guard, carry a `# noqa: E402`).
 
 To pay down a line of that debt, clear the violations and delete the line in the same PR.
 
