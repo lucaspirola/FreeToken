@@ -204,6 +204,9 @@ class SessionSpillStore:
         self.state_stride_tokens = max(1, int(state_stride_tokens))
         self.max_states = max(1, int(max_states))
         self._prefetch: _Prefetch | None = None
+        # A promotion installed by a reap nobody asked for (``start_prefetch``'s own
+        # housekeeping), held until the caller that does ask for it collects it.
+        self._promoted: str | None = None
         self.ram_bytes = 0
         self.disk_bytes = 0
         self._records: list[SessionSpillRecord] = []
@@ -706,7 +709,13 @@ class SessionSpillStore:
         Returns False (never raises) when there is nothing to promote or the RAM budget
         cannot hold it: the look-ahead is an optimization, never an admission gate.
         """
-        self.collect_prefetch()  # reap a finished or cancelled predecessor
+        # Reap a finished or cancelled predecessor -- but do not swallow its result: the
+        # reader thread can land at any moment, so whether this reap or the caller's own
+        # later ``collect_prefetch`` installs the promotion is a race. Park the id so that
+        # later call still reports it instead of answering "nothing was promoted".
+        reaped = self.collect_prefetch()
+        if reaped is not None:
+            self._promoted = reaped
         if self._prefetch is not None:
             return False
         record = self.get(session_id)
@@ -736,13 +745,21 @@ class SessionSpillStore:
         state.thread.start()
         return True
 
+    def _take_promoted(self, session_id: str | None) -> str | None:
+        """Report an already-installed promotion once, to the first caller that asks."""
+        promoted = self._promoted
+        if promoted is None or (session_id is not None and promoted != session_id):
+            return None
+        self._promoted = None
+        return promoted
+
     def collect_prefetch(
         self, session_id: str | None = None, *, wait: bool = False
     ) -> str | None:
         """Install a finished promotion (main thread only). Returns the session promoted."""
         state = self._prefetch
         if state is None or (session_id is not None and state.session_id != session_id):
-            return None
+            return self._take_promoted(session_id)
         if state.thread is not None and state.thread.is_alive():
             if not wait:
                 return None
@@ -792,6 +809,8 @@ class SessionSpillStore:
             return
         if self._prefetch is not None and self._prefetch.record is record:
             self.cancel_prefetch()
+        if self._promoted == record.session_id:
+            self._promoted = None  # nothing left to report: this checkpoint is gone
         record.valid = False
         self._records = [candidate for candidate in self._records if candidate is not record]
         if self._by_session.get(record.session_id) is record:
@@ -810,6 +829,7 @@ class SessionSpillStore:
     def shutdown(self) -> None:
         """Persisting shutdown only flushes manifests; the root survives for the next run."""
         self.cancel_prefetch()
+        self._promoted = None
         if not self.persist:
             for record in list(self._records):
                 self.discard(record)

@@ -478,6 +478,21 @@ def test_prefetch_promotes_a_queued_session_checkpoint_to_ram(tmp_path, monkeypa
     store.shutdown()
 
 
+def test_prefetch_result_survives_the_reap_inside_the_next_start(tmp_path, monkeypatch):
+    """The reader thread can finish before any collect: the housekeeping reap that
+    ``start_prefetch`` performs must not consume the promotion its caller will ask for."""
+    _kv, linear, _manager, store = _boundary_pools(tmp_path)
+    record = _disk_record(store, linear, "agent-a", monkeypatch)
+
+    assert store.start_prefetch("agent-a") is True
+    store._prefetch.thread.join()  # the racy window, made deterministic
+    assert store.start_prefetch("agent-b") is False  # reaps agent-a on the way through
+    assert store.collect_prefetch("agent-a", wait=True) == "agent-a"
+    assert record.tier == "ram" and record.directory is None
+    assert store.collect_prefetch("agent-a") is None  # reported once, not forever
+    store.shutdown()
+
+
 def test_prefetch_is_refused_when_the_ram_budget_cannot_hold_it(tmp_path, monkeypatch):
     _kv, linear, _manager, store = _boundary_pools(tmp_path, ram_budget_bytes=0)
     record = _disk_record(store, linear, "agent-a", monkeypatch)

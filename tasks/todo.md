@@ -206,6 +206,19 @@ Command: `ft serve --model ~/ai/models/Ornith-1.5-35B-Q4_K_M.gguf
   responses without a crash. Worker environments proved the fallback leg had
   `FREETOKEN_GGUF_DISABLE_MMA=1` and the optimized leg did not.
 - tests/moe/test_prefill_hit_d2d.py::test_batch_memcpy_roundtrip is a pre-existing order-dependent flake (dst produced on the default stream, probe syncs its own stream). Ticket it; not Nemotron work.
+  ROOT CAUSE (2026-09-05, CUDA-only — cannot be reproduced or fixed without a GPU): the raiser is the
+  JIT loader's probe, not the test body. `kernel/batch_memcpy.py:28-39` zeroes `dst` on the *ambient*
+  stream (line 29), runs the batch copy on a fresh private stream (31-36), then `stream.synchronize()`
+  (37) waits on that private stream only. Nothing orders the memset ahead of the copy, so once earlier
+  tests have left work queued on the ambient stream the zero-fill retires *after* the copy and clobbers
+  it -> `RuntimeError: cudaMemcpyBatchAsync probe copied wrong bytes` (line 39), surfacing at
+  tests/moe/test_prefill_hit_d2d.py:75. Deterministic when the whole tests/moe dir runs; passes alone.
+  Fix: `stream.wait_stream(torch.cuda.current_stream())` before the copy and `dst.record_stream(stream)`
+  after it (or allocate/zero `dst` inside `with torch.cuda.stream(stream)`); the same two lines belong in
+  test_batch_memcpy_roundtrip. Wider impact worth ticketing: `_probe` runs on the caller's ambient stream,
+  so a busy stream at first resolve can make `moe/offload_cache.py:1194-1205` latch `_batch_memcpy=False`
+  and silently disable prefill hit-D2D process-wide. The production copy path (offload_cache.py:1294-1300)
+  is event-ordered and unaffected.
 - Ticket: `--kv-grow-step-tokens` + `--nvfp4-backend flashinfer` crashes at init (b12x banks include an int32 bank that `kernel/vmm.py` `_DTYPE_NAMES` lacks). Not blocking (triton is the default).
 - 1M gate must retest the 262K/524K needle through the chat endpoint (cache study saw misses on the raw completions probe, the known artifact).
 
@@ -478,6 +491,15 @@ the clock. A live 16-way soak on both routes remains the acceptance test.
       at ~2 K tokens.
 - [x] Merged fork/main (14 Ada/Ornith commits) into nemotron35 at 32cc504. Before deploying on Ada:
       rebuild the _gguf extension (multiwarp bool→warps int64; stale .so silently picks 4-warp path).
-- [ ] Ticket: Scheduler.__init__ now calls torch.cuda.get_device_capability unconditionally (from
-      fork/main) — blocks constructing a Scheduler in CPU tests; guard it.
+- [x] Scheduler.__init__'s unconditional torch.cuda.get_device_capability (from fork/main) is now
+      routed through `_device_compute_capability`, which answers None off-GPU; the batch profile
+      treats None as "no crossover" (grouping off) and keeps Ada's 1536 / Blackwell's 1280 exactly.
+      Covered by tests/scheduler/test_batch_profile_capability.py. Full Scheduler construction on
+      CPU is still out of reach for a small fixture (`__init__` builds a real Engine and a
+      torch.cuda.Stream), so the tests exercise the helpers, not a constructed Scheduler.
+- [x] Fixed the tests/scheduler/test_session_spill.py prefetch flake at the source: `start_prefetch`
+      reaps a finished predecessor, and when the reader thread happened to land first that reap
+      installed (and logged) the promotion, then dropped its id — so the caller's own
+      `collect_prefetch(sid, wait=True)` found `_prefetch is None` and answered None. The store now
+      parks such an unasked-for promotion in `_promoted` and hands it to the first caller that asks.
 - [ ] fork/main fast-forward to the merge is the user's call (nemotron35 branch carries it).

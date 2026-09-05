@@ -66,14 +66,28 @@ def _resolve_max_prefill_seqs(config: SchedulerConfig) -> int:
     )
 
 
+def _device_compute_capability(device: torch.device) -> tuple[int, int] | None:
+    """This device's CUDA capability, or ``None`` when there is no GPU behind it.
+
+    A Scheduler is constructed in CPU-only contexts (unit tests, tooling) where
+    ``torch.cuda.get_device_capability`` raises rather than answering, so the GPU batch
+    profile has to be able to say "no profile" instead of failing construction.
+    """
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return None
+    return torch.cuda.get_device_capability(device)
+
+
 def _auto_small_prompt_group_tokens(
     config: SchedulerConfig,
     max_prefill_seqs: int,
-    compute_capability: tuple[int, int],
+    compute_capability: tuple[int, int] | None,
 ) -> int:
     """Return the measured short-prompt grouping crossover for this GPU."""
     if config.max_prefill_seqs is not None or max_prefill_seqs != 1:
         return 0
+    if compute_capability is None:
+        return 0  # no GPU to have a crossover: leave short-prompt grouping off
     # Four-way Ornith measurements put Ada's crossover between 1,536 and
     # 2,048 tokens for both Q4_K_M/INT4 and Q6_K/Q8_0.  Keep the imported
     # Blackwell crossover unchanged rather than extrapolating across GPUs.
@@ -173,7 +187,7 @@ class Scheduler(SchedulerIOMixin):
         self.cache_manager.mamba_reclaim_hook = self._reclaim_soft_sessions_for_state_slot
         self.decode_manager = DecodeManager(config.page_size)
         max_prefill_seqs = _resolve_max_prefill_seqs(config)
-        compute_capability = torch.cuda.get_device_capability(self.device)
+        compute_capability = _device_compute_capability(self.device)
         self.prefill_manager = PrefillManager(
             self.cache_manager,
             self.table_manager,
