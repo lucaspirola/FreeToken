@@ -1,5 +1,6 @@
 """Weightless check: the fused (all-layers-on-the-head-axis) commit == the per-layer one."""
-import sys, torch
+import sys
+import torch
 sys.path.insert(0, "python")
 from freetoken.models.nemotron_h.spec_scan import SpecScanCapture, _plan
 

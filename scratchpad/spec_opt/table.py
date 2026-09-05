@@ -1,6 +1,8 @@
 """Rebuild the per-class arm table from a probe session log (the JSON lost its class keys
 in session 1's shadowed loop variable)."""
-import ast, re, sys
+import ast
+import re
+import sys
 
 for path in sys.argv[1:]:
     cls = None

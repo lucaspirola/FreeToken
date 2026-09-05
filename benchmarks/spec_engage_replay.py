@@ -17,7 +17,8 @@ Policies, all with the same n and k:
   stale-superset     the new peek: ask whether any indexed n-gram starts with the n-1
                      tokens already held, then re-test exactly after the drain
 """
-import json, sys
+import json
+import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python"))
