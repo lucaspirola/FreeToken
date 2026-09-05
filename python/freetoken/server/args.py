@@ -921,6 +921,21 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--moe-extend-cache-tokens",
+        type=int,
+        dest="moe_extend_cache_tokens",
+        default=ServerArgs.moe_extend_cache_tokens,
+        help=(
+            "Route an extend (prefill-path) forward carrying at most this many tokens "
+            "through the decode expert cache -- fetch only the experts those tokens "
+            "route to -- instead of streaming every expert of every layer over PCIe. "
+            "The prefill stream costs num_experts rows per layer per forward whatever "
+            "the token count, which is hidden behind a full chunk's GPU work and is the "
+            "entire cost of a short extend. 0 disables (always stream the full layer)."
+        ),
+    )
+
+    parser.add_argument(
         "--shell-mode",
         action="store_true",
         help="Run the server in shell mode.",

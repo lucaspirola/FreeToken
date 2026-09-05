@@ -545,3 +545,35 @@ the clock. A live 16-way soak on both routes remains the acceptance test.
       `collect_prefetch(sid, wait=True)` found `_prefetch is None` and answered None. The store now
       parks such an unasked-for promotion in `_promoted` and hands it to the first caller that asks.
 - [ ] fork/main fast-forward to the merge is the user's call (nemotron35 branch carries it).
+- [x] **Extend-path MoE ticket 1** (from the n-gram NO-GO §6): the 11.6 ms per MoE layer per
+      forward is not host-side planning, it is `_prefill_routed` streaming **every** expert of the
+      layer into its double buffer on **every** forward -- nothing in that movement path reads
+      `topk_ids`, which is why it is flat from 1 to 32 tokens. 128 x 5.612 MB = 718 MB per layer,
+      16.5 GB per forward (the whole 15.4 GiB bank set), and 16.5 GB / 267 ms = **61.9 GB/s**: a
+      saturated PCIe 5.0 x16 link. A 1-token extend routes 6 experts per layer and moves 128 --
+      **21.3x, in bytes**. Fixed by `--moe-extend-cache-tokens` (default 64, 0 disables): below the
+      threshold an extend takes the *decode* movement (`ensure_experts` + `copy_missing`) and the
+      *prefill* grouped GEMM; movement and kernel were already independent arguments of
+      `_expert_gemm`, the extend path just had them paired wrong. 64 is where the measured
+      `D(m) ~ 6.2*m^0.75` distinct-expert curve reaches num_experts. **Measured 2026-09-05:
+      forward 282.7 -> 27.7 ms (m=1), 282.7 -> 30.2 (m=8), 282.5 -> 30.9 (m=32); MoE 11.4 ->
+      0.42-0.48 ms/layer, i.e. 9.2-10.2x on the forward and 23.6-27.3x on the MoE. 131K prefill
+      5,059 -> 5,105 tok/s (+0.9 %, noise), needle recalled both arms, a long prompt with a short
+      last chunk is greedy token-identical. A verify step is now 4.4x a graphed decode step
+      instead of 42x, projecting 1.63x on the copy class.** The first attempt pointed the grouped
+      prefill GEMM at the slot cache and faulted (sgl `moe_align_block_size` over ~1,800 experts);
+      the GEMV is what ships, and the grouped variant is ticket 1 of the write-up. There is **no
+      per-forward re-planning to hoist** above the threshold on the default configuration (six
+      `Tensor.copy_` per layer, no host sync, plan precomputed in `_build_copy_plan`; the only
+      per-layer host work belongs to the opt-in `--moe-prefill-hit-d2d` split), so the large-M path
+      is deliberately untouched. Write-up:
+      `benchmarks/results/nemotron35_lightning_5080_extend_moe_2026-09-05.md`; tests
+      `tests/moe/test_extend_cache.py`.
+- [ ] Extend-cache follow-ups (from the same run): (a) whether to raise the threshold to cover the
+      scheduler's 512-token interleave chunks -- decidable in one run by per-chunk time and the
+      following decode's miss rate at `--moe-extend-cache-tokens` 64/512/2048 on a 131K prompt;
+      (b) `--moe-collect-stats`' "MoE decode miss stats" and the pageable-layer profile now also
+      count extend routings below the threshold (`ensure_experts` bumps `lru_stats`/`decode_freq`);
+      (c) `_ensure_experts_sized_kernel` evicts serially in a `(1,)` grid -- one argmin over
+      `next_pow2(cache_size)` lanes per miss, fine at a decode step's 6 and the first suspect if
+      the M = 32 number lands above prediction.

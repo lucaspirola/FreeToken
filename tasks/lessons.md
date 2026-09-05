@@ -798,3 +798,60 @@ check for `Discarded cold session ...: client token prefix changed` before blami
 - **A 31 s hole with 291 non-batch lines in it is a spill burst, not a stall.** Second run in a
   row where the only gap ≥ 30 s was session spill/release under admission pressure
   (`#queue-req 11`, `#running-req 3`). Read inside the gap before naming it; the §U lesson held.
+
+## 2026-09-05 (extend-path MoE ticket — a host OOM and a malformed test bank)
+- **Never run pytest, or import torch at all, while a model is loaded on this host.** A CPU
+  test sweep overlapping the soak's expert-bank build OOM-restarted WSL and took the whole
+  session's background jobs with it. Check `pgrep -f "ft serve"` / `nvidia-smi` FIRST; if
+  anything is loaded, stay under ~1 GB RSS and do desk work. CPU test runs are a GPU-window
+  activity here, not a free one.
+- **The 11.6 ms/MoE-layer extend cost was bytes, not planning.** `_prefill_routed` streams
+  every expert of the layer into its double buffer on every forward and nothing in that
+  movement path reads `topk_ids` -- which is exactly why it was flat from 1 to 32 tokens.
+  128 x 5.612 MB = 718 MB per layer, 16.5 GB per forward (the whole 15.4 GiB bank set), and
+  16.5 GB / 267 ms = 61.9 GB/s: a saturated PCIe 5.0 x16 link. The n-gram write-up rejected
+  bandwidth by pricing the *routed* experts (138 fetches) instead of the *streamed* ones
+  (2,944). **When a cost is flat in the variable you swept, price the thing that is NOT a
+  function of it before concluding "host overhead".**
+- **Check a candidate fix's arithmetic against the model's own documented totals.** "15.39 GiB
+  per forward" landing exactly on `docs/nemotron.md`'s "the NVFP4 routed-expert banks are
+  15.4 GiB" is what turned a hypothesis into a diagnosis, before any GPU time.
+- **A reference output full of NaN makes an equality test vacuous in both directions.** Four
+  CUDA tests "failed" on synthetic NVFP4 banks whose `*_global` was `[E, 1]`; the real layout
+  is per OUTPUT ROW (`[E, I]` / `[E, H]`, see `tests/moe/test_nvfp4_backends.py::
+  _make_ungated_sources`), so `stride(0) = 1` made the kernel read overlapping rows and every
+  output was NaN or 1e15. **Assert `isfinite().all()` and `abs().max() > 0` on the reference
+  before comparing to it** -- and build synthetic quantized banks by copying the repo's own
+  builder, never by guessing the shapes from the bank schema names.
+- **`moe_align_block_size` is the first thing to exonerate, not to suspect.** Printing its
+  `sorted_ids`/`expert_ids`/`ntpp` for the compact and the wide call took one 10-line script
+  and proved they were identical (same sort, remapped expert ids), which moved the search to
+  the data. Dump the intermediate before theorising about the kernel.
+- **A `git worktree` has no compiled CUDA extensions.** `freetoken.kernel._pinned_tensor`,
+  `_cpu_moe` and `_pageable_stage` live only in the main checkout's `python/freetoken/kernel/`;
+  with `PYTHONPATH=<worktree>/python` every `set_bank_sources` test dies on an ImportError that
+  reads like a broken install. Symlink the three `.so` files in (they are gitignored).
+- **`str.replace(old, new, 1)` lands on the FIRST match, and near-duplicate method bodies make
+  that the wrong one.** A three-line `ensure_experts` / `copy_missing` / `_expert_gemm` prefix
+  appears in both `_decode_routed` and the new `_cached_extend_routed`, so an nvfp4-only assert
+  meant for the second went into the first and broke bf16 decode -- caught only because
+  `tests/moe/test_offload.py` covers it. When patching by text, anchor on something unique to
+  the target (a docstring line), or assert the match count is 1 AND that it is in the right
+  function.
+- **The tree usually already documents the constraint you are about to hit.** Pointing the
+  grouped prefill GEMM at the decode slot cache faulted with an illegal memory access (sgl
+  `moe_align_block_size` over ~1,800 "experts"); `_expert_gemm`'s ds_fp4 branch had said for
+  months that its small-chunk slot path uses the GEMV because "sorting over the full slot cache
+  would drown in padding". Read the neighbouring branch's comment before generalising a kernel.
+- **A benchmark that reuses one prompt measures the radix tree, not the model.** `base + tail`
+  repeated across arms is served from cache and an m-token extend silently becomes a 1-token
+  one. Give every timed call a fresh tail and key the row on the recorded `"<m>/extend"` forward
+  bucket, so the shape is proven rather than assumed.
+- **Greedy equivalence has to be probed with `ignore_eos=False`.** The 131K needle arm diverged
+  at token 0 -- but `ignore_eos=True` forces both arms past `<|im_end|>` into a degenerate
+  repeat whose phase carries no signal. With natural stop, the realistic shape (a long prompt
+  whose last chunk is short) was token-identical, and only the all-new-kernel case drifted, at
+  token 60 of 255.
+- **Ship the arm that works and file the faster one.** The GEMV variant was 23-27x on the MoE
+  and took one line; chasing the grouped GEMM's further ~2.3x of HBM would have cost another
+  session and had a fault to design around. Same discipline as the scheduler's third attempt.

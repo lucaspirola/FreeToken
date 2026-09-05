@@ -251,21 +251,48 @@ never advanced speculatively and there is nothing to roll back; each mixer cache
 pass runs one varlen SSD scan over the accepted j positions (~0.2–0.5 ms). No 47 MiB state copy.
 
 **The blocker is that there is no cheap multi-token forward.** The only path that carries k > 1
-query tokens for a running request is the prefill/extend path, and that path costs **290 ms of
+query tokens for a running request is the prefill/extend path, and that path cost **290 ms of
 host time per forward, flat from 1 to 32 tokens**, against 33.9 ms for a 1-token forward on the
 decode path. Per-mixer attribution puts **267 ms of it in the 23 MoE layers — 11.6 ms per MoE
-layer per forward, independent of token count**: the prefill MoE path plans and issues its expert
-gather per layer per forward and does not reuse the decode expert cache. That is 36–42× a 6.9–8.0 ms
-graphed decode step, so break-even would need λ ≈ 40 against a ceiling of k + 1 ≤ 17.
+layer per forward, independent of token count**. That is 36–42× a 6.9–8.0 ms graphed decode step,
+so break-even would need λ ≈ 40 against a ceiling of k + 1 ≤ 17.
 
-It is invisible in normal serving because an 8 192-token chunk does ~861 ms of GPU work and the
-host runs ahead of it. It also means **prefill chunks below ~3K tokens go host-bound**, which is a
-second reason not to lower `--max-prefill-length`.
+**Why (measured 2026-09-05, ticket 1 closed):** `_prefill_routed` streams *every* expert of the
+layer into its double buffer on *every* forward — nothing in that movement path reads `topk_ids`,
+which is exactly why the cost is flat in M. That is 128 × 5.612 MB = **718 MB per layer** and
+**16.5 GB per forward** (the whole 15.4 GiB expert bank set), and 16.5 GB / 267 ms = **61.9 GB/s**,
+a saturated PCIe 5.0 x16 link. A 1-token extend routes 6 experts per layer and moves 128: a
+**21.3× waste, in bytes, not host time.** It is invisible in normal serving because an 8 192-token
+chunk does ~861 ms of GPU work and the host runs ahead of it — and it is why **prefill chunks below
+~3K tokens go host-bound**, a second reason not to lower `--max-prefill-length`.
 
-Order of work if this is revisited: (1) make the extend path reuse the decode expert cache;
-(2) capture a fixed-width verify forward; (3) only then build `--speculative ngram` (default
-`--spec-ngram-n 8`, `--spec-draft-len 8`, greedy only). With (1) alone the copy class projects
-**1.52×**; with (2) as well, **1.74×** — both clear of the 1.25× bar MTP failed. This also
+**The fix** is `--moe-extend-cache-tokens` (default **64**, 0 disables): an extend forward carrying
+at most that many tokens takes the *decode* path — `ensure_experts` + `copy_missing` fetch the
+experts those tokens route to and only the ones not already resident, and the NVFP4 decode GEMV is
+m-general (grid `(m·top_k, cdiv(N, BLOCK_N))`). 64 is the crossover: the measured distinct-experts
+curve `D(m) ≈ 6.2·m^0.75` reaches num_experts at m ≈ 57, above which the cached path degenerates
+into the full-layer stream and also evicts the decode working set. Restricted to the NVFP4 bank
+layouts, GPU decode target and pinned layers; everything else keeps the full-layer stream, as does
+every M above the threshold.
+
+**Measured** (2026-09-05, same binary both arms):
+
+| m | forward before | forward after | MoE ms/layer before → after |
+|---:|---:|---:|---|
+| 1 | 282.7 ms | **27.7 ms** | 11.44 → **0.42** |
+| 8 | 282.7 ms | **30.2 ms** | 11.42 → **0.47** |
+| 32 | 282.5 ms | **30.9 ms** | 11.37 → **0.48** |
+
+9.2–10.2× on the forward, 23.6–27.3× on the MoE, and the MoE is no longer the extend forward (at
+m = 32 it is 11.1 ms against Mamba-2's 15.6). 131K prefill 5,059 → 5,105 tok/s (+0.9 %, noise),
+needle recalled in both arms, and a long prompt whose last chunk is short is greedy token-identical.
+Write-up: `benchmarks/results/nemotron35_lightning_5080_extend_moe_2026-09-05.md`.
+
+Order of work if speculation is revisited: (1) **done** — the extend path reuses the decode expert
+cache; (2) capture a fixed-width verify forward; (3) build `--speculative ngram` (default
+`--spec-ngram-n 8`, `--spec-draft-len 8`, greedy only). With (1) a verify step costs **4.4×** a
+graphed decode step instead of 42×, which projects **1.63×** on the copy class — already clear of
+the 1.25× bar MTP failed, so (2) is now an improvement rather than a precondition. This also
 corrects the Phase 4 write-up: its 1.63× verify cost came from a bs=2 *decode* step, but a real
 verify step takes the *extend* path, so MTP's projection was ~25× optimistic about its own verify
 step.

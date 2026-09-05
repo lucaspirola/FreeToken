@@ -87,6 +87,12 @@ class EngineConfig:
     # prefetch instead of re-streaming the full layer over PCIe. Needs CUDA >= 12.8
     # (cudaMemcpyBatchAsync); no-op unless moe_cache_size > 2 * num_experts.
     moe_prefill_hit_d2d: bool = False
+    # Extend (prefill-path) forwards carrying at most this many tokens take the DECODE
+    # expert cache instead of streaming every expert of every layer over PCIe. The
+    # prefill stream costs num_experts rows per layer per forward regardless of token
+    # count (15.7 GiB per forward on Nemotron 3.5 Lightning, ~290 ms), which is free
+    # behind an 8K chunk's GPU work and is the entire cost of a short extend. 0 disables.
+    moe_extend_cache_tokens: int = 64
     moe_collect_stats: bool = False  # capture decode miss-rate counters into the cuda graph
     # Persistent pageable-layer profiles are deliberately opt-in. Production traffic can
     # have a very different expert-routing distribution from a tuning gate, so silently

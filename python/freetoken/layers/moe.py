@@ -447,9 +447,17 @@ class OffloadMoELayer(MoELayer):
         """Prefill movement: stream whole layers -- double-buffered behind the
         previous layer's GEMMs when ``prefill_overlap`` is on, else a synchronous
         ``materialize_layer``. In both, position == expert id, so the routing ids
-        pass through unmapped."""
+        pass through unmapped.
+
+        A whole layer is ``num_experts`` expert rows per forward whatever the token
+        count, which is the right trade behind a full chunk's GPU work and the wrong
+        one for a handful of tokens; below ``extend_cache_tokens`` the forward takes
+        the decode slot cache instead (``_cached_extend_routed``), where the ids ARE
+        remapped to slot ids."""
         cache = self.offload_cache
         assert cache is not None
+        if cache.use_cached_extend(self.layer_id, hidden_states.shape[0]):
+            return self._cached_extend_routed(cache, hidden_states, topk_weights, topk_ids)
         if cache.prefill_overlap:
             views = self._wait_prefill_overlap(cache)
             out = self._expert_gemm(
@@ -476,6 +484,36 @@ class OffloadMoELayer(MoELayer):
             alphas=cache.alphas_for_layer(self.layer_id),
             is_prefill=True,
         )
+
+    def _cached_extend_routed(
+        self,
+        cache: OffloadMoeCache,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Small-M extend: the DECODE expert path, unchanged, over m tokens.
+
+        Which weights cross PCIe and which kernel multiplies them are independent
+        choices, and the extend path had them paired wrong for small m: it streams
+        ``num_experts`` rows per layer per forward whatever m is (16.5 GB per forward
+        on Nemotron 3.5 Lightning, a saturated PCIe link) to compute over the ~6m
+        rows the routing actually touches. ``_decode_routed`` fetches exactly those,
+        and only the ones not already resident, and its GEMV is m-general -- the
+        grid is ``(m * top_k, cdiv(N, BLOCK_N))``.
+
+        The GEMV re-reads an expert per *route* where a grouped GEMM would read it
+        once per distinct expert, so its HBM traffic grows as ``m * top_k`` rather
+        than as the distinct-expert curve. Pointing the grouped prefill GEMM at the
+        slot cache instead is the obvious next step and is NOT taken here: the sort
+        would have to cover ``cache_size`` rows, which is what the ds_fp4 slot path
+        already refuses ("sorting over the full slot cache would drown in padding")
+        and what an sgl ``moe_align_block_size`` over ~1 800 experts faults on.
+        """
+        # The gate restricts this to the NVFP4 layouts, which decode through the
+        # slot cache; every other format keeps the full-layer stream.
+        assert cache.quant_format.startswith("nvfp4"), cache.quant_format
+        return self._decode_routed(hidden_states, topk_weights, topk_ids)
 
     def _wait_prefill_overlap(self, cache: OffloadMoeCache) -> tuple[torch.Tensor, ...]:
         """Double-buffer choreography for this layer's overlap prefill: kick off the

@@ -879,6 +879,7 @@ class Engine:
                 cache_policy=config.moe_cache_policy,
                 prefill_overlap=config.moe_prefill_overlap,
                 prefill_hit_d2d=config.moe_prefill_hit_d2d,
+                extend_cache_tokens=config.moe_extend_cache_tokens,
                 quant_format=banks.quant_format,
                 decode_target=decode_target,
                 hybrid_max_fetch=config.moe_hybrid_max_fetch,
@@ -2080,6 +2081,7 @@ _DENSE_MOE_SETTINGS = {
     "moe_hybrid_max_fetch": -1,
     "moe_prefill_overlap": True,
     "moe_prefill_hit_d2d": False,
+    "moe_extend_cache_tokens": 64,
     "expert_load": "auto",
 }
 

@@ -37,6 +37,12 @@ logger = init_logger(__name__)
 # layout is declared. The cache machinery (copy_missing, the prefill double buffers,
 # bank_views) iterates banks in this order, the layers' kernel dispatch unpacks views
 # in this order, and set_bank_sources validates against it.
+# Bank layouts whose expert-GEMM entry points index bank rows by an arbitrary id, so
+# the grouped prefill GEMM can be pointed at the decode slot cache instead of a
+# full-layer buffer (position == expert id).  Every other format keeps the legacy
+# full-layer prefill stream on the extend path.
+_CACHED_EXTEND_FORMATS = frozenset({"nvfp4", "nvfp4_marlin", "nvfp4_b12x"})
+
 _BANK_SCHEMAS: dict[str, tuple[str, ...]] = {
     # dense bf16 expert weights
     "bf16": ("gate_up", "down"),
@@ -150,6 +156,17 @@ class OffloadMoeCache:
     # measured two-token window only for Q6_K Ornith on Ada; zero keeps pure LFU.
     lfu_recency_tokens: int = 0
     lfu_recency_bonus: int = 1
+    # Small-M extend forwards (a speculative verify step, a short prefill tail, a
+    # 1-token continuation) route their MoE through the DECODE slot cache instead
+    # of the prefill full-layer stream: ``ensure_experts`` fetches only the experts
+    # the tokens actually route to, exactly as a decode step does, and the grouped
+    # prefill GEMM then reads the slot cache. The prefill path is bandwidth-bound in
+    # ``num_experts``, not in M -- it moves every expert of every layer per forward
+    # (23 x 128 x ~5.5 MiB = 15.7 GiB on Nemotron 3.5 Lightning) whether the forward
+    # carries 1 token or 8192 -- so below the crossover the cached path moves ~20x
+    # fewer bytes. 0 disables (always the legacy full-layer prefill stream).
+    # FREETOKEN_MOE_EXTEND_CACHE_TOKENS overrides it for A/B without re-plumbing args.
+    extend_cache_tokens: int = 64
 
     def __post_init__(self) -> None:
         policy_ids = {"lru": 0, "lfu": 1}
@@ -158,6 +175,9 @@ class OffloadMoeCache:
         assert self.quant_format in _BANK_SCHEMAS, (
             f"unknown quant_format {self.quant_format!r}"
         )
+        if (env := os.environ.get("FREETOKEN_MOE_EXTEND_CACHE_TOKENS")) is not None:
+            self.extend_cache_tokens = int(env)
+        assert self.extend_cache_tokens >= 0, self.extend_cache_tokens
         # Attached by the engine for decode_target == "cpu" (CpuMoeExecutor); None
         # for the GPU decode path.
         self.cpu_executor = None
@@ -929,6 +949,28 @@ class OffloadMoeCache:
         """Whether ``layer_id``'s host banks have no device address (LOCKED/PAGEABLE): the GPU slot-gather paths cannot serve it.
         ``copy_missing`` takes the whole-layer pageable branch, which presumes materialize's position == expert id (never ``ensure_experts``'s LRU slot remap)."""
         return layer_id in self._unpinned_layers
+
+    def use_cached_extend(self, layer_id: int, num_tokens: int) -> bool:
+        """Whether an extend forward of ``num_tokens`` should take the DECODE slot
+        cache for ``layer_id`` instead of the full-layer prefill stream.
+
+        The prefill stream's cost is ``num_experts`` expert rows per layer per
+        forward and is independent of ``num_tokens``; the cached path's cost is the
+        distinct experts the tokens route to, minus the ones already resident. Below
+        the threshold the second is far smaller, above it the first wins (and the
+        cached path would also evict the whole decode working set). Restricted to
+        the NVFP4 bank layouts, which are the ones whose GEMM entry points take
+        arbitrary bank-row ids; every other format keeps the legacy path.
+        """
+        return (
+            self.extend_cache_tokens > 0
+            and 0 < num_tokens <= self.extend_cache_tokens
+            and self.quant_format in _CACHED_EXTEND_FORMATS
+            and self.decode_target == "gpu"
+            and not self._size_class_enabled
+            and not self.is_cpu_layer(layer_id)
+            and not self.is_unpinned_layer(layer_id)
+        )
 
     def retune_pageable_layers(self, target: frozenset[int]) -> None:
         """Swap equal-count pinned/pageable layer banks at an idle boundary."""
