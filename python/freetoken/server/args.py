@@ -1055,10 +1055,12 @@ def parse_args(
         type=str,
         default=ServerArgs.hidden_states_dir,
         help=(
-            "Enable the Switchyard prefill-probe export and make this directory its only "
-            "permitted root. A /v1/chat/completions request opts in per call with top-level "
-            "kv_transfer_params; the response returns the artifact path. Off by default: "
-            "without this flag such a request is refused."
+            "Enable the Switchyard prefill-probe file export and make this directory its "
+            "only permitted root. A /v1/chat/completions request opts in per call with "
+            "top-level kv_transfer_params; the response returns the artifact path. Off by "
+            "default: without this flag such a request is refused unless it asks only for "
+            "kv_transfer_params.pooling, which returns pooled vectors inline and writes "
+            "no file."
         ),
     )
     parser.add_argument(

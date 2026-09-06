@@ -38,10 +38,15 @@ import base64
 import fcntl
 import os
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import torch
+
+from freetoken.utils import init_logger
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from freetoken.core import Batch
@@ -90,7 +95,8 @@ class HiddenStateSpec:
 
     directory: str | None = None
     layer_ids: list[int] = field(default_factory=list)
-    pooling: tuple[str, ...] = ()
+    # A ``POOLINGS`` value; a list after the msgpack hop, so only ``in`` is used on it.
+    pooling: Sequence[str] = ()
 
 
 def validate_layer_ids(
@@ -215,8 +221,8 @@ class HiddenStateCapture:
     """
 
     __slots__ = (
-        "spec", "_hidden_size", "_index", "_chunks", "_token_chunks", "_written",
-        "_sum", "_last",
+        "spec", "_hidden_size", "_index", "_chunks", "_token_chunks", "_token_count",
+        "_written", "_sum", "_last",
     )
 
     def __init__(self, spec: HiddenStateSpec, hidden_size: int):
@@ -227,7 +233,9 @@ class HiddenStateCapture:
         # copy lands in one contiguous host slab; transposed once at finish. Only
         # populated when an artifact is wanted.
         self._chunks: list[torch.Tensor] = []
+        # The artifact's ``token_ids``; a pooled-only capture keeps just the count.
         self._token_chunks: list[torch.Tensor] = []
+        self._token_count = 0
         # Distinct layer ids written into each chunk. The buffers are uninitialized, so
         # this is what separates "captured" from "a model that never calls the sink".
         self._written: list[set[int]] = []
@@ -241,12 +249,13 @@ class HiddenStateCapture:
 
     @property
     def token_count(self) -> int:
-        return sum(int(t.numel()) for t in self._token_chunks)
+        return self._token_count
 
     def begin_chunk(self, token_ids: torch.Tensor) -> None:
         rows = int(token_ids.numel())
-        self._token_chunks.append(token_ids.detach().to(torch.int64).clone())
+        self._token_count += rows
         if self.spec.directory is not None:
+            self._token_chunks.append(token_ids.detach().to(torch.int64).clone())
             self._chunks.append(
                 torch.empty(
                     len(self._index), rows, self._hidden_size, dtype=torch.bfloat16
@@ -261,12 +270,14 @@ class HiddenStateCapture:
         # D2H per block: the probe path is opt-in and rare, and staging the whole
         # [chunk, layers, hidden] slab on the GPU first would cost ~1.1 GiB of VRAM at
         # the 4096-token cap for no benefit to a request that samples one token.
+        # A second write of one layer in one chunk would double-count the sum.
+        assert index not in self._written[-1], f"layer {layer_id} captured twice in a chunk"
         if self._chunks:
             self._chunks[-1][index].copy_(hidden)
         if self._sum is not None:
-            # Reduce on the device in float32 (the cast happens inside the reduction,
-            # nothing [rows, hidden]-sized is materialized) and accumulate across chunks
-            # on the host.
+            # Reduce in float32 (on CUDA the half/bf16 -> float32 cast happens inside
+            # the reduction kernel, so nothing [rows, hidden]-sized is materialized) and
+            # accumulate across chunks on the host.
             self._sum[index] += hidden.sum(dim=0, dtype=torch.float32).to("cpu")
         if self._last is not None:
             # Each chunk overwrites it; the last chunk's last row is the final prompt
@@ -288,14 +299,16 @@ class HiddenStateCapture:
                 "this model does not implement the hidden-state hook"
             )
 
-    def finish(self) -> tuple[torch.Tensor | None, torch.Tensor]:
-        """``(hidden_states, token_ids)`` for the artifact; ``hidden_states`` is None
-        when the spec writes no file. Raises when a layer was never captured."""
+    def finish(self) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """``(hidden_states, token_ids)`` for the artifact; both None when the spec
+        writes no file. Raises when a layer was never captured."""
         self._check_complete()
-        token_ids = torch.cat(self._token_chunks)
         if not self._chunks:
-            return None, token_ids
-        return torch.cat(self._chunks, dim=1).permute(1, 0, 2).contiguous(), token_ids
+            return None, None
+        return (
+            torch.cat(self._chunks, dim=1).permute(1, 0, 2).contiguous(),
+            torch.cat(self._token_chunks),
+        )
 
     def pooled(self) -> dict | None:
         """The JSON-ready ``kv_transfer_params.pooled`` object; None when not pooling.
@@ -389,13 +402,20 @@ class HiddenStateCollector:
             return None
         hidden, token_ids = capture.finish()
         result: dict = {}
-        if hidden is not None:
-            result["hidden_states_path"] = write_hidden_states(
-                capture.spec.directory, hidden, token_ids
-            )
         pooled = capture.pooled()
         if pooled is not None:
             result["pooled"] = pooled
+        if hidden is not None:
+            # The pooled half is already in hand; a write failure (full disk, a
+            # directory that vanished) costs the client the path, not the vectors.
+            try:
+                result["hidden_states_path"] = write_hidden_states(
+                    capture.spec.directory, hidden, token_ids
+                )
+            except Exception as exc:  # noqa: BLE001 -- never fail a sampled turn over this
+                logger.warning_rank0(
+                    f"Hidden-state artifact write failed for request {uid}: {exc}"
+                )
         return result
 
     def discard(self, uid: int) -> None:

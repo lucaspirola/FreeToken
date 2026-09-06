@@ -16,6 +16,8 @@ import base64
 import json
 import os
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
@@ -58,10 +60,6 @@ def test_pooling_is_an_enum():
         probe_request(pooling="max")
 
 
-def test_pooling_values_map_to_their_response_keys():
-    assert POOLINGS == {"mean": ("mean",), "last": ("last",), "both": ("mean", "last")}
-
-
 def test_layer_subsets_are_accepted_only_when_not_contiguous_is_relaxed():
     assert validate_layer_ids([3, 7, 11], 12, contiguous=False) == [3, 7, 11]
     with pytest.raises(ValueError, match="contiguous"):
@@ -75,6 +73,18 @@ def test_layer_subsets_are_accepted_only_when_not_contiguous_is_relaxed():
 
 def _pooled_state(replies=None, **kwargs) -> ProbeState:
     return ProbeState(replies or [final_reply()], num_layers=NUM_LAYERS, **kwargs)
+
+
+def test_explicit_layer_ids_are_served_when_the_state_has_no_model_config(tmp_path):
+    state = _pooled_state(hidden_states_dir=str(tmp_path))
+    del state.config.model_config
+    run(handle_chat_completion(
+        probe_request(hidden_states_path=str(tmp_path), layer_ids=[0, 1]), None, state, {}
+    ))
+    assert state.sent.hidden_states.layer_ids == [0, 1]
+    response = run(handle_chat_completion(probe_request(pooling="mean"), None, state, {}))
+    assert response.status_code == 400
+    assert b"send them explicitly" in response.body
 
 
 def test_pooled_probe_needs_no_server_directory():
@@ -207,9 +217,8 @@ def test_pooled_mean_and_last_accumulate_across_chunks():
     chunks = _chunks()
     total = _feed(capture, chunks)
     hidden, token_ids = capture.finish()
-    assert hidden is None  # nothing to write
-    assert token_ids.tolist() == list(range(100, 100 + total))
-    assert capture._chunks == []  # no per-token buffer was ever allocated
+    assert hidden is None and token_ids is None  # nothing to write
+    assert capture._chunks == [] and capture._token_chunks == []  # nothing per-token kept
 
     pooled = capture.pooled()
     assert pooled["layer_ids"] == layer_ids
@@ -235,6 +244,16 @@ def test_only_the_requested_poolings_are_present():
         pooled = capture.pooled()
         assert {k for k in ("mean", "last") if k in pooled} == set(pooling)
     assert HiddenStateCapture(HiddenStateSpec(directory="/tmp", layer_ids=[0]), HIDDEN).pooled() is None
+
+
+def test_a_layer_written_twice_in_one_chunk_is_refused():
+    capture = HiddenStateCapture(
+        HiddenStateSpec(layer_ids=[0], pooling=("mean",)), hidden_size=HIDDEN
+    )
+    capture.begin_chunk(torch.tensor([1], dtype=torch.int32))
+    capture.write(0, torch.ones(1, HIDDEN))
+    with pytest.raises(AssertionError, match="twice"):
+        capture.write(0, torch.ones(1, HIDDEN))
 
 
 def test_pooled_refuses_to_finish_when_a_layer_was_never_written():
@@ -404,6 +423,64 @@ def test_both_file_and_pooled_from_one_capture(tmp_path):
     np.testing.assert_allclose(
         decode(result["pooled"]["mean"], [0, 1, 2]), ref_mean, rtol=1e-5, atol=1e-6
     )
+
+
+def _req(uid, input_ids, spec):
+    from freetoken.core import Req
+
+    return Req(
+        input_ids=torch.tensor(input_ids, dtype=torch.int32), table_idx=0, cached_len=0,
+        output_len=1, uid=uid, sampling_params=None, cache_handle=None, hidden_states=spec,
+    )
+
+
+def _batch(reqs):
+    from freetoken.core import Batch
+
+    batch = Batch(reqs=reqs, phase="prefill")
+    batch.padded_reqs = reqs
+    return batch
+
+
+def test_collector_pools_only_the_probe_rows_behind_a_plain_request():
+    """Offsets come from begin_batch: a plain request ahead of the probe shifts them."""
+    collector = HiddenStateCollector(hidden_size=HIDDEN, num_layers=2)
+    plain = _req(1, [8, 9, 10], None)
+    probe = _req(2, [5, 6], HiddenStateSpec(layer_ids=[0, 1], pooling=("mean", "last")))
+    sink = collector.begin_batch(_batch([plain, probe]))
+    rows = torch.arange(5 * HIDDEN, dtype=torch.float32).reshape(5, HIDDEN)
+    sink.capture(0, rows)
+    sink.capture(1, rows * 10)
+
+    result = collector.finish(probe.uid)
+    assert collector.finish(plain.uid) is None
+    got = result["pooled"]
+    assert got["prompt_tokens"] == 2
+    np.testing.assert_array_equal(decode(got["mean"], [0, 1])[0], rows[3:].mean(0).numpy())
+    np.testing.assert_array_equal(decode(got["mean"], [0, 1])[1], (rows[3:] * 10).mean(0).numpy())
+    np.testing.assert_array_equal(decode(got["last"], [0, 1])[0], rows[4].numpy())
+
+
+def test_write_failure_keeps_the_pooled_half(tmp_path, caplog):
+    """The scheduler's drain must neither crash nor lose the vectors when the artifact
+    cannot be written; only the path is missing."""
+    from freetoken.scheduler.scheduler import Scheduler
+
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    collector = HiddenStateCollector(hidden_size=HIDDEN, num_layers=1)
+    probe = _req(7, [1, 2, 3], HiddenStateSpec(directory=str(gone), layer_ids=[0], pooling=("mean",)))
+    sink = collector.begin_batch(_batch([probe]))
+    rows = torch.ones(3, HIDDEN)
+    sink.capture(0, rows)
+    gone.rmdir()  # the directory vanishes before the drain
+
+    stub = SimpleNamespace(engine=SimpleNamespace(hidden_states=collector))
+    result = Scheduler._finish_hidden_states(stub, probe)
+    assert set(result) == {"pooled"}
+    np.testing.assert_array_equal(decode(result["pooled"]["mean"], [0])[0], rows[0].numpy())
+    assert len(collector) == 0
+    assert any("artifact write failed" in r.getMessage() for r in caplog.records)
 
 
 def test_sink_pools_only_its_own_rows_out_of_a_mixed_batch():

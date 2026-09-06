@@ -213,23 +213,27 @@ def _hidden_states_spec(
         if writes_file
         else None
     )
+    # The frontend may not know the model's depth (no model_config on this state);
+    # explicit ids are then bounded by the scheduler's authoritative repeat only.
     num_layers = _num_layers(state)
-    layer_ids = (
-        validate_layer_ids(params.layer_ids, num_layers, contiguous=writes_file)
-        if params.layer_ids is not None
-        else list(range(num_layers))
-    )
+    if params.layer_ids is not None:
+        layer_ids = validate_layer_ids(params.layer_ids, num_layers, contiguous=writes_file)
+    elif num_layers is not None:
+        layer_ids = list(range(num_layers))
+    else:
+        raise ValueError(
+            "cannot default kv_transfer_params.layer_ids for this model; send them "
+            "explicitly"
+        )
     return HiddenStateSpec(directory=directory, layer_ids=layer_ids, pooling=pooling)
 
 
-def _num_layers(state: Any) -> int:
-    """Depth of the served checkpoint: the default export set and the bound on ids."""
+def _num_layers(state: Any) -> int | None:
+    """Depth of the served checkpoint, or None when this state does not carry it."""
     try:
         num_layers = int(state.config.model_config.num_layers)
-    except Exception as exc:  # noqa: BLE001 -- no config, no depth
-        raise ValueError(
-            f"cannot resolve kv_transfer_params.layer_ids for this model ({exc})"
-        ) from exc
+    except Exception:  # noqa: BLE001 -- no config, no depth
+        return None
     if num_layers < 1:
         raise ValueError("the served model reports no layers to export")
     return num_layers

@@ -1292,7 +1292,7 @@ class Scheduler(SchedulerIOMixin):
             return self.engine.hidden_states.finish(req.uid)
         except Exception as exc:  # noqa: BLE001 -- never fail a sampled turn over this
             self.engine.hidden_states.discard(req.uid)
-            logger.error_rank0(
+            logger.warning_rank0(
                 f"Hidden-state export failed for request {req.uid}: {exc}"
             )
             return None
