@@ -37,10 +37,11 @@ class DetokenizeMsg(BaseTokenizerMsg):
     # The request's stop strings (None when it has none), so the detokenizer can hold back
     # a trailing partial-stop prefix instead of streaming it and then needing to retract.
     stop_strs: list[str] | None = None
-    # Path of the hidden-state artifact this request's prefill wrote, echoed to the client
-    # as `kv_transfer_params.hidden_states_path`. Set once, on the reply that closes the
-    # prefill; None on every ordinary request.
-    hidden_states_path: str | None = None
+    # The response's `kv_transfer_params` object for a hidden-state probe (the written
+    # artifact's `hidden_states_path` and/or the inline `pooled` vectors), built by the
+    # engine's HiddenStateCollector. Set once, on the reply that closes the prefill; None
+    # on every ordinary request.
+    kv_transfer_params: dict | None = None
     # KV page-pool usage snapshot at this step (not-evictable used/total), passed
     # through to the frontend for the shell status bar. 0/0 for owned-KV models.
     kv_used_pages: int = 0

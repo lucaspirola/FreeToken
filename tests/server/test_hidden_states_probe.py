@@ -246,7 +246,9 @@ def test_capture_keeps_only_the_requested_layers():
 # --------------------------------------------------------------------------- #
 def test_probe_response_carries_the_written_path(tmp_path):
     state = ProbeState(
-        [final_reply(hidden_states_path=str(tmp_path / "abc.safetensors"))],
+        [final_reply(kv_transfer_params={
+            "hidden_states_path": str(tmp_path / "abc.safetensors")
+        })],
         hidden_states_dir=str(tmp_path),
     )
     payload = run(
@@ -406,8 +408,9 @@ def test_collector_writes_only_for_opted_in_requests(tmp_path):
     assert collector.begin_batch(_batch([plain])) is None
     assert collector.finish(plain.uid) is None
 
-    path = collector.finish(probe.uid)
-    with safe_open(path, framework="pt") as handle:
+    result = collector.finish(probe.uid)
+    assert set(result) == {"hidden_states_path"}
+    with safe_open(result["hidden_states_path"], framework="pt") as handle:
         loaded = handle.get_tensor("hidden_states")
         ids = handle.get_tensor("token_ids")
     assert loaded.shape == (3, 2, 4)

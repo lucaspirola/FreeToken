@@ -264,8 +264,9 @@ ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   ... --hidden-states-dir /tmp/ft-hidden-states
 ```
 
-Without the flag the feature is off and a probe request is a 400. The router's client
-must be able to read that same path (a shared mount, or the same host).
+Without the flag the file export is off and a file probe request is a 400. The router's
+client must be able to read that same path (a shared mount, or the same host). The
+inline **pooled** variant below needs neither the flag nor shared storage.
 
 ### The request
 
@@ -288,6 +289,7 @@ curl http://127.0.0.1:1919/v1/chat/completions \
 | `hidden_states_path` | Directory to write into. Must be `--hidden-states-dir` or a subdirectory of it — resolved through symlinks and `..`, and refused otherwise. Omit it to use the root. |
 | `layer_ids` | Which blocks to export. Default: every block, in forward order (52 on Lightning). Must be contiguous from 0 and ascending — Switchyard's loader indexes the middle axis positionally, so a gap would silently mislabel features. |
 | `include_output_tokens` | Accepted and ignored. FreeToken exports prompt positions only, which is all the router pools. |
+| `pooling` | `"mean"`, `"last"` or `"both"`: return the pooled prompt vectors inline (see "Inline pooled hidden states" below). Set without `hidden_states_path`, no file is written. |
 
 `kv_transfer_params` is typed **only** on `/v1/chat/completions`. On `/v1/completions`,
 `/v1/messages` and `/v1/responses` it lands in the untyped extras and is ignored.
@@ -308,6 +310,77 @@ curl http://127.0.0.1:1919/v1/chat/completions \
 
 Read the path from the response; the file name is a uuid FreeToken chooses. On the
 stream path the same object rides on the terminal chunk (the router never streams).
+
+### Inline pooled hidden states
+
+`pooling` returns what the router would compute from the artifact -- one vector per
+layer -- on the response itself, so a consumer needs no shared storage and no file
+read. It works **without `--hidden-states-dir`** (the hook is model-side and free; the
+flag guards only what FreeToken writes to disk), and because nothing indexes the layers
+positionally, `layer_ids` may be **any ascending, unique subset** of `0..num_layers-1`.
+The engine keeps only a running float32 sum and the last row per layer -- O(layers x
+hidden) on the host, accumulated across prefill chunks -- so the
+`--hidden-states-max-tokens` cap **does not apply**.
+
+```bash
+curl http://127.0.0.1:1919/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "nemotron-3.5-lightning",
+    "messages": [{"role": "user", "content": "Return one short sentence."}],
+    "max_tokens": 1,
+    "kv_transfer_params": {"pooling": "both", "layer_ids": [12, 24, 36, 51]}
+  }'
+```
+
+```json
+{
+  "id": "chatcmpl-7", "object": "chat.completion", "model": "nemotron-3.5-lightning",
+  "choices": [{"index": 0, "message": {"role": "assistant", "content": "The"},
+               "finish_reason": "length"}],
+  "usage": {"prompt_tokens": 42, "completion_tokens": 1, "total_tokens": 43},
+  "kv_transfer_params": {
+    "pooled": {
+      "layer_ids": [12, 24, 36, 51],
+      "hidden": 2688,
+      "prompt_tokens": 42,
+      "dtype": "float32",
+      "mean": "<base64 of float32 [4, 2688], row-major, little-endian>",
+      "last": "<base64 ...>"
+    }
+  }
+}
+```
+
+| `pooled` field | Meaning |
+|---|---|
+| `layer_ids` | The layers actually pooled, in the order the rows come back (the request's list, or every block by default). |
+| `hidden` | Row width (2688 on Lightning). |
+| `prompt_tokens` | Positions pooled: every prompt token, chat-template tokens included. |
+| `dtype` | Always `float32`. |
+| `mean` | Only with `"mean"`/`"both"`: base64 of `[len(layer_ids), hidden]` float32, row-major, little-endian. The mean over all prompt positions -- the same number as mean-pooling the artifact's `hidden_states[:, i]`. |
+| `last` | Only with `"last"`/`"both"`: same encoding; the residual at the final prompt position (the artifact's `hidden_states[-1, i]`, i.e. `token_ids[-1]`). |
+
+Decode it with
+
+```python
+import base64, numpy as np
+pooled = response["kv_transfer_params"]["pooled"]
+mean = np.frombuffer(base64.b64decode(pooled["mean"]), dtype="<f4").reshape(len(pooled["layer_ids"]), pooled["hidden"])
+```
+
+Each vector is ~10 KiB per layer (~560 KiB for all 52 in one pooling), on the response
+body rather than on disk. The mean is accumulated in float32 from the bf16 residual,
+so it is within float32 summation-order noise of pooling the BF16 artifact client-side
+(`tests/server/test_hidden_states_pooled.py` pins the parity, single- and multi-chunk).
+
+Pooling composes with the file: send `pooling` **and** `hidden_states_path` and the
+response carries both `hidden_states_path` and `pooled` from one capture -- but then the
+file rules apply to the whole request (`--hidden-states-dir` set, contiguous-from-0
+`layer_ids`, the token cap). `max_tokens` may exceed 1; the vectors are pooled from the
+prefill and the completion is whatever it is. A pooled request is served exactly like
+the file probe otherwise: it bypasses prefix reuse and binds no session lease (below).
+On the stream path `pooled` rides on the terminal chunk, like `hidden_states_path`.
 
 ### The artifact
 
@@ -342,17 +415,20 @@ consuming will fill the disk.
   ignored for a probe: a lease protects a prefix for a next turn, and the probe refuses
   to reuse a prefix and has no next turn. This also stops concurrent probes on one
   conversation from serializing on a `session … is busy`.
-- **It is capped at `--hidden-states-max-tokens` (default 4096) prompt tokens.** A
-  longer prompt is a 400 with `error.code = context_length_exceeded`. The cap is a size
-  guard, not a context guard: every layer of every prompt token is exported, so one
-  4096-token probe over 52 layers at hidden 2688 is ~1.1 GiB. The check runs frontend
-  side even with `--no-context-preflight`, and again in the scheduler.
+- **A file probe is capped at `--hidden-states-max-tokens` (default 4096) prompt
+  tokens.** A longer prompt is a 400 with `error.code = context_length_exceeded`. The
+  cap is a size guard, not a context guard: every layer of every prompt token is
+  exported, so one 4096-token probe over 52 layers at hidden 2688 is ~1.1 GiB. The
+  check runs frontend side even with `--no-context-preflight`, and again in the
+  scheduler. A pooled-only probe is not capped (its state is O(layers x hidden)).
 - **It costs nothing when absent.** Without `kv_transfer_params` no sink is installed;
   the model forward reads one attribute and the captured decode graphs never see it.
 
 ### Verifying it
 
 CPU: `tests/server/test_hidden_states_probe.py` (wire + validation + writer round trip),
+`tests/server/test_hidden_states_pooled.py` (pooled variant: rules, chunked
+accumulation, response placement, parity with client-side pooling of the artifact),
 `tests/scheduler/test_hidden_states_no_prefix_reuse.py`,
 `tests/models/test_nemotron_h_hidden_states.py` (the hook captures the post-block
 residual, not `norm_f`).

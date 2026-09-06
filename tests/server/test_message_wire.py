@@ -161,7 +161,7 @@ def test_hidden_state_spec_survives_the_wire_in_both_directions():
     from freetoken.hidden_states import HiddenStateSpec
     from freetoken.message import UserMsg
 
-    spec = HiddenStateSpec(directory="/srv/hidden", layer_ids=[0, 1, 2])
+    spec = HiddenStateSpec(directory="/srv/hidden", layer_ids=[0, 1, 2], pooling=("mean",))
 
     tokenize = TokenizeMsg(
         uid=5, text="hi", sampling_params=SamplingParams(max_tokens=1),
@@ -171,6 +171,7 @@ def test_hidden_state_spec_survives_the_wire_in_both_directions():
     assert isinstance(tokenize_out.hidden_states, HiddenStateSpec)
     assert tokenize_out.hidden_states.directory == "/srv/hidden"
     assert tokenize_out.hidden_states.layer_ids == [0, 1, 2]
+    assert tokenize_out.hidden_states.pooling == ("mean",)
     assert tokenize_out.no_prefix_cache is True
 
     user = UserMsg(
@@ -183,19 +184,20 @@ def test_hidden_state_spec_survives_the_wire_in_both_directions():
     assert user_out.hidden_states.layer_ids == [0, 1, 2]
     assert user_out.no_prefix_cache is True
 
-    detok = DetokenizeMsg(
-        uid=5, next_token=7, finished=True,
-        hidden_states_path="/srv/hidden/abc.safetensors",
-    )
+    params = {
+        "hidden_states_path": "/srv/hidden/abc.safetensors",
+        "pooled": {"layer_ids": [0, 1, 2], "hidden": 4, "prompt_tokens": 2,
+                   "dtype": "float32", "mean": "AAAAAA=="},
+    }
+    detok = DetokenizeMsg(uid=5, next_token=7, finished=True, kv_transfer_params=params)
     detok_out = BaseTokenizerMsg.decoder(BaseTokenizerMsg.encoder(detok))
-    assert detok_out.hidden_states_path == "/srv/hidden/abc.safetensors"
+    assert detok_out.kv_transfer_params == params
 
     reply = UserReply(
-        uid=5, incremental_output="", finished=True,
-        hidden_states_path="/srv/hidden/abc.safetensors",
+        uid=5, incremental_output="", finished=True, kv_transfer_params=params
     )
     reply_out = BaseFrontendMsg.decoder(BaseFrontendMsg.encoder(reply))
-    assert reply_out.hidden_states_path == "/srv/hidden/abc.safetensors"
+    assert reply_out.kv_transfer_params == params
 
 
 def test_ordinary_messages_carry_no_probe_state():

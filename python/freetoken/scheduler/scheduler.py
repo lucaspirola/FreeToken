@@ -890,8 +890,8 @@ class Scheduler(SchedulerIOMixin):
                         # This is the drain of the request's LAST prefill chunk (a
                         # ChunkedReq continuation `continue`s above), so every prompt
                         # token has been forwarded and captured.
-                        hidden_states_path=(
-                            self._write_hidden_states(req)
+                        kv_transfer_params=(
+                            self._finish_hidden_states(req)
                             if batch.is_prefill
                             and getattr(req, "hidden_states", None) is not None
                             else None
@@ -1242,7 +1242,9 @@ class Scheduler(SchedulerIOMixin):
         """
         spec = msg.hidden_states
         limit = int(getattr(self.config, "hidden_states_max_tokens", 0) or 0)
-        if limit > 0 and input_len > limit:
+        # The cap guards the artifact's size; a pooled-only probe keeps O(layers x
+        # hidden) whatever the prompt length, so it is uncapped.
+        if spec.directory is not None and limit > 0 and input_len > limit:
             return ErrorReplyMsg(
                 uid=msg.uid,
                 error=(
@@ -1252,24 +1254,25 @@ class Scheduler(SchedulerIOMixin):
                 code="context_length_exceeded",
             )
         num_layers = self.engine.config.model_config.num_layers
-        if len(spec.layer_ids) > num_layers:
+        if spec.layer_ids and spec.layer_ids[-1] >= num_layers:
             return ErrorReplyMsg(
                 uid=msg.uid,
                 error=(
-                    f"kv_transfer_params.layer_ids asks for {len(spec.layer_ids)} layers "
+                    f"kv_transfer_params.layer_ids asks for layer {spec.layer_ids[-1]} "
                     f"but this model has {num_layers}"
                 ),
                 code="invalid_request_error",
             )
         return None
 
-    def _write_hidden_states(self, req: Req) -> str | None:
-        """Serialize this request's captured prompt residual stream; None on failure.
+    def _finish_hidden_states(self, req: Req) -> dict | None:
+        """Close this request's capture (write the artifact and/or pool it) and return
+        the response's ``kv_transfer_params``; None on failure.
 
-        A write failure (full disk, a directory that vanished) must not take the
-        scheduler down or fail a request whose completion is already sampled: it is
-        logged and the response simply carries no ``kv_transfer_params``, which is the
-        exact condition Switchyard's probe reports as a probe error.
+        A failure (full disk, a directory that vanished) must not take the scheduler
+        down or fail a request whose completion is already sampled: it is logged and
+        the response simply carries no ``kv_transfer_params``, which is the exact
+        condition Switchyard's probe reports as a probe error.
         """
         try:
             return self.engine.hidden_states.finish(req.uid)

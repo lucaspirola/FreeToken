@@ -11,6 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from freetoken.core import SamplingParams
 from freetoken.hidden_states import (
+    POOLINGS,
     HiddenStateSpec,
     resolve_hidden_states_dir,
     validate_layer_ids,
@@ -167,37 +168,46 @@ def _hidden_states_spec(
 ) -> HiddenStateSpec | None:
     """Turn a request's ``kv_transfer_params`` into a resolved export spec.
 
-    Raises ``ValueError`` (-> HTTP 400) when the server has no
-    ``--hidden-states-dir``, when the requested directory escapes it, or when the layer
-    ids are not the contiguous-from-0 run Switchyard's artifact loader indexes
-    positionally. The default is every block of the model, which the engine fills in --
-    the frontend does not know the model's depth.
+    An artifact is written unless ``pooling`` is set without a ``hidden_states_path``.
+    Whenever one is, the file rules apply and raise ``ValueError`` (-> HTTP 400): the
+    server needs ``--hidden-states-dir``, the requested directory must not escape it,
+    and the layer ids must be the contiguous-from-0 run Switchyard's artifact loader
+    indexes positionally. A pooled-only probe needs none of that -- the hook is
+    model-side and the response names its layers -- so any ascending, unique subset
+    is accepted. The default is every block of the model.
     """
     params = req.kv_transfer_params
     if params is None:
         return None
-    root = getattr(state.config, "hidden_states_dir", None)
-    directory = resolve_hidden_states_dir(params.hidden_states_path, root)
-    layer_ids = (
-        validate_layer_ids(params.layer_ids)
-        if params.layer_ids is not None
-        else _all_layer_ids(state)
+    pooling = POOLINGS[params.pooling] if params.pooling is not None else ()
+    writes_file = params.hidden_states_path is not None or not pooling
+    directory = (
+        resolve_hidden_states_dir(
+            params.hidden_states_path, getattr(state.config, "hidden_states_dir", None)
+        )
+        if writes_file
+        else None
     )
-    return HiddenStateSpec(directory=directory, layer_ids=layer_ids)
+    num_layers = _num_layers(state)
+    layer_ids = (
+        validate_layer_ids(params.layer_ids, num_layers, contiguous=writes_file)
+        if params.layer_ids is not None
+        else list(range(num_layers))
+    )
+    return HiddenStateSpec(directory=directory, layer_ids=layer_ids, pooling=pooling)
 
 
-def _all_layer_ids(state: Any) -> list[int]:
-    """Every block of the served checkpoint, in forward order (the export default)."""
+def _num_layers(state: Any) -> int:
+    """Depth of the served checkpoint: the default export set and the bound on ids."""
     try:
         num_layers = int(state.config.model_config.num_layers)
-    except Exception as exc:  # noqa: BLE001 -- no config, no defaulting
+    except Exception as exc:  # noqa: BLE001 -- no config, no depth
         raise ValueError(
-            "cannot default kv_transfer_params.layer_ids for this model; send them "
-            f"explicitly ({exc})"
+            f"cannot resolve kv_transfer_params.layer_ids for this model ({exc})"
         ) from exc
     if num_layers < 1:
         raise ValueError("the served model reports no layers to export")
-    return list(range(num_layers))
+    return num_layers
 
 
 def _force_nonempty_content(
@@ -521,12 +531,11 @@ async def handle_chat_completion(
         reasoning_tokens=result.reasoning_tokens,
         finish_reason=result.finish_reason,
     )
-    if result.hidden_states_path is not None:
-        # The written artifact, not the directory the client asked for: Switchyard reads
-        # the path off the response and is documented never to guess the file name.
-        payload["kv_transfer_params"] = {
-            "hidden_states_path": result.hidden_states_path
-        }
+    if result.kv_transfer_params is not None:
+        # The written artifact's path (not the directory the client asked for:
+        # Switchyard reads it off the response and never guesses the file name) and/or
+        # the inline pooled vectors, as the engine's collector built them.
+        payload["kv_transfer_params"] = result.kv_transfer_params
     # A plain dict when there is no header to carry (FastAPI serializes it to the
     # same JSONResponse); the session id has to ride on the response itself, which
     # is the one thing a returned dict cannot express.
@@ -760,13 +769,11 @@ async def stream_chat_completion_chunks(
             chunk = _chat_chunk(
                 req, uid, [{"delta": {}, "index": 0, "finish_reason": ev.finish_reason}]
             )
-            if ev.hidden_states_path is not None:
+            if ev.kv_transfer_params is not None:
                 # Streaming has no envelope to put this on but the terminal chunk. The
                 # probe itself never streams (Switchyard reads a plain JSON response),
                 # so this exists only so the field is not silently lost.
-                chunk["kv_transfer_params"] = {
-                    "hidden_states_path": ev.hidden_states_path
-                }
+                chunk["kv_transfer_params"] = ev.kv_transfer_params
             yield _sse(chunk)
 
     if req.stream_options and req.stream_options.include_usage:

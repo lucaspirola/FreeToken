@@ -119,6 +119,13 @@ class KvTransferParams(BaseModel):
     ``include_output_tokens`` is accepted for wire compatibility and ignored: FreeToken
     only ever exports prompt positions, which is all the router mean-pools.
 
+    FreeToken also adds ``pooling``: ``"mean"``, ``"last"`` or ``"both"`` returns the
+    per-layer pooled prompt vectors inline as ``kv_transfer_params.pooled`` (base64
+    float32). With ``pooling`` set and no ``hidden_states_path`` no file is written, no
+    ``--hidden-states-dir`` is needed, ``layer_ids`` may be any ascending subset and
+    the prompt-token cap does not apply; with both, the file is written under the file
+    rules as well. See docs/switchyard.md section 6.
+
     This model is the only place ``kv_transfer_params`` is typed. /v1/completions,
     /v1/messages and /v1/responses do not declare it, so it lands in their ``extra`` and
     is ignored there -- the probe is a chat-completions feature.
@@ -129,6 +136,7 @@ class KvTransferParams(BaseModel):
     hidden_states_path: str | None = None
     layer_ids: list[int] | None = None
     include_output_tokens: bool = False
+    pooling: Literal["mean", "last", "both"] | None = None
 
 
 class ChatCompletionRequest(BaseModel):

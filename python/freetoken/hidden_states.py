@@ -23,10 +23,18 @@ Capture is per prefill chunk. A probe request bypasses prefix reuse (so every pr
 token is actually forwarded) and its chunks are concatenated in forward order, which is
 also token order. The whole path is opt-in: without ``Req.hidden_states`` no sink is
 installed and a forward pays one attribute read.
+
+``kv_transfer_params.pooling`` is the inline variant of the same capture: instead of
+(or as well as) the file, the response carries per-layer ``mean`` and/or ``last``
+vectors over the prompt positions, base64 float32, under ``kv_transfer_params.pooled``.
+That path keeps only a running float32 sum and the last row per layer -- O(layers x
+hidden) on the host -- so it has no token cap, needs no ``--hidden-states-dir``, and
+accepts any ascending subset of layers (nothing indexes them positionally).
 """
 
 from __future__ import annotations
 
+import base64
 import fcntl
 import os
 import uuid
@@ -40,6 +48,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DEFAULT_MAX_TOKENS",
+    "POOLINGS",
     "HiddenStateCapture",
     "HiddenStateCollector",
     "HiddenStateSink",
@@ -60,26 +69,40 @@ ARTIFACT_SUFFIX = ".safetensors"
 _HIDDEN_STATES_KEY = "hidden_states"
 _TOKEN_IDS_KEY = "token_ids"
 
+#: ``kv_transfer_params.pooling`` values -> the ``pooled`` keys each one returns.
+POOLINGS: dict[str, tuple[str, ...]] = {
+    "mean": ("mean",),
+    "last": ("last",),
+    "both": ("mean", "last"),
+}
+
 
 @dataclass
 class HiddenStateSpec:
-    """One request's opt-in capture: where to write, and which blocks to keep.
+    """One request's opt-in capture: where to write, which blocks to keep, what to pool.
 
     ``directory`` is already resolved against the server's ``--hidden-states-dir`` root
     (see :func:`resolve_hidden_states_dir`); nothing downstream re-derives it from
-    client input. ``layer_ids`` is contiguous from 0 and ascending.
+    client input. None means no artifact is written. ``layer_ids`` is ascending and
+    unique, and contiguous from 0 whenever a file is written. ``pooling`` is the set of
+    inline vectors to return (a ``POOLINGS`` value); empty for the file-only probe.
     """
 
-    directory: str
+    directory: str | None = None
     layer_ids: list[int] = field(default_factory=list)
+    pooling: tuple[str, ...] = ()
 
 
-def validate_layer_ids(layer_ids: object, num_layers: int | None = None) -> list[int]:
+def validate_layer_ids(
+    layer_ids: object, num_layers: int | None = None, *, contiguous: bool = True
+) -> list[int]:
     """Normalize a client's ``layer_ids`` or raise ``ValueError``.
 
     Switchyard's artifact loader indexes the middle axis positionally against its
     checkpoint's ``layer_count``, so a non-contiguous or unsorted set would silently
-    mislabel features rather than fail. Reject it here instead.
+    mislabel features rather than fail. Reject it here instead. The pooled response
+    names its layers (``pooled.layer_ids``), so ``contiguous=False`` relaxes that to any
+    ascending, unique subset.
     """
     if not isinstance(layer_ids, (list, tuple)) or isinstance(layer_ids, (str, bytes)):
         raise ValueError("kv_transfer_params.layer_ids must be a list of integers")
@@ -90,14 +113,19 @@ def validate_layer_ids(layer_ids: object, num_layers: int | None = None) -> list
         ids.append(int(value))
     if not ids:
         raise ValueError("kv_transfer_params.layer_ids must not be empty")
-    if ids != list(range(len(ids))):
+    if contiguous and ids != list(range(len(ids))):
         raise ValueError(
             "kv_transfer_params.layer_ids must be contiguous from 0 and ascending "
             f"(got {ids!r}); Switchyard's artifact loader indexes them positionally"
         )
-    if num_layers is not None and len(ids) > num_layers:
+    if ids != sorted(set(ids)) or ids[0] < 0:
         raise ValueError(
-            f"kv_transfer_params.layer_ids asks for {len(ids)} layers but this model "
+            "kv_transfer_params.layer_ids must be ascending, unique and non-negative "
+            f"(got {ids!r})"
+        )
+    if num_layers is not None and ids[-1] >= num_layers:
+        raise ValueError(
+            f"kv_transfer_params.layer_ids asks for layer {ids[-1]} but this model "
             f"has {num_layers}"
         )
     return ids
@@ -178,10 +206,17 @@ def write_hidden_states(
 
 
 class HiddenStateCapture:
-    """One request's accumulator: chunk buffers on the host, concatenated at finish."""
+    """One request's accumulator, on the host, for both shapes of the export.
+
+    File: per-chunk ``[layers, chunk_tokens, hidden]`` BF16 buffers, concatenated at
+    finish. Pooled: one float32 ``[layers, hidden]`` running sum and one ``[layers,
+    hidden]`` last-row buffer, updated per chunk -- so a pooled request's footprint
+    does not grow with the prompt. Either or both, per ``spec``.
+    """
 
     __slots__ = (
-        "spec", "_hidden_size", "_index", "_chunks", "_token_chunks", "_written"
+        "spec", "_hidden_size", "_index", "_chunks", "_token_chunks", "_written",
+        "_sum", "_last",
     )
 
     def __init__(self, spec: HiddenStateSpec, hidden_size: int):
@@ -189,12 +224,20 @@ class HiddenStateCapture:
         self._hidden_size = hidden_size
         self._index = {layer_id: i for i, layer_id in enumerate(spec.layer_ids)}
         # [layers, chunk_tokens, hidden] per chunk -- layer-major so each block's D2H
-        # copy lands in one contiguous host slab; transposed once at finish.
+        # copy lands in one contiguous host slab; transposed once at finish. Only
+        # populated when an artifact is wanted.
         self._chunks: list[torch.Tensor] = []
         self._token_chunks: list[torch.Tensor] = []
         # Distinct layer ids written into each chunk. The buffers are uninitialized, so
         # this is what separates "captured" from "a model that never calls the sink".
         self._written: list[set[int]] = []
+        pooled = (len(self._index), hidden_size)
+        self._sum = (
+            torch.zeros(pooled, dtype=torch.float32) if "mean" in spec.pooling else None
+        )
+        self._last = (
+            torch.empty(pooled, dtype=torch.float32) if "last" in spec.pooling else None
+        )
 
     @property
     def token_count(self) -> int:
@@ -203,9 +246,12 @@ class HiddenStateCapture:
     def begin_chunk(self, token_ids: torch.Tensor) -> None:
         rows = int(token_ids.numel())
         self._token_chunks.append(token_ids.detach().to(torch.int64).clone())
-        self._chunks.append(
-            torch.empty(len(self._index), rows, self._hidden_size, dtype=torch.bfloat16)
-        )
+        if self.spec.directory is not None:
+            self._chunks.append(
+                torch.empty(
+                    len(self._index), rows, self._hidden_size, dtype=torch.bfloat16
+                )
+            )
         self._written.append(set())
 
     def write(self, layer_id: int, hidden: torch.Tensor) -> None:
@@ -215,11 +261,21 @@ class HiddenStateCapture:
         # D2H per block: the probe path is opt-in and rare, and staging the whole
         # [chunk, layers, hidden] slab on the GPU first would cost ~1.1 GiB of VRAM at
         # the 4096-token cap for no benefit to a request that samples one token.
-        self._chunks[-1][index].copy_(hidden)
+        if self._chunks:
+            self._chunks[-1][index].copy_(hidden)
+        if self._sum is not None:
+            # Reduce on the device in float32 (the cast happens inside the reduction,
+            # nothing [rows, hidden]-sized is materialized) and accumulate across chunks
+            # on the host.
+            self._sum[index] += hidden.sum(dim=0, dtype=torch.float32).to("cpu")
+        if self._last is not None:
+            # Each chunk overwrites it; the last chunk's last row is the final prompt
+            # position, i.e. what ``token_ids[-1]`` names in the artifact.
+            self._last[index].copy_(hidden[-1])
         self._written[-1].add(index)
 
-    def finish(self) -> tuple[torch.Tensor, torch.Tensor]:
-        if not self._chunks:
+    def _check_complete(self) -> None:
+        if not self._written:
             raise ValueError("no prefill chunk was captured for this request")
         expected = len(self._index)
         missing = [i for i, seen in enumerate(self._written) if len(seen) != expected]
@@ -231,8 +287,45 @@ class HiddenStateCapture:
                 f"prefill chunk(s) {missing} captured fewer than {expected} layers; "
                 "this model does not implement the hidden-state hook"
             )
-        hidden = torch.cat(self._chunks, dim=1).permute(1, 0, 2).contiguous()
-        return hidden, torch.cat(self._token_chunks)
+
+    def finish(self) -> tuple[torch.Tensor | None, torch.Tensor]:
+        """``(hidden_states, token_ids)`` for the artifact; ``hidden_states`` is None
+        when the spec writes no file. Raises when a layer was never captured."""
+        self._check_complete()
+        token_ids = torch.cat(self._token_chunks)
+        if not self._chunks:
+            return None, token_ids
+        return torch.cat(self._chunks, dim=1).permute(1, 0, 2).contiguous(), token_ids
+
+    def pooled(self) -> dict | None:
+        """The JSON-ready ``kv_transfer_params.pooled`` object; None when not pooling.
+
+        Vectors are ``[len(layer_ids), hidden]`` float32, row-major, little-endian,
+        base64 -- ``np.frombuffer(b64decode(v), dtype="<f4").reshape(len(layer_ids),
+        hidden)`` on the client. ``mean`` is over every prompt position, chat-template
+        tokens included, exactly what mean-pooling the artifact gives.
+        """
+        if not self.spec.pooling:
+            return None
+        self._check_complete()
+        prompt_tokens = self.token_count
+        payload: dict = {
+            "layer_ids": list(self.spec.layer_ids),
+            "hidden": self._hidden_size,
+            "prompt_tokens": prompt_tokens,
+            "dtype": "float32",
+        }
+        if self._sum is not None:
+            payload["mean"] = _encode_f32(self._sum / prompt_tokens)
+        if self._last is not None:
+            payload["last"] = _encode_f32(self._last)
+        return payload
+
+
+def _encode_f32(vectors: torch.Tensor) -> str:
+    return base64.b64encode(
+        vectors.detach().to(torch.float32).contiguous().numpy().astype("<f4").tobytes()
+    ).decode("ascii")
 
 
 class HiddenStateSink:
@@ -288,13 +381,22 @@ class HiddenStateCollector:
             offset += extend_len
         return HiddenStateSink(targets) if targets else None
 
-    def finish(self, uid: int) -> str | None:
-        """Write ``uid``'s artifact and return its path; None if it captured nothing."""
+    def finish(self, uid: int) -> dict | None:
+        """Close ``uid``'s capture and return the response's ``kv_transfer_params``
+        object (``hidden_states_path`` and/or ``pooled``); None if it captured nothing."""
         capture = self._captures.pop(uid, None)
         if capture is None:
             return None
         hidden, token_ids = capture.finish()
-        return write_hidden_states(capture.spec.directory, hidden, token_ids)
+        result: dict = {}
+        if hidden is not None:
+            result["hidden_states_path"] = write_hidden_states(
+                capture.spec.directory, hidden, token_ids
+            )
+        pooled = capture.pooled()
+        if pooled is not None:
+            result["pooled"] = pooled
+        return result
 
     def discard(self, uid: int) -> None:
         self._captures.pop(uid, None)
