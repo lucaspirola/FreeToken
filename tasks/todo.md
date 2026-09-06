@@ -955,5 +955,8 @@ gave standing GO for agent-requested code adaptation. Server on :1919 restarted 
 - [ ] (f) Prefix auto-pin after second match + /v1/stats scheduler.prefix.{hits,hit_tokens,miss_tokens,pinned_tokens}
       + --pin-prefix-min-tokens. Low priority (measured prefix is 4.9k, cached 4736/4856 already).
       Restart only after the hidden session announces the pilot finished. Disk persistence deferred.
+- [ ] (g) after (f): pooled requests take prefix hits by attaching per-layer fp32 sums to snapshot
+      nodes produced by pooled requests (hit gated on sums present); add `prefix_tokens` and
+      `mean_suffix` (mean after the matched boundary) to the inline block and sink line.
 - [ ] (c) pooled as first stream event after prefill: queued until the hidden session's bake-off
       says a prompt probe wins.
