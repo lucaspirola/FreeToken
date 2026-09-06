@@ -950,5 +950,7 @@ gave standing GO for agent-requested code adaptation. Server on :1919 restarted 
       with thinking on the first token is the first reasoning token.
 - [x] Restarted :1919 at cf377e4 2026-09-06 12:09 (after a host OOM at 11:51 took the previous instance; see lessons); live parity done.
 - [x] (d) serve.sh + production checklist carry the hidden-states flags (f268cc6).
+- [x] (e) Pooled JSONL sink --pooled-sink-dir + kv_transfer_params.pooled_sink (ced167c, live 21:20).
+- [x] Served-model aliases --served-model-alias (03ad283); switchyard_e2e router skips (cddca77).
 - [ ] (c) pooled as first stream event after prefill: queued until the hidden session's bake-off
       says a prompt probe wins.
