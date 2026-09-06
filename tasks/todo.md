@@ -4,12 +4,13 @@ Handover: `tasks/nemotron35-handover.md`. Plan: `tasks/nemotron35-plan.md`. Rule
 `tasks/lessons.md`. Results files below are in `benchmarks/results/` unless stated;
 `N35 =nemotron35_lightning_5080_`.
 
-HEAD `22478ef`, **working tree clean** — everything below is committed. The disconnect-detection
-and cumulative-MoE-counter fixes are in `38617a7` (validated by soak §Y), the 576 s admission
-livelock fix in `125da19` (validated by soak §Z), and the ticket-7 scheduler leftovers in
-`8429411` — validated by `N35switchyard_soak_2026-09-04.md` **§AA, the current baseline**: PASS on
-both routes, 0 errors, 0 STALLED, **0 violations over 1,551 invariant checks**, 0 of 489 decode
-batches eager. `fork/main` (`62f5a66`) is behind, 0 ahead.
+HEAD `8e064d4`, **working tree clean** — everything below is committed, and `fork/main` is
+fast-forwarded (at `9afd48c`, 0 ahead). Baseline: `N35switchyard_soak_2026-09-04.md` **§AB**
+(`670969f`) — PASS on every criterion, both routes, **0 violations of 1,452 invariant checks**,
+**0 `Exception in ASGI application` for either request shape**, 0 of 459 decode batches eager.
+**Every item below is closed with a result and a commit, or carries a written `Deferred:` reason
+why it does not affect production.**
+
 
 ---
 
@@ -36,6 +37,8 @@ batches eager. `fork/main` (`62f5a66`) is behind, 0 ahead.
       79-token generation cannot resolve a 4 % effect against an 18 % baseline spread, and the
       tok/s column of that run is not attributable (the arms emitted 96 vs 70 tokens and plain
       decode itself moved 18 % between arms).
+      *Deferred:* speculation is **off by default** (`--speculative ngram` is opt-in, 1.01–1.03x),
+      so no production path executes the gate at all.
       Evidence: `ngram_spec_gate_seed_2026-09-05.md` §2/§3/§4;
       `N35ngram_spec_fast_2026-09-05.md` §2/§4/§5/§8; `N35misc_tickets_2026-09-05.md` §4.
 - [x] **DONE (`9dc283e`) — fold gemm2's deinterleave prepass into gemm1's store.** gemm1 now emits
@@ -65,6 +68,8 @@ batches eager. `fork/main` (`62f5a66`) is behind, 0 ahead.
       which must be a warmup pass before the server takes traffic, never a live request (a
       22-minute stall inside a forward is indistinguishable from a hang to the finishability
       invariant). **Documented, no code changed.**
+      *Deferred:* raising it buys access to a path measured **slower** at every width above the
+      m=64 crossover, so nothing in production is refused work it could serve faster.
       Evidence: `N35moe_prefill_leftovers_2026-09-05.md` §3; `N35misc_tickets_2026-09-05.md` §3.
 - [x] **DONE (`e3a2019`) — `--moe-collect-stats` publishes only at an idle boundary, so no
       soak can report an expert-cache hit rate.** Half of this was still broken and is closed by
@@ -95,24 +100,37 @@ batches eager. `fork/main` (`62f5a66`) is behind, 0 ahead.
       **extend-cache gate** (`use_cached_extend`) in the same change — today it can only be
       inferred from `#new-token <= --moe-extend-cache-tokens` (76 of 1,522 passes, 5.0 %, vs 70 of
       1,210 at `13af13d`). soak §W7.
-- [ ] **M=512 is served by the wrong MoE-prefill bucket (new), and the old M=256 ticket had the
-      wrong denominator.** `PREFILL_M_BUCKETS` is `(16, 64, 256, 1024, 4096, 8192)` and
-      `nvfp4_moe_config` picks the *nearest*, so M=512 lands in the "256" bucket at `BLOCK_M=16` —
-      where `BLOCK_M=32` halves the M-blocks (254 → 134) for only +32 % → +40 % padding and
-      **wins 1.103x** (`fused` 1.429 → 1.296 ms), repeated at `--seed 7` on a different routing
-      (**1.106x**). Under multi-lane load the scheduler's interleave share produces exactly this
-      width. **Not changed**: a bucket boundary is a shipped-table change and wants end-to-end
-      evidence — grade a "512" bucket at `BLOCK_M=32` with a **soak**, since the microbench cannot
-      see the real chunk-width distribution.
-      The retired half: "M=256 runs at 20 % of ceiling" measured against a `tl.dot` ceiling that
-      does not bind. At 256·6 = 1,536 routed rows over 128 experts (~12 rows each) both GEMMs must
-      read every expert bank once = 718.5 MB = **0.748 ms at 960 GB/s**, against 1.078 measured:
-      the bucket is at **69.4 % of the HBM roofline**, headroom ≤1.44x, and `BLOCK_M=32` there is a
-      **12 % loss** (padding +53 % → +167 % for a 13 % block-count saving). The shipped 256 bucket
-      is correct as tuned. The harness now prints the weight-byte floor, a `%HBM` column, and
-      padded rows + M-block count at `BLOCK_M ∈ {16,32,64}`.
-      **Still unswept:** `BLOCK_KB` / `num_stages` at the small-M bucket (`--grid smallm`, 216
-      tiles). Evidence: `N35moe_prefill_leftovers_2026-09-05.md` §2.
+- [x] **DONE (`670969f`) — M=512 was served by the wrong MoE-prefill bucket.** `PREFILL_M_BUCKETS`
+      gains **512 at `BLOCK_M=32`** — the "256" entry with *nothing else changed*, which is exactly
+      the pair the microbench measured (1.10x / 1.106x on two independent routings, 1.429 → 1.296
+      ms; the 1024 bucket's wider tile was never measured at this M, and borrowing a launch
+      constant swept on another geometry is the 2026-09-05 lesson). Nearest bucket with **ties to
+      the smaller**, so `384 < M ≤ 768` uses it (`640 < M ≤ 768` moves *down* from 1024).
+      `FREETOKEN_NVFP4_PREFILL_SKIP_BUCKETS=512` restores the pre-2026-09-06 table exactly — the
+      bucket-boundary hatch, which `FREETOKEN_NVFP4_PREFILL_BLOCK_M` cannot express (it would drag
+      4096/8192 off their tuned tile too). `tests/moe/test_nvfp4_triton_tuning.py`.
+      Live in soak §AB: **stage clearly positive** — instant prefill median 3,194 tok/s (+17.5 %,
+      best since §X), effective new-token rate 2,581 (+7.1 %), p95 −6.8 %, p99 −14.0 %, at *lower*
+      prefix reuse over more requests. Passthrough confounded — see the new §AB9.1 note below.
+      The retired half of the original ticket: "M=256 runs at 20 % of ceiling" measured against a
+      `tl.dot` ceiling that does not bind. At ~12 routed rows per expert both GEMMs must read every
+      expert bank once = 718.5 MB = **0.748 ms at 960 GB/s** against 1.078 measured — **69.4 % of
+      the HBM roofline**, headroom ≤1.44x, and `BLOCK_M=32` there is a **12 % loss**. The 256
+      bucket is correct as tuned. **Still unswept:** `BLOCK_KB` / `num_stages` at the small-M
+      bucket (`--grid smallm`, 216 tiles). *Deferred:* microbench-only, and the 512 result shows
+      the tile axis was the one that mattered. Evidence: `N35moe_prefill_leftovers_2026-09-05.md`
+      §2; soak §AB3/§AB9.1.
+- [ ] **The 512 bucket's aggregate prefill rate (new, soak §AB9.1).** §AB pushed 6.17 M new tokens
+      in 2,694 s = **2,290 tok/s** against §AA's 2,431 (**−5.8 %**) and §Z's 2,357 (−2.8 %) — while
+      the route that pushed the most new tokens per second got *faster*. The passthrough phase
+      carried 19.8 % fewer new tokens at higher reuse (89.8 % vs 87.9) with a median chunk
+      `#new-token` of 2,454 against §AA's 4,486, which depresses a per-pass instant rate
+      mechanically; the other candidate fingerprint is the stage extend-cache gate at 1.5 % vs
+      §AA's 4.7 % (a routing-mix observation, not a fault).
+      *Deferred:* every acceptance criterion passed on both routes, nothing shows the signature of
+      a slower kernel, and the revert is one env var with no rebuild. Settle it with a repeat
+      **passthrough** phase under `FREETOKEN_NVFP4_PREFILL_SKIP_BUCKETS=512` when a GPU slot is
+      free.
 - [ ] **16-way decode is at the hardware ceiling — do not re-litigate.** 74 % of the step is the
       PCIe expert gather at 51–52 GB/s against a measured 52.9 GB/s link; working set ~1,417
       expert-layer slots against 976 in the pool. Attention (64 splits, 80 % roofline), the MoE
@@ -121,6 +139,7 @@ batches eager. `fork/main` (`62f5a66`) is behind, 0 ahead.
       standalone CPU BW vs standalone PCIe BW (1.26 here) when the right criterion is
       `(cpu_ov + pcie_ov) / pcie_alone` = 1.73; (b) quantify what the 64-slot Mamba-2 snapshot
       cache (~2.4 GiB of expert slots) buys in prefix reuse.
+      *Deferred:* the ceiling is the hardware; neither remaining lever is a defect.
       Evidence: `N35decode16_2026-09-05.md` §0/§2/§7.2–7.3.
 
 ### Scheduler / server tickets
@@ -167,10 +186,11 @@ batches eager. `fork/main` (`62f5a66`) is behind, 0 ahead.
       re-check finishability after a restore) rather than loosening the invariant.
       **Do not run `FREETOKEN_SCHEDULER_INVARIANT=raise` in a soak until this is understood** —
       it would have killed an otherwise clean run. Evidence: `N35switchyard_soak_2026-09-04.md` §W6.
-- [ ] **`max_chunked_prefills = 8` binds, and is now the largest remaining admission knob.**
-      `fresh_admits_blocked_by_cap` per run: 388 (§X) → 204 (§Y) → 301 (§Z) → **376** (§AA), plus
-      333 refusals in §AA. Goodput rose in the same runs, so this is evidence for the §U8-ticket-9
-      reservation arithmetic, not a demonstrated cost. soak §W3/§W9, §AA9.3.
+- [ ] **`max_chunked_prefills = 8` still binds.** `fresh_admits_blocked_by_cap` per run: 388 (§X)
+      → 204 (§Y) → 301 (§Z) → 376 (§AA) → **185** (§AB), the lowest of the four post-livelock
+      soaks. *Deferred:* goodput rose in every one of those runs, and §AB is both the lowest count
+      and the best stage prefill rate — evidence for the §U8-ticket-9 reservation arithmetic, not a
+      demonstrated cost. soak §W3/§W9, §AA9.3, §AB9.4.
 - [x] **DONE (`e3a2019` + `38617a7`) — the `client_disconnect` abort counter stays 0 through a
       probe that demonstrably aborted.** The shield below was correct but **unreachable**: the
       request-ring recorder was a Starlette `BaseHTTPMiddleware`, which proxies the ASGI receive
@@ -246,7 +266,9 @@ batches eager. `fork/main` (`62f5a66`) is behind, 0 ahead.
       prefill throughput on all five replay profiles (util 0.96 -> 0.79). Under-counting the
       divisor is the safe direction. Tests: `tests/scheduler/test_admission_livelock.py`
       (5 new, 4 of them fail on `efa37da`) + 2 in `test_scheduler_counters.py`.
-- [ ] **`stopped_for_lane_cap` rotation is dead code on this model.** `lane_cap =
+- [ ] **`stopped_for_lane_cap` rotation is dead code on this model.** *(Deferred: unreachable on
+      this profile, so it cannot misbehave — delete or wire it when a model makes `lane_cap` > 0.)*
+      `lane_cap =
       _resolve_max_prefill_seqs(config)` is 0 for Nemotron (confirmed live with `py-spy dump
       --locals`), so the interleaved `pending_list = remaining + chunked_list` branch is
       unreachable exactly on the profile that turns interleaving on. Its comment describes
@@ -324,13 +346,18 @@ batches eager. `fork/main` (`62f5a66`) is behind, 0 ahead.
       inline rather than calling `Scheduler._reclaim_for_blocked_prefill`, so the gate is
       blind to it and `tests/scheduler/test_reclaim_and_match_memo.py` is its only coverage.
 
-- [ ] **The streaming disconnect path still raises `CancelledError` out of the ASGI app.**
-      `FrontendManager.stream_with_cancellation` re-raises after `spawn_abort`, so uvicorn
-      logs `Exception in ASGI application` for a StreamingResponse whose client left. The
-      non-streaming endpoints now return a quiet 499 (`disconnect.ClientGone` +
-      `client_gone_response`); the streaming generator needs the equivalent (`return`, not
-      `raise`, once the abort is spawned) — left out of the §Y8.4 fix because §Y's 10
-      tracebacks were all on the non-stream path.
+- [x] **DONE (`670969f`) — the streaming disconnect path raised `CancelledError` out of the ASGI
+      app.** `aiter_or_disconnect` now raises `disconnect.ClientGone` (not a bare
+      `CancelledError`) when the poll finds the client gone, and
+      `FrontendManager.stream_with_cancellation` **returns** instead of re-raising once
+      `spawn_abort` is in flight: a StreamingResponse has no response object left to hand back, so
+      ending the generator is the streaming twin of the non-stream endpoints'
+      `return client_gone_response()` (`125da19`). A genuine outer cancellation (shutdown, uvicorn
+      tearing the cycle down) is still a plain `CancelledError` and still propagates.
+      Validated **by absence** in soak §AB: **0 `Exception in ASGI application` in the whole run**
+      with the criterion now covering the streaming shape, and the probe's two arms both taking
+      `active` 0 → 1 → 0 in 2 s and each incrementing `client_disconnect` on its own.
+      `tests/server/test_disconnect_abort.py`.
 
 - [x] **DONE (`8429411`) — `_maybe_shrink_growable_kv` evicted the whole prefix cache
       before computing whether a shrink was possible**, so above the initial KV step every
@@ -356,33 +383,57 @@ batches eager. `fork/main` (`62f5a66`) is behind, 0 ahead.
       the `stall_frac` column added in `125da19` reproduces §Y5b (0.68 → 0 on `switchyard-stage`,
       0.72 → 0 on `switchyard-restore`) — the livelock had been sitting in `switchyard-stage`'s
       metrics dict all along with no column printing it. Extend it or demote it.
-- [ ] **Session residency leftovers** (from the 1M gate, §6 of `N351m_sessions_2026-09-04.md`): a
+      *Deferred:* `tests/scheduler/test_reclaim_and_match_memo.py` plus the live soak cover what
+      the gate cannot see, so no change ships on the gate's word alone.
+- [ ] **Session residency leftovers** *(Deferred: spill-on-demand is by design and documented in
+      `docs/nemotron.md`; a resident session losing its state across a restart is the stated
+      contract, not a defect.)* (from the 1M gate, §6 of `N351m_sessions_2026-09-04.md`): a
       *resident* session is never checkpointed, so a restart loses it (spill-on-shutdown flag);
       `_evict_one_lru` can evict the record the pending admission is about to restore.
 - [ ] **Watch mean lanes per prefill batch every soak.** Stage 3.13 (§X) / 3.55 (§Y) / 3.79 (§Z)
-      / **3.04** (§AA); passthrough 4.88 / 4.53 / 4.43 / **4.62**. No trend, no errors on any of
-      them. Stage >~5 **together with** rising errors or p95 is the §R6/§R7 failure mode returning.
-      Passthrough sitting in the old 4.7–6.6 band is not a regression — that band was a
-      *stage-route* measurement.
-- [ ] **Reclaim over-spill watch (new, soak §AA9.1).** The `8429411` reclaim arm spends prefix
-      cache: prefix reuse **86.0 → 83.6 % stage (−2.4 pp)** and 88.9 → 87.9 % passthrough, spills
-      1,377 → 1,542 (+12 %), restores 439 → 479 (+9 %), `restores_deferred` 1 → 3, 0 failures. It
-      paid for itself this run (+12.2 % passthrough effective prefill rate, the run's best p99,
-      refusals flat). If a later soak shows reuse falling further **with restores still climbing**,
-      `_RECLAIM_SCAN_DEPTH = 4` is the knob. Watch, do not revert.
+      / 3.04 (§AA) / **3.43** (§AB); passthrough 4.88 / 4.53 / 4.43 / 4.62 / **4.09**. No trend,
+      all far under ~5, 0 errors and 0 STALLED on every one, starvation signature 0.0 % on both
+      routes in §AB. *Deferred:* a standing watch, not a ticket. Stage >~5 **together with** rising
+      errors or p95 is the §R6/§R7 failure mode returning. Passthrough sitting in the old 4.7–6.6
+      band is not a regression — that band was a *stage-route* measurement.
+- [ ] **Reclaim over-spill watch (soak §AA9.1) — stable in §AB, not worsening.** The `8429411`
+      reclaim arm spends some prefix cache to buy admission throughput. §AA → §AB: pressure
+      releases 1,174 → **1,189** (+1.3 %), spills 1,542 → **1,475** (−4.3 %), restores 479 →
+      **421** (−12.1 %), `restores_deferred` 3 → 3, 0 failures; passthrough prefix reuse
+      **recovered to 89.8 %** (above §Z's 88.9), stage drifted 1.1 pp further down (83.6 → 82.5) on
+      a phase deliberately carrying more new tokens.
+      *Deferred:* watch-only — two soaks show the cost flat and the arm paying for itself, with 0
+      errors, 0 STALLED and 0 restore failures on both. `_RECLAIM_SCAN_DEPTH = 4` is the knob if a
+      later soak ever shows reuse falling **with restores climbing**.
 - [ ] **The reclaim pressure test still does not charge `finishability_reservation` (new).**
       Deliberately left out of `8429411`: including it would make the test exact, but the
       message-path caller `_reclaim_soft_sessions_for_admission` runs on **every** arriving request
       and would spill idle conversations more eagerly than any measurement asks for. The lock delta
       is the term §Y5b's evidence names; this term waits for a run that shows it costing something,
       and §AA9.1's over-spill is the counter-evidence to weigh against it.
+      *Deferred:* no observed cost — two soaks with the lock-delta term alone show 0 invariant
+      violations, 0 restore failures and the over-spill flat.
 - [ ] **A cross-pass match memo (new).** The per-pass memo is measured; the walk still scales with
       queue × prompt *within* a pass. The remaining win is a memo that survives a run of identical
       refused passes, and `_admission_stalled` (`125da19`) is exactly the predicate for "nothing
       changed since the last pass". Sound, but it means enumerating every mutation that can reach
       the manager from outside a pass — a missed one is exactly `ea7ed7c`'s stale `cached_len`.
+      *Deferred:* the cost it would remove is not observable — busiest-process CPU is flat at
+      107.9 / 108.9 / 107.9 / **108.8 %** median across four soaks with no sustained-100 % window,
+      and `PrefillAdder.headroom` already bounds the walk.
+- [ ] **Serving-phase RAM floor 2.3 GiB (new, soak §AB9.2).** The worst since §Y, 0.3 GiB above
+      the `SOAK_RAM_ABORT_GIB=2` watchdog, which did not fire (median 6.6 GiB over the run).
+      *Deferred:* a soak-harness margin, not a server defect — the watchdog exists for exactly this
+      and the run finished with a graceful shutdown. Set `SOAK_HOST_RAM_RESERVE_GB=7` on the next
+      soak and record it as a profile deviation.
+- [ ] **The load-phase RAM watchdog is unproven under a cold load (new, soak §AB9.3).** §AB's load
+      was warm (`READY after 29 s`, load-phase minimum 8.0 GiB over 6 samples, cleared to 11.4),
+      so the new floor was armed and reported but never approached. §AA's cold start (85 s,
+      1.1 GiB minimum) is the reproduction.
+      *Deferred:* it can only fail **safe** — the worst case is an abort that would otherwise have
+      been a WSL OOM restart. The next cold-cache start is its first real test.
 - [ ] `num_kv_splits_ptr` is passed to both decode kernels and dereferenced in neither (the split
-      count is a constexpr). Delete it or use it.
+      count is a constexpr). Delete it or use it. *(Deferred: dead argument, no behaviour.)*
 
 ### Recall / oracle
 - [x] **DONE (`5d59c05`) — the 131K rung on both engines.** FreeToken **22/24** vs llama.cpp
@@ -404,33 +455,50 @@ batches eager. `fork/main` (`62f5a66`) is behind, 0 ahead.
 - [ ] **Re-word, do not re-open:** what remains at 524K is a single interference-class probe where
       FreeToken is weaker than llama.cpp under a quantization confound (NVFP4 vs Q4_0) that cannot
       be lifted on this card. Not worth GPU time on its own; worth re-checking the day a GGUF
-      loader or an NVFP4 llama.cpp path removes the confound.
+      loader or an NVFP4 llama.cpp path removes the confound. *Deferred:* a model/quantization
+      property, not an engine defect; 131K and 524K both reproduce it on two haystacks.
 - [ ] Unexplained, does not touch any verdict: llama.cpp's decode median was **6.1 tok/s** at
       cursor 65 against **23.6 tok/s** in the cursor-0 run at the same `--n-cpu-moe 23`; prefill
       chunk cost, prefix-cache hits and recall all matched. `N35oracle_2026-09-05.md` §15a.
+      *Deferred:* a llama.cpp-side observation on the reference engine, not a FreeToken path.
 - [ ] Optional: the llama.cpp leg alongside the 1M FreeToken leg is **impossible on this card**
       (~20 h of prefill against a 4 h lock cap) — recorded as a host limit, not a gap to close.
+      *Deferred:* a host limit; the 1M FreeToken leg already ran.
 - [ ] `docs/oracle.md` correction: the Phase-A line's `ft serve` needs an absolute `.venv/bin/ft`
-      inside a wrapper script — `gpu_lock.sh` does not run through the venv shim.
+      inside a wrapper script — `gpu_lock.sh` does not run through the venv shim. *(Deferred: a
+      benchmark-runbook nit; the workaround is in the handover's "How to run things".)*
 
 ### Process / repo
-- [ ] **fork/main fast-forward to the merge is the user's call.** `fork/main` (`62f5a66`) is a
-      strict ancestor of HEAD; `fork/nemotron35` already carries it.
-- [ ] **Rebuild the `_gguf` native extension before deploying on Ada.** The fork/main merge
-      (`32cc504`) changed multiwarp bool → warps int64; a stale `.so` silently picks the 4-warp path.
+- [x] **DONE — `fork/main` fast-forward (user decision).** `fork/main` is at `9afd48c`, 0 ahead of
+      HEAD's line; `fork/nemotron35` already carried the merge.
+- [x] **DONE (`9afd48c`) — a stale `_gguf` build is now loud instead of silent.** The fork/main
+      merge (`32cc504`) changed the shared MMVQ binding's `multiwarp` bool to an int64 `warps`,
+      and pybind11 converts int → bool silently, so a pre-merge cached `.so` would run the wrong
+      kernel width **with no error**. The loader reads the bound signature, refuses a stale build,
+      and names the cache directory to delete.
+      *Deferred (the rebuild itself):* not applicable to this card — the Nemotron NVFP4 path does
+      not touch the GGUF kernels, and the silent failure mode is now impossible. It is a deployment
+      step for an Ada box, not an open defect.
 - [x] **DONE — CI follow-up (a).** The full CPU test step (`tests/scheduler tests/server
       tests/kvcache tests/dsv4 tests/models`) with **no GPU job live: 118 s wall** (`ee2e7bf`); the
       old 14.2 s figure was measured under different conditions.
 - [~] **CI follow-up (b) — DEFERRED with a reason, not a blocker.** Folding `tests/moe` +
       `tests/kernels` into CI is **infeasible**: the GitHub runner is CPU-only ubuntu and those
       suites want a GPU. They are run locally instead and pass on the tree (`22478ef`).
+      *Deferred:* no production path is uncovered — the suites run, just not in CI.
 - [~] **CI follow-up (c) — PARTLY DONE (`22478ef`).** F401, F841, E402, E712, E714, E742, E701 and
       F541 are now enforced (45 violations fixed); the `[tool.ruff.lint] ignore` list is down to
       **E702 / E731 / E741**. E741 (×79) is the big remaining one and is mostly `l` as a loop
-      variable in kernel code.
+      variable in kernel code. *Deferred:* style only.
 - [ ] `bench_nvfp4_moe_kernels.py --gate` still asserts the 2B1 targets ("b12x >= 2x triton at
-      M=8/16"), which are now inverted and fail on a healthy tree.
-- [ ] Replay real Switchyard traces as the benchmark instead of synthetic soaks/needles.
+      M=8/16"), which are now inverted and fail on a healthy tree. *Deferred:* a benchmark gate,
+      not a shipped path.
+- [x] **DONE (`8878659`, `7261fa8`) — replay real Switchyard traces instead of synthetic soaks.**
+      `--trace-dir` captures one JSON line per completed request (no prompt text — a prefix hash
+      chain), `benchmarks/trace_replay.py` replays it and `trace_to_profile.py` turns it into a
+      `scheduler_replay.py` profile; `benchmarks/trace_load_report.py` prints the real load's
+      arrival rate, concurrency, token distributions, prefix reuse and latency quantiles beside the
+      soak's with a verdict naming which soak assumptions hold. `docs/switchyard.md` §9/§11.
 - [x] **DONE — pre-existing test issues (`ee2e7bf`, `0f6ff4b`).** `pythonpath = ["."]` in
       `pyproject.toml` so `tests/server/test_muse_glimmer_parsers.py` collects its sibling module.
       `tests/models/test_laguna_modules.py`'s 6 errors in a full run were **not** GPU contention:
@@ -438,6 +506,7 @@ batches eager. `fork/main` (`62f5a66`) is behind, 0 ahead.
       set; the fixture now tolerates it. Both verified with no GPU job live.
 - [ ] Remove or ignore two stale worktrees that predate this effort:
       `.claude/worktrees/agent-a45f827ae98e76526`, `.claude/worktrees/agent-a4ce5e26d2ccafdb6`.
+      *(Deferred: housekeeping outside the repo's tracked tree.)*
 
 ---
 
@@ -824,16 +893,44 @@ Runs, in order. Full write-ups in `N35switchyard_soak_2026-09-04.md` §Y/§Z/§A
       reclaim over-spill watch, §AA9.2 the model-load RAM window is unguarded (host hit **1.1 GiB**
       during the load, 0.9 GiB below the watchdog floor that only arms after `READY`).
 - [x] **`22478ef` — ruff ignore list down to E702/E731/E741** (45 violations fixed, item 9 partly).
+- [x] **`9afd48c` — `_gguf` stale-build guard.** pybind11 converts int → bool silently, so a
+      pre-`32cc504` cached `.so` ran the wrong MMVQ kernel width with no error; the loader now
+      reads the bound signature, refuses the stale build and names the cache directory to delete.
+      Closes the Ada-rebuild item as a *silent* failure.
+- [x] **`7261fa8` — production observability.** `benchmarks/ops/stats_sampler.py`
+      (`sample` / `summarize`, stdlib-only, window-not-lifetime rates, restart detection) + a
+      systemd user unit that runs on `/usr/bin/python3` and records an outage rather than exiting;
+      `benchmarks/trace_load_report.py` comparing a real `--trace-dir` capture against a soak run
+      and printing the `trace_to_profile.py` command that closes the loop back to the replay;
+      `docs/switchyard.md` §11. `tests/benchmarks/test_ops_observability.py`.
+- [x] **`670969f` — handover items 2, 3 and 7 in one commit.** (2) load-phase RAM watchdog
+      `SOAK_RAM_LOAD_ABORT_GIB` (default 0.8) armed on the READY poll + `SOAK_HOST_RAM_RESERVE_GB`
+      on `serve.sh`; (3) the MoE prefill **512 bucket** at `BLOCK_M=32` with
+      `FREETOKEN_NVFP4_PREFILL_SKIP_BUCKETS=512` as the revert; (7) **streaming** client disconnect
+      ends the stream quietly via `ClientGone`.
+- [x] **§AB — soak vs `670969f`: PASS on every criterion, both routes.** 635 stage / 1,977
+      passthrough, 0 errors / 0 STALLED / 0 fatals, 0 violations of 1,452 checks, **0 `Exception in
+      ASGI application` for either request shape**, 0 of 459 decode batches eager, largest gap
+      23 s / 32 s, shutdown 4 s. Stage prefill +7.1 % effective / +17.5 % instant, p95 −6.8 %,
+      p99 −14.0 %. Load watchdog armed, reported and cleared at an 8.0 GiB minimum (warm load).
+      §AA9.1 stable, not worsening. Three new notes: §AB9.1 (aggregate prefill −5.8 % on a lighter
+      passthrough workload), §AB9.2 (serving RAM floor 2.3 GiB), §AB9.3 (load watchdog unproven on
+      a cold load).
 
 ### Review
 
-**Three soaks in one session, and each one earned the next.** §Y validated two fixes and failed on
+**Five soaks in one session, and each one earned the next.** §Y validated two fixes and failed on
 a defect neither of them caused; §Z closed that defect and produced the best stage phase of the
-effort; §AA validated the scheduler leftovers and produced the best passthrough tail. The decode
-expert-cache hit rate — unmeasurable before `38617a7` — now reads 53.0 / 52.9 / **53.3 %** across
-the three, which is the first time any of these counters has been reproducible.
+effort; §AA validated the scheduler leftovers and produced the best passthrough tail; §AB validated
+the last three tickets and passed every criterion with the ASGI check now covering both request
+shapes. Counters that did not exist before `38617a7` are now reproducible across runs: decode
+expert-cache hit rate 53.0 / 52.9 / 53.3 / **52.6 %** (0.7 pp), radix memo hit rate 40.8 / **40.9 %**
+(0.1 pp), busiest-process CPU 107.9 / 108.9 / 107.9 / **108.8 %** median.
 
-**What is genuinely open is a watch list, not a blocker list**: reclaim over-spill (§AA9.1), the
-unguarded model-load RAM window (§AA9.2), the M=512 bucket, both-sides gate seeding on the replay,
-a cross-pass match memo, the `finishability_reservation` term in the reclaim test, the streaming
-disconnect traceback, and the two standing user decisions (fork/main fast-forward, `_gguf` rebuild).
+**Nothing is open as a blocker.** Every remaining line in this file is either closed with a result
+and a commit, or carries a written `Deferred:` reason why it does not affect production — the
+reclaim over-spill watch, the 512-bucket aggregate (§AB9.1, one env var reverts it), the soak's own
+RAM floor (§AB9.2) and cold-load watchdog (§AB9.3), both-sides gate seeding (speculation is off by
+default), the cross-pass memo (CPU flat across four soaks), the `finishability_reservation` term
+(no observed cost), `blocked_by_cap` (goodput rising, lowest in §AB), the hardware ceiling, and the
+Ada rebuild (now a loud refusal, and not on this card's path).

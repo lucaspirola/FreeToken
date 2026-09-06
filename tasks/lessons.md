@@ -1351,3 +1351,12 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   an in-flight experiment is exactly the `git add -A` failure this project already bans.
   Stage the explicit paths, every time; the rule is about which files move, not about which
   flag looks safer.
+- **A microbench win at a fixed M does not survive contact with the scheduler's chunk-width
+  distribution.** The MoE prefill "512" bucket measured 1.10x on two independent routings at
+  exactly M=512, and it shipped — but the soak that graded it (§AB) ran a passthrough phase
+  whose median chunk was 2,454 new tokens against the previous run's 4,486, so the aggregate
+  prefill rate read **−5.8 %** while the route that actually pushed tokens read **+7.1 %**.
+  A per-pass rate is a ratio whose denominator the workload chooses. Grade a bucket-boundary
+  change on a route whose width distribution you have measured, keep the one-env-var revert
+  (`FREETOKEN_NVFP4_PREFILL_SKIP_BUCKETS`) so the A/B needs no rebuild, and do not read an
+  aggregate as a kernel verdict when the two runs carried different work.
