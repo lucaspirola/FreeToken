@@ -56,3 +56,14 @@ def test_max_tokens_must_be_positive(tmp_path):
     assert _parse("--hidden-states-max-tokens", "512").hidden_states_max_tokens == 512
     with pytest.raises(SystemExit):
         _parse("--hidden-states-max-tokens", "0")
+
+
+def test_pooled_sink_dir_is_off_by_default_and_canonicalized(tmp_path):
+    assert _parse().pooled_sink_dir is None
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    assert _parse("--pooled-sink-dir", str(link)).pooled_sink_dir == str(os.path.realpath(real))
+    with pytest.raises(SystemExit):
+        _parse("--pooled-sink-dir", str(tmp_path / "nope"))

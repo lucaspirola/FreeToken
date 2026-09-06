@@ -184,6 +184,10 @@ class EngineConfig:
     hidden_states_dir: str | None = None
     # Per-probe prompt-token cap (--hidden-states-max-tokens); a longer prompt is a 400.
     hidden_states_max_tokens: int = HIDDEN_STATES_MAX_TOKENS
+    # Root directory for the pooled hidden-state JSONL sink (--pooled-sink-dir). None
+    # disables it: pooled vectors are only returned inline, and a request naming a
+    # kv_transfer_params.pooled_sink is refused.
+    pooled_sink_dir: str | None = None
 
     @cached_property
     def kv_quant(self):

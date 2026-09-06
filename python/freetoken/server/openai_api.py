@@ -35,6 +35,7 @@ from .disconnect import (
 )
 from .function_call_parser import ToolCallItem
 from .json_output import apply_json_instruction, schema_instruction
+from .pooled_sink import pooled_sink_for, validate_pooled_sink
 from .request_logger import log_request
 from .served_models import served_model_ids, unknown_model_message
 from . import request_trace
@@ -459,6 +460,9 @@ async def handle_chat_completion(
             )
 
     try:
+        validate_pooled_sink(
+            req.kv_transfer_params, getattr(state.config, "pooled_sink_dir", None)
+        )
         hidden_states = _hidden_states_spec(req, state)
     except ValueError as exc:
         return create_error_response(str(exc), param="kv_transfer_params")
@@ -512,10 +516,14 @@ async def handle_chat_completion(
         return create_error_response(str(err), code=err.code)
 
     uid = await submit_generation(spec, state)
+    # --pooled-sink-dir: the pooled vectors are also appended to a JSONL file once the
+    # engine has answered (both paths). Fixed here so the stream generator, which never
+    # sees the Request, still records the client's session header.
+    sink = pooled_sink_for(req, request, state, spec, f"chatcmpl-{uid}")
 
     if req.stream:
         chunks = _traced_stream(
-            stream_chat_completion_chunks(uid, req, state, spec, trace=trace), trace)
+            stream_chat_completion_chunks(uid, req, state, spec, trace=trace, sink=sink), trace)
         if request is not None:
             chunks = (
                 state.stream_with_cancellation(chunks, request, uid, spec.session_id)
@@ -608,6 +616,8 @@ async def handle_chat_completion(
         # Switchyard reads it off the response and never guesses the file name) and/or
         # the inline pooled vectors, as the engine's collector built them.
         payload["kv_transfer_params"] = result.kv_transfer_params
+        if sink is not None and "pooled" in result.kv_transfer_params:
+            await sink.record(result.kv_transfer_params["pooled"])
     # A plain dict when there is no header to carry (FastAPI serializes it to the
     # same JSONResponse); the session id has to ride on the response itself, which
     # is the one thing a returned dict cannot express.
@@ -672,8 +682,10 @@ async def stream_chat_completion_chunks(
     state: Any,
     spec: GenSpec | None = None,
     trace: Any = request_trace.NULL,
+    sink: Any = None,
 ) -> AsyncIterator[bytes]:
-    """Format generate_events() into the OpenAI chat.completion.chunk SSE stream."""
+    """Format generate_events() into the OpenAI chat.completion.chunk SSE stream.
+    ``sink`` (``pooled_sink.PooledSink``) records the terminal chunk's pooled vectors."""
     if spec is None:
         spec = chat_request_to_genspec(req, {})
 
@@ -857,6 +869,8 @@ async def stream_chat_completion_chunks(
                 # probe itself never streams (Switchyard reads a plain JSON response),
                 # so this exists only so the field is not silently lost.
                 chunk["kv_transfer_params"] = ev.kv_transfer_params
+                if sink is not None and "pooled" in ev.kv_transfer_params:
+                    await sink.record(ev.kv_transfer_params["pooled"])
             yield _sse(chunk)
 
     if req.stream_options and req.stream_options.include_usage:

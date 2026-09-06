@@ -46,7 +46,8 @@ The serving-compliance half of that line:
 | `--kv-cache-dtype q8_0` | FP8 KV (FreeToken block scales; the checkpoint's `k_scale`/`v_scale` are ignored). Requires `--attention-backend triton`. |
 
 Optional knobs that change the contract: `--no-context-preflight` (see §5),
-`--json-retry N` (see §4), `--hidden-states-dir DIR` (see §6). Default listen
+`--json-retry N` (see §4), `--hidden-states-dir DIR`, `--pooled-sink-dir DIR` (see §6).
+Default listen
 address is `127.0.0.1:1919`.
 
 ### Served context window
@@ -292,6 +293,7 @@ curl http://127.0.0.1:1919/v1/chat/completions \
 | `layer_ids` | Which blocks to export. Default: every block, in forward order (52 on Lightning). Must be contiguous from 0 and ascending — Switchyard's loader indexes the middle axis positionally, so a gap would silently mislabel features. |
 | `include_output_tokens` | Accepted and ignored. FreeToken exports prompt positions only, which is all the router pools. |
 | `pooling` | `"mean"`, `"last"` or `"both"`: return the pooled prompt vectors inline (see "Inline pooled hidden states" below). Set without `hidden_states_path`, no file is written. |
+| `pooled_sink` | One path segment (`^[A-Za-z0-9._-]{1,64}$`, not `.`/`..`): the subdirectory of `--pooled-sink-dir` whose `pooled.jsonl` also receives this request's pooled vectors (see "Pooled sink (JSONL)" below). Requires `pooling`; refused (400) without the server flag. |
 
 `kv_transfer_params` is typed **only** on `/v1/chat/completions`. On `/v1/completions`,
 `/v1/messages` and `/v1/responses` it lands in the untyped extras and is ignored.
@@ -383,6 +385,56 @@ file rules apply to the whole request (`--hidden-states-dir` set, contiguous-fro
 prefill and the completion is whatever it is. A pooled request is served exactly like
 the file probe otherwise: it bypasses prefix reuse and binds no session lease (below).
 On the stream path `pooled` rides on the terminal chunk, like `hidden_states_path`.
+
+### Pooled sink (JSONL)
+
+Start the server with `--pooled-sink-dir DIR` (an existing directory, canonicalized at
+startup) and every `pooling` request is **also** appended as one JSON line to
+`DIR/<pooled_sink>/pooled.jsonl`, where `<pooled_sink>` is the request's
+`kv_transfer_params.pooled_sink` or `default`. The subdirectory is created on demand;
+the file is created `0o666 & ~umask` (like the artifact) and each line is appended
+under an exclusive `flock`, so a collector may `flock` + truncate/rotate it between
+lines, and several servers may share one file. The inline response is unchanged; the
+write runs in a worker thread after the engine has answered and **never fails the
+response** -- a failed write is a `pooled sink write failed` warning in the server log.
+
+```json
+{"model": "nemotron-3.5-lightning", "messages": [...], "max_tokens": 1,
+ "kv_transfer_params": {"pooling": "both", "layer_ids": [12, 24, 36, 51], "pooled_sink": "run-2026-09-06"}}
+```
+
+Line schema (keys in this order):
+
+| Key | Meaning |
+|---|---|
+| `ts` | Unix time of the write, float seconds. |
+| `request_id` | The response's `id` (`chatcmpl-<uid>`), so a line joins its HTTP response. |
+| `session_id` | The FreeToken session lease the turn was bound to (`X-FreeToken-Session-Id`), or `null`. A pooled request binds no lease (see "What a probe request does differently"), so this is `null` today; the key is kept for a future opt-in. |
+| `x_switchyard_session_id` | The request's `x-switchyard-session-id` header, stripped, or `null`. This is the conversation identity the router already sends; use it to group lines. |
+| `model` | The `model` the client named (echoed, not the served id). |
+| `prompt_tokens`, `layer_ids`, `hidden`, `dtype` | Copied from the response's `pooled` object. |
+| `mean`, `last` | Copied from `pooled`: base64 float32 `[len(layer_ids), hidden]`, row-major, little-endian; each present only when requested. |
+| `prompt_sha256` | Hex SHA-256 of the **rendered chat-template prompt** (UTF-8) -- the string the frontend tokenizer's `render_prompt` produces for this request's messages, tools and `chat_template_kwargs`, i.e. the exact text the worker encodes. Two lines with equal hashes were pooled over the same token sequence. `null` if this server has no frontend tokenizer or the render fails. (Not a hash of token ids: those never reach the API layer.) |
+
+Read it back with `jq`:
+
+```sh
+# one row per line: request id, switchyard session, prompt length, layer count
+jq -r '[.request_id, .x_switchyard_session_id, .prompt_tokens, (.layer_ids|length)] | @tsv' \
+  /var/lib/freetoken/pooled/run-2026-09-06/pooled.jsonl
+# decode one line's mean vectors in Python
+python - <<'PY'
+import base64, json, numpy as np
+line = json.loads(open("pooled.jsonl").readline())
+mean = np.frombuffer(base64.b64decode(line["mean"]), dtype="<f4").reshape(len(line["layer_ids"]), line["hidden"])
+PY
+```
+
+Validation, all `400` on `param: kv_transfer_params`: `pooled_sink` without `pooling`;
+a name that is not one path segment; a name on a server started without
+`--pooled-sink-dir` (`pooled sink is disabled; start the server with --pooled-sink-dir`).
+A `pooling` request that names no sink on such a server is served normally and writes
+nothing. `tests/server/test_pooled_sink.py` pins all of this.
 
 ### The artifact
 

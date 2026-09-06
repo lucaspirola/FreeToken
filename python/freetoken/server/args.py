@@ -1095,6 +1095,18 @@ def parse_args(
         ),
     )
     parser.add_argument(
+        "--pooled-sink-dir",
+        type=str,
+        default=ServerArgs.pooled_sink_dir,
+        help=(
+            "Also append every kv_transfer_params.pooling result as one JSON line to "
+            "DIR/<kv_transfer_params.pooled_sink or 'default'>/pooled.jsonl (request id, "
+            "session ids, model, layer ids, base64 float32 vectors, rendered-prompt "
+            "sha256). The inline response is unchanged. Off by default: without it a "
+            "request naming pooled_sink is refused. DIR must exist."
+        ),
+    )
+    parser.add_argument(
         "--trace-dir",
         type=str,
         default=ServerArgs.trace_dir,
@@ -1169,6 +1181,11 @@ def parse_args(
         if not os.path.isdir(root):
             parser.error(f"--hidden-states-dir {root!r} is not an existing directory")
         kwargs["hidden_states_dir"] = root
+    if kwargs["pooled_sink_dir"] is not None:
+        root = os.path.realpath(os.path.expanduser(kwargs["pooled_sink_dir"]))
+        if not os.path.isdir(root):
+            parser.error(f"--pooled-sink-dir {root!r} is not an existing directory")
+        kwargs["pooled_sink_dir"] = root
     if isinstance(kwargs["session_spill_dir"], str) and kwargs[
         "session_spill_dir"
     ].lower() in {"off", "none", "disable", "disabled"}:

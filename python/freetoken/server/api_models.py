@@ -124,7 +124,10 @@ class KvTransferParams(BaseModel):
     float32). With ``pooling`` set and no ``hidden_states_path`` no file is written, no
     ``--hidden-states-dir`` is needed, ``layer_ids`` may be any ascending subset and
     the prompt-token cap does not apply; with both, the file is written under the file
-    rules as well. See docs/switchyard.md section 6.
+    rules as well. ``pooled_sink`` names the subdirectory (one path segment) of
+    ``--pooled-sink-dir`` whose ``pooled.jsonl`` also receives the pooled vectors; it
+    requires ``pooling`` and a server started with that flag. See docs/switchyard.md
+    section 6.
 
     This model is the only place ``kv_transfer_params`` is typed. /v1/completions,
     /v1/messages and /v1/responses do not declare it, so it lands in their ``extra`` and
@@ -137,6 +140,7 @@ class KvTransferParams(BaseModel):
     layer_ids: list[int] | None = None
     include_output_tokens: bool = False
     pooling: Literal["mean", "last", "both"] | None = None
+    pooled_sink: str | None = None
 
 
 class ChatCompletionRequest(BaseModel):
