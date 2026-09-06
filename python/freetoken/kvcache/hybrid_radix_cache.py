@@ -108,6 +108,9 @@ class HybridRadixCache:
         the live one, or the one already there: a pooled request that recomputed a prefix
         some earlier plain request had snapshotted still makes that node pooled-reusable."""
         insert_len = align_down(len(input_ids), self.page_size)
+        # Sums describe exactly [0, len(input_ids)); an alignment cut would mislabel them.
+        assert pooled_sums is None or insert_len == len(input_ids), (
+            f"pooled_sums cover {len(input_ids)} tokens but the node ends at {insert_len}")
         input_ids, kv_indices = input_ids[:insert_len], kv_indices[:insert_len]
         node, prefix_len = self._walk(input_ids)
         if prefix_len != insert_len:

@@ -272,12 +272,15 @@ class HiddenStateCapture:
         self._written: list[set[int]] = []
         pooled = (len(self._index), hidden_size)
         # Any pooling keeps the all-layer sum: a ``last``-only request still donates
-        # sums with its snapshot, so a later ``mean`` request can hit its prefix.
-        self._sum = (
+        # sums with its snapshot, so a later ``mean`` request can hit its prefix. The
+        # running buffers live on the residual's device (allocated at the first write,
+        # which is where the device is known) so a chunk costs no D2H at all; the
+        # single copy to the host happens in ``sums_at`` / ``pooled``.
+        self._sum: torch.Tensor | None = (
             torch.zeros((self._num_layers, hidden_size), dtype=torch.float32)
             if spec.pooling else None
         )
-        self._last = (
+        self._last: torch.Tensor | None = (
             torch.empty(pooled, dtype=torch.float32) if "last" in spec.pooling else None
         )
         # Prefix-cache hit: the tree's sum over [0, prefix_count) for every layer. A hit
@@ -340,19 +343,28 @@ class HiddenStateCapture:
         if self._chunks and index is not None:
             self._chunks[-1][index].copy_(hidden)
         if pooled:
+            self._to_device(hidden.device)
             # Reduce in float32 (on CUDA the half/bf16 -> float32 cast happens inside
             # the reduction kernel, so nothing [rows, hidden]-sized is materialized) and
-            # accumulate across chunks on the host.
-            self._sum[layer_id] += hidden.sum(dim=0, dtype=torch.float32).to("cpu")
+            # accumulate across chunks in place, on the device: no sync per layer.
+            self._sum[layer_id] += hidden.sum(dim=0, dtype=torch.float32)
             if self._boundary_rows:
                 self._boundary_sum[layer_id] += (
-                    hidden[: self._boundary_rows].sum(dim=0, dtype=torch.float32).to("cpu")
+                    hidden[: self._boundary_rows].sum(dim=0, dtype=torch.float32)
                 )
         if self._last is not None and index is not None:
+            self._to_device(hidden.device)
             # Each chunk overwrites it; the last chunk's last row is the final prompt
             # position, i.e. what ``token_ids[-1]`` names in the artifact.
             self._last[index].copy_(hidden[-1])
         self._written[-1].add(layer_id)
+
+    def _to_device(self, device: torch.device) -> None:
+        """Move the running buffers to the residual's device once (first write)."""
+        for name in ("_sum", "_last", "_boundary_sum"):
+            buf = getattr(self, name)
+            if buf is not None and buf.device != device:
+                setattr(self, name, buf.to(device))
 
     def _missing_chunks(self, expected: set[int]) -> list[int]:
         return [i for i, seen in enumerate(self._written) if not expected <= seen]
@@ -372,7 +384,9 @@ class HiddenStateCapture:
             )
 
     def _total_sum(self) -> torch.Tensor:
-        return self._sum if self._prefix_sum is None else self._prefix_sum + self._sum
+        """Host float32 sum over [0, token_count): one D2H of the running buffer."""
+        forwarded = self._sum.to("cpu")
+        return forwarded if self._prefix_sum is None else self._prefix_sum + forwarded
 
     def sums_at(self, length: int) -> torch.Tensor | None:
         """The all-layer float32 ``[num_layers, hidden]`` sum over prompt positions
@@ -387,10 +401,10 @@ class HiddenStateCapture:
         if self._missing_chunks(set(range(self._num_layers))):
             return None
         if self._boundary_rows and length == self._boundary_len:
-            partial = self._boundary_sum
-            return partial.clone() if self._prefix_sum is None else self._prefix_sum + partial
+            partial = self._boundary_sum.to("cpu")
+            return partial if self._prefix_sum is None else self._prefix_sum + partial
         if length == self.token_count:
-            return self._total_sum().clone()
+            return self._total_sum()
         return None
 
     def finish(self) -> tuple[torch.Tensor | None, torch.Tensor | None]:
@@ -426,17 +440,22 @@ class HiddenStateCapture:
             "prefix_tokens": self._prefix_count,
             "dtype": "float32",
         }
+        if self._last is not None:
+            payload["last"] = _encode_f32(self._last.to("cpu"))
         if "mean" in self.spec.pooling:
             if self._prefix_count > 0 and self._prefix_sum is None:
-                raise ValueError(
+                # The skipped positions are unaccounted for: no mean rather than a wrong
+                # one. ``last`` (above) is still exact -- the final position was forwarded.
+                logger.warning_rank0(
                     f"prefix hit of {self._prefix_count} tokens carried no pooled sums; "
-                    "the mean cannot be exact"
+                    "omitting mean/mean_suffix"
                 )
+                return payload
             ids = list(self.spec.layer_ids)
-            payload["mean"] = _encode_f32(self._total_sum()[ids] / prompt_tokens)
-            payload["mean_suffix"] = _encode_f32(self._sum[ids] / self._token_count)
-        if self._last is not None:
-            payload["last"] = _encode_f32(self._last)
+            total = self._total_sum()
+            payload["mean"] = _encode_f32(total[ids] / prompt_tokens)
+            forwarded = total if self._prefix_sum is None else total - self._prefix_sum
+            payload["mean_suffix"] = _encode_f32(forwarded[ids] / self._token_count)
         return payload
 
 

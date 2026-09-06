@@ -45,7 +45,7 @@ The serving-compliance half of that line:
 | `--max-output-tokens 16384` | Ceiling for a request that sends no `max_completion_tokens`. |
 | `--kv-cache-dtype q8_0` | FP8 KV (FreeToken block scales; the checkpoint's `k_scale`/`v_scale` are ignored). Requires `--attention-backend triton`. |
 | `--pin-prefix-min-tokens N` (default 1024; 0 disables) | Prefix auto-pin (hybrid radix cache): a cached prefix that a *second* request reuses with `cached_tokens >= N` is locked against eviction until `DELETE /v1/cache/pins`. See §3a. |
-| `--pin-prefix-max-tokens N` (default 65536; 0 = unlimited) | Total pinned-token budget. Past it, new prefixes are not pinned and `scheduler.prefix.pin_budget_refusals` counts each refusal. |
+| `--pin-prefix-max-tokens N` (default 65536; 0 = the cap) | Total pinned-token budget, clamped at startup to 25% of the KV pool (`num_pages x page_size`; the clamp is logged) because pins never release under pressure. Past it, new prefixes are not pinned and `scheduler.prefix.pin_budget_refusals` counts each refusal. |
 
 Optional knobs that change the contract: `--no-context-preflight` (see §5),
 `--json-retry N` (see §4), `--hidden-states-dir DIR`, `--pooled-sink-dir DIR` (see §6).

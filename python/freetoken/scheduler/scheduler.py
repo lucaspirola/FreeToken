@@ -2437,8 +2437,20 @@ class Scheduler(SchedulerIOMixin):
         forward_input = self._prepare_batch(batch)
         if getattr(getattr(self, "config", None), "adaptive_scheduler", False):
             batch.scheduler_started_at = time.perf_counter()
+        self._note_prefix_admissions(batch)
         self._report_prompt_admissions(batch)
         return forward_input
+
+    def _note_prefix_admissions(self, batch: Batch) -> None:
+        """Prefix hit/miss counters and the auto-pin decision, once per prompt, after the
+        batch is prepared (``getattr``: the loop tests drive stub managers/batches)."""
+        note = getattr(self.cache_manager, "note_prompt_admitted", None)
+        notes = getattr(batch, "prefix_notes", None)
+        if note is None or not notes:
+            return
+        for handle, prompt_tokens, pooled in notes:
+            note(handle, prompt_tokens, pooled=pooled)
+        batch.prefix_notes = []
 
     def _adaptive_decode_burst(self) -> int:
         """Decode forwards that approximate one short wall-clock service slice."""

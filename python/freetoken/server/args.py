@@ -1016,7 +1016,8 @@ def parse_args(
         help=(
             "Total token budget for pinned prefixes. Once pinned tokens would exceed it, "
             "new prefixes are not pinned (counted in /v1/stats "
-            "scheduler.prefix.pin_budget_refusals). 0 = unlimited. Default 65536."
+            "scheduler.prefix.pin_budget_refusals). Clamped to 25%% of the KV pool; "
+            "0 = that cap. Default 65536."
         ),
     )
 

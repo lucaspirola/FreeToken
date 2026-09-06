@@ -50,8 +50,10 @@ def _insert(cm, pool, ids):
     n = len(ids)
     pages, cm.free_slots = cm.free_slots[:n].clone(), cm.free_slots[n:]
     slot = pool.alloc(1)[0]
-    _, exists = cm.prefix_cache.insert(torch.tensor(ids, dtype=torch.int32), pages, slot)
+    matched, exists = cm.prefix_cache.insert(torch.tensor(ids, dtype=torch.int32), pages, slot)
     assert not exists
+    # The deduped prefix pages go back to the free-list, as cache_req's ``_free`` does.
+    cm.free_slots = torch.cat([cm.free_slots, pages[:matched]])
     return slot
 
 

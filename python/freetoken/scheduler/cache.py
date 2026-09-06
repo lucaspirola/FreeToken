@@ -32,6 +32,9 @@ _SWA_RETAIN_GAP = 16
 
 logger = init_logger(__name__)
 
+#: ``--pin-prefix-max-tokens`` is clamped to this fraction of the KV pool: pins are
+#: never released under pressure, so a budget past it could starve ``allocate``.
+PIN_BUDGET_MAX_FRACTION = 0.25
 
 
 def _pooled_sums_at(req, length: int):
@@ -89,7 +92,18 @@ class CacheManager:
         # Prefix auto-pin (hybrid radix only; see note_prompt_admitted). ``_pin_locks`` are
         # the nodes this manager holds an extra ``inc_lock`` on.
         self.pin_prefix_min_tokens = max(0, int(pin_prefix_min_tokens or 0))
-        self.pin_prefix_max_tokens = max(0, int(pin_prefix_max_tokens or 0))
+        # Budget cap: at most PIN_BUDGET_MAX_FRACTION of the pool, whatever the flag says
+        # (0, "unlimited", included) -- a pinned prefix is never evicted, so anything
+        # larger can push ``allocate`` into its hard assert.
+        requested = max(0, int(pin_prefix_max_tokens or 0))
+        cap = max(1, int(num_pages * page_size * PIN_BUDGET_MAX_FRACTION))
+        self.pin_prefix_max_tokens = cap if requested == 0 or requested > cap else requested
+        if self.pin_prefix_min_tokens > 0 and self.pin_prefix_max_tokens != requested:
+            logger.info(
+                "pin_prefix_max_tokens clamped from %s to %d (%d%% of the %d-token KV pool)",
+                "unlimited" if requested == 0 else requested, self.pin_prefix_max_tokens,
+                int(PIN_BUDGET_MAX_FRACTION * 100), num_pages * page_size,
+            )
         self.prefix_counters = PrefixCounters()
         self._pin_locks: list = []          # lock order, for unpin_all
         self._pin_locked: set = set()       # the same nodes, for the re-entrancy check

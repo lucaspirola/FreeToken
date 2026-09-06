@@ -699,7 +699,7 @@ def test_a_last_only_request_still_accumulates_donatable_sums():
     assert set(pooled) == {"layer_ids", "hidden", "prompt_tokens", "prefix_tokens", "dtype", "last"}
 
 
-def test_mean_refuses_a_prefix_hit_that_carried_no_sums_but_last_is_served():
+def test_mean_is_omitted_on_a_prefix_hit_that_carried_no_sums_but_last_is_served(caplog):
     chunk = _chunks(seed=10, sizes=(2,))[0]
     capture = HiddenStateCapture(
         HiddenStateSpec(layer_ids=[0], pooling=("mean", "last")), HIDDEN,
@@ -708,8 +708,11 @@ def test_mean_refuses_a_prefix_hit_that_carried_no_sums_but_last_is_served():
     capture.begin_chunk(torch.arange(2, dtype=torch.int32))
     for layer_id in range(NUM_LAYERS):
         capture.write(layer_id, chunk[layer_id])
-    with pytest.raises(ValueError, match="no pooled sums"):
-        capture.pooled()
+    pooled = capture.pooled()
+    assert set(pooled) == {"layer_ids", "hidden", "prompt_tokens", "prefix_tokens", "dtype", "last"}
+    assert pooled["prompt_tokens"] == 8 and pooled["prefix_tokens"] == 6
+    np.testing.assert_array_equal(decode(pooled["last"], [0]), chunk[0][-1:].float().numpy())
+    assert any("omitting mean" in r.getMessage() for r in caplog.records)
     assert capture.sums_at(8) is None
     only_last = HiddenStateCapture(
         HiddenStateSpec(layer_ids=[0], pooling=("last",)), HIDDEN,
@@ -799,14 +802,16 @@ def test_collector_seeds_a_hit_from_the_matched_node_and_the_mean_is_exact():
 def test_a_hit_whose_node_lost_its_sums_serves_no_mean(caplog):
     model = _Model(seed=12)
     prompt = list(range(1, 8))
-    spec = HiddenStateSpec(layer_ids=[0], pooling=("mean",))
+    spec = HiddenStateSpec(layer_ids=[0], pooling=("mean", "last"))
     collector = HiddenStateCollector(hidden_size=HIDDEN, num_layers=NUM_LAYERS)
     for node in (_Node(None, 0), _Node(torch.zeros(NUM_LAYERS, HIDDEN), 3)):  # bare / stale
         req = _hit_req(7, prompt, 4, spec, node)
         _forward(model, _batch([req]), collector.begin_batch(_batch([req])))
-        with pytest.raises(ValueError, match="no pooled sums"):
-            collector.finish(7)
-    assert "without pooled sums" in caplog.text
+        pooled = collector.finish(7)["pooled"]
+        assert "mean" not in pooled and "mean_suffix" not in pooled and "last" in pooled
+        assert pooled["prefix_tokens"] == 4
+    # Same logger plumbing as test_write_failure_keeps_the_pooled_half (caplog.records).
+    assert any("without pooled sums" in r.getMessage() for r in caplog.records)
 
 
 # --------------------------------------------------------------------------- #

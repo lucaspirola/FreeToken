@@ -739,6 +739,7 @@ class PrefillManager:
         reqs: List[Req] = []
         chunked_list: List[PendingReq] = []
         prompt_admissions: List[Tuple[int, int, int]] = []
+        batch_prefix_notes: List[Tuple[object, int, bool]] = []
         # Snapshot here, before the forward's complete_one() advances cached_len: the tokens
         # forwarded this batch (extend_len) and the prefix-cache hit. SGLang counts the hit
         # once at admission, so continuation chunks (already-chunked reqs) contribute 0.
@@ -793,14 +794,15 @@ class PrefillManager:
                         (req.uid, pending_req.input_len, req.cache_handle.cached_len)
                     )
                     # Same point, same numbers: the prefix hit/miss counters and the
-                    # auto-pin decision (``getattr``: the loop tests drive stub managers).
-                    note = getattr(self.cache_manager, "note_prompt_admitted", None)
-                    if note is not None:
-                        spec = pending_req.hidden_states
-                        note(
-                            req.cache_handle, pending_req.input_len,
-                            pooled=spec is not None and bool(spec.pooling),
-                        )
+                    # auto-pin decision, applied by the scheduler only once
+                    # _prepare_batch has succeeded (a failed prep re-admits the prompt
+                    # and must not count it twice). A file+pooled probe bypasses the
+                    # tree, so it is not a pooled hit candidate.
+                    spec = pending_req.hidden_states
+                    batch_prefix_notes.append((
+                        req.cache_handle, pending_req.input_len,
+                        spec is not None and bool(spec.pooling) and spec.directory is None,
+                    ))
                 log_new_tokens += req.extend_len
                 if not is_continuation:
                     log_cached_tokens += req.cache_handle.cached_len
@@ -871,6 +873,7 @@ class PrefillManager:
         batch.log_new_tokens = log_new_tokens
         batch.log_cached_tokens = log_cached_tokens
         batch.prompt_admissions = prompt_admissions
+        batch.prefix_notes = batch_prefix_notes
         return batch
 
     def abort_req(self, uid: int) -> Req | None:

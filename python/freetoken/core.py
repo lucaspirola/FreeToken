@@ -185,6 +185,10 @@ class Batch:
     # _prepare_batch succeeds. Continuation chunks leave this empty, so accounting is
     # exactly-once.
     prompt_admissions: List[Tuple[int, int, int]] = field(default_factory=list, init=False)
+    # (cache handle, complete prompt length, pooled probe?) for the same requests: the
+    # scheduler feeds these to CacheManager.note_prompt_admitted (prefix counters, auto-pin)
+    # at the same post-_prepare_batch point.
+    prefix_notes: List[Tuple[object, int, bool]] = field(default_factory=list, init=False)
 
     def last_indices(self, bs: int) -> torch.Tensor:
         """Rows of the token-major hidden state the LM head should score.
