@@ -101,6 +101,27 @@ async def _collect(stream) -> list:
     return [chunk async for chunk in stream]
 
 
+async def _collect_quietly(stream) -> list:
+    """Consume a stream whose client leaves and assert it ends *quietly*.
+
+    ``stream_with_cancellation`` used to re-raise the ``CancelledError`` after spawning the
+    abort, which put ``ERROR: Exception in ASGI application`` in uvicorn's log for a
+    StreamingResponse that ended exactly as designed (soak §Y8.4, handover item 7). The
+    streaming twin of the non-streaming ``return client_gone_response()`` is simply ending
+    the generator: there is no response object left to hand back, and the abort is already
+    in flight as its own task.
+    """
+    chunks = []
+    try:
+        async for chunk in stream:
+            chunks.append(chunk)
+    except asyncio.CancelledError as exc:  # pragma: no cover -- the regression itself
+        raise AssertionError(
+            "a gone client must end the stream, not raise out of the ASGI app"
+        ) from exc
+    return chunks
+
+
 # --------------------------------------------------------------------------- #
 # Streaming
 # --------------------------------------------------------------------------- #
@@ -117,8 +138,7 @@ def test_stream_aborts_when_client_drops_during_prefill():
             yield b"data: never\n\n"
 
         stream = state.stream_with_cancellation(prefilling(), FakeRequest(0), uid, "sess-1")
-        with pytest.raises(asyncio.CancelledError):
-            await _collect(stream)
+        assert await _collect_quietly(stream) == []
         await _drain_aborts(state)
         return uid
 
@@ -146,8 +166,7 @@ def test_stream_abort_sends_exactly_one_abortmsg():
 
         request = FakeRequest(0)
         stream = state.stream_with_cancellation(prefilling(), request, uid)
-        with pytest.raises(asyncio.CancelledError):
-            await _collect(stream)
+        await _collect_quietly(stream)
         await _drain_aborts(state)
         # Give any stray background task a chance to run before we count.
         await asyncio.sleep(0)
@@ -171,11 +190,8 @@ def test_stream_aborts_after_first_chunk_disconnect():
             await forever.wait()
             yield b"data: two\n\n"
 
-        chunks = []
         stream = state.stream_with_cancellation(one_then_stall(), FakeRequest(1), uid)
-        with pytest.raises(asyncio.CancelledError):
-            async for chunk in stream:
-                chunks.append(chunk)
+        chunks = await _collect_quietly(stream)
         await _drain_aborts(state)
         return chunks
 
@@ -204,6 +220,63 @@ def test_stream_completes_normally_without_aborting():
     assert asyncio.run(main()) == [b"data: one\n\n", b"data: [DONE]\n\n"]
     assert _aborts(state) == []
     assert state.abort_tasks == set()
+
+
+def test_stream_post_chunk_disconnect_also_ends_quietly():
+    """The other place ``aiter_or_disconnect`` gives up: the client is re-checked *after* an
+    item arrives, so a chunk is never written to a socket already known to be gone. That is
+    the same finding as the mid-await one and must end the same way -- it used to raise a
+    bare ``CancelledError``, which is indistinguishable from a shutdown at the caller."""
+    state = _manager()
+
+    async def main():
+        uid = state.new_user()
+
+        async def two_chunks():
+            yield b"data: one\n\n"
+            yield b"data: two\n\n"
+
+        # Both items are ready immediately, so no poll happens while one is awaited and
+        # the only checks are the post-item ones: the first says "still here" (chunk one
+        # goes out), the second says gone, and the second chunk is never written.
+        request = FakeRequest(1)
+        chunks = await _collect_quietly(
+            state.stream_with_cancellation(two_chunks(), request, uid)
+        )
+        await _drain_aborts(state)
+        return chunks
+
+    assert asyncio.run(main()) == [b"data: one\n\n"]
+    assert len(_aborts(state)) == 1
+
+
+def test_a_genuine_outer_cancellation_still_propagates():
+    """The half that must NOT be swallowed: a shutdown cancelling the response task is a
+    plain ``CancelledError``, and eating it would leave uvicorn believing the stream ended
+    normally. The abort still has to be sent."""
+    state = _manager()
+
+    async def main():
+        uid = state.new_user()
+        forever = asyncio.Event()
+
+        async def prefilling():
+            await forever.wait()
+            yield b"never"
+
+        # request=None: nothing is polling, so the only way out is the outer cancel
+        task = asyncio.ensure_future(
+            _collect(state.stream_with_cancellation(prefilling(), None, uid, "sess-2"))
+        )
+        await asyncio.sleep(0.02)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await _drain_aborts(state)
+
+    asyncio.run(main())
+    aborts = _aborts(state)
+    assert len(aborts) == 1 and aborts[0].session_id == "sess-2"
 
 
 def test_stream_without_request_object_is_unchanged():
@@ -368,8 +441,7 @@ def test_probe_failure_counts_as_a_disconnect():
             await forever.wait()
             yield b"never"
 
-        with pytest.raises(asyncio.CancelledError):
-            await _collect(state.stream_with_cancellation(prefilling(), BrokenRequest(), uid))
+        await _collect_quietly(state.stream_with_cancellation(prefilling(), BrokenRequest(), uid))
         await _drain_aborts(state)
 
     asyncio.run(main())
@@ -415,8 +487,7 @@ def test_stream_disconnect_is_counted_once():
             await forever.wait()
             yield b"never"
 
-        with pytest.raises(asyncio.CancelledError):
-            await _collect(state.stream_with_cancellation(prefilling(), FakeRequest(0), uid))
+        await _collect_quietly(state.stream_with_cancellation(prefilling(), FakeRequest(0), uid))
         await _drain_aborts(state)
 
     asyncio.run(main())

@@ -13,9 +13,10 @@
 #   * the server runs under the GPU lock and its output is REDIRECTED, never piped -- the
 #     lock's exit trap pkill -9's its own process group, which kills any reader
 #   * shutdown TERMs the `ft serve` python directly, so the graceful path is what gets timed
-#   * it refuses to start below 26 GiB MemAvailable, and it also bounds the RUNNING floor:
-#     the watchdog TERMs the server if MemAvailable falls under SOAK_RAM_ABORT_GIB, so the run
-#     ends with its artifacts on disk instead of being destroyed by a host OOM
+#   * it refuses to start below 26 GiB MemAvailable, and it bounds BOTH the LOAD floor and the
+#     RUNNING floor: a watchdog TERMs the server if MemAvailable falls under
+#     SOAK_RAM_LOAD_ABORT_GIB during the model load / SOAK_RAM_ABORT_GIB once it is serving, so
+#     the run ends with its artifacts on disk instead of being destroyed by a host OOM
 set -uo pipefail
 REPO=/home/lucas/ai/FreeToken
 TAG="${1:-$(date -u +%Y%m%dT%H%M%SZ)}"
@@ -30,20 +31,43 @@ git -C "$REPO" log -1 --oneline
 git -C "$REPO" status --porcelain
 free -g | head -2
 
-# MemAvailable gates, in GiB: START is checked once before the model loads; WARN and ABORT
-# are checked every 10 s by the watchdog below (the 2026-09-04 soak bottomed at 3.1 GiB).
+# MemAvailable gates, in GiB. START is checked once before the model loads; LOAD_ABORT every
+# second while the model loads; WARN and ABORT every 10 s by the watchdog below, once the
+# server is up (the 2026-09-04 soak bottomed at 3.1 GiB while serving).
+#
+# Why the load phase needs its OWN, LOWER floor (soak AA9.2): the load transiently drove the
+# host to 1.1 GiB -- 0.9 GiB *under* the 2 GiB serving floor -- and that load succeeded. Arming
+# the serving floor over the load would abort a load that is known to work, so LOAD_ABORT sits
+# below the deepest observed good load and above the OOM point: 0.8 GiB leaves ~0.3 GiB under
+# the measured 1.1 GiB dip and ~0.8 GiB over the 0 GiB at which WSL starts killing (the
+# 2026-09-05 restart that destroyed a whole soak's artifacts).
+#
+# The server side cannot do this for us. `--host-ram-reserve-gb` (serve.sh, 6) is a *static*
+# preflight: validate_host_bank_memory() refuses the load when resident bank bytes + reserve
+# exceed MemAvailable at the moment of the check. It bounds the steady-state resident set, not
+# the load-phase transient (pinned-bank staging plus the reader's shard buffers on top of the
+# banks), which is what the 1.1 GiB dip is; _host_ram_fits_parallel() covers one term of that
+# transient by dropping to the serial reader, also as a one-shot pre-load estimate. So the
+# window between "preflight passed" and READY is only observable from outside the process --
+# hence this watchdog. (SOAK_HOST_RAM_RESERVE_GB raises the preflight itself, AA9.5.)
 START_GIB="${SOAK_RAM_START_GIB:-26}"
+LOAD_ABORT_GIB="${SOAK_RAM_LOAD_ABORT_GIB:-0.8}"
 WARN_GIB="${SOAK_RAM_WARN_GIB:-4}"
 ABORT_GIB="${SOAK_RAM_ABORT_GIB:-2}"
 
-mem_avail_gib() { awk '/MemAvailable/ {printf "%.1f", $2/1048576}' /proc/meminfo; }
+# SOAK_MEMINFO exists so the gates above can be exercised against a fixture instead of the
+# live host; nothing but a test should set it.
+MEMINFO="${SOAK_MEMINFO:-/proc/meminfo}"
+mem_avail_gib() { awk '/MemAvailable/ {printf "%.1f", $2/1048576}' "$MEMINFO"; }
+mem_below() { awk -v a="$1" -v f="$2" 'BEGIN{exit !(a+0 < f+0)}'; }
 
-avail=$(awk '/MemAvailable/ {printf "%d", $2/1048576}' /proc/meminfo)
+avail=$(awk '/MemAvailable/ {printf "%d", $2/1048576}' "$MEMINFO")
 if [ "$avail" -lt "$START_GIB" ]; then
   echo "ABORT: only ${avail} GiB MemAvailable (< ${START_GIB}); a model load here OOMs the host"
   exit 2
 fi
-echo "ram gates: start>=${START_GIB} warn<${WARN_GIB} abort<${ABORT_GIB} GiB (now $(mem_avail_gib))"
+echo "ram gates: start>=${START_GIB} load_abort<${LOAD_ABORT_GIB} warn<${WARN_GIB}" \
+     "abort<${ABORT_GIB} GiB (now $(mem_avail_gib))"
 
 SOAK_PORT="$PORT" "$REPO/scripts/gpu_lock.sh" "$HERE/serve.sh" > "$SP/server.log" 2>&1 &
 LOCK=$!
@@ -52,17 +76,8 @@ echo "$LOCK" > "$SP/lock.pid"
 "$HERE/sample.sh" "$SP" &
 SAMP=$!
 
-READY=0
-for i in $(seq 1 900); do
-  if ! kill -0 "$LOCK" 2>/dev/null; then echo "SERVER_DIED_DURING_STARTUP"; kill "$SAMP" 2>/dev/null; exit 3; fi
-  s=$(curl -s -m 3 "http://127.0.0.1:$PORT/health" | tr -d ' \n' || true)
-  case "$s" in *'"status":"ok"'*) echo "READY after ${i}s at $(date -Is)"; READY=1; break;; esac
-  sleep 1
-done
-[ "$READY" = 1 ] || { echo "STARTUP_TIMEOUT"; kill -TERM "$LOCK"; kill "$SAMP" 2>/dev/null; exit 4; }
-curl -s -m 5 "http://127.0.0.1:$PORT/health"; echo
-
-# The top ft-serve python (its parent is not itself a FreeToken-venv python).
+# The top ft-serve python (its parent is not itself a FreeToken-venv python). Defined before
+# the startup wait because the load-phase guard below needs something to TERM.
 find_srv() {
   for p in $(pgrep -f '^/home/lucas/ai/FreeToken/\.venv/bin/python' 2>/dev/null); do
     ppid=$(awk '{s=$0; sub(/^[0-9]+ \(.*\) /,"",s); split(s,f," "); print f[2]}' /proc/$p/stat 2>/dev/null)
@@ -71,6 +86,35 @@ find_srv() {
     case "$pc" in *FreeToken/.venv/bin/python*) ;; *) echo "$p"; return;; esac
   done
 }
+
+# Startup wait, with the LOAD-phase RAM guard on the same 1 s tick (soak AA9.2: this window was
+# unguarded, and it is where the run's all-samples floor of 1.1 GiB was set -- 0.9 GiB below the
+# floor that would have TERMed a *running* server). The server python may not exist yet, so a
+# breach falls back to TERMing the lock, whose exit trap takes its process group with it.
+READY=0
+for i in $(seq 1 900); do
+  if ! kill -0 "$LOCK" 2>/dev/null; then echo "SERVER_DIED_DURING_STARTUP"; kill "$SAMP" 2>/dev/null; exit 3; fi
+  ma=$(mem_avail_gib)
+  if mem_below "$ma" "$LOAD_ABORT_GIB"; then
+    echo "$(date -Is) MemAvailable=${ma} GiB < ${LOAD_ABORT_GIB} during model load:" \
+      "TERMing server before the host OOMs" | tee -a "$SP/ram_low.log" >> "$SP/RAM_ABORT"
+    p=$(find_srv)
+    kill -TERM "${p:-$LOCK}" 2>/dev/null
+    # Wait for the lock to release (its trap pkill -9's the group) before leaving, so the
+    # GPU and the host RAM are actually back when the driver returns.
+    for _ in $(seq 1 60); do kill -0 "$LOCK" 2>/dev/null || break; sleep 1; done
+    kill -TERM "$LOCK" 2>/dev/null
+    kill "$SAMP" 2>/dev/null
+    exit 6
+  fi
+  s=$(curl -s -m 3 "http://127.0.0.1:$PORT/health" | tr -d ' \n' || true)
+  case "$s" in *'"status":"ok"'*) echo "READY after ${i}s at $(date -Is)"; READY=1; break;; esac
+  sleep 1
+done
+[ "$READY" = 1 ] || { echo "STARTUP_TIMEOUT"; kill -TERM "$LOCK"; kill "$SAMP" 2>/dev/null; exit 4; }
+curl -s -m 5 "http://127.0.0.1:$PORT/health"; echo
+echo "load phase cleared the ${LOAD_ABORT_GIB} GiB floor; MemAvailable now $(mem_avail_gib) GiB"
+
 SRV=$(find_srv)
 echo "server python pid=$SRV"
 
@@ -85,12 +129,12 @@ echo "server python pid=$SRV"
       *) echo "$(date -Is) health_http=$code body=$body" >> "$SP/health_bad.log" ;;
     esac
     ma=$(mem_avail_gib)
-    if awk -v a="$ma" -v f="$ABORT_GIB" 'BEGIN{exit !(a<f)}'; then
+    if mem_below "$ma" "$ABORT_GIB"; then
       echo "$(date -Is) MemAvailable=${ma} GiB < ${ABORT_GIB}: TERMing server to save the artifacts" \
         | tee -a "$SP/ram_low.log" >> "$SP/RAM_ABORT"
       kill -TERM "$SRV" 2>/dev/null
       break
-    elif awk -v a="$ma" -v f="$WARN_GIB" 'BEGIN{exit !(a<f)}'; then
+    elif mem_below "$ma" "$WARN_GIB"; then
       echo "$(date -Is) MemAvailable=${ma} GiB < ${WARN_GIB}" >> "$SP/ram_low.log"
     fi
     sleep 10

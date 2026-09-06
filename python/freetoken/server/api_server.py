@@ -39,7 +39,7 @@ from freetoken.utils import (
 from pydantic import BaseModel
 
 from .args import ServerArgs
-from .disconnect import aiter_or_disconnect
+from .disconnect import ClientGone, aiter_or_disconnect
 from .anthropic_api import register_anthropic_routes
 from .accounting import AdmissionClosedError, register_accounting_routes
 from .control_api import register_control_routes
@@ -429,9 +429,19 @@ class FrontendManager:
         try:
             async for chunk in aiter_or_disconnect(generator, request):
                 yield chunk
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             logger.info("Client disconnected (or cancelled) for user %s", uid)
             self.spawn_abort(uid, session_id=session_id)
+            if isinstance(exc, ClientGone):
+                # The client is already gone and nobody cancelled this task, so there is
+                # nothing left to raise at: re-raising only makes uvicorn log ``ERROR:
+                # Exception in ASGI application`` for a stream that ended exactly as
+                # designed. Ending the generator is the streaming twin of the non-stream
+                # endpoints' ``return client_gone_response()`` (125da19); the abort is
+                # already in flight as its own task, so nothing is lost by returning.
+                # A genuine outer cancellation (shutdown, uvicorn tearing the cycle down)
+                # is a plain CancelledError and must still propagate.
+                return
             raise
 
     def spawn_abort(

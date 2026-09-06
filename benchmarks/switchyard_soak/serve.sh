@@ -5,6 +5,11 @@
 #
 # SOAK_EXTRA_ARGS appends flags for an A/B (e.g. "--speculative ngram"). Leave it unset for
 # a comparable baseline -- a run with it set is NOT the reference profile.
+#
+# SOAK_HOST_RAM_RESERVE_GB overrides --host-ram-reserve-gb (default 6, the reference value:
+# soak AA9.5 asked for the knob because the flag was hard-coded). It raises the *static*
+# pre-load bank preflight only -- the load-phase transient is bounded by run.sh's
+# SOAK_RAM_LOAD_ABORT_GIB watchdog, not by this.
 set -euo pipefail
 cd /home/lucas/ai/FreeToken
 export FREETOKEN_PIN_BUDGET_GB="${FREETOKEN_PIN_BUDGET_GB:-17}"
@@ -16,7 +21,8 @@ exec uv run ft serve \
   --num-tokens 262144 --max-seq-len-override 131072 --kv-cache-dtype q8_0 \
   --attention-backend triton --moe-backend offload --moe-cache-auto \
   --moe-cache-policy lfu \
-  --memory-ratio 0.85 --max-prefill-length 8192 --host-ram-reserve-gb 6 \
+  --memory-ratio 0.85 --max-prefill-length 8192 \
+  --host-ram-reserve-gb "${SOAK_HOST_RAM_RESERVE_GB:-6}" \
   --enable-cache-report --served-model-name nemotron-3.5-lightning \
   --reasoning-parser nemotron_v3 --tool-call-parser qwen3_coder \
   --force-nonempty-content --max-output-tokens 16384 \

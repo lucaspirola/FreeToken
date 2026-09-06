@@ -45,6 +45,11 @@ class ClientGone(asyncio.CancelledError):
     ended exactly as designed (soak §Y8.4, 10 of them in one phase). Return
     :func:`client_gone_response` instead; a genuine outer cancellation (shutdown) is a
     plain ``CancelledError`` and must still propagate.
+
+    The streaming twin of that return is a plain ``return`` out of
+    ``FrontendManager.stream_with_cancellation`` once the abort is spawned: a
+    StreamingResponse has no response object left to hand back, and ending the generator
+    is what stops uvicorn logging the same traceback for a stream whose client left.
     """
 
 
@@ -145,7 +150,10 @@ async def aiter_or_disconnect(
             finally:
                 step = None
             if await client_gone(request):
-                raise asyncio.CancelledError
+                # ``ClientGone``, not a bare ``CancelledError``: this is the same "nobody is
+                # listening any more" finding as the one _wait_or_disconnect raises, so the
+                # streaming caller must be able to end quietly here too.
+                raise ClientGone
             yield item
     finally:
         # Only reachable when the *caller* was cancelled (server shutdown, uvicorn

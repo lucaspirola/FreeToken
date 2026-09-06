@@ -326,7 +326,18 @@ def fused_experts_decode_nvfp4_serial(
 
 
 # M buckets the prefill JSON configs are keyed by (``benchmarks/tune_nvfp4_moe.py``).
-PREFILL_M_BUCKETS = (16, 64, 256, 1024, 4096, 8192)
+#
+# "512" was added 2026-09-06 (moe_prefill_leftovers_2026-09-05.md S2.4). Without it the
+# nearest-bucket rule below served M=512 out of the "256" bucket at ``BLOCK_M=16``, where
+# ``BLOCK_M=32`` measures **1.10x on two independent routings** (fused 1.429 -> 1.296 ms;
+# 1.445 -> 1.306 at ``--seed 7``) because the M-block count halves (254 -> 134) for only
+# +32 % -> +40 % padding. The scheduler's interleave share produces exactly this width
+# under multi-lane load. The new bucket is the "256" bucket with ``BLOCK_SIZE_M=32`` and
+# **nothing else changed**: that pair is what the microbench measured (its ``--grid-json
+# '{"BLOCK_SIZE_M":[16,32]}'`` takes every other key from the shipped 256 entry), and the
+# 1024 bucket's wider tile (``BLOCK_N=256``, ``num_stages=3``) was never measured at this M
+# -- borrowing a launch constant swept on another geometry is the 2026-09-05 lesson.
+PREFILL_M_BUCKETS = (16, 64, 256, 512, 1024, 4096, 8192)
 
 PREFILL_CONFIG_KEYS = (
     "BLOCK_SIZE_M", "BLOCK_SIZE_N", "BLOCK_SIZE_KB", "GROUP_SIZE_M", "num_warps", "num_stages"
@@ -364,6 +375,28 @@ def _prefill_launch_env_override(cfg: Dict[str, int]) -> Dict[str, int]:
         if raw:
             cfg[key] = int(raw)
     return cfg
+
+
+def _skipped_prefill_buckets() -> frozenset[int]:
+    """M buckets ``FREETOKEN_NVFP4_PREFILL_SKIP_BUCKETS`` removes from the lookup.
+
+    The A/B hatch for a *bucket boundary*, which the tile overrides above cannot express:
+    ``FREETOKEN_NVFP4_PREFILL_BLOCK_M`` forces one ``BLOCK_SIZE_M`` on **every** bucket, so
+    using it to undo the 512 bucket would also drag 4096/8192 off their tuned 64 -- a
+    different and much larger change than the one under test. ``=512`` instead drops the
+    512 entry and lets the nearest-bucket rule fall back to exactly the pre-2026-09-06
+    behaviour (M=512 -> the "256" bucket). Comma-separated; unparsable entries are ignored
+    so a typo degrades to the shipped table rather than to the heuristic fallback.
+    """
+    raw = os.environ.get("FREETOKEN_NVFP4_PREFILL_SKIP_BUCKETS", "")
+    out = set()
+    for part in raw.replace(" ", "").split(","):
+        if part:
+            try:
+                out.add(int(part))
+            except ValueError:
+                continue
+    return frozenset(out)
 
 
 def nvfp4_config_filename(num_experts: int, N: int, K: int, device_name: str) -> str:
@@ -412,16 +445,24 @@ def nvfp4_moe_config(
     """Prefill grouped-GEMM config for one NVFP4 expert GEMM of shape ``[N, K]``.
 
     Reads the tuned M-bucketed JSON for ``(num_experts, N, K, device, triton version)``
-    and returns the nearest bucket; falls back to :func:`_prefill_config_default` when
-    the file, the device or the triton version has no table. ``device`` accepts a
-    ``torch.device``, a device index, a literal device name, or ``None`` (current
-    device)."""
+    and returns the **nearest** bucket, ties going to the smaller one (the less padded
+    tile, and a rule that does not depend on the JSON's key order); falls back to
+    :func:`_prefill_config_default` when the file, the device or the triton version has no
+    table. ``device`` accepts a ``torch.device``, a device index, a literal device name, or
+    ``None`` (current device).
+
+    Nearest is on |bucket - M|, so with the shipped buckets each one owns the M range up to
+    the midpoint with its neighbour: the 512 bucket serves 384 < M <= 768 (384 itself is the
+    tie and stays with 256), and 768 < M <= 1024 stays with the 1024 bucket.
+    """
     name = _device_name(device)
     cfg = None
     if name is not None:
         configs = _load_nvfp4_moe_configs(num_experts, N, K, name, triton.__version__)
+        if skip := _skipped_prefill_buckets():
+            configs = {b: c for b, c in (configs or {}).items() if b not in skip}
         if configs:
-            bucket = min(configs, key=lambda b: abs(b - M))
+            bucket = min(configs, key=lambda b: (abs(b - M), b))
             cfg = dict(configs[bucket])
     if cfg is None:
         cfg = _prefill_config_default(M)
