@@ -959,7 +959,11 @@ gave standing GO for agent-requested code adaptation. Server on :1919 restarted 
       nodes donated by pooled requests, pooled match gated on them; `prefix_tokens` + `mean_suffix`
       in the inline block and sink line; scheduler.prefix.pooled_hits/pooled_hit_tokens. Torch
       tests written, not run (live server holds the GPU/RAM); needs a restart to go live.
-- [ ] (h) Fix auto-pin (post-pilot restart): budget pins by Mamba state slots (pool minus 4x
+- [x] (h) Fix auto-pin (9eb7cc0, live 2026-09-07 01:10; ft-unpin retired). Gap: pooled requests carry no
+      session key (no lease), so pins only fire from non-pooled traffic.
+- [ ] (i) next window: let pooled requests carry the header-derived session key for pin
+      matching WITHOUT taking a lease (openai_api.py:489 sets spec.session_id None for them).
+      Original (h) spec: budget pins by Mamba state slots (pool minus 4x
       working set), pin only prefixes matched from a DIFFERENT session id, release the LRU pin
       when the budget is hit instead of refusing; then retire the ft-unpin loop.
 - [ ] (c) pooled as first stream event after prefill: queued until the hidden session's bake-off
