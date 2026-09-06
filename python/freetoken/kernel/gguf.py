@@ -64,13 +64,40 @@ def _module():
 
     # gguf_kernel.cu carries its own PYBIND11_MODULE (appended at the end), so a
     # plain `load` of the single source compiles + binds the ggml_* ops.
-    return load(
+    mod = load(
         name="freetoken_gguf_kernels",
         sources=[str(_CSRC / "gguf_kernel.cu")],
         extra_include_paths=[str(_CSRC)],
         extra_cuda_cflags=extra_cuda_cflags,
         verbose=True,
     )
+    _check_binding_generation(mod)
+    return mod
+
+
+def _check_binding_generation(mod) -> None:
+    """Refuse a stale build of the extension.
+
+    The fork/main merge (32cc504) changed the shared MMVQ bindings' last
+    argument from ``bool multiwarp`` to ``int64_t warps``. pybind11 converts an
+    int to a bool silently, so a stale ``.so`` from before the change would
+    accept ``warps=2`` as ``multiwarp=True`` and run the wrong kernel width
+    without any error. torch's JIT cache normally rebuilds on a source change,
+    but a copied or pre-built cache does not, so check the bound signature.
+    """
+    for fn in ("ggml_moe_shared_a8_vec", "ggml_moe_shared_silu_down_a8_vec"):
+        doc = getattr(getattr(mod, fn, None), "__doc__", "") or ""
+        # pybind11 renders the trailing int64 as "int" or "typing.SupportsInt";
+        # a stale bool build ends "... bool) -> torch.Tensor".
+        sig = doc.split("->")[0].rstrip().rstrip(")")
+        last = sig.rsplit(":", 1)[-1].strip()
+        if last not in ("int", "typing.SupportsInt"):
+            raise RuntimeError(
+                f"freetoken_gguf_kernels.{fn} is a stale build (expected a trailing "
+                "`warps: int` argument). Delete the cached build under "
+                "$TORCH_EXTENSIONS_DIR (default ~/.cache/torch_extensions/*/"
+                "freetoken_gguf_kernels) and restart so it recompiles."
+            )
 
 
 _CSRC_MMQ = pathlib.Path(__file__).parent / "csrc" / "gguf_mmq"
