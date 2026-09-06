@@ -796,7 +796,11 @@ class PrefillManager:
                     # auto-pin decision (``getattr``: the loop tests drive stub managers).
                     note = getattr(self.cache_manager, "note_prompt_admitted", None)
                     if note is not None:
-                        note(req.cache_handle, pending_req.input_len)
+                        spec = pending_req.hidden_states
+                        note(
+                            req.cache_handle, pending_req.input_len,
+                            pooled=spec is not None and bool(spec.pooling),
+                        )
                 log_new_tokens += req.extend_len
                 if not is_continuation:
                     log_cached_tokens += req.cache_handle.cached_len

@@ -104,7 +104,7 @@ def test_no_flag_and_no_sink_name_writes_nothing(tmp_path):
 # --------------------------------------------------------------------------- #
 EXPECTED_KEYS = [
     "ts", "request_id", "session_id", "x_switchyard_session_id", "model", "prompt_tokens",
-    "layer_ids", "hidden", "dtype", "mean", "prompt_sha256",
+    "prefix_tokens", "layer_ids", "hidden", "dtype", "mean", "mean_suffix", "prompt_sha256",
 ]
 
 
@@ -127,10 +127,15 @@ def test_non_stream_writes_one_line_and_keeps_the_response(tmp_path):
     assert line["x_switchyard_session_id"] == "sess-9"
     assert line["model"] == "client-model"
     assert line["prompt_tokens"] == 5 and line["layer_ids"] == [3, 7]
+    assert line["prefix_tokens"] == 2  # copied from the engine's pooled object
     assert line["hidden"] == HIDDEN and line["dtype"] == "float32"
     assert "last" not in line
     np.testing.assert_array_equal(
         decode(line["mean"], line["layer_ids"]), np.arange(2 * HIDDEN, dtype="<f4").reshape(2, HIDDEN)
+    )
+    np.testing.assert_array_equal(
+        decode(line["mean_suffix"], line["layer_ids"]),
+        2 * np.arange(2 * HIDDEN, dtype="<f4").reshape(2, HIDDEN),
     )
     # The hash is of the rendered prompt string the frontend tokenizer produces.
     assert line["prompt_sha256"] == hashlib.sha256(b"rendered").hexdigest()

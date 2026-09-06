@@ -59,10 +59,15 @@ class Req:
     # that carry one and writes the artifact once the prompt is fully forwarded.
     hidden_states: "HiddenStateSpec | None" = None
     # Match against the empty prefix instead of the radix tree, so every prompt token is
-    # actually computed. The hidden-state probe needs it (a cached prefix would leave
-    # those positions' residual streams unobserved); the cache manager reads it in
-    # match_req, next to the multimodal bypass.
+    # actually computed. The file probe needs it (a cached prefix would leave those
+    # positions' residual streams unobserved); the cache manager reads it in match_req,
+    # next to the multimodal bypass. A pooled-only probe leaves it False and instead
+    # matches only snapshot nodes that carry pooled sums (hybrid radix).
     no_prefix_cache: bool = False
+    # The engine's HiddenStateCapture for this request (set by the collector on every
+    # prefill chunk); the hybrid cache manager reads ``sums_at`` off it when it donates
+    # a snapshot, to attach the prefix's pooled sums to the node.
+    pooled_capture: "object | None" = None
 
     # --- hybrid-radix (GDN linear-state) per-request slots; None for non-hybrid models or
     # until allocated from LinearStatePool. Set by the scheduler (P2). ---

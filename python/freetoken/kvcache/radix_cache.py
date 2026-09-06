@@ -33,6 +33,14 @@ class RadixTreeNode:
         # whose end boundary is unchanged. Forward-compat seam for SWA.
         self.mamba_value: int | None = None
         self.mamba_ref_count: int = 0
+        # Pooled hidden-state sums riding on the snapshot (HybridRadixCache): a host
+        # float32 ``[num_layers, hidden]`` sum of the residual stream over every position
+        # in [0, this node's end boundary), for all layers, and that position count.
+        # Attached only when the donating request was itself a pooled probe; dropped
+        # with the snapshot (a hit needs both). ``split_at`` leaves it on the suffix
+        # half with ``mamba_value``, since the end boundary is what it describes.
+        self.pooled_sums: torch.Tensor | None = None
+        self.pooled_count: int = 0
 
         # SWA second currency (SWARadixCache). Unlike the GDN snapshot above, SWA stores NO
         # separate slot: ``value`` (full-pool page indices) is canonical and the swa KV is

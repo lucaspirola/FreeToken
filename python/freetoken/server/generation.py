@@ -319,7 +319,12 @@ async def submit_generation(spec: GenSpec, state: Any) -> int:
             session_ttl_seconds=spec.session_ttl_seconds,
             session_reclaimable=spec.session_reclaimable,
             hidden_states=spec.hidden_states,
-            no_prefix_cache=spec.hidden_states is not None,
+            # Only the file probe needs every position forwarded; a pooled-only probe
+            # takes prefix hits that carry pooled sums (hybrid radix; see
+            # freetoken/hidden_states.py) and forwards the rest.
+            no_prefix_cache=(
+                spec.hidden_states is not None and spec.hidden_states.directory is not None
+            ),
         )
     )
     return uid

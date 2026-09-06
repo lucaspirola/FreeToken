@@ -30,6 +30,14 @@ vectors over the prompt positions, base64 float32, under ``kv_transfer_params.po
 That path keeps only a running float32 sum and the last row per layer -- O(layers x
 hidden) on the host -- so it has no token cap, needs no ``--hidden-states-dir``, and
 accepts any ascending subset of layers (nothing indexes them positionally).
+
+A pooled-only request also takes prefix-cache hits (the file probe never does). The
+hybrid radix cache stores, next to a GDN snapshot that a pooled request donated, the
+per-layer sums over every position before that boundary (``RadixTreeNode.pooled_sums``,
+all layers, so any later layer subset is served); a pooled request matches only nodes
+that carry them, inherits the sum for ``[0, P)`` and forwards the rest, so ``mean`` is
+still exact over the whole prompt. ``prefix_tokens`` (P) and ``mean_suffix`` (the mean
+over the forwarded positions ``[P, prompt_tokens)``) come back alongside.
 """
 
 from __future__ import annotations
@@ -218,16 +226,38 @@ class HiddenStateCapture:
     finish. Pooled: one float32 ``[layers, hidden]`` running sum and one ``[layers,
     hidden]`` last-row buffer, updated per chunk -- so a pooled request's footprint
     does not grow with the prompt. Either or both, per ``spec``.
+
+    When pooling, the running sum covers EVERY layer of the model (``num_layers``), not
+    just ``spec.layer_ids``: it is what the prefix cache stores on a donated snapshot
+    (:meth:`sums_at`), and a later hit may ask for any layer subset. A hit seeds the
+    capture with the tree's sum over ``[0, prefix_count)`` (``prefix_sums``); the
+    capture then only ever sees the forwarded positions. The per-chunk boundary sum
+    (:meth:`begin_chunk` ``boundary_rows``) is the same O(layers x hidden) buffer again,
+    so nothing rows-sized lives on the host beyond the file chunks.
     """
 
     __slots__ = (
-        "spec", "_hidden_size", "_index", "_chunks", "_token_chunks", "_token_count",
-        "_written", "_sum", "_last",
+        "spec", "_hidden_size", "_num_layers", "_index", "_chunks", "_token_chunks",
+        "_token_count", "_written", "_sum", "_last", "_prefix_sum", "_prefix_count",
+        "_boundary_sum", "_boundary_rows", "_boundary_len",
     )
 
-    def __init__(self, spec: HiddenStateSpec, hidden_size: int):
+    def __init__(
+        self,
+        spec: HiddenStateSpec,
+        hidden_size: int,
+        num_layers: int | None = None,
+        prefix_sums: torch.Tensor | None = None,
+        prefix_count: int = 0,
+    ):
         self.spec = spec
         self._hidden_size = hidden_size
+        # Layers the pooled sum covers: the whole model when known (so the sum can be
+        # donated to the prefix cache), else just up to the request's deepest layer.
+        self._num_layers = (
+            num_layers if num_layers is not None
+            else (spec.layer_ids[-1] + 1 if spec.layer_ids else 0)
+        )
         self._index = {layer_id: i for i, layer_id in enumerate(spec.layer_ids)}
         # [layers, chunk_tokens, hidden] per chunk -- layer-major so each block's D2H
         # copy lands in one contiguous host slab; transposed once at finish. Only
@@ -236,24 +266,52 @@ class HiddenStateCapture:
         # The artifact's ``token_ids``; a pooled-only capture keeps just the count.
         self._token_chunks: list[torch.Tensor] = []
         self._token_count = 0
-        # Distinct layer ids written into each chunk. The buffers are uninitialized, so
-        # this is what separates "captured" from "a model that never calls the sink".
+        # Distinct layer ids written into each chunk (raw ids, not spec indexes: the
+        # pooled sum wants every layer). The buffers are uninitialized, so this is what
+        # separates "captured" from "a model that never calls the sink".
         self._written: list[set[int]] = []
         pooled = (len(self._index), hidden_size)
+        # Any pooling keeps the all-layer sum: a ``last``-only request still donates
+        # sums with its snapshot, so a later ``mean`` request can hit its prefix.
         self._sum = (
-            torch.zeros(pooled, dtype=torch.float32) if "mean" in spec.pooling else None
+            torch.zeros((self._num_layers, hidden_size), dtype=torch.float32)
+            if spec.pooling else None
         )
         self._last = (
             torch.empty(pooled, dtype=torch.float32) if "last" in spec.pooling else None
         )
+        # Prefix-cache hit: the tree's sum over [0, prefix_count) for every layer. A hit
+        # without sums (``prefix_sums`` None, ``prefix_count`` > 0) can still serve
+        # ``last``; ``mean`` refuses at :meth:`pooled`.
+        self._prefix_count = int(prefix_count)
+        self._prefix_sum: torch.Tensor | None = None
+        if prefix_sums is not None and self._sum is not None:
+            if tuple(prefix_sums.shape) != (self._num_layers, hidden_size):
+                raise ValueError(
+                    f"prefix sums {tuple(prefix_sums.shape)} do not match "
+                    f"[{self._num_layers}, {hidden_size}]"
+                )
+            self._prefix_sum = prefix_sums.detach().to(torch.float32).clone()
+        # The sum up to a snapshot boundary inside the current chunk (``sums_at``).
+        self._boundary_sum: torch.Tensor | None = None
+        self._boundary_rows = 0
+        self._boundary_len = 0
 
     @property
     def token_count(self) -> int:
-        return self._token_count
+        """Prompt positions accounted for: the inherited prefix plus every forwarded row."""
+        return self._prefix_count + self._token_count
 
-    def begin_chunk(self, token_ids: torch.Tensor) -> None:
+    @property
+    def prefix_count(self) -> int:
+        return self._prefix_count
+
+    def begin_chunk(self, token_ids: torch.Tensor, boundary_rows: int = 0) -> None:
+        """Open a chunk of ``token_ids`` (the forwarded rows). ``boundary_rows`` > 0 names
+        a snapshot boundary strictly inside the chunk (row offset from its start): the
+        sum over ``[0, boundary)`` is kept aside so the cache can attach it to the
+        snapshot the same forward writes there (:meth:`sums_at`)."""
         rows = int(token_ids.numel())
-        self._token_count += rows
         if self.spec.directory is not None:
             self._token_chunks.append(token_ids.detach().to(torch.int64).clone())
             self._chunks.append(
@@ -262,42 +320,78 @@ class HiddenStateCapture:
                 )
             )
         self._written.append(set())
+        self._boundary_rows = 0
+        if self._sum is not None and 0 < boundary_rows < rows:
+            self._boundary_rows = int(boundary_rows)
+            self._boundary_len = self.token_count + int(boundary_rows)
+            self._boundary_sum = self._sum.clone()  # + this chunk's first rows, per layer
+        self._token_count += rows
 
     def write(self, layer_id: int, hidden: torch.Tensor) -> None:
         index = self._index.get(layer_id)
-        if index is None:
+        pooled = self._sum is not None and 0 <= layer_id < self._num_layers
+        if index is None and not pooled:
             return
         # D2H per block: the probe path is opt-in and rare, and staging the whole
         # [chunk, layers, hidden] slab on the GPU first would cost ~1.1 GiB of VRAM at
         # the 4096-token cap for no benefit to a request that samples one token.
         # A second write of one layer in one chunk would double-count the sum.
-        assert index not in self._written[-1], f"layer {layer_id} captured twice in a chunk"
-        if self._chunks:
+        assert layer_id not in self._written[-1], f"layer {layer_id} captured twice in a chunk"
+        if self._chunks and index is not None:
             self._chunks[-1][index].copy_(hidden)
-        if self._sum is not None:
+        if pooled:
             # Reduce in float32 (on CUDA the half/bf16 -> float32 cast happens inside
             # the reduction kernel, so nothing [rows, hidden]-sized is materialized) and
             # accumulate across chunks on the host.
-            self._sum[index] += hidden.sum(dim=0, dtype=torch.float32).to("cpu")
-        if self._last is not None:
+            self._sum[layer_id] += hidden.sum(dim=0, dtype=torch.float32).to("cpu")
+            if self._boundary_rows:
+                self._boundary_sum[layer_id] += (
+                    hidden[: self._boundary_rows].sum(dim=0, dtype=torch.float32).to("cpu")
+                )
+        if self._last is not None and index is not None:
             # Each chunk overwrites it; the last chunk's last row is the final prompt
             # position, i.e. what ``token_ids[-1]`` names in the artifact.
             self._last[index].copy_(hidden[-1])
-        self._written[-1].add(index)
+        self._written[-1].add(layer_id)
+
+    def _missing_chunks(self, expected: set[int]) -> list[int]:
+        return [i for i, seen in enumerate(self._written) if not expected <= seen]
 
     def _check_complete(self) -> None:
         if not self._written:
             raise ValueError("no prefill chunk was captured for this request")
-        expected = len(self._index)
-        missing = [i for i, seen in enumerate(self._written) if len(seen) != expected]
+        expected = set(self._index)
+        missing = self._missing_chunks(expected)
         if missing:
             # The served model's forward never called the sink for (all of) these
             # layers, so the buffers still hold uninitialized memory. Fail loudly
             # instead of handing the router plausible garbage.
             raise ValueError(
-                f"prefill chunk(s) {missing} captured fewer than {expected} layers; "
+                f"prefill chunk(s) {missing} captured fewer than {len(expected)} layers; "
                 "this model does not implement the hidden-state hook"
             )
+
+    def _total_sum(self) -> torch.Tensor:
+        return self._sum if self._prefix_sum is None else self._prefix_sum + self._sum
+
+    def sums_at(self, length: int) -> torch.Tensor | None:
+        """The all-layer float32 ``[num_layers, hidden]`` sum over prompt positions
+        ``[0, length)``, for the prefix cache to attach to a snapshot at ``length``; None
+        when this capture cannot produce it exactly (not pooling, ``length`` is neither
+        the current chunk's boundary nor the total captured so far, or a layer is
+        missing from a chunk). ``length`` counts the inherited prefix too."""
+        if self._sum is None or not self._written or length <= 0:
+            return None
+        if self._prefix_count > 0 and self._prefix_sum is None:
+            return None
+        if self._missing_chunks(set(range(self._num_layers))):
+            return None
+        if self._boundary_rows and length == self._boundary_len:
+            partial = self._boundary_sum
+            return partial.clone() if self._prefix_sum is None else self._prefix_sum + partial
+        if length == self.token_count:
+            return self._total_sum().clone()
+        return None
 
     def finish(self) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """``(hidden_states, token_ids)`` for the artifact; both None when the spec
@@ -316,7 +410,10 @@ class HiddenStateCapture:
         Vectors are ``[len(layer_ids), hidden]`` float32, row-major, little-endian,
         base64 -- ``np.frombuffer(b64decode(v), dtype="<f4").reshape(len(layer_ids),
         hidden)`` on the client. ``mean`` is over every prompt position, chat-template
-        tokens included, exactly what mean-pooling the artifact gives.
+        tokens included, exactly what mean-pooling the artifact gives -- on a prefix hit
+        the first ``prefix_tokens`` positions come from the cached sum. ``mean_suffix``
+        is the mean over the forwarded positions ``[prefix_tokens, prompt_tokens)`` and
+        equals ``mean`` on a miss.
         """
         if not self.spec.pooling:
             return None
@@ -326,10 +423,18 @@ class HiddenStateCapture:
             "layer_ids": list(self.spec.layer_ids),
             "hidden": self._hidden_size,
             "prompt_tokens": prompt_tokens,
+            "prefix_tokens": self._prefix_count,
             "dtype": "float32",
         }
-        if self._sum is not None:
-            payload["mean"] = _encode_f32(self._sum / prompt_tokens)
+        if "mean" in self.spec.pooling:
+            if self._prefix_count > 0 and self._prefix_sum is None:
+                raise ValueError(
+                    f"prefix hit of {self._prefix_count} tokens carried no pooled sums; "
+                    "the mean cannot be exact"
+                )
+            ids = list(self.spec.layer_ids)
+            payload["mean"] = _encode_f32(self._total_sum()[ids] / prompt_tokens)
+            payload["mean_suffix"] = _encode_f32(self._sum[ids] / self._token_count)
         if self._last is not None:
             payload["last"] = _encode_f32(self._last)
         return payload
@@ -359,6 +464,30 @@ class HiddenStateSink:
             capture.write(layer_id, hidden[start:stop])
 
 
+def _boundary_rows(req) -> int:
+    """Row offset (within this chunk) of the GDN snapshot boundary the forward will
+    write for ``req``, or 0. Mirrors ``attention.linear._build_track_metadata``: the
+    deepest ``track_chunk_size`` multiple strictly inside the extend."""
+    if getattr(req, "mamba_ping_pong", None) is None:
+        return 0
+    chunk = _track_chunk_size()
+    if not chunk:
+        return 0
+    c = (req.extend_len - 1) // chunk
+    return c * chunk if c >= 1 else 0
+
+
+def _track_chunk_size() -> int | None:
+    from freetoken.core import get_global_ctx
+
+    try:
+        ctx = get_global_ctx()
+    except (AssertionError, RuntimeError):
+        return None
+    pool = None if ctx is None else getattr(ctx, "linear_state_pool", None)
+    return None if pool is None else pool.track_chunk_size
+
+
 class HiddenStateCollector:
     """Engine-side registry of in-flight captures, keyed by request uid.
 
@@ -386,13 +515,42 @@ class HiddenStateCollector:
             if spec is not None and req.uid >= 0:
                 capture = self._captures.get(req.uid)
                 if capture is None:
-                    capture = self._captures[req.uid] = HiddenStateCapture(
-                        spec, self.hidden_size
-                    )
-                capture.begin_chunk(req.input_ids[req.cached_len : req.device_len])
+                    capture = self._captures[req.uid] = self._open(req, spec)
+                # The cache manager reads the capture back (``sums_at``) when it commits
+                # this request's snapshot; a chunked prompt is a fresh Req per chunk.
+                req.pooled_capture = capture
+                capture.begin_chunk(
+                    req.input_ids[req.cached_len : req.device_len],
+                    boundary_rows=_boundary_rows(req),
+                )
                 targets.append((capture, offset, offset + extend_len))
             offset += extend_len
         return HiddenStateSink(targets) if targets else None
+
+    def _open(self, req, spec: HiddenStateSpec) -> HiddenStateCapture:
+        """A fresh capture for ``req``'s first chunk, seeded from its prefix hit.
+
+        ``cached_len > 0`` means the admission matched a radix node; for a pooled spec
+        ``match_prefix`` only stops at nodes carrying ``pooled_sums`` for exactly that
+        length, so the sums are read straight off the matched node (locked by the
+        request's handle, so neither eviction nor a tombstone can drop them first).
+        """
+        prefix_count = int(req.cached_len)
+        prefix_sums = None
+        if prefix_count > 0 and spec.pooling:
+            node = getattr(req.cache_handle, "node", None)
+            sums = getattr(node, "pooled_sums", None)
+            if sums is not None and getattr(node, "pooled_count", -1) == prefix_count:
+                prefix_sums = sums
+            else:
+                logger.warning_rank0(
+                    f"Pooled request {req.uid} hit a {prefix_count}-token prefix without "
+                    "pooled sums; its mean cannot be served"
+                )
+        return HiddenStateCapture(
+            spec, self.hidden_size, self.num_layers,
+            prefix_sums=prefix_sums, prefix_count=prefix_count,
+        )
 
     def finish(self, uid: int) -> dict | None:
         """Close ``uid``'s capture and return the response's ``kv_transfer_params``

@@ -28,8 +28,23 @@ def test_the_document_has_every_field_and_the_pin_gauges_start_at_zero():
     doc = PrefixCounters().as_dict()
     assert doc == {
         "hits": 0, "misses": 0, "hit_tokens": 0, "miss_tokens": 0,
+        "pooled_hits": 0, "pooled_hit_tokens": 0,
         "pinned_prefixes": 0, "pinned_tokens": 0, "pin_budget_refusals": 0,
     }
+
+
+def test_pooled_hits_are_a_subset_of_hits():
+    """A pooled probe's hit counts in both ledgers; its miss and a plain hit in neither
+    pooled field."""
+    c = PrefixCounters()
+    c.note_admitted(prompt_tokens=300, cached_len=256, pooled=True)
+    c.note_admitted(prompt_tokens=300, cached_len=0, pooled=True)      # pooled miss
+    c.note_admitted(prompt_tokens=100, cached_len=64)                  # plain hit
+    assert (c.hits, c.hit_tokens) == (2, 320)
+    assert (c.pooled_hits, c.pooled_hit_tokens) == (1, 256)
+    assert (c.misses, c.miss_tokens) == (1, 300)
+    doc = c.as_dict()
+    assert doc["pooled_hits"] == 1 and doc["pooled_hit_tokens"] == 256
 
 
 def test_build_scheduler_counters_reads_the_manager_and_distinguishes_absent():

@@ -186,6 +186,10 @@ class PrefixCounters:
     a cached prompt is still a hit with ``cached_len == input_len - 1``). The forwarded
     remainder of a hit is not counted anywhere here; it is ``prompt_tokens - hit_tokens``.
 
+    ``pooled_hits`` / ``pooled_hit_tokens`` are the subset of hits taken by pooled
+    hidden-state probes (``kv_transfer_params.pooling``), which match only snapshot nodes
+    carrying pooled sums; they are counted in ``hits`` / ``hit_tokens`` as well.
+
     The pin fields are gauges (``pinned_prefixes``, ``pinned_tokens``) plus one counter
     (``pin_budget_refusals``): see ``CacheManager.note_prompt_admitted``.
     """
@@ -194,14 +198,19 @@ class PrefixCounters:
     misses: int = 0
     hit_tokens: int = 0
     miss_tokens: int = 0
+    pooled_hits: int = 0
+    pooled_hit_tokens: int = 0
     pinned_prefixes: int = 0
     pinned_tokens: int = 0
     pin_budget_refusals: int = 0
 
-    def note_admitted(self, prompt_tokens: int, cached_len: int) -> None:
+    def note_admitted(self, prompt_tokens: int, cached_len: int, *, pooled: bool = False) -> None:
         if cached_len > 0:
             self.hits += 1
             self.hit_tokens += cached_len
+            if pooled:
+                self.pooled_hits += 1
+                self.pooled_hit_tokens += cached_len
         else:
             self.misses += 1
             self.miss_tokens += max(0, prompt_tokens)
@@ -212,6 +221,8 @@ class PrefixCounters:
             "misses": self.misses,
             "hit_tokens": self.hit_tokens,
             "miss_tokens": self.miss_tokens,
+            "pooled_hits": self.pooled_hits,
+            "pooled_hit_tokens": self.pooled_hit_tokens,
             "pinned_prefixes": self.pinned_prefixes,
             "pinned_tokens": self.pinned_tokens,
             "pin_budget_refusals": self.pin_budget_refusals,

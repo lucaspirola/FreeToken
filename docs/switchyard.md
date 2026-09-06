@@ -224,6 +224,7 @@ counted once per prompt on its first chunk (where `PromptAdmittedMsg` is built):
 |---|---|
 | `hits`, `misses` | prompts admitted with `cached_tokens > 0` / `== 0` (a multimodal or hidden-state-probe prompt that bypasses the tree is a miss). |
 | `hit_tokens` | sum of `cached_tokens` over hits. |
+| `pooled_hits`, `pooled_hit_tokens` | the subset of `hits` / `hit_tokens` taken by pooled hidden-state probes (`kv_transfer_params.pooling`), which only resume from snapshot nodes carrying pooled sums (see "Pooled requests and the prefix cache" in §6). |
 | `miss_tokens` | sum of the **full prompt length** over misses: the tokens the prefill forwards for them, last token included (`match_req` never matches the last token, so a repeated prompt is a hit with `cached_tokens = prompt_tokens - 1`). The forwarded remainder of a hit is `prompt_tokens_total - hit_tokens - miss_tokens`. |
 | `pinned_prefixes`, `pinned_tokens` | gauges: distinct pinned match nodes and the distinct tokens their root paths cover. |
 | `pin_budget_refusals` | pins refused by `--pin-prefix-max-tokens`. |
@@ -389,8 +390,10 @@ curl http://127.0.0.1:1919/v1/chat/completions \
       "layer_ids": [12, 24, 36, 51],
       "hidden": 2688,
       "prompt_tokens": 42,
+      "prefix_tokens": 0,
       "dtype": "float32",
       "mean": "<base64 of float32 [4, 2688], row-major, little-endian>",
+      "mean_suffix": "<base64 ...>",
       "last": "<base64 ...>"
     }
   }
@@ -401,10 +404,12 @@ curl http://127.0.0.1:1919/v1/chat/completions \
 |---|---|
 | `layer_ids` | The layers actually pooled, in the order the rows come back (the request's list, or every block by default). |
 | `hidden` | Row width (2688 on Lightning). |
-| `prompt_tokens` | Positions pooled: every prompt token, chat-template tokens included. |
+| `prompt_tokens` | Positions pooled: every prompt token, chat-template tokens included -- the full prompt length whether or not a prefix was reused. |
+| `prefix_tokens` | Positions served from the prefix cache's stored sums instead of this request's forward (`P`; `0` on a miss, and always `0` when a file is also written). See "Pooled requests and the prefix cache". |
 | `dtype` | Always `float32`. |
-| `mean` | Only with `"mean"`/`"both"`: base64 of `[len(layer_ids), hidden]` float32, row-major, little-endian. The mean over all prompt positions -- the same number as mean-pooling the artifact's `hidden_states[:, i]`. |
-| `last` | Only with `"last"`/`"both"`: same encoding; the residual at the final prompt position (the artifact's `hidden_states[-1, i]`, i.e. `token_ids[-1]`). |
+| `mean` | Only with `"mean"`/`"both"`: base64 of `[len(layer_ids), hidden]` float32, row-major, little-endian. The mean over **all** prompt positions `[0, prompt_tokens)` -- the same number as mean-pooling the artifact's `hidden_states[:, i]`, exact on a prefix hit too. |
+| `mean_suffix` | Accompanies `mean`: same encoding; the mean over the positions this request actually forwarded, `[prefix_tokens, prompt_tokens)`. Equal to `mean` when `prefix_tokens == 0`. |
+| `last` | Only with `"last"`/`"both"`: same encoding; the residual at the final prompt position (the artifact's `hidden_states[-1, i]`, i.e. `token_ids[-1]`). The final position is always forwarded (a match never covers it), so this is unaffected by a hit. |
 
 Decode it with
 
@@ -422,10 +427,37 @@ so it is within float32 summation-order noise of pooling the BF16 artifact clien
 Pooling composes with the file: send `pooling` **and** `hidden_states_path` and the
 response carries both `hidden_states_path` and `pooled` from one capture -- but then the
 file rules apply to the whole request (`--hidden-states-dir` set, contiguous-from-0
-`layer_ids`, the token cap). `max_tokens` may exceed 1; the vectors are pooled from the
-prefill and the completion is whatever it is. A pooled request is served exactly like
-the file probe otherwise: it bypasses prefix reuse and binds no session lease (below).
-On the stream path `pooled` rides on the terminal chunk, like `hidden_states_path`.
+`layer_ids`, the token cap, and the full prefix-cache bypass). `max_tokens` may exceed
+1; the vectors are pooled from the prefill and the completion is whatever it is. A
+pooled request binds no session lease, like the file probe (below). On the stream path
+`pooled` rides on the terminal chunk, like `hidden_states_path`.
+
+#### Pooled requests and the prefix cache
+
+A pooled-only request (no `hidden_states_path`) **does** take prefix-cache hits, and
+its `mean` stays exact. The hybrid radix cache attaches a GDN state snapshot to the
+tree at 128-token boundaries (Mamba-2's scan chunk; 64 on a GDN model); when the
+request that produced a snapshot was itself a pooled request, the same node also
+stores the float32 sum of the residual stream over every position before that boundary
+-- for **all** 52 layers, whatever `layer_ids` that request asked for, so any later
+subset can be served (~560 KiB per node, host memory, evicted with the node; a
+tombstoned snapshot drops its sums, since a hit needs both). A pooled request matches
+only nodes that carry these sums (`scheduler.prefix.pooled_hits`); it inherits the sum
+for `[0, P)`, forwards `[P, prompt_tokens)` as usual, and reports:
+
+- `prefix_tokens = P`, `prompt_tokens` = the full prompt length;
+- `mean` = the exact mean over `[0, prompt_tokens)` (inherited sum + forwarded sum);
+- `mean_suffix` = the mean over the forwarded positions `[P, prompt_tokens)` only;
+- `last` = the final prompt position, as always.
+
+Because `P` is a snapshot boundary, not the true common prefix, `mean_suffix` may
+include up to 127 tokens that another request would count as prefix (the tokens
+between the last boundary and where the prompts diverge). Nodes donated by plain
+(non-pooled) requests carry no sums and are simply skipped by a pooled match; a pooled
+request that recomputes such a prefix adds the sums to the existing node. A pooled
+request that also writes a file keeps the full bypass (`prefix_tokens` is always `0`).
+Pinned prefixes (§3a) keep their sums. `usage.prompt_tokens_details.cached_tokens`
+(with `--enable-cache-report`) equals `prefix_tokens` for such a request.
 
 ### Pooled sink (JSONL)
 
@@ -453,8 +485,8 @@ Line schema (keys in this order):
 | `session_id` | The FreeToken session lease the turn was bound to (`X-FreeToken-Session-Id`), or `null`. A pooled request binds no lease (see "What a probe request does differently"), so this is `null` today; the key is kept for a future opt-in. |
 | `x_switchyard_session_id` | The request's `x-switchyard-session-id` header, stripped, or `null`. This is the conversation identity the router already sends; use it to group lines. |
 | `model` | The `model` the client named (echoed, not the served id). |
-| `prompt_tokens`, `layer_ids`, `hidden`, `dtype` | Copied from the response's `pooled` object. |
-| `mean`, `last` | Copied from `pooled`: base64 float32 `[len(layer_ids), hidden]`, row-major, little-endian; each present only when requested. |
+| `prompt_tokens`, `prefix_tokens`, `layer_ids`, `hidden`, `dtype` | Copied from the response's `pooled` object (`prefix_tokens`: positions served from the prefix cache's pooled sums, `0` on a miss). |
+| `mean`, `mean_suffix`, `last` | Copied from `pooled`: base64 float32 `[len(layer_ids), hidden]`, row-major, little-endian; `mean`/`last` present only when requested, `mean_suffix` whenever `mean` is (the mean over the forwarded positions `[prefix_tokens, prompt_tokens)`; equals `mean` on a miss). |
 | `prompt_sha256` | Hex SHA-256 of the **rendered chat-template prompt** (UTF-8) -- the string the frontend tokenizer's `render_prompt` produces for this request's messages, tools and `chat_template_kwargs`, i.e. the exact text the worker encodes. Two lines with equal hashes were pooled over the same token sequence. `null` if this server has no frontend tokenizer or the render fails. (Not a hash of token ids: those never reach the API layer.) |
 
 Read it back with `jq`:
@@ -502,10 +534,12 @@ consuming will fill the disk.
 
 ### What a probe request does differently
 
-- **It bypasses prefix reuse.** A cached prefix would leave those positions out of the
-  forward and therefore out of the artifact. `Req.no_prefix_cache` makes the match run
-  against the empty prefix; the completed prompt is still committed to the radix tree,
-  so ordinary traffic behind the probe still hits.
+- **A file probe bypasses prefix reuse.** A cached prefix would leave those positions
+  out of the forward and therefore out of the artifact. `Req.no_prefix_cache` makes the
+  match run against the empty prefix; the completed prompt is still committed to the
+  radix tree, so ordinary traffic behind the probe still hits. A pooled-only request
+  instead reuses prefixes that carry pooled sums (see "Pooled requests and the prefix
+  cache") and donates sums with the snapshots it commits.
 - **It binds no session lease.** `x-switchyard-session-id` and `prompt_cache_key` are
   ignored for a probe: a lease protects a prefix for a next turn, and the probe refuses
   to reuse a prefix and has no next turn. This also stops concurrent probes on one
@@ -523,7 +557,10 @@ consuming will fill the disk.
 
 CPU: `tests/server/test_hidden_states_probe.py` (wire + validation + writer round trip),
 `tests/server/test_hidden_states_pooled.py` (pooled variant: rules, chunked
-accumulation, response placement, parity with client-side pooling of the artifact),
+accumulation, response placement, parity with client-side pooling of the artifact,
+prefix hits through the hybrid cache manager: inherited sums, boundary sums,
+`prefix_tokens`/`mean_suffix`), `tests/kvcache/radix/test_hybrid_radix_pooled.py`
+(sums on the tree: pooled match gating, dedup, tombstone/eviction/split/lock),
 `tests/scheduler/test_hidden_states_no_prefix_reuse.py`,
 `tests/models/test_nemotron_h_hidden_states.py` (the hook captures the post-block
 residual, not `norm_f`).

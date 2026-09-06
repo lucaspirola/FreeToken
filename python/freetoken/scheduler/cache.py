@@ -33,6 +33,20 @@ _SWA_RETAIN_GAP = 16
 logger = init_logger(__name__)
 
 
+
+def _pooled_sums_at(req, length: int):
+    """The pooled hidden-state sums a snapshot donated at ``length`` should carry, or None.
+
+    Only a pooled probe (``Req.pooled_capture`` set by the engine's collector) produces
+    them, and only for a boundary its capture can account for exactly: the chunk's
+    tracked snapshot boundary or the whole captured prompt (``HiddenStateCapture.sums_at``).
+    Every other request donates a bare snapshot, which a pooled match then skips.
+    """
+    capture = getattr(req, "pooled_capture", None)
+    if capture is None:
+        return None
+    return capture.sums_at(length)
+
 class CacheManager:
     def __init__(self, num_pages: int, page_size: int, page_table: torch.Tensor, type: str,
                  linear_state_pool=None, swa_pool=None, sliding_window_size=None,
@@ -119,9 +133,18 @@ class CacheManager:
         # empty prefix instead. Multimodal: image-placeholder tokens have identical ids
         # across images but carry different content (and KV), so a match would serve the
         # wrong image's KV. no_prefix_cache: the request needs every prompt token
-        # actually forwarded -- the hidden-state probe observes the residual stream at
-        # each position, and a cached prefix would leave those positions unobserved.
+        # actually forwarded -- the file hidden-state probe observes the residual stream
+        # at each position, and a cached prefix would leave those positions unobserved.
+        # A pooled-only probe needs the SUM over the skipped positions instead, which
+        # only the hybrid radix keeps (``pooled_sums`` on snapshot nodes): it matches
+        # there with the pooled gate and bypasses on every other cache.
         bypass = req.mm_embeds is not None or getattr(req, "no_prefix_cache", False)
+        pooled = (
+            not bypass and getattr(req, "hidden_states", None) is not None
+            and bool(req.hidden_states.pooling)
+        )
+        if pooled and not self.is_hybrid:
+            bypass = True
         ids = req.input_ids[:0] if bypass else req.input_ids[: input_len - 1]
         if self.is_swa:
             from freetoken.kvcache.swa_radix_cache import SWACacheHandle
@@ -129,7 +152,7 @@ class CacheManager:
             return MatchResult(SWACacheHandle(m.cached_len, m.node, m.kv_indices))
         if self.is_hybrid:
             from freetoken.kvcache.hybrid_radix_cache import HybridCacheHandle
-            m = self.prefix_cache.match_prefix(ids)
+            m = self.prefix_cache.match_prefix(ids, pooled=pooled)
             return MatchResult(
                 HybridCacheHandle(m.cached_len, m.node, m.kv_indices), mamba_value=m.mamba_value)
         return self.prefix_cache.match_prefix(ids)
@@ -450,7 +473,9 @@ class CacheManager:
     def pinning_enabled(self) -> bool:
         return self.is_hybrid and self.pin_prefix_min_tokens > 0
 
-    def note_prompt_admitted(self, handle: BaseCacheHandle, prompt_tokens: int) -> None:
+    def note_prompt_admitted(
+        self, handle: BaseCacheHandle, prompt_tokens: int, *, pooled: bool = False
+    ) -> None:
         """Account one admitted prompt (first chunk only) and auto-pin its prefix if due.
 
         Called from the admission loop at the point ``PromptAdmittedMsg`` is built, so
@@ -463,7 +488,7 @@ class CacheManager:
         counted once, on the pass that admits it.
         """
         cached_len = handle.cached_len
-        self.prefix_counters.note_admitted(prompt_tokens, cached_len)
+        self.prefix_counters.note_admitted(prompt_tokens, cached_len, pooled=pooled)
         if (self.pinning_enabled and cached_len >= self.pin_prefix_min_tokens
                 and getattr(handle, "node", None) is not None):
             self.pin_prefix(handle.node)
@@ -935,7 +960,8 @@ class CacheManager:
                 frozen_idx = 1 - req.mamba_next_track_idx
                 frozen = req.mamba_ping_pong[frozen_idx]
                 prefix_len, mamba_exist = self.prefix_cache.insert(
-                    req.input_ids[:L], page_indices[:L], frozen)
+                    req.input_ids[:L], page_indices[:L], frozen,
+                    pooled_sums=_pooled_sums_at(req, L))
                 pool.free([s for s in req.mamba_ping_pong if mamba_exist or s != frozen])
                 req.mamba_ping_pong = None
                 self._free(page_indices[free_upto : max(free_upto, prefix_len)])
@@ -949,7 +975,8 @@ class CacheManager:
             keep_live = False
             if insert_len == req.cached_len and insert_len > 0:
                 prefix_len, mamba_exist = self.prefix_cache.insert(
-                    req.input_ids[:insert_len], page_indices[:insert_len], req.linear_slot_idx)
+                    req.input_ids[:insert_len], page_indices[:insert_len], req.linear_slot_idx,
+                    pooled_sums=_pooled_sums_at(req, insert_len))
                 self.unlock(old_handle)
                 self._free(page_indices[free_upto : max(free_upto, prefix_len)])
                 keep_live = not mamba_exist           # tree now owns linear_slot_idx
@@ -989,7 +1016,7 @@ class CacheManager:
             # reuse for this chunk is lost; the request is not.
             return
         prefix_len, mamba_exist = self.prefix_cache.insert(
-            req.input_ids[:L], page_indices[:L], frozen)
+            req.input_ids[:L], page_indices[:L], frozen, pooled_sums=_pooled_sums_at(req, L))
         self.unlock(old_handle)
         self._free(page_indices[old_handle.cached_len : prefix_len])
         # Lock the committed snapshot node before returning: it is a live reuse point that the

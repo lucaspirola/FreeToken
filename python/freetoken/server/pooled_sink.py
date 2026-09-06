@@ -10,8 +10,11 @@ Line schema (keys in this order):
 ``ts`` (unix seconds, float), ``request_id`` (the response id), ``session_id`` (the
 FreeToken session lease the turn was bound to, or null -- a probe binds none, so this
 is null today), ``x_switchyard_session_id`` (the raw request header, or null),
-``model`` (the id the client named), ``prompt_tokens``, ``layer_ids``, ``hidden``,
-``dtype``, ``mean`` / ``last`` (base64 float32, present only when requested),
+``model`` (the id the client named), ``prompt_tokens``, ``prefix_tokens`` (positions
+served from the prefix cache's pooled sums; 0 on a miss), ``layer_ids``, ``hidden``,
+``dtype``, ``mean`` / ``mean_suffix`` / ``last`` (base64 float32, present only when
+requested; ``mean_suffix`` accompanies ``mean`` and is the mean over the forwarded
+positions ``[prefix_tokens, prompt_tokens)``),
 ``prompt_sha256`` (hex SHA-256 of the *rendered* chat-template prompt, UTF-8, from the
 frontend tokenizer's ``render_prompt`` -- the exact string the worker encodes; null when
 this server has no frontend tokenizer or the render fails).
@@ -131,11 +134,12 @@ class PooledSink:
                 "x_switchyard_session_id": self.x_switchyard_session_id,
                 "model": self.model,
                 "prompt_tokens": pooled.get("prompt_tokens"),
+                "prefix_tokens": pooled.get("prefix_tokens", 0),
                 "layer_ids": pooled.get("layer_ids"),
                 "hidden": pooled.get("hidden"),
                 "dtype": pooled.get("dtype"),
             }
-            for key in ("mean", "last"):
+            for key in ("mean", "mean_suffix", "last"):
                 if key in pooled:
                     record[key] = pooled[key]
             record["prompt_sha256"] = digest

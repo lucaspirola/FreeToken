@@ -96,8 +96,9 @@ def test_pooled_probe_needs_no_server_directory():
     assert sent.hidden_states.directory is None
     assert sent.hidden_states.pooling == ("mean",)
     assert sent.hidden_states.layer_ids == list(range(NUM_LAYERS))
-    # Same serving rules as the file probe: full recompute, no session lease.
-    assert sent.no_prefix_cache is True
+    # Unlike the file probe it may take prefix hits (those carrying pooled sums); it
+    # still binds no session lease.
+    assert sent.no_prefix_cache is False
     assert sent.session_id is None
 
 
@@ -224,8 +225,14 @@ def test_pooled_mean_and_last_accumulate_across_chunks():
     assert pooled["layer_ids"] == layer_ids
     assert pooled["hidden"] == HIDDEN
     assert pooled["prompt_tokens"] == total == 10
+    assert pooled["prefix_tokens"] == 0  # no hit: nothing inherited
     assert pooled["dtype"] == "float32"
-    assert set(pooled) == {"layer_ids", "hidden", "prompt_tokens", "dtype", "mean", "last"}
+    assert set(pooled) == {
+        "layer_ids", "hidden", "prompt_tokens", "prefix_tokens", "dtype", "mean",
+        "mean_suffix", "last",
+    }
+    # On a miss the suffix is the whole prompt.
+    assert pooled["mean_suffix"] == pooled["mean"]
 
     whole = torch.cat(chunks, dim=1).float()  # [layers, tokens, hidden]
     mean = decode(pooled["mean"], layer_ids)
@@ -501,8 +508,10 @@ def test_sink_pools_only_its_own_rows_out_of_a_mixed_batch():
 def _pooled_payload() -> dict:
     vectors = np.arange(2 * HIDDEN, dtype="<f4").reshape(2, HIDDEN)
     return {
-        "layer_ids": [3, 7], "hidden": HIDDEN, "prompt_tokens": 5, "dtype": "float32",
+        "layer_ids": [3, 7], "hidden": HIDDEN, "prompt_tokens": 5, "prefix_tokens": 2,
+        "dtype": "float32",
         "mean": base64.b64encode(vectors.tobytes()).decode("ascii"),
+        "mean_suffix": base64.b64encode((vectors * 2).tobytes()).decode("ascii"),
     }
 
 
@@ -547,3 +556,398 @@ def test_stream_carries_pooled_on_the_terminal_chunk():
     assert terminal[0]["choices"][0]["finish_reason"] == "length"
     assert terminal[0]["kv_transfer_params"] == {"pooled": pooled}
     assert events[-1] == "[DONE]"
+
+
+# --------------------------------------------------------------------------- #
+# Prefix-cache hits: inherited prefix sums, boundary sums, prefix_tokens / mean_suffix
+# --------------------------------------------------------------------------- #
+def test_pooling_plus_a_path_keeps_the_full_bypass(tmp_path):
+    """Only the file probe needs every position forwarded; the pooled-only probe (see
+    test_pooled_probe_needs_no_server_directory) leaves the knob off."""
+    state = _pooled_state(hidden_states_dir=str(tmp_path))
+    run(handle_chat_completion(
+        probe_request(pooling="mean", hidden_states_path=str(tmp_path), layer_ids=[0, 1]),
+        None, state, {},
+    ))
+    assert state.sent.no_prefix_cache is True
+
+
+def _all_layer_sum(chunks, upto: int | None = None) -> torch.Tensor:
+    whole = torch.cat(chunks, dim=1).float()  # [layers, tokens, hidden]
+    return whole[:, :upto].sum(dim=1)
+
+
+def test_capture_inherits_a_prefix_sum_across_chunks():
+    """A hit seeds the capture with the tree's sum over [0, P); the forwarded chunks add
+    to it, so ``mean`` is over the whole prompt and ``mean_suffix`` over the rest."""
+    layer_ids = [1, 4, 11]
+    chunks = _chunks(seed=3, sizes=(4, 3, 2))          # the prefix: 9 positions
+    prefix_sum = _all_layer_sum(chunks)
+    suffix = _chunks(seed=4, sizes=(3, 5))              # forwarded: 8 positions
+    capture = HiddenStateCapture(
+        HiddenStateSpec(layer_ids=layer_ids, pooling=("mean", "last")), hidden_size=HIDDEN,
+        num_layers=NUM_LAYERS, prefix_sums=prefix_sum, prefix_count=9,
+    )
+    assert capture.prefix_count == 9 and capture.token_count == 9
+    forwarded = _feed(capture, suffix)
+    assert forwarded == 8 and capture.token_count == 17
+
+    pooled = capture.pooled()
+    assert pooled["prompt_tokens"] == 17 and pooled["prefix_tokens"] == 9
+    whole = torch.cat(chunks + suffix, dim=1).float()
+    np.testing.assert_allclose(
+        decode(pooled["mean"], layer_ids), whole[layer_ids].mean(dim=1).numpy(),
+        rtol=1e-6, atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        decode(pooled["mean_suffix"], layer_ids),
+        torch.cat(suffix, dim=1).float()[layer_ids].mean(dim=1).numpy(), rtol=1e-6, atol=1e-6,
+    )
+    # ``last`` is the final FORWARDED position -- the match always leaves >= 1 token.
+    np.testing.assert_array_equal(
+        decode(pooled["last"], layer_ids), torch.cat(suffix, dim=1)[layer_ids][:, -1].float().numpy()
+    )
+    # The sum it would donate at the end covers the prefix too.
+    np.testing.assert_allclose(
+        capture.sums_at(17).numpy(), whole.sum(dim=1).numpy(), rtol=1e-6, atol=1e-6
+    )
+    assert capture.sums_at(9) is None and capture.sums_at(16) is None
+
+
+def test_capture_keeps_the_sum_at_a_snapshot_boundary_inside_a_chunk():
+    """``begin_chunk(boundary_rows=k)`` keeps the sum over [0, chunk_start + k) aside, for
+    the snapshot the same forward writes there; the running sum still covers the chunk."""
+    chunks = _chunks(seed=5, sizes=(3, 6, 2))
+    capture = HiddenStateCapture(
+        HiddenStateSpec(layer_ids=[0, 7], pooling=("mean",)), hidden_size=HIDDEN,
+        num_layers=NUM_LAYERS,
+    )
+    token = 0
+    for i, chunk in enumerate(chunks):
+        rows = chunk.shape[1]
+        capture.begin_chunk(
+            torch.arange(token, token + rows, dtype=torch.int32),
+            boundary_rows=4 if i == 1 else 0,        # absolute position 3 + 4 = 7
+        )
+        token += rows
+        for layer_id in range(NUM_LAYERS):
+            capture.write(layer_id, chunk[layer_id])
+        if i == 1:
+            got = capture.sums_at(7)
+            assert got is not None and got.shape == (NUM_LAYERS, HIDDEN)
+            np.testing.assert_allclose(
+                got.numpy(), _all_layer_sum(chunks, 7).numpy(), rtol=1e-6, atol=1e-6
+            )
+            assert capture.sums_at(9) is not None                 # the chunk end, too
+            assert capture.sums_at(6) is None and capture.sums_at(8) is None
+    # A later chunk forgets the earlier boundary; only the total remains.
+    assert capture.sums_at(7) is None
+    np.testing.assert_allclose(
+        capture.sums_at(11).numpy(), _all_layer_sum(chunks).numpy(), rtol=1e-6, atol=1e-6
+    )
+    # And the response is unaffected by the boundary bookkeeping.
+    np.testing.assert_allclose(
+        decode(capture.pooled()["mean"], [0, 7]),
+        torch.cat(chunks, dim=1).float()[[0, 7]].mean(dim=1).numpy(), rtol=1e-6, atol=1e-6,
+    )
+
+
+def test_boundary_rows_outside_the_chunk_are_ignored():
+    chunk = _chunks(seed=6, sizes=(4,))[0]
+    for boundary in (0, 4, 9):
+        capture = HiddenStateCapture(
+            HiddenStateSpec(layer_ids=[0], pooling=("mean",)), HIDDEN, num_layers=NUM_LAYERS
+        )
+        capture.begin_chunk(torch.arange(4, dtype=torch.int32), boundary_rows=boundary)
+        for layer_id in range(NUM_LAYERS):
+            capture.write(layer_id, chunk[layer_id])
+        assert capture._boundary_rows == 0
+        assert capture.sums_at(4) is not None
+
+
+def test_sums_are_donated_only_when_every_layer_was_captured():
+    """The tree's sums serve ANY later layer subset, so a partial capture must not be
+    attached -- even though the request's own (subset) mean is fine."""
+    chunk = _chunks(seed=8, sizes=(3,))[0]
+    capture = HiddenStateCapture(
+        HiddenStateSpec(layer_ids=[2], pooling=("mean",)), HIDDEN, num_layers=NUM_LAYERS
+    )
+    capture.begin_chunk(torch.arange(3, dtype=torch.int32))
+    for layer_id in (0, 2, 5):
+        capture.write(layer_id, chunk[layer_id])
+    assert capture.sums_at(3) is None
+    assert "mean" in capture.pooled()
+    # Without pooling there is nothing to donate at all.
+    plain = HiddenStateCapture(HiddenStateSpec(directory="/tmp", layer_ids=[0]), HIDDEN)
+    plain.begin_chunk(torch.arange(3, dtype=torch.int32))
+    plain.write(0, chunk[0])
+    assert plain.sums_at(3) is None
+
+
+def test_a_last_only_request_still_accumulates_donatable_sums():
+    chunk = _chunks(seed=9, sizes=(5,))[0]
+    capture = HiddenStateCapture(
+        HiddenStateSpec(layer_ids=[3], pooling=("last",)), HIDDEN, num_layers=NUM_LAYERS
+    )
+    capture.begin_chunk(torch.arange(5, dtype=torch.int32))
+    for layer_id in range(NUM_LAYERS):
+        capture.write(layer_id, chunk[layer_id])
+    np.testing.assert_allclose(
+        capture.sums_at(5).numpy(), chunk.float().sum(dim=1).numpy(), rtol=1e-6, atol=1e-6
+    )
+    pooled = capture.pooled()
+    assert set(pooled) == {"layer_ids", "hidden", "prompt_tokens", "prefix_tokens", "dtype", "last"}
+
+
+def test_mean_refuses_a_prefix_hit_that_carried_no_sums_but_last_is_served():
+    chunk = _chunks(seed=10, sizes=(2,))[0]
+    capture = HiddenStateCapture(
+        HiddenStateSpec(layer_ids=[0], pooling=("mean", "last")), HIDDEN,
+        num_layers=NUM_LAYERS, prefix_count=6,
+    )
+    capture.begin_chunk(torch.arange(2, dtype=torch.int32))
+    for layer_id in range(NUM_LAYERS):
+        capture.write(layer_id, chunk[layer_id])
+    with pytest.raises(ValueError, match="no pooled sums"):
+        capture.pooled()
+    assert capture.sums_at(8) is None
+    only_last = HiddenStateCapture(
+        HiddenStateSpec(layer_ids=[0], pooling=("last",)), HIDDEN,
+        num_layers=NUM_LAYERS, prefix_count=6,
+    )
+    only_last.begin_chunk(torch.arange(2, dtype=torch.int32))
+    for layer_id in range(NUM_LAYERS):
+        only_last.write(layer_id, chunk[layer_id])
+    assert only_last.pooled()["prompt_tokens"] == 8
+
+
+def test_prefix_sums_must_match_the_model_shape():
+    with pytest.raises(ValueError, match="do not match"):
+        HiddenStateCapture(
+            HiddenStateSpec(layer_ids=[0], pooling=("mean",)), HIDDEN, num_layers=NUM_LAYERS,
+            prefix_sums=torch.zeros(3, HIDDEN), prefix_count=4,
+        )
+
+
+class _Node:
+    """The matched radix node as the collector sees it through the request's handle."""
+
+    def __init__(self, pooled_sums, pooled_count):
+        self.pooled_sums = pooled_sums
+        self.pooled_count = pooled_count
+
+
+def _hit_req(uid, input_ids, cached_len, spec, node):
+    from freetoken.core import Req
+
+    return Req(
+        input_ids=torch.tensor(input_ids, dtype=torch.int32), table_idx=0,
+        cached_len=cached_len, output_len=1, uid=uid, sampling_params=None,
+        cache_handle=SimpleNamespace(cached_len=cached_len, node=node), hidden_states=spec,
+    )
+
+
+def _forward(model: _Model, batch, sink) -> None:
+    model.forward(batch, sink)
+    for req in batch.reqs:
+        req.complete_one()
+
+
+def test_collector_seeds_a_hit_from_the_matched_node_and_the_mean_is_exact():
+    """Parity: a pooled request that skips P cached positions and forwards the rest
+    pools the same mean as a full forward of the same tokens."""
+    model = _Model(seed=11)
+    prompt = list(range(1, 12))
+    spec = HiddenStateSpec(layer_ids=[2, 5, 9], pooling=("mean", "last"))
+    collector = HiddenStateCollector(hidden_size=HIDDEN, num_layers=NUM_LAYERS)
+
+    # The producer: a full forward, whose all-layer sum at P=6 is what the tree stores.
+    producer = _req(1, prompt, spec)
+    _forward(model, _batch([producer]), collector.begin_batch(_batch([producer])))
+    capture = producer.pooled_capture
+    assert capture is collector._captures[1]
+    full = collector.finish(1)["pooled"]
+    node = _Node(model.table[:, prompt[:6]].float().sum(dim=1), 6)
+    # (the same numbers the capture produces for the whole prompt)
+    np.testing.assert_allclose(
+        capture.sums_at(len(prompt)).numpy(), model.table[:, prompt].float().sum(dim=1).numpy(),
+        rtol=1e-6, atol=1e-6,
+    )
+
+    # The hit: cached_len 6, forwards prompt[6:] in two chunks (a fresh Req per chunk).
+    first = _hit_req(2, prompt[:9], 6, spec, node)
+    _forward(model, _batch([first]), collector.begin_batch(_batch([first])))
+    second = _hit_req(2, prompt, 9, spec, node)
+    _forward(model, _batch([second]), collector.begin_batch(_batch([second])))
+    assert first.pooled_capture is second.pooled_capture
+    hit = collector.finish(2)["pooled"]
+
+    assert full["prefix_tokens"] == 0 and hit["prefix_tokens"] == 6
+    assert full["prompt_tokens"] == hit["prompt_tokens"] == len(prompt)
+    np.testing.assert_allclose(
+        decode(hit["mean"], spec.layer_ids), decode(full["mean"], spec.layer_ids),
+        rtol=1e-6, atol=1e-6,
+    )
+    np.testing.assert_array_equal(decode(hit["last"], spec.layer_ids), decode(full["last"], spec.layer_ids))
+    np.testing.assert_allclose(
+        decode(hit["mean_suffix"], spec.layer_ids),
+        model.table[spec.layer_ids][:, prompt[6:]].float().mean(dim=1).numpy(), rtol=1e-6, atol=1e-6,
+    )
+    assert full["mean_suffix"] == full["mean"]
+
+
+def test_a_hit_whose_node_lost_its_sums_serves_no_mean(caplog):
+    model = _Model(seed=12)
+    prompt = list(range(1, 8))
+    spec = HiddenStateSpec(layer_ids=[0], pooling=("mean",))
+    collector = HiddenStateCollector(hidden_size=HIDDEN, num_layers=NUM_LAYERS)
+    for node in (_Node(None, 0), _Node(torch.zeros(NUM_LAYERS, HIDDEN), 3)):  # bare / stale
+        req = _hit_req(7, prompt, 4, spec, node)
+        _forward(model, _batch([req]), collector.begin_batch(_batch([req])))
+        with pytest.raises(ValueError, match="no pooled sums"):
+            collector.finish(7)
+    assert "without pooled sums" in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# Through the hybrid cache manager: donate sums with the snapshot, hit with them
+# --------------------------------------------------------------------------- #
+def _hybrid_manager():
+    from freetoken.kvcache.linear_state_pool import LinearStatePool
+    from freetoken.models.config import LinearGatedDeltaGroupConfig
+    from freetoken.scheduler.cache import CacheManager
+
+    group = LinearGatedDeltaGroupConfig(
+        name="linear", layer_ids=(0,), num_key_heads=2, num_value_heads=4,
+        key_head_dim=16, value_head_dim=16, conv_kernel_dim=4, output_gate=True,
+    )
+    pool = LinearStatePool(
+        group=group, num_slots=16, dtype=torch.bfloat16, device=torch.device("cpu"), tp_size=1
+    )
+    page_table = torch.zeros(4, 64, dtype=torch.int32)
+    return pool, page_table, CacheManager(64, 1, page_table, "hybrid_radix", linear_state_pool=pool)
+
+
+def _pending(uid, ids, spec=None):
+    from freetoken.core import SamplingParams
+    from freetoken.scheduler.utils import PendingReq
+
+    return PendingReq(
+        uid=uid, input_ids=torch.tensor(ids, dtype=torch.int32),
+        sampling_params=SamplingParams(max_tokens=1), hidden_states=spec,
+    )
+
+
+def _admit(cm, pool, page_table, pending, table_idx, first_page):
+    """Hand-build the Req ``PrefillAdder`` would: match, lock, stage KV pages, slots."""
+    from freetoken.core import Req
+
+    mr = cm.match_req(pending)
+    handle = mr.cuda_handle
+    cached_len = handle.cached_len
+    n = len(pending.input_ids)
+    if cached_len:
+        page_table[table_idx, :cached_len] = handle.get_matched_indices()
+    page_table[table_idx, cached_len:n] = torch.arange(
+        first_page, first_page + n - cached_len, dtype=torch.int32
+    )
+    req = Req(
+        input_ids=pending.input_ids, table_idx=table_idx, cached_len=cached_len, output_len=1,
+        uid=pending.uid, cache_handle=handle, sampling_params=pending.sampling_params,
+        hidden_states=pending.hidden_states,
+    )
+    req.linear_slot_idx, req.mamba_ping_pong = pool.alloc(1)[0], tuple(pool.alloc(2))
+    req.mamba_restore_src = mr.mamba_value
+    cm.lock(handle)
+    return req
+
+
+def test_pooled_hit_through_the_hybrid_cache_manager(monkeypatch):
+    """Producer donates its snapshot + sums at the 4-token boundary; a second pooled
+    request hits there, forwards the rest and pools the exact whole-prompt mean; a
+    plain request hits the same node; a pooled request never hits a bare snapshot."""
+    import freetoken.hidden_states as hs
+
+    monkeypatch.setattr(hs, "_track_chunk_size", lambda: 4)
+    pool, page_table, cm = _hybrid_manager()
+    model = _Model(seed=13)
+    collector = HiddenStateCollector(hidden_size=HIDDEN, num_layers=NUM_LAYERS)
+    spec = HiddenStateSpec(layer_ids=[1, 6], pooling=("mean", "last"))
+
+    # Producer A: [1..6], extend 6 -> track boundary at 4 (like _build_track_metadata).
+    a = _admit(cm, pool, page_table, _pending(1, [1, 2, 3, 4, 5, 6], spec), 0, 100)
+    assert a.cached_len == 0
+    batch = _batch([a])
+    sink = collector.begin_batch(batch)
+    assert a.pooled_capture._boundary_rows == 4
+    a.mamba_next_track_idx, a.mamba_last_track_seqlen = 1, 4
+    _forward(model, batch, sink)
+    cm.note_prompt_admitted(a.cache_handle, 6, pooled=True)   # what the adder does for A: a miss
+    cm.cache_req(a, finished=False)                     # the chunk commit donates at 4
+    full = collector.finish(1)["pooled"]
+    node = cm.prefix_cache.match_prefix(torch.tensor([1, 2, 3, 4], dtype=torch.int32)).node
+    assert node.pooled_count == 4
+    np.testing.assert_allclose(
+        node.pooled_sums.numpy(), model.table[:, [1, 2, 3, 4]].float().sum(dim=1).numpy(),
+        rtol=1e-6, atol=1e-6,
+    )
+    assert cm.prefix_counters.pooled_hits == 0 and cm.prefix_counters.misses == 1
+    cm.prefix_cache.check_integrity()
+
+    # Consumer B: pooled, same 4-token prefix, two more tokens -> hit at 4 with the sums.
+    b = _admit(cm, pool, page_table, _pending(2, [1, 2, 3, 4, 7, 8], spec), 1, 200)
+    assert b.cached_len == 4 and b.mamba_restore_src is not None
+    cm.note_prompt_admitted(b.cache_handle, 6, pooled=True)
+    assert (cm.prefix_counters.pooled_hits, cm.prefix_counters.pooled_hit_tokens) == (1, 4)
+    assert (cm.prefix_counters.hits, cm.prefix_counters.hit_tokens) == (1, 4)
+    batch = _batch([b])
+    _forward(model, batch, collector.begin_batch(batch))
+    hit = collector.finish(2)["pooled"]
+    assert hit["prefix_tokens"] == 4 and hit["prompt_tokens"] == 6
+    np.testing.assert_allclose(
+        decode(hit["mean"], [1, 6]),
+        model.table[[1, 6]][:, [1, 2, 3, 4, 7, 8]].float().mean(dim=1).numpy(), rtol=1e-6, atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        decode(hit["mean_suffix"], [1, 6]),
+        model.table[[1, 6]][:, [7, 8]].float().mean(dim=1).numpy(), rtol=1e-6, atol=1e-6,
+    )
+    np.testing.assert_array_equal(decode(hit["last"], [1, 6]), model.table[[1, 6]][:, 8].float().numpy())
+    # A's own response was a miss over the same six tokens' worth of layers.
+    assert full["prefix_tokens"] == 0
+
+    # A plain request hits the same node (the pooled gate is for pooled requests only).
+    assert cm.match_req(_pending(3, [1, 2, 3, 4, 9])).cuda_handle.cached_len == 4
+    # A pooled request never resumes from a snapshot a plain request donated.
+    c = _admit(cm, pool, page_table, _pending(4, [20, 21, 22, 23, 24, 25]), 2, 300)
+    c.mamba_next_track_idx, c.mamba_last_track_seqlen = 1, 4
+    c.cached_len = 6
+    cm.cache_req(c, finished=False)
+    bare = cm.prefix_cache.match_prefix(torch.tensor([20, 21, 22, 23], dtype=torch.int32)).node
+    assert bare.mamba_value is not None and bare.pooled_sums is None
+    assert cm.match_req(_pending(5, [20, 21, 22, 23, 26])).cuda_handle.cached_len == 4
+    assert cm.match_req(_pending(6, [20, 21, 22, 23, 26], spec)).cuda_handle.cached_len == 0
+
+
+def test_finish_donate_attaches_the_whole_prompt_sum(monkeypatch):
+    """A max_tokens=1 probe never chunk-commits: its finish donates the live state at
+    the full prompt length, and the sums go with it (the prompt-extension hit)."""
+    import freetoken.hidden_states as hs
+
+    monkeypatch.setattr(hs, "_track_chunk_size", lambda: 128)
+    pool, page_table, cm = _hybrid_manager()
+    model = _Model(seed=14)
+    collector = HiddenStateCollector(hidden_size=HIDDEN, num_layers=NUM_LAYERS)
+    spec = HiddenStateSpec(layer_ids=[0], pooling=("mean",))
+    a = _admit(cm, pool, page_table, _pending(1, [3, 4, 5], spec), 0, 100)
+    batch = _batch([a])
+    _forward(model, batch, collector.begin_batch(batch))
+    assert collector.finish(1)["pooled"]["prompt_tokens"] == 3
+    cm.cache_req(a, finished=True)                      # the scheduler's drain order
+    node = cm.prefix_cache.match_prefix(torch.tensor([3, 4, 5], dtype=torch.int32)).node
+    assert node.pooled_count == 3
+    np.testing.assert_allclose(
+        node.pooled_sums.numpy(), model.table[:, [3, 4, 5]].float().sum(dim=1).numpy(),
+        rtol=1e-6, atol=1e-6,
+    )
+    assert cm.match_req(_pending(2, [3, 4, 5, 6], spec)).cuda_handle.cached_len == 3

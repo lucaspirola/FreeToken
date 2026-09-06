@@ -44,7 +44,7 @@ class HybridMatch(NamedTuple):
     kv_indices: torch.Tensor      # reused KV page indices for [0:cached_len)
     cached_len: int               # truncated to the deepest LIVE-snapshot boundary
     mamba_value: Optional[int]    # GDN snapshot slot to restore from (None = cold start)
-    node: RadixTreeNode           # the matched node (lock target)
+    node: RadixTreeNode           # the matched node (lock target; carries pooled_sums on a pooled match)
 
 
 class EvictResult(NamedTuple):
@@ -81,26 +81,32 @@ class HybridRadixCache:
         self.mamba_protected = 0
 
     # ---------------------------------------------------------------- match / insert
-    def match_prefix(self, input_ids: torch.Tensor) -> HybridMatch:
+    def match_prefix(self, input_ids: torch.Tensor, *, pooled: bool = False) -> HybridMatch:
         """Match the token prefix, then truncate the reusable length to the deepest node on
         the path that still owns a LIVE snapshot (a continuation can only resume the GDN
-        recurrence from a checkpointed boundary)."""
+        recurrence from a checkpointed boundary). ``pooled`` (a pooled hidden-state
+        request) further requires the node to carry ``pooled_sums``: the requester's mean
+        over the skipped positions comes from those, so a snapshot without them is no
+        reuse point for it."""
         node, _ = self._walk(input_ids)
         # walk up to the deepest node whose END boundary has a live snapshot
         cur, end_len = node, self._path_len(node)
         while not cur.is_root():
-            if cur.mamba_value is not None:
+            if cur.mamba_value is not None and (not pooled or cur.pooled_sums is not None):
                 return HybridMatch(self._collect_kv(cur), end_len, cur.mamba_value, cur)
             end_len -= cur.length
             cur = cur.parent
         return HybridMatch(self.empty, 0, None, self.root)
 
     def insert(self, input_ids: torch.Tensor, kv_indices: torch.Tensor,
-               mamba_value: int) -> Tuple[int, bool]:
+               mamba_value: int, pooled_sums: torch.Tensor | None = None) -> Tuple[int, bool]:
         """Insert the committed KV prefix and DONATE ``mamba_value`` at the (page-aligned) end
         boundary node. Returns (matched_prefix_len, mamba_exist). If the boundary node already
         owns a live snapshot, returns mamba_exist=True and does not attach (caller frees the
-        donated slot -- dedup)."""
+        donated slot -- dedup). ``pooled_sums`` (host float32 ``[num_layers, hidden]``, the
+        residual-stream sum over ``[0, len(input_ids))``) rides on the node's snapshot --
+        the live one, or the one already there: a pooled request that recomputed a prefix
+        some earlier plain request had snapshotted still makes that node pooled-reusable."""
         insert_len = align_down(len(input_ids), self.page_size)
         input_ids, kv_indices = input_ids[:insert_len], kv_indices[:insert_len]
         node, prefix_len = self._walk(input_ids)
@@ -113,8 +119,12 @@ class HybridRadixCache:
         if node.is_root():
             return prefix_len, True   # root can't hold a snapshot; report exist so caller frees it
         if node.mamba_value is not None:
+            if pooled_sums is not None and node.pooled_sums is None:
+                node.pooled_sums, node.pooled_count = pooled_sums, insert_len
             return prefix_len, True                 # dedup: caller frees its donated slot
         node.mamba_value = mamba_value              # fills a fresh node or a tombstone
+        if pooled_sums is not None:
+            node.pooled_sums, node.pooled_count = pooled_sums, insert_len
         if node.mamba_ref_count == 0:
             self.mamba_evictable += 1
         return prefix_len, False
@@ -213,9 +223,14 @@ class HybridRadixCache:
 
     def check_integrity(self) -> None:
         # Structural: every snapshot-bearing node holds a real slot id; ref counts non-negative.
+        # Pooled sums never outlive their snapshot and always describe the node's end boundary.
         # (KV/page conservation is checked by CacheManager.check_integrity.)
         for n in self._snapshot_nodes():
             assert n.mamba_value is not None and n.mamba_ref_count >= 0 and n.ref_count >= 0
+            if n.pooled_sums is not None:
+                assert n.pooled_count == self._path_len(n)
+        for n in self._all_nodes():
+            assert n.mamba_value is not None or n.pooled_sums is None
 
     def remap_mamba_slots(self, remap: dict[int, int]) -> None:
         """Rewrite snapshot slot ids after a state-pool-preserving compaction."""
@@ -229,6 +244,9 @@ class HybridRadixCache:
         if node.mamba_value is not None:
             out.append(node.mamba_value)
             node.mamba_value = None
+            # The sums describe the state at this boundary; without the snapshot a hit
+            # cannot resume here, so they go too (a tombstone holds neither).
+            node.pooled_sums, node.pooled_count = None, 0
             if node.mamba_ref_count == 0:
                 self.mamba_evictable -= 1
 
@@ -276,6 +294,15 @@ class HybridRadixCache:
                     out.append(n)
             else:
                 stack.extend(n.children.values())
+        return out
+
+    def _all_nodes(self) -> List[RadixTreeNode]:
+        out, stack = [], [self.root]
+        while stack:
+            n = stack.pop()
+            if not n.is_root():
+                out.append(n)
+            stack.extend(n.children.values())
         return out
 
     def _snapshot_nodes(self) -> List[RadixTreeNode]:
