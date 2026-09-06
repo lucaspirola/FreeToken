@@ -36,6 +36,7 @@ from .disconnect import (
 from .function_call_parser import ToolCallItem
 from .json_output import apply_json_instruction, schema_instruction
 from .request_logger import log_request
+from .served_models import served_model_ids, unknown_model_message
 from . import request_trace
 from .generation import (
     ContentDelta,
@@ -371,17 +372,47 @@ def register_openai_routes(
     @app.get("/v1/models")
     async def v1_models():
         state = get_state()
-        model_id = _served_model_name(state)
-        ctx = _model_context_length(state)
-        efforts, default_effort = await _effort_fields(state)
-        return ModelList(data=[ModelCard(
+        return ModelList(data=await _model_cards(state))
+
+    @app.get("/v1/models/{model_id:path}")
+    async def v1_model(model_id: str):
+        state = get_state()
+        for card in await _model_cards(state):
+            if card.id == model_id:
+                return card
+        return create_error_response(
+            f"The model {model_id!r} does not exist", status_code=404,
+            err_type="invalid_request_error", param="model", code="model_not_found",
+        )
+
+
+async def _model_cards(state: Any) -> list[ModelCard]:
+    """One card per served id, primary first; every card carries the same fields and
+    `root` names the checkpoint, so a client can see the aliases are one model."""
+    ctx = _model_context_length(state)
+    efforts, default_effort = await _effort_fields(state)
+    return [
+        ModelCard(
             id=model_id,
             root=state.config.model_path,
             max_model_len=ctx,
             context_length=ctx,
             supported_reasoning_efforts=efforts,
             default_reasoning_effort=default_effort,
-        )])
+        )
+        for model_id in served_model_ids(state.config)
+    ]
+
+
+def model_not_found_response(state: Any, requested: str | None) -> JSONResponse | None:
+    """404 `model_not_found` when `--strict-model-name` is on and the id is not served."""
+    msg = unknown_model_message(state.config, requested)
+    if msg is None:
+        return None
+    return create_error_response(
+        msg, status_code=404, err_type="invalid_request_error", param="model",
+        code="model_not_found",
+    )
 
 
 async def handle_chat_completion(
@@ -390,6 +421,8 @@ async def handle_chat_completion(
     state: Any,
     model_sampling: dict[str, Any],
 ):
+    if (refused := model_not_found_response(state, req.model)) is not None:
+        return refused
     if req.function_call is not None:
         return create_error_response("function_call is not supported; use tools/tool_choice instead")
     if req.logit_bias is not None:
@@ -850,6 +883,8 @@ async def handle_completion(
     state: Any,
     model_sampling: dict[str, Any],
 ):
+    if (refused := model_not_found_response(state, req.model)) is not None:
+        return refused
     unsupported = _completion_unsupported_reason(req)
     if unsupported is not None:
         return create_error_response(unsupported)
@@ -1236,10 +1271,6 @@ async def _effort_fields(state: Any) -> tuple[list[str] | None, str | None]:
         return None, None
     ordered = sorted(served, key=lambda name: -EFFORT_SCALE.get(name, 0.0))
     return ordered, profile.default
-
-
-def _served_model_name(state: Any) -> str:
-    return getattr(state.config, "served_model_name", None) or state.config.model_path
 
 
 def _model_context_length(state: Any) -> int | None:

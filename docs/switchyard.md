@@ -36,6 +36,8 @@ The serving-compliance half of that line:
 | Flag | Why Switchyard needs it |
 |---|---|
 | `--served-model-name nemotron-3.5-lightning` | The id `GET /v1/models` advertises; `[targets.*].id` in `routes.toml` must match. |
+| `--served-model-alias NAME` (repeatable, optional) | Extra ids the same model answers to. `GET /v1/models` lists the served name first, then each alias in flag order (one card each, same `root`); `/v1/chat/completions`, `/v1/completions`, `/v1/messages`, `/v1/responses` and `/v1/models/{id}` accept any of them. The response `model` field echoes the id the request named, so a router keying on the id it dispatched with sees it back. Empty or duplicate names fail at startup. Not in `serve.sh`; pass it via `SOAK_EXTRA_ARGS` or the launch line. |
+| `--strict-model-name` (optional) | Refuse (`404`, `code: model_not_found`) a request whose `model` is neither the served name nor an alias. Off by default: any name is accepted and echoed, because Anthropic-protocol clients send `claude-*` names to whatever proxy they are pointed at. |
 | `--reasoning-parser nemotron_v3` | Splits `<think>…</think>` into `reasoning_content` and escapes to a tool call when the model opens `<tool_call>` without closing the think block. (`auto` also selects it for Nemotron-3.x.) |
 | `--tool-call-parser qwen3_coder` | Lightning emits Qwen3-Coder nested-XML tool calls. |
 | `--enable-cache-report` | Populates `usage.prompt_tokens_details.cached_tokens` (always present with the flag on, absent without it). Without it the router sees no prefix reuse and the soak's `prefix-reuse` scenario cannot be graded. |

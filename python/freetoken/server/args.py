@@ -10,6 +10,8 @@ from freetoken.distributed import DistributedInfo
 from freetoken.scheduler import SchedulerConfig
 from freetoken.utils import init_logger
 
+from .served_models import normalize_aliases
+
 
 @dataclass(frozen=True)
 class ServerArgs(SchedulerConfig):
@@ -22,6 +24,12 @@ class ServerArgs(SchedulerConfig):
     # a turn cannot also kill the engine — see server/launch.py:_detach_process_group.
     shell_mode: bool = False
     served_model_name: str | None = None
+    # Extra ids the same model answers to (--served-model-alias, repeatable). /v1/models lists
+    # them after served_model_name; a request may name any of them. See server/served_models.py.
+    served_model_aliases: tuple[str, ...] = ()
+    # Refuse a request whose `model` is neither the served name nor an alias (404). Off by
+    # default: Anthropic-protocol clients send `claude-*` names to any proxy they are given.
+    strict_model_name: bool = False
     tool_call_parser: str = "llama3"
     # Reasoning parser that splits <think> reasoning from content for OpenAI
     # responses. None disables it (default for models without a reasoning protocol).
@@ -697,6 +705,29 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--served-model-alias",
+        dest="served_model_aliases",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help=(
+            "Additional model id the loaded model answers to; repeatable. /v1/models lists the "
+            "served name first, then each alias in flag order. Responses echo the id the request "
+            "named. Empty and duplicate names are rejected at startup."
+        ),
+    )
+
+    parser.add_argument(
+        "--strict-model-name",
+        action="store_true",
+        default=ServerArgs.strict_model_name,
+        help=(
+            "Refuse (404 model_not_found) any request whose `model` is neither the served "
+            "name nor an alias. Off by default: any name is accepted and echoed back."
+        ),
+    )
+
+    parser.add_argument(
         "--tool-call-parser",
         type=str,
         default="auto",
@@ -1158,6 +1189,13 @@ def parse_args(
         kwargs["served_model_name"] = (
             os.path.basename(os.path.normpath(kwargs["model_path"])) or kwargs["model_path"]
         )
+
+    try:
+        kwargs["served_model_aliases"] = normalize_aliases(
+            kwargs["served_model_name"], kwargs["served_model_aliases"]
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     if kwargs["tool_call_parser"] == "auto":
         kwargs["tool_call_parser"] = _infer_tool_call_parser(kwargs["model_path"])

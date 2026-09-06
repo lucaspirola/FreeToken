@@ -33,6 +33,8 @@ parsers all resolve automatically from the checkpoint and the GPU.
 |---|---|---|
 | `--model-path`, `--model` | required | Local dir, HF repo id, or an FTW dir (auto-detected) |
 | `--served-model-name` | basename of `--model` | Model id reported by `/v1/models` |
+| `--served-model-alias NAME` | none | Extra id the same model answers to; repeatable. Listed after the served name in `/v1/models`; responses echo the id the request named |
+| `--strict-model-name` | off | Refuse (404 `model_not_found`) a `model` that is neither the served name nor an alias. Off: any name is accepted and echoed |
 
 ### Server & runtime
 

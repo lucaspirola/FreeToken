@@ -56,6 +56,7 @@ from .generation import (
     with_keepalive,
 )
 from .request_logger import log_request
+from .served_models import unknown_model_message
 
 # Emit a protocol-native `ping` event after this many seconds of stream silence,
 # bridging long queue/prefill/decode gaps for clients with stream-idle timeouts.
@@ -127,6 +128,8 @@ async def handle_anthropic_messages(
     model_sampling: dict[str, Any],
     session_reclaimable: bool = False,
 ):
+    if (msg := unknown_model_message(state.config, req.model)) is not None:
+        return _anthropic_error_response(404, "not_found_error", msg)
     try:
         spec = convert_anthropic_to_genspec(
             req, model_sampling,
@@ -177,6 +180,8 @@ async def handle_anthropic_messages(
 
 
 async def handle_anthropic_count_tokens(req: AnthropicCountTokensRequest, state: Any):
+    if (msg := unknown_model_message(state.config, req.model)) is not None:
+        return _anthropic_error_response(404, "not_found_error", msg)
     if not req.messages:
         return _anthropic_error_response(
             400, "invalid_request_error", "messages: at least one message is required"

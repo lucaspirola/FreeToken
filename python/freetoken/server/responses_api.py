@@ -82,6 +82,7 @@ from .generation import (
     with_keepalive,
 )
 from .request_logger import log_request
+from .served_models import unknown_model_message
 
 # Seconds of event silence before a keep-alive frame is emitted on the stream.
 # codex's stream-idle timeout (default 300s) only resets on a data-bearing SSE
@@ -169,6 +170,8 @@ async def handle_responses(
 ):
     response_id = f"resp_{uuid.uuid4().hex}"
     created = int(time.time())
+    if (msg := unknown_model_message(state.config, req.model)) is not None:
+        return _error_response(404, msg, code="model_not_found")
     if req.max_output_tokens is not None and req.max_output_tokens < 1:
         return _error_response(400, "max_output_tokens must be a positive integer")
     default_max = getattr(state.config, "max_output_tokens", None) or DEFAULT_MAX_OUTPUT_TOKENS

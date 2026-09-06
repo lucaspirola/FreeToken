@@ -138,6 +138,7 @@ def derive_model_card(config: Any) -> dict:
         attn = "mha"
     return {
         "id": config.served_model_name,
+        "aliases": list(getattr(config, "served_model_aliases", ())),
         "ctx": config.max_seq_len,
         "attn": attn,
         "moe": bool(getattr(mc, "is_moe", False)),
