@@ -952,5 +952,8 @@ gave standing GO for agent-requested code adaptation. Server on :1919 restarted 
 - [x] (d) serve.sh + production checklist carry the hidden-states flags (f268cc6).
 - [x] (e) Pooled JSONL sink --pooled-sink-dir + kv_transfer_params.pooled_sink (ced167c, live 21:20).
 - [x] Served-model aliases --served-model-alias (03ad283); switchyard_e2e router skips (cddca77).
+- [ ] (f) Prefix auto-pin after second match + /v1/stats scheduler.prefix.{hits,hit_tokens,miss_tokens,pinned_tokens}
+      + --pin-prefix-min-tokens. Low priority (measured prefix is 4.9k, cached 4736/4856 already).
+      Restart only after the hidden session announces the pilot finished. Disk persistence deferred.
 - [ ] (c) pooled as first stream event after prefill: queued until the hidden session's bake-off
       says a prompt probe wins.
