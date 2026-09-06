@@ -941,13 +941,13 @@ Ada rebuild (now a loud refusal, and not on this card's path).
 Requested by the Switchyard hidden-state routing session via cross-session message; owner
 gave standing GO for agent-requested code adaptation. Server on :1919 restarted 07:15 with
 `--hidden-states-dir /home/lucas/.cache/freetoken/hidden-states --hidden-states-max-tokens 4096`.
-- [ ] (a) Inline pooled hidden states: `kv_transfer_params.pooling` = mean|last|both, arbitrary
+- [x] (a) Inline pooled hidden states (6b18742 + cf377e4; live parity cos 1.000000 all layers, 13k-token chunked prefill OK): `kv_transfer_params.pooling` = mean|last|both, arbitrary
       sorted layer_ids subset, no file, no max-tokens cap, O(layers x hidden) accumulation across
       prefill chunks; response `kv_transfer_params.pooled` {layer_ids, hidden, prompt_tokens,
       dtype float32, mean/last base64 row-major}. Unit tests + parity vs file artifact + chunked.
-- [ ] (b) First-decode-step top-k logprobs: `logprobs: true, top_logprobs: k (1..20)` →
+- [x] (b) First-decode-step top-k logprobs (3928b4f; live-verified): `logprobs: true, top_logprobs: k (1..20)` →
       `choices[0].logprobs.content` with exactly one entry. Docs: later steps not populated;
       with thinking on the first token is the first reasoning token.
-- [ ] Restart :1919 only after the hidden session says GO; then live parity check.
+- [x] Restarted :1919 at cf377e4 2026-09-06 12:09 (after a host OOM at 11:51 took the previous instance; see lessons); live parity done.
 - [ ] Later, gated on results: (c) pooled as first stream event after prefill; (d) launch
       checklist + serve.sh gain the two hidden-states flags.
