@@ -1,0 +1,46 @@
+# /v1/stats sampler as a systemd --user service.
+#
+#   install -Dm644 benchmarks/ops/freetoken-stats-sampler.service \
+#       ~/.config/systemd/user/freetoken-stats-sampler.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now freetoken-stats-sampler
+#   journalctl --user -u freetoken-stats-sampler -f
+#
+# It runs on /usr/bin/python3, NOT the FreeToken venv: stats_sampler.py is stdlib-only on
+# purpose, and a sampler that needed the venv would stop being installable when the venv is
+# being rebuilt -- exactly when a server is most likely to misbehave. `%h` is the user's
+# home, so this file needs no editing for a different account; edit ExecStart's --base-url
+# if the server is not on the default port.
+#
+# Restart=always with a 10 s backoff and no dependency on the server unit is deliberate:
+# the sampler must outlive the thing it samples, and it records the outage (one record with
+# "ok": false per interval) rather than exiting alongside it. StartLimitIntervalSec=0 stops
+# systemd from giving up on it after a burst of restarts.
+
+[Unit]
+Description=FreeToken /v1/stats sampler
+Documentation=file:%h/ai/FreeToken/docs/switchyard.md
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/ai/FreeToken/benchmarks/ops/stats_sampler.py sample \
+    --base-url http://127.0.0.1:1919 \
+    --interval 60 \
+    --out %h/.cache/freetoken/stats/%%Y-%%m-%%d.jsonl
+Restart=always
+RestartSec=10
+# One JSON line a minute is ~2 MB/day with --requests on and ~200 KB without; the sampler
+# holds one record at a time, so this ceiling only ever catches a real leak.
+MemoryMax=256M
+Nice=10
+# Nothing but its own output directory needs to be writable.
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.cache/freetoken
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

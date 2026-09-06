@@ -292,9 +292,19 @@ def report_stats(path: str, previous: tuple[str, dict] | None) -> dict:
     return flat
 
 
-previous_stats: tuple[str, dict] | None = None
-for arg in sys.argv[1:]:
-    if arg.endswith(".json"):
-        previous_stats = (arg, report_stats(arg, previous_stats))
-    else:
-        analyze(arg)
+def main(argv: list[str] | None = None) -> int:
+    previous_stats: tuple[str, dict] | None = None
+    for arg in (sys.argv[1:] if argv is None else list(argv)):
+        if arg.endswith(".json"):
+            previous_stats = (arg, report_stats(arg, previous_stats))
+        else:
+            analyze(arg)
+    return 0
+
+
+# Guarded so this file can be IMPORTED for its helpers rather than only run. Without the
+# guard, `import analyze` would re-run the argv loop with the *importer's* argv --
+# benchmarks/ops/stats_sampler.py and benchmarks/trace_load_report.py both reuse `_flat`
+# (the cumulative-counter differ) and `_kv`/`_hist` from here instead of re-deriving them.
+if __name__ == "__main__":
+    raise SystemExit(main())

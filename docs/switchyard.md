@@ -605,3 +605,83 @@ stdlib fake server, and trace → profile → a real `scheduler_replay` run).
 | Overflow answered 500 or with a bare message | Check `error.code`; only `context_length_exceeded` makes the route retarget. |
 | Soak intervals go `status=STALLED` | The FreeToken backend scheduler died and in-flight requests hang until the client timeout. Since 2026-09-04 `/health` answers **503** with the dead worker's name (it polls the worker handles, not just the supervisor's latched `fatal_error`), and the stop is bounded instead of hanging in "Waiting for background tasks to complete". Check the FreeToken log for `Backend supervisor: backend worker … exited`. A pre-fix server answers `health=ok` throughout the stall. |
 | `unknown scenario "x"` | Valid ids: `short-interactive`, `long-context`, `decode-heavy`, `prefix-reuse`, `mixed-traffic`, `growing-conversation`, `large-tool-catalog`, `tool-call-burst`, `stage-transitions`, `classifier-mix`, `context-overflow`, `failure-pressure`, `client-cancellation`. Sets: `core`, `agentic`, `resilience`, `standard`, `all`. |
+
+---
+
+## 11. Production observability
+
+Everything above answers "did this change help", on traffic we chose. This section is the
+other question — "what is the deployment actually doing, right now and last Tuesday" — and
+it has exactly three sources. Each is independent, each is cheap, and none of them needs the
+GPU box to be doing anything special at the time.
+
+**1. The server log, with the invariant on.** Run the server with
+`FREETOKEN_SCHEDULER_INVARIANT=warn` (what `switchyard_soak/serve.sh` exports) and redirect
+its output to a file. That gives the per-batch `Prefill batch …` / `Decode batch …` lines and
+the pressure markers, which `benchmarks/switchyard_soak/analyze.py <log>` turns into
+throughput, occupancy, lanes per prefill batch and the §R7 starvation signature. `warn` makes
+a finishability violation say so at the moment it happens; the *count* is published either
+way (see `scheduler.prefill.invariant` below), so the env var buys the offending pass's
+context, not the fact that it occurred.
+
+**2. `/v1/stats` sampling.** The scheduler counters (`python/freetoken/scheduler/counters.py`)
+are cumulative for the server process, so a rate is a difference between two snapshots. The
+soak takes two, at its phase boundaries. A production server needs a time series:
+
+```bash
+python benchmarks/ops/stats_sampler.py sample --base-url http://127.0.0.1:1919 \
+  --interval 60 --out ~/.cache/freetoken/stats/%Y-%m-%d.jsonl
+```
+
+One JSON line per sample, appended; the `%`-escapes are expanded per sample, which is what
+rotates the file at midnight. The server being down is recorded (`"ok": false`) rather than
+fatal — the outage is the interval you most wanted. As a service:
+
+```bash
+install -Dm644 benchmarks/ops/freetoken-stats-sampler.service \
+  ~/.config/systemd/user/freetoken-stats-sampler.service
+systemctl --user daemon-reload && systemctl --user enable --now freetoken-stats-sampler
+```
+
+Read it back with per-hour deltas (`--bucket 600` for ten-minute buckets, `--json` for the
+raw numbers):
+
+```bash
+python benchmarks/ops/stats_sampler.py summarize ~/.cache/freetoken/stats/
+```
+
+One row per bucket: completed requests, errors and client disconnects, prefill refusals,
+`fresh_admits_deferred`, `fresh_admits_blocked_by_cap`, session spills / restores /
+`restores_deferred`, radix match-memo hits, finishability-invariant violations, the MoE decode
+expert-cache and extend-cache hit rates computed **over the window** (never a lifetime
+average — that is why `counters.py` publishes raw counts), and p50/p95 of the sampled
+`requests.p95_ms` and `ttft_mean_ms` gauges. A restart resets the counters, so `uptime_s`
+going backwards is detected and the new process is counted from zero instead of producing a
+huge negative delta; gauges and high-water marks are excluded from the differencing. Add
+`--requests` to also pull `/v1/requests?since=<cursor>` into each sample.
+
+**3. `--trace-dir`.** §9's capture, which is the only one of the three that sees an
+individual request. Once you have both a trace and a soak run, ask whether the gate's traffic
+resembles the real thing:
+
+```bash
+python benchmarks/trace_load_report.py --trace /var/tmp/ft-trace \
+  --soak-run benchmarks/switchyard_soak/runs/<tag>
+```
+
+It prints the real load's arrival rate and arrivals-vs-completions per minute, peak
+concurrency, sessions active per minute, prompt / new (`prompt − cached`) / output token
+distributions (p50/p90/p99/max), prefix reuse, the per-route split, session count, turns and
+lifetime, TTFT and latency quantiles and the abort/disconnect rate — each beside the soak's
+corresponding number with the ratio between them, and a verdict block naming which of the
+soak's assumptions hold and which do not ("real p99 prompt is 4.5x the soak's mean prompt").
+The soak's numbers come from the run's own `/v1/stats` phase snapshots wherever possible
+(the same `_flat` delta `analyze.py` uses, so the two cannot drift) and from the soak
+client's flags otherwise; every row says which. It ends with the exact
+`trace_to_profile.py` command — `--agents` sized to the measured peak concurrency — that
+turns the trace into a `scheduler_replay.py` profile, closing the loop back to §9.
+
+Both tools are stdlib-only and need neither torch nor the venv. CPU coverage:
+`tests/benchmarks/test_ops_observability.py` (sampler against a stdlib server serving a real
+`build_scheduler_counters` document, restart and outage handling, window-vs-lifetime ratios;
+load report over a trace written by the real writer, and a synthetic `runs/<tag>/`).
