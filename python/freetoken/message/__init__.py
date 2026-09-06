@@ -5,6 +5,7 @@ from .backend import (
     CacheRebuildBackendMsg,
     CloseSessionBackendMsg,
     ExitMsg,
+    UnpinPrefixesBackendMsg,
     UserMsg,
 )
 from .frontend import (
@@ -13,6 +14,7 @@ from .frontend import (
     CacheRebuildReply,
     SchedulerCountersReply,
     SessionClosedReply,
+    UnpinPrefixesReply,
     UserReply,
 )
 from .tokenizer import (
@@ -28,6 +30,8 @@ from .tokenizer import (
     SchedulerCountersMsg,
     SessionClosedResultMsg,
     TokenizeMsg,
+    UnpinPrefixesMsg,
+    UnpinPrefixesResultMsg,
 )
 
 __all__ = [
@@ -38,6 +42,7 @@ __all__ = [
     "CacheRebuildBackendMsg",
     "CloseSessionBackendMsg",
     "ExitMsg",
+    "UnpinPrefixesBackendMsg",
     "UserMsg",
     "BaseTokenizerMsg",
     "BatchTokenizerMsg",
@@ -50,10 +55,13 @@ __all__ = [
     "SchedulerCountersMsg",
     "SessionClosedResultMsg",
     "TokenizeMsg",
+    "UnpinPrefixesMsg",
+    "UnpinPrefixesResultMsg",
     "BaseFrontendMsg",
     "BatchFrontendMsg",
     "CacheRebuildReply",
     "SchedulerCountersReply",
     "SessionClosedReply",
+    "UnpinPrefixesReply",
     "UserReply",
 ]

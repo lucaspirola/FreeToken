@@ -9,6 +9,8 @@ from freetoken.core import Req
 from freetoken.kvcache import BaseCacheHandle, MatchResult, create_prefix_cache
 from freetoken.utils import align_down, div_ceil, init_logger
 
+from .counters import PrefixCounters
+
 if TYPE_CHECKING:
     from .utils import PendingReq
 
@@ -34,7 +36,8 @@ logger = init_logger(__name__)
 class CacheManager:
     def __init__(self, num_pages: int, page_size: int, page_table: torch.Tensor, type: str,
                  linear_state_pool=None, swa_pool=None, sliding_window_size=None,
-                 committed_pages: int | None = None, page_index_offset: int = 0):
+                 committed_pages: int | None = None, page_index_offset: int = 0,
+                 pin_prefix_min_tokens: int = 0, pin_prefix_max_tokens: int = 0):
         # The `_free_slots` follows a page-aligned manner. For example, if page_size = 2,
         # the `_free_slots` may look like [0, 2, 4, 6, ...], and each slot represents a page.
         device = page_table.device
@@ -69,6 +72,14 @@ class CacheManager:
         self.page_table = page_table
         self.page_size = page_size
         self.cache_type = type
+        # Prefix auto-pin (hybrid radix only; see note_prompt_admitted). ``_pin_locks`` are
+        # the nodes this manager holds an extra ``inc_lock`` on.
+        self.pin_prefix_min_tokens = max(0, int(pin_prefix_min_tokens or 0))
+        self.pin_prefix_max_tokens = max(0, int(pin_prefix_max_tokens or 0))
+        self.prefix_counters = PrefixCounters()
+        self._pin_locks: list = []          # lock order, for unpin_all
+        self._pin_locked: set = set()       # the same nodes, for the re-entrancy check
+        self._pin_starvation_logged = False
 
     # ----- capability hooks (defaults; plugged-in pools may narrow them) -----
     supports_runtime_rebuild = True
@@ -328,6 +339,8 @@ class CacheManager:
         if pool.num_free_slots < n and self.mamba_reclaim_hook is not None:
             if self.mamba_reclaim_hook(n):
                 self.ensure_mamba_slots(n)
+        if pool.num_free_slots < n:
+            self._note_pin_starvation("GDN state pool")
         return pool.num_free_slots >= n
 
     def acquire_mamba_slot(self) -> int | None:
@@ -431,6 +444,121 @@ class CacheManager:
             if new_evicted > start:
                 self._free_swa(self.page_table[req.table_idx, start:new_evicted])
                 req.swa_evicted_seqlen = new_evicted
+
+    # ------------------------------------------------------------------ prefix pins
+    @property
+    def pinning_enabled(self) -> bool:
+        return self.is_hybrid and self.pin_prefix_min_tokens > 0
+
+    def note_prompt_admitted(self, handle: BaseCacheHandle, prompt_tokens: int) -> None:
+        """Account one admitted prompt (first chunk only) and auto-pin its prefix if due.
+
+        Called from the admission loop at the point ``PromptAdmittedMsg`` is built, so
+        ``handle.cached_len`` is the hit the prompt actually got. A ``cached_len > 0`` here
+        is by construction a SECOND distinct request on that path: a fresh prompt has
+        produced nothing yet, and everything the tree holds was donated by an earlier
+        request (``cache_req``) -- so no producer bookkeeping is needed to know the node's
+        KV is being reused. Continuation chunks never reach this method (they own their
+        handle and do not re-match), and a deferred prompt re-matched across passes is
+        counted once, on the pass that admits it.
+        """
+        cached_len = handle.cached_len
+        self.prefix_counters.note_admitted(prompt_tokens, cached_len)
+        if (self.pinning_enabled and cached_len >= self.pin_prefix_min_tokens
+                and getattr(handle, "node", None) is not None):
+            self.pin_prefix(handle.node)
+
+    def pin_prefix(self, node) -> bool:
+        """Hold ``node``'s root path against eviction until :meth:`unpin_all`.
+
+        Locks with the tree's own ``inc_lock`` (full ref on node..root, mamba ref on the
+        node), so ``evict_full`` cannot take the path and ``evict_mamba`` cannot tombstone
+        the node's snapshot -- and ``full_ref >= mamba_ref`` holds because nothing here
+        bypasses it. Every snapshot-bearing ancestor is locked the same way so its
+        snapshot survives too (a tombstoned ancestor would not break this hit, but it is
+        the restore point of every shorter reuse of the same prefix). Re-entrant: a node
+        already in ``_pin_locks`` is not locked twice, and a request that re-matches an
+        already-pinned path adds only the tokens BELOW the deepest covered node to the
+        ledger (a node is covered iff it lies on the root path of a locked node, see
+        ``_pin_covered_nodes``).
+
+        Returns True when a pin (or a re-entrant no-op) held; False on a budget refusal,
+        which is counted and never partially applied.
+
+        Pins never starve admission on purpose: a pinned path is simply protected KV, and a
+        reserve/allocate that fails because too much is protected fails exactly as it does
+        for a session lease (logged once, no automatic unpin). ``DELETE /v1/cache/pins`` is
+        the operator's release valve; :meth:`rebuild` drops them with the tree.
+        """
+        if node is None or node.is_root():
+            return True
+        path = []
+        cur = node
+        while not cur.is_root():
+            path.append(cur)
+            cur = cur.parent
+        # Tokens below the deepest already-covered node. Coverage is recomputed from the
+        # locked nodes' current root paths rather than remembered, so a node that a later
+        # ``split_at`` carved out ABOVE a pinned node (a new object carrying the copied
+        # ref_count) is seen as covered; pins are rare, so O(pins x depth) here is nothing.
+        covered = self._pin_covered_nodes()
+        new_tokens = 0
+        for n in path:
+            if n in covered:
+                break
+            new_tokens += n.length
+        already_locked = node in self._pin_locked
+        if new_tokens == 0 and already_locked:
+            return True
+        if (self.pin_prefix_max_tokens
+                and self.prefix_counters.pinned_tokens + new_tokens > self.pin_prefix_max_tokens):
+            self.prefix_counters.pin_budget_refusals += 1
+            return False
+        for n in path:
+            if n is node or n.mamba_value is not None:
+                if n not in self._pin_locked:
+                    self.prefix_cache.inc_lock(n)
+                    self._pin_locks.append(n)
+                    self._pin_locked.add(n)
+        self.prefix_counters.pinned_tokens += new_tokens
+        if not already_locked:
+            self.prefix_counters.pinned_prefixes += 1
+        return True
+
+    def _pin_covered_nodes(self) -> set:
+        covered: set = set()
+        for n in self._pin_locks:
+            cur = n
+            while not cur.is_root() and cur not in covered:
+                covered.add(cur)
+                cur = cur.parent
+        return covered
+
+    def unpin_all(self) -> dict:
+        """Release every pin (``DELETE /v1/cache/pins``). Returns the ledger it cleared."""
+        released = {"pinned_prefixes": self.prefix_counters.pinned_prefixes,
+                    "pinned_tokens": self.prefix_counters.pinned_tokens}
+        for n in self._pin_locks:
+            self.prefix_cache.dec_lock(n)
+        self._reset_pins()
+        return released
+
+    def _reset_pins(self) -> None:
+        self._pin_locks = []
+        self._pin_locked = set()
+        self.prefix_counters.pinned_prefixes = 0
+        self.prefix_counters.pinned_tokens = 0
+
+    def _note_pin_starvation(self, what: str) -> None:
+        """Log once when a shortage coincides with pins holding KV/snapshots. Pins are not
+        released automatically -- the operator decides (DELETE /v1/cache/pins)."""
+        if self._pin_locks and not self._pin_starvation_logged:
+            self._pin_starvation_logged = True
+            logger.warning(
+                "%s short while %d pinned prefixes hold %d tokens; pins are never released "
+                "automatically -- DELETE /v1/cache/pins to free them",
+                what, self.prefix_counters.pinned_prefixes, self.prefix_counters.pinned_tokens,
+            )
 
     def lock(self, handle: BaseCacheHandle) -> None:
         if self.is_swa:
@@ -1053,6 +1181,7 @@ class CacheManager:
         self.page_table = page_table
         self.free_slots = torch.arange(num_pages, dtype=torch.int32, device=device) * self.page_size
         self.prefix_cache = self._make_prefix_cache(device, self.page_size, self.cache_type)
+        self._reset_pins()   # the pinned nodes went with the old tree
         # The discarded hybrid tree owned donated GDN-snapshot slots; rebuild is idle-only, so
         # reclaim the whole LinearStatePool free-list (else those slots leak -> admission hangs).
         if self.is_hybrid:
@@ -1092,6 +1221,8 @@ class CacheManager:
             else:
                 evicted = self.prefix_cache.evict(need)
             self.free_slots = torch.cat([self.free_slots, evicted[:: self.page_size]])
+            if len(self.free_slots) < needed_pages:
+                self._note_pin_starvation("KV pool")
             assert len(self.free_slots) >= needed_pages, "Eviction did not free enough space."
         allocated = self.free_slots[:needed_pages]
         self.free_slots = self.free_slots[needed_pages:]

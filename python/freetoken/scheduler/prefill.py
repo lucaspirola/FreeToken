@@ -792,6 +792,11 @@ class PrefillManager:
                     prompt_admissions.append(
                         (req.uid, pending_req.input_len, req.cache_handle.cached_len)
                     )
+                    # Same point, same numbers: the prefix hit/miss counters and the
+                    # auto-pin decision (``getattr``: the loop tests drive stub managers).
+                    note = getattr(self.cache_manager, "note_prompt_admitted", None)
+                    if note is not None:
+                        note(req.cache_handle, pending_req.input_len)
                 log_new_tokens += req.extend_len
                 if not is_continuation:
                     log_cached_tokens += req.cache_handle.cached_len

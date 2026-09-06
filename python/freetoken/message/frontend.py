@@ -87,3 +87,10 @@ class SessionClosedReply(BaseFrontendMsg):
     session_id: str
     request_id: str
     status: str
+
+
+@dataclass
+class UnpinPrefixesReply(BaseFrontendMsg):
+    request_id: str
+    pinned_prefixes: int
+    pinned_tokens: int

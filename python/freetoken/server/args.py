@@ -997,6 +997,30 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--pin-prefix-min-tokens",
+        type=int,
+        dest="pin_prefix_min_tokens",
+        default=ServerArgs.pin_prefix_min_tokens,
+        help=(
+            "Prefix auto-pin threshold (hybrid radix cache only). A cached prefix that a "
+            "second request reuses with cached_tokens >= this many is locked against "
+            "eviction until DELETE /v1/cache/pins. 0 disables pinning. Default 1024."
+        ),
+    )
+
+    parser.add_argument(
+        "--pin-prefix-max-tokens",
+        type=int,
+        dest="pin_prefix_max_tokens",
+        default=ServerArgs.pin_prefix_max_tokens,
+        help=(
+            "Total token budget for pinned prefixes. Once pinned tokens would exceed it, "
+            "new prefixes are not pinned (counted in /v1/stats "
+            "scheduler.prefix.pin_budget_refusals). 0 = unlimited. Default 65536."
+        ),
+    )
+
+    parser.add_argument(
         "--spec-ngram-n",
         type=int,
         dest="spec_ngram_n",
@@ -1156,6 +1180,10 @@ def parse_args(
         parser.error("--session-spill-limit-gb must be >= 0")
     if kwargs["hidden_states_max_tokens"] < 1:
         parser.error("--hidden-states-max-tokens must be >= 1")
+    if kwargs["pin_prefix_min_tokens"] < 0:
+        parser.error("--pin-prefix-min-tokens must be >= 0")
+    if kwargs["pin_prefix_max_tokens"] < 0:
+        parser.error("--pin-prefix-max-tokens must be >= 0")
     if kwargs["trace_dir"] is not None:
         # Expanded once here so ~ and $VAR resolve against the server's own environment.
         # Unlike --hidden-states-dir this may not exist yet: nothing outside the server

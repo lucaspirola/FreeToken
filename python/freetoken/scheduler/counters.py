@@ -172,6 +172,52 @@ class SpillCounters:
         }
 
 
+@dataclass
+class PrefixCounters:
+    """Prefix-cache reuse as the admission gate sees it, plus the auto-pin ledger.
+
+    A prompt is counted ONCE, on its first chunk, at the point ``PromptAdmittedMsg`` is
+    built (``cached_len`` is final there: continuation chunks never re-match). ``hits`` are
+    prompts admitted with ``cached_len > 0``; ``misses`` are the rest -- including prompts
+    that bypass the tree on purpose (multimodal, the hidden-state probe), since the prefill
+    they cost is the same. ``hit_tokens`` sums ``cached_len``; ``miss_tokens`` sums the
+    FULL prompt length of every miss (``PendingReq.input_len``: the tokens the prefill will
+    forward, the last one included -- ``match_req`` never matches it, so a total re-run of
+    a cached prompt is still a hit with ``cached_len == input_len - 1``). The forwarded
+    remainder of a hit is not counted anywhere here; it is ``prompt_tokens - hit_tokens``.
+
+    The pin fields are gauges (``pinned_prefixes``, ``pinned_tokens``) plus one counter
+    (``pin_budget_refusals``): see ``CacheManager.note_prompt_admitted``.
+    """
+
+    hits: int = 0
+    misses: int = 0
+    hit_tokens: int = 0
+    miss_tokens: int = 0
+    pinned_prefixes: int = 0
+    pinned_tokens: int = 0
+    pin_budget_refusals: int = 0
+
+    def note_admitted(self, prompt_tokens: int, cached_len: int) -> None:
+        if cached_len > 0:
+            self.hits += 1
+            self.hit_tokens += cached_len
+        else:
+            self.misses += 1
+            self.miss_tokens += max(0, prompt_tokens)
+
+    def as_dict(self) -> Dict[str, int]:
+        return {
+            "hits": self.hits,
+            "misses": self.misses,
+            "hit_tokens": self.hit_tokens,
+            "miss_tokens": self.miss_tokens,
+            "pinned_prefixes": self.pinned_prefixes,
+            "pinned_tokens": self.pinned_tokens,
+            "pin_budget_refusals": self.pin_budget_refusals,
+        }
+
+
 def build_moe_counters(moe: Any, collect_decode_stats: bool = False) -> Dict[str, Any] | None:
     """The ``scheduler.moe`` block: expert-cache decisions, cumulative and integral.
 
@@ -216,6 +262,7 @@ def build_scheduler_counters(
     spill_store: Any = None,
     moe: Any = None,
     moe_collect_stats: bool = False,
+    cache_manager: Any = None,
 ) -> Dict[str, Any]:
     """The ``/v1/stats["scheduler"]`` document.
 
@@ -226,8 +273,11 @@ def build_scheduler_counters(
     from ``cached_tokens``.
     """
     doc: Dict[str, Any] = {
-        "prefill": None, "spec": None, "session_spill": None, "moe": None,
+        "prefill": None, "spec": None, "session_spill": None, "moe": None, "prefix": None,
     }
+    prefix = getattr(cache_manager, "prefix_counters", None)
+    if prefix is not None:
+        doc["prefix"] = prefix.as_dict()
     counters = getattr(prefill_manager, "counters", None)
     if counters is not None:
         doc["prefill"] = counters.as_dict(

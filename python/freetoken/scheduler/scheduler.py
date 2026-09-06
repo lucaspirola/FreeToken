@@ -24,6 +24,8 @@ from freetoken.message import (
     PromptAdmittedMsg,
     SchedulerCountersMsg,
     SessionClosedResultMsg,
+    UnpinPrefixesBackendMsg,
+    UnpinPrefixesResultMsg,
     UserMsg,
 )
 from freetoken.utils import (
@@ -193,6 +195,8 @@ class Scheduler(SchedulerIOMixin):
                 self.engine.kv_cache.committed_pages if growable_kv else None
             ),
             page_index_offset=(1 if growable_kv else 0),
+            pin_prefix_min_tokens=getattr(config, "pin_prefix_min_tokens", 0),
+            pin_prefix_max_tokens=getattr(config, "pin_prefix_max_tokens", 0),
         )
         # Second-currency demand signal. ``ensure_mamba_slots`` can only reach UNLOCKED radix
         # snapshots, and an idle automatic session lease holds its node locked for as long as
@@ -1174,6 +1178,11 @@ class Scheduler(SchedulerIOMixin):
                     msg.request_id,
                     msg.session_id,
                 )
+        elif isinstance(msg, UnpinPrefixesBackendMsg):
+            # Synchronous: dec_lock on a handful of nodes, safe between any two batches
+            # (a pin is an extra ref, never the only one a live request depends on).
+            released = self.cache_manager.unpin_all()
+            self.send_result([UnpinPrefixesResultMsg(request_id=msg.request_id, **released)])
         elif isinstance(msg, CacheRebuildBackendMsg):
             # v1 scope: only if_idle, single-rank, non-owned-KV. drain mode and TP rebuild
             # need the drain-gate / all-rank failure-agreement machinery (deferred), so we
@@ -2527,6 +2536,7 @@ class Scheduler(SchedulerIOMixin):
             # --moe-collect-stats, so they ride the same flag.
             moe=getattr(getattr(self, "engine", None), "moe_offload_cache", None),
             moe_collect_stats=bool(getattr(config, "moe_collect_stats", False)),
+            cache_manager=getattr(self, "cache_manager", None),
         )
         if doc == self._counters_published:
             return  # nothing moved since the last snapshot; do not spend a message on it

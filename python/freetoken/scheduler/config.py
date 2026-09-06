@@ -21,6 +21,12 @@ class SchedulerConfig(EngineConfig):
     # GGUF MoE with concurrency; zero explicitly keeps normal aggregate-token batching.
     max_prefill_seqs: int | None = None
     cache_type: str = "radix"
+    # --- prefix auto-pin (scheduler/cache.py CacheManager.pin_prefix; hybrid radix only) ---
+    # A prefix reused by a second request with cached_len >= min is locked against eviction
+    # until DELETE /v1/cache/pins. 0 disables. max caps the total pinned tokens; past it new
+    # prefixes are not pinned (counted in /v1/stats scheduler.prefix.pin_budget_refusals).
+    pin_prefix_min_tokens: int = 1024
+    pin_prefix_max_tokens: int = 65536
     # --- speculative decoding (scheduler/spec_ngram.py) ---
     # None disables it; "ngram" enables prompt-lookup (n-gram) speculation. Greedy-only and
     # single-stream in v1: a request with temperature > 0, or any step with more than one

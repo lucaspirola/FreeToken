@@ -125,6 +125,21 @@ class SessionClosedResultMsg(BaseTokenizerMsg):
 
 
 @dataclass
+class UnpinPrefixesMsg(BaseTokenizerMsg):
+    # api server -> tokenizer worker (passthrough to UnpinPrefixesBackendMsg):
+    # DELETE /v1/cache/pins releases every auto-pinned prefix.
+    request_id: str
+
+
+@dataclass
+class UnpinPrefixesResultMsg(BaseTokenizerMsg):
+    # scheduler -> tokenizer worker (passthrough to UnpinPrefixesReply).
+    request_id: str
+    pinned_prefixes: int = 0   # what was released
+    pinned_tokens: int = 0
+
+
+@dataclass
 class CacheRebuildMsg(BaseTokenizerMsg):
     # api server -> tokenizer worker (pure passthrough to CacheRebuildBackendMsg).
     request_id: str

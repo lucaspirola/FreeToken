@@ -28,6 +28,8 @@ from freetoken.message import (
     SchedulerCountersReply,
     SessionClosedReply,
     TokenizeMsg,
+    UnpinPrefixesMsg,
+    UnpinPrefixesReply,
     UserReply,
 )
 from freetoken.utils import (
@@ -193,6 +195,7 @@ class FrontendManager:
     # the int-uid generation ack machinery).
     rebuild_futures: Dict[str, asyncio.Future] = field(default_factory=dict)
     session_close_futures: Dict[str, asyncio.Future] = field(default_factory=dict)
+    unpin_futures: Dict[str, asyncio.Future] = field(default_factory=dict)
     client_launch_sessions: Dict[str, set[str]] = field(default_factory=dict)
     # Lifecycle gate. Starts "loading" (uvicorn binds before weights finish; the three
     # API adapters 503 until this flips) -> "serving" once all workers ack ready ->
@@ -307,6 +310,11 @@ class FrontendManager:
                 continue
             if isinstance(msg, SessionClosedReply):
                 fut = self.session_close_futures.pop(msg.request_id, None)
+                if fut is not None and not fut.done():
+                    fut.set_result(msg)
+                continue
+            if isinstance(msg, UnpinPrefixesReply):
+                fut = self.unpin_futures.pop(msg.request_id, None)
                 if fut is not None and not fut.done():
                     fut.set_result(msg)
                 continue
@@ -967,6 +975,30 @@ async def _close_session_on_state(state, session_id: str) -> tuple[dict[str, str
         if not sessions:
             state.client_launch_sessions.pop(launch_id, None)
     return {"id": reply.session_id, "status": reply.status}, 200
+
+
+@app.delete("/v1/cache/pins")
+async def unpin_prefixes():
+    """Release every auto-pinned prefix (``--pin-prefix-min-tokens``); the KV and GDN
+    snapshots become ordinary LRU-evictable tree entries again. Returns what was released."""
+    state = get_global_state()
+    request_id = str(uuid.uuid4())
+    fut = asyncio.get_running_loop().create_future()
+    state.unpin_futures[request_id] = fut
+    await state.send_one(UnpinPrefixesMsg(request_id=request_id))
+    try:
+        reply = await asyncio.wait_for(fut, timeout=30.0)
+    except asyncio.TimeoutError:
+        state.unpin_futures.pop(request_id, None)
+        return JSONResponse({"status": "timeout"}, status_code=504)
+    state.unpin_futures.pop(request_id, None)
+    return {
+        "status": "ok",
+        "released": {
+            "pinned_prefixes": reply.pinned_prefixes,
+            "pinned_tokens": reply.pinned_tokens,
+        },
+    }
 
 
 @app.delete("/v1/client-launches/{launch_id}/sessions")

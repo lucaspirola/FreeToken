@@ -44,6 +44,8 @@ The serving-compliance half of that line:
 | `--force-nonempty-content` | A thinking turn that produces only reasoning answers with the reasoning text instead of an empty `content`. Switchyard treats empty content as a failed turn. |
 | `--max-output-tokens 16384` | Ceiling for a request that sends no `max_completion_tokens`. |
 | `--kv-cache-dtype q8_0` | FP8 KV (FreeToken block scales; the checkpoint's `k_scale`/`v_scale` are ignored). Requires `--attention-backend triton`. |
+| `--pin-prefix-min-tokens N` (default 1024; 0 disables) | Prefix auto-pin (hybrid radix cache): a cached prefix that a *second* request reuses with `cached_tokens >= N` is locked against eviction until `DELETE /v1/cache/pins`. See §3a. |
+| `--pin-prefix-max-tokens N` (default 65536; 0 = unlimited) | Total pinned-token budget. Past it, new prefixes are not pinned and `scheduler.prefix.pin_budget_refusals` counts each refusal. |
 
 Optional knobs that change the contract: `--no-context-preflight` (see §5),
 `--json-retry N` (see §4), `--hidden-states-dir DIR`, `--pooled-sink-dir DIR` (see §6).
@@ -186,6 +188,45 @@ An id FreeToken *inferred* from a header is reclaimable, and a `session … is b
 collision (a classifier call landing on the same conversation as the turn it grades)
 is retried once without a lease rather than failed. That retry loses prefix reuse for
 that one call; it never surfaces as an error.
+
+### 3a. Prefix pinning and the prefix counters
+
+Session leases keep *one conversation's* prefix resident; they do nothing for a prefix
+that many conversations share (a long system prompt, a tool manifest, a repository
+briefing). Under LRU pressure that shared prefix is evicted exactly as often as any other
+leaf, and every requester that lands after the eviction pays the prefill again.
+
+With `--pin-prefix-min-tokens N` (default 1024) the hybrid radix cache pins such a prefix the
+first time it is **reused**: when a prompt is admitted with `cached_tokens >= N`, the matched
+node's root path takes a persistent lock — the tree's own `inc_lock` (full-KV ref on
+node..root, recurrent-state ref on the node and on every snapshot-bearing ancestor), held by
+the cache manager instead of a request — so `evict_full` cannot take the path and
+`evict_mamba` cannot tombstone its snapshot. "Reused" needs no producer bookkeeping: a
+freshly admitted prompt has produced nothing, so any `cached_tokens > 0` at admission is by
+construction a second request on KV a first one donated. A prefix is pinned once
+(re-matching it is a no-op); a longer prompt through an already-pinned path adds only the
+tokens below it to the ledger.
+
+Pins are released only by **`DELETE /v1/cache/pins`** (returns the released
+`pinned_prefixes` / `pinned_tokens`), by a cache rebuild (the tree is discarded), or by a
+restart. `--pin-prefix-max-tokens` (default 65536) caps the total; a pin that would exceed
+it is refused whole and counted. **Pins never starve admission on purpose**: a pinned path is
+protected KV like a session lease, so a reserve or allocate that fails only because too much
+is protected fails exactly as it does today — the server logs one warning naming the pins
+and does *not* unpin automatically. If `pinned_tokens` is a large fraction of the pool and
+`prefill.refusals` / `fresh_admits_deferred` climb, lower the budget or `DELETE` the pins.
+The plain (non-hybrid) radix cache and the SWA radix are not pinned in this version.
+
+`/v1/stats` reports the reuse the admission gate actually saw under `scheduler.prefix`,
+counted once per prompt on its first chunk (where `PromptAdmittedMsg` is built):
+
+| Field | Meaning |
+|---|---|
+| `hits`, `misses` | prompts admitted with `cached_tokens > 0` / `== 0` (a multimodal or hidden-state-probe prompt that bypasses the tree is a miss). |
+| `hit_tokens` | sum of `cached_tokens` over hits. |
+| `miss_tokens` | sum of the **full prompt length** over misses: the tokens the prefill forwards for them, last token included (`match_req` never matches the last token, so a repeated prompt is a hit with `cached_tokens = prompt_tokens - 1`). The forwarded remainder of a hit is `prompt_tokens_total - hit_tokens - miss_tokens`. |
+| `pinned_prefixes`, `pinned_tokens` | gauges: distinct pinned match nodes and the distinct tokens their root paths cover. |
+| `pin_budget_refusals` | pins refused by `--pin-prefix-max-tokens`. |
 
 ---
 

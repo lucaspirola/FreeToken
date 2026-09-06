@@ -61,6 +61,12 @@ class CloseSessionBackendMsg(BaseBackendMsg):
 
 
 @dataclass
+class UnpinPrefixesBackendMsg(BaseBackendMsg):
+    # tokenizer worker -> scheduler: release every auto-pinned prefix (DELETE /v1/cache/pins).
+    request_id: str
+
+
+@dataclass
 class CacheRebuildBackendMsg(BaseBackendMsg):
     # tokenizer worker -> scheduler: request a runtime KV/MoE/GDN cache resize.
     request_id: str

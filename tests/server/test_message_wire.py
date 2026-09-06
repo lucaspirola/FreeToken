@@ -61,6 +61,23 @@ def test_session_control_messages_roundtrip():
     assert reply_out.status == "closed"
 
 
+def test_unpin_prefixes_messages_roundtrip():
+    from freetoken.message import (
+        UnpinPrefixesBackendMsg, UnpinPrefixesMsg, UnpinPrefixesReply, UnpinPrefixesResultMsg,
+    )
+
+    out = BaseTokenizerMsg.decoder(BaseTokenizerMsg.encoder(UnpinPrefixesMsg(request_id="u1")))
+    assert isinstance(out, UnpinPrefixesMsg) and out.request_id == "u1"
+    out = BaseBackendMsg.decoder(UnpinPrefixesBackendMsg(request_id="u1").encoder())
+    assert isinstance(out, UnpinPrefixesBackendMsg) and out.request_id == "u1"
+    result = UnpinPrefixesResultMsg(request_id="u1", pinned_prefixes=2, pinned_tokens=4096)
+    out = BaseTokenizerMsg.decoder(BaseTokenizerMsg.encoder(result))
+    assert isinstance(out, UnpinPrefixesResultMsg) and (out.pinned_prefixes, out.pinned_tokens) == (2, 4096)
+    reply = UnpinPrefixesReply(request_id="u1", pinned_prefixes=2, pinned_tokens=4096)
+    out = BaseFrontendMsg.decoder(BaseFrontendMsg.encoder(reply))
+    assert isinstance(out, UnpinPrefixesReply) and out.pinned_tokens == 4096
+
+
 def test_cache_rebuild_backend_msg_roundtrip():
     msg = CacheRebuildBackendMsg(request_id="r1", moe_cache_size=None, num_pages=256, mode="drain")
     out = BaseBackendMsg.decoder(msg.encoder())

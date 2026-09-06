@@ -27,6 +27,10 @@ from freetoken.message import (
     SessionClosedReply,
     SessionClosedResultMsg,
     TokenizeMsg,
+    UnpinPrefixesBackendMsg,
+    UnpinPrefixesMsg,
+    UnpinPrefixesReply,
+    UnpinPrefixesResultMsg,
     UserMsg,
     UserReply,
 )
@@ -206,6 +210,16 @@ def tokenize_worker(
                             session_id=m.session_id, request_id=m.request_id
                         )
                     )
+                elif isinstance(m, UnpinPrefixesMsg):
+                    send_backend.put(UnpinPrefixesBackendMsg(request_id=m.request_id))
+                elif isinstance(m, UnpinPrefixesResultMsg):
+                    send_frontend.put(
+                        UnpinPrefixesReply(
+                            request_id=m.request_id,
+                            pinned_prefixes=m.pinned_prefixes,
+                            pinned_tokens=m.pinned_tokens,
+                        )
+                    )
                 elif isinstance(m, SchedulerCountersMsg):
                     # Nothing to translate: the frontend stores the document whole.
                     send_frontend.put(SchedulerCountersReply(counters=m.counters))
@@ -228,6 +242,8 @@ def tokenize_worker(
                         ErrorReplyMsg,
                         PromptAdmittedMsg,
                         SchedulerCountersMsg,
+                        UnpinPrefixesMsg,
+                        UnpinPrefixesResultMsg,
                     ),
                 )
                 for m in pending_msg
