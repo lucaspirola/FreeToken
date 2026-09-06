@@ -10,8 +10,14 @@
 # soak AA9.5 asked for the knob because the flag was hard-coded). It raises the *static*
 # pre-load bank preflight only -- the load-phase transient is bounded by run.sh's
 # SOAK_RAM_LOAD_ABORT_GIB watchdog, not by this.
+#
+# FREETOKEN_HIDDEN_STATES_DIR overrides the Switchyard hidden-state probe root
+# (docs/switchyard.md §6). The server refuses a missing directory at parse time, so it is
+# created here; FreeToken never cleans it -- the consumer deletes each artifact it has scored.
 set -euo pipefail
 cd /home/lucas/ai/FreeToken
+export FREETOKEN_HIDDEN_STATES_DIR="${FREETOKEN_HIDDEN_STATES_DIR:-/home/lucas/.cache/freetoken/hidden-states}"
+mkdir -p "$FREETOKEN_HIDDEN_STATES_DIR"
 export FREETOKEN_PIN_BUDGET_GB="${FREETOKEN_PIN_BUDGET_GB:-17}"
 export FREETOKEN_SCHEDULER_INVARIANT="${FREETOKEN_SCHEDULER_INVARIANT:-warn}"
 exec uv run ft serve \
@@ -26,4 +32,5 @@ exec uv run ft serve \
   --enable-cache-report --served-model-name nemotron-3.5-lightning \
   --reasoning-parser nemotron_v3 --tool-call-parser qwen3_coder \
   --force-nonempty-content --max-output-tokens 16384 \
+  --hidden-states-dir "$FREETOKEN_HIDDEN_STATES_DIR" --hidden-states-max-tokens 4096 \
   ${SOAK_EXTRA_ARGS:-}

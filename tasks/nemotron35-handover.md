@@ -88,6 +88,7 @@ ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   --enable-cache-report --served-model-name nemotron-3.5-lightning \
   --reasoning-parser nemotron_v3 --tool-call-parser qwen3_coder \
   --force-nonempty-content --max-output-tokens 16384 \
+  --hidden-states-dir /home/lucas/.cache/freetoken/hidden-states --hidden-states-max-tokens 4096 \
   --trace-dir /var/tmp/ft-trace
 ```
 
@@ -128,6 +129,15 @@ ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
    1.18 GiB/s) instead of RAM. **This configuration has never been soaked.** At the 4 GiB default
    a 3.5 GiB checkpoint stays in RAM and does not survive a restart; at 0 it always survives.
    Soak it before trusting it under 16-way load.
+7. **Hidden-state probe target (docs/switchyard.md §6).** The directory exists before launch
+   (`serve.sh` does the `mkdir -p`; `FREETOKEN_HIDDEN_STATES_DIR` overrides the default
+   `~/.cache/freetoken/hidden-states`) -- the server refuses a missing `--hidden-states-dir` at
+   parse time -- and both `--hidden-states-dir` and `--hidden-states-max-tokens 4096` are on the
+   line. FreeToken never cleans the directory: the consumer deletes each artifact once it has
+   scored it, so a client that stops deleting fills the disk. Pooled-only requests
+   (`kv_transfer_params.pooling`, no `hidden_states_path`) work without the directory and are not
+   subject to the token cap; the file path (`hidden_states_path`) needs the directory and is
+   capped at 4096 prompt tokens.
 
 ## Closed
 - **262K recall** — Mamba-2 prefill `dt` floor (`time_step_min` is an *initializer* range, not
