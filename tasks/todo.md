@@ -949,5 +949,6 @@ gave standing GO for agent-requested code adaptation. Server on :1919 restarted 
       `choices[0].logprobs.content` with exactly one entry. Docs: later steps not populated;
       with thinking on the first token is the first reasoning token.
 - [x] Restarted :1919 at cf377e4 2026-09-06 12:09 (after a host OOM at 11:51 took the previous instance; see lessons); live parity done.
-- [ ] Later, gated on results: (c) pooled as first stream event after prefill; (d) launch
-      checklist + serve.sh gain the two hidden-states flags.
+- [x] (d) serve.sh + production checklist carry the hidden-states flags (f268cc6).
+- [ ] (c) pooled as first stream event after prefill: queued until the hidden session's bake-off
+      says a prompt probe wins.
