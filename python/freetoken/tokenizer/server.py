@@ -312,6 +312,7 @@ def tokenize_worker(
                             session_reclaimable=msg.session_reclaimable,
                             hidden_states=msg.hidden_states,
                             no_prefix_cache=msg.no_prefix_cache,
+                            pin_key=msg.pin_key,
                         )
                         for msg, t in zip(ok_msgs, ok_tensors, strict=True)
                     ]

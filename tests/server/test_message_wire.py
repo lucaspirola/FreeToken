@@ -217,8 +217,32 @@ def test_hidden_state_spec_survives_the_wire_in_both_directions():
     assert reply_out.kv_transfer_params == params
 
 
+def test_pin_key_survives_the_wire_without_a_session_id():
+    """The lease-free pin key (Req.pin_key) rides TokenizeMsg -> UserMsg beside a None
+    session_id, so a hidden-state probe reaches the scheduler with a key for the
+    cross-session pin rule and still binds no lease."""
+    from freetoken.message import UserMsg
+
+    tokenize = TokenizeMsg(
+        uid=5, text="hi", sampling_params=SamplingParams(max_tokens=1),
+        pin_key="switchyard:conv-7",
+    )
+    tokenize_out = BaseTokenizerMsg.decoder(BaseTokenizerMsg.encoder(tokenize))
+    assert tokenize_out.pin_key == "switchyard:conv-7"
+    assert tokenize_out.session_id is None
+
+    user = UserMsg(
+        uid=5, input_ids=torch.tensor([1, 2], dtype=torch.int32),
+        sampling_params=SamplingParams(max_tokens=1), pin_key="switchyard:conv-7",
+    )
+    user_out = BaseBackendMsg.decoder(user.encoder())
+    assert user_out.pin_key == "switchyard:conv-7"
+    assert user_out.session_id is None
+
+
 def test_ordinary_messages_carry_no_probe_state():
     msg = TokenizeMsg(uid=1, text="hi", sampling_params=SamplingParams())
     out = BaseTokenizerMsg.decoder(BaseTokenizerMsg.encoder(msg))
     assert out.hidden_states is None
     assert out.no_prefix_cache is False
+    assert out.pin_key is None

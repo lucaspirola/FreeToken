@@ -152,3 +152,92 @@ def test_probe_fields_survive_chunked_prefill(tmp_path):
     assert [c for c, _, _, _ in seen] == [0, 4, 8, 12]
     assert all(spec_seen is spec for _, _, spec_seen, _ in seen)
     assert all(flag for _, _, _, flag in seen)
+
+
+def _user_msg(uid: int, **kwargs):
+    from freetoken.core import SamplingParams
+    from freetoken.message import UserMsg
+
+    return UserMsg(
+        uid=uid,
+        input_ids=torch.tensor(PROMPT, dtype=torch.int32),
+        sampling_params=SamplingParams(max_tokens=1),
+        **kwargs,
+    )
+
+
+def test_prefix_notes_carry_the_lease_free_pin_key():
+    """The auto-pin's cross-session rule (CacheManager.note_prompt_admitted, session_key)
+    is fed from ``batch.prefix_notes``; the key is ``Req.pin_key`` when set (a pooled probe
+    binds no lease, so its ``session_id`` is None) and falls back to ``session_id``."""
+    from freetoken.hidden_states import HiddenStateSpec
+
+    cache_manager, _, prefill_manager = _build_managers()
+    pooled = HiddenStateSpec(directory=None, layer_ids=[0, 1], pooling=("mean",))
+
+    # A pooled probe: no lease, pin key from the client session header.
+    prefill_manager.add_one_req(
+        _user_msg(1, hidden_states=pooled, pin_key="switchyard:conv-7")
+    )
+    (pending,) = prefill_manager.pending_list
+    assert pending.pin_key == "switchyard:conv-7"
+    assert pending.session_id is None
+    batch = prefill_manager.schedule_next_batch(len(PROMPT))
+    assert batch is not None
+    (req,) = batch.reqs
+    assert req.pin_key == "switchyard:conv-7"
+    assert req.session_id is None
+    (note,) = batch.prefix_notes
+    handle, prompt_tokens, is_pooled, session_key = note
+    assert handle is req.cache_handle
+    assert prompt_tokens == len(PROMPT)
+    assert is_pooled is True
+    assert session_key == "switchyard:conv-7"
+    cache_manager.allocate_paged(batch.reqs)
+    req.complete_one()
+    cache_manager.cache_req(req, finished=True)
+
+    # A plain leased turn carries the same key on both fields; pin_key is preferred.
+    prefill_manager.add_one_req(_user_msg(2, session_id="lease-a", pin_key="lease-a"))
+    batch = prefill_manager.schedule_next_batch(len(PROMPT))
+    assert batch is not None
+    (_, _, is_pooled, session_key) = batch.prefix_notes[0]
+    assert is_pooled is False
+    assert session_key == "lease-a"
+    (req,) = batch.reqs
+    cache_manager.allocate_paged(batch.reqs)
+    req.complete_one()
+    cache_manager.cache_req(req, finished=True)
+
+    # No pin key (an offline/legacy producer): session_id is the fallback.
+    prefill_manager.add_one_req(_user_msg(3, session_id="lease-b"))
+    batch = prefill_manager.schedule_next_batch(len(PROMPT))
+    assert batch is not None
+    assert batch.prefix_notes[0][3] == "lease-b"
+
+    # Neither: no key, and the note says so.
+    (req,) = batch.reqs
+    cache_manager.allocate_paged(batch.reqs)
+    req.complete_one()
+    cache_manager.cache_req(req, finished=True)
+    prefill_manager.add_one_req(_user_msg(4))
+    batch = prefill_manager.schedule_next_batch(len(PROMPT))
+    assert batch is not None
+    assert batch.prefix_notes[0][3] is None
+
+
+def test_pin_key_survives_chunked_prefill():
+    """Each continuation builds a fresh Req; the pin key must ride every chunk."""
+    cache_manager, _, prefill_manager = _build_managers()
+    prefill_manager.pending_list = [_pending(1)]
+    prefill_manager.pending_list[0].pin_key = "switchyard:conv-7"
+    seen = []
+    while prefill_manager.runnable:
+        batch = prefill_manager.schedule_next_batch(4)
+        assert batch is not None
+        (req,) = batch.reqs
+        seen.append(req.pin_key)
+        cache_manager.allocate_paged(batch.reqs)
+        req.complete_one()
+    assert len(seen) == len(PROMPT) // 4
+    assert seen == ["switchyard:conv-7"] * len(seen)

@@ -382,6 +382,7 @@ class PrefillAdder:
             session_ttl_seconds=pending_req.session_ttl_seconds,
             hidden_states=pending_req.hidden_states,
             no_prefix_cache=pending_req.no_prefix_cache,
+            pin_key=pending_req.pin_key,
         )
         # Hybrid GDN per-request state slots (None for non-hybrid). On a fresh admit these are
         # freshly allocated; on a chunked continuation they are inherited from the prior chunk.
@@ -686,6 +687,7 @@ class PrefillManager:
                 session_ttl_seconds=req.session_ttl_seconds,
                 hidden_states=req.hidden_states,
                 no_prefix_cache=req.no_prefix_cache,
+                pin_key=req.pin_key,
             )
         )
 
@@ -797,12 +799,14 @@ class PrefillManager:
                     # auto-pin decision, applied by the scheduler only once
                     # _prepare_batch has succeeded (a failed prep re-admits the prompt
                     # and must not count it twice). A file+pooled probe bypasses the
-                    # tree, so it is not a pooled hit candidate.
+                    # tree, so it is not a pooled hit candidate. The pin key is the
+                    # resolved client session id, carried lease-free so a hidden-state
+                    # probe (session_id None) still counts for cross-session pins.
                     spec = pending_req.hidden_states
                     batch_prefix_notes.append((
                         req.cache_handle, pending_req.input_len,
                         spec is not None and bool(spec.pooling) and spec.directory is None,
-                        getattr(req, "session_id", None),
+                        getattr(req, "pin_key", None) or getattr(req, "session_id", None),
                     ))
                 log_new_tokens += req.extend_len
                 if not is_continuation:

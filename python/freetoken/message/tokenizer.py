@@ -103,6 +103,8 @@ class TokenizeMsg(BaseTokenizerMsg):
     hidden_states: HiddenStateSpec | None = None
     # Force a full recompute of the prompt (see Req.no_prefix_cache).
     no_prefix_cache: bool = False
+    # Resolved client session id for the prefix auto-pin only (see Req.pin_key).
+    pin_key: str | None = None
 
 
 @dataclass

@@ -64,6 +64,11 @@ class Req:
     # next to the multimodal bypass. A pooled-only probe leaves it False and instead
     # matches only snapshot nodes that carry pooled sums (hybrid radix).
     no_prefix_cache: bool = False
+    # The resolved client session id (explicit session_id, else the header-inferred key)
+    # for the prefix auto-pin's cross-session rule, carried independently of session_id
+    # because a hidden-state probe binds no lease (session_id None) yet still belongs
+    # to a client session whose shared prefix should pin. Never takes a lease.
+    pin_key: str | None = None
     # The engine's HiddenStateCapture for this request (set by the collector on every
     # prefill chunk); the hybrid cache manager reads ``sums_at`` off it when it donates
     # a snapshot, to attach the prefix's pooled sums to the node.

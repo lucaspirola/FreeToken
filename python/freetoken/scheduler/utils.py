@@ -25,6 +25,8 @@ class PendingReq:
     hidden_states: HiddenStateSpec | None = None
     # Match against the empty prefix (see Req.no_prefix_cache).
     no_prefix_cache: bool = False
+    # Resolved client session id for the prefix auto-pin only (see Req.pin_key).
+    pin_key: str | None = None
 
     @property
     def input_len(self) -> int:

@@ -486,7 +486,11 @@ async def handle_chat_completion(
     # leasing it would only park the router's throwaway prompt in the radix tree and
     # serialize probes that Switchyard fires concurrently on one conversation.
     explicit_session = req.session_id is not None
-    spec.session_id = None if hidden_states is not None else chat_session_id(req, request)
+    session_key = chat_session_id(req, request)
+    spec.session_id = None if hidden_states is not None else session_key
+    # The prefix auto-pin keys on the resolved client session id regardless of the
+    # lease, so a probe fired on a conversation still counts as that conversation.
+    spec.pin_key = session_key
     spec.session_reclaimable = spec.session_id is not None and not explicit_session
     session_headers = (
         {"X-FreeToken-Session-Id": spec.session_id} if spec.session_id is not None else None

@@ -102,6 +102,34 @@ def test_pooled_probe_needs_no_server_directory():
     assert sent.session_id is None
 
 
+def test_pooled_probe_carries_the_client_session_as_a_lease_free_pin_key():
+    """The prefix auto-pin keys on the resolved client session id (docs/switchyard.md
+    §3a); the probe still binds no lease, so ``session_id`` stays None while ``pin_key``
+    is the header-derived key -- the same one a plain turn would lease."""
+    from freetoken.server.client_sessions import chat_session_id
+
+    from .test_openai_api import FakeRequest
+
+    request = FakeRequest(x_switchyard_session_id="conv-7")
+    state = _pooled_state(hidden_states_dir=None)
+    run(handle_chat_completion(probe_request(pooling="mean"), request, state, {}))
+    sent = state.sent
+    assert sent.session_id is None
+    assert sent.pin_key == chat_session_id(probe_request(pooling="mean"), request)
+    assert sent.pin_key is not None
+    # An explicit session_id on the probe is the key too, still without a lease.
+    explicit = probe_request(pooling="mean")
+    explicit.session_id = "conv-explicit"
+    state = _pooled_state(hidden_states_dir=None)
+    run(handle_chat_completion(explicit, None, state, {}))
+    assert state.sent.session_id is None
+    assert state.sent.pin_key == "conv-explicit"
+    # No session anywhere: no key, nothing to pin on.
+    state = _pooled_state(hidden_states_dir=None)
+    run(handle_chat_completion(probe_request(pooling="mean"), None, state, {}))
+    assert state.sent.pin_key is None
+
+
 def test_pooled_probe_accepts_any_ascending_layer_subset():
     state = _pooled_state(hidden_states_dir=None)
     run(handle_chat_completion(

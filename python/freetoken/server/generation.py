@@ -185,6 +185,11 @@ class GenSpec:
     #: or pooled) makes the request bypass prefix reuse so every prompt token is really
     #: forwarded.
     hidden_states: HiddenStateSpec | None = None
+    #: The resolved client session id (``server/client_sessions.chat_session_id``)
+    #: carried for the prefix auto-pin's cross-session rule only. Set on every chat
+    #: request, including a hidden-state probe whose ``session_id`` stays None so it
+    #: binds no lease; it never takes, restores or extends a lease.
+    pin_key: str | None = None
 
     @property
     def parse_tools(self) -> bool:
@@ -319,6 +324,7 @@ async def submit_generation(spec: GenSpec, state: Any) -> int:
             session_ttl_seconds=spec.session_ttl_seconds,
             session_reclaimable=spec.session_reclaimable,
             hidden_states=spec.hidden_states,
+            pin_key=spec.pin_key,
             # Only the file probe needs every position forwarded; a pooled-only probe
             # takes prefix hits that carry pooled sums (hybrid radix; see
             # freetoken/hidden_states.py) and forwards the rest.

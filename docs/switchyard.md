@@ -211,7 +211,9 @@ the 24 slots, donations had no free slot to land in and no request could hit at 
 a prefix that is **shared across sessions**. Every node on a hit's matched root path
 remembers the session keys of the requests that matched through it (at most two; the key
 is the resolved session id the API layer already binds — explicit `session_id`, else the
-header / `prompt_cache_key`-inferred lease key — carried as `Req.session_id`). The pin
+header / `prompt_cache_key`-inferred lease key — carried as `Req.pin_key`, so a
+hidden-state request pins on its client session id even though it still binds no lease
+and its `Req.session_id` stays None). The pin
 target is the deepest node on the path that two *different* keys have matched through and
 whose prefix is `>= N` tokens; a session re-matching its own history records itself and
 pins nothing, and a request with no session key neither records nor pins (both keys must
