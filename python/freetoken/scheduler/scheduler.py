@@ -35,7 +35,7 @@ from freetoken.utils import (
     load_toolcall_anchor_id,
 )
 
-from .cache import CacheManager
+from .cache import PIN_WORKING_SET_SLOTS_PER_REQUEST, CacheManager
 from .config import SchedulerConfig
 from .counters import build_scheduler_counters
 from .decode import DecodeManager
@@ -197,6 +197,12 @@ class Scheduler(SchedulerIOMixin):
             page_index_offset=(1 if growable_kv else 0),
             pin_prefix_min_tokens=getattr(config, "pin_prefix_min_tokens", 0),
             pin_prefix_max_tokens=getattr(config, "pin_prefix_max_tokens", 0),
+            pin_prefix_max_slots=getattr(config, "pin_prefix_max_slots", -1),
+            # The concurrency the GDN pool was sized for (linear_state_pool.py): the
+            # elastic initial tier when elastic, else max_running_req.
+            pin_working_set_slots=PIN_WORKING_SET_SLOTS_PER_REQUEST * (
+                getattr(config, "elastic_initial_requests", None) or config.max_running_req
+            ),
         )
         # Second-currency demand signal. ``ensure_mamba_slots`` can only reach UNLOCKED radix
         # snapshots, and an idle automatic session lease holds its node locked for as long as
@@ -2101,6 +2107,11 @@ class Scheduler(SchedulerIOMixin):
         from freetoken.kvcache.linear_state_pool import linear_pool_slots_for_capacity
 
         target_slots = linear_pool_slots_for_capacity(self.config, target)
+        # Pins are budgeted against the working set of the tier the pool is sized for;
+        # re-derive it for the target tier and let over-budget pins go before the shrink
+        # counts what it must evict (a pinned snapshot is locked and would defer it).
+        self.cache_manager.pin_working_set_slots = PIN_WORKING_SET_SLOTS_PER_REQUEST * target
+        self.cache_manager.enforce_pin_budget(pool_slots=target_slots)
         if target < self._elastic_capacity:
             # Unlocked snapshots are cache, not live agent state. Evict just enough
             # to fit the compact pool; protected session snapshots postpone shrink.
@@ -2448,8 +2459,8 @@ class Scheduler(SchedulerIOMixin):
         notes = getattr(batch, "prefix_notes", None)
         if note is None or not notes:
             return
-        for handle, prompt_tokens, pooled in notes:
-            note(handle, prompt_tokens, pooled=pooled)
+        for handle, prompt_tokens, pooled, session_key in notes:
+            note(handle, prompt_tokens, pooled=pooled, session_key=session_key)
         batch.prefix_notes = []
 
     def _adaptive_decode_burst(self) -> int:

@@ -41,6 +41,11 @@ class RadixTreeNode:
         # half with ``mamba_value``, since the end boundary is what it describes.
         self.pooled_sums: torch.Tensor | None = None
         self.pooled_count: int = 0
+        # Prefix auto-pin (CacheManager.note_prompt_admitted): session keys of requests
+        # that matched THROUGH this node, capped at two -- two distinct keys mean the
+        # prefix ending here is shared across sessions. ``split_at`` copies it to the
+        # root-side half (everyone who traversed the node traversed its prefix).
+        self.pin_sessions: set = set()
 
         # SWA second currency (SWARadixCache). Unlike the GDN snapshot above, SWA stores NO
         # separate slot: ``value`` (full-pool page indices) is canonical and the swa KV is
@@ -100,6 +105,7 @@ class RadixTreeNode:
         new_node.set_key_value(self._key[:pos], self._value[:pos])
         new_node.set_parent(parent)
         new_node.ref_count = self.ref_count
+        new_node.pin_sessions = set(self.pin_sessions)
         # SWA: a tombstone covers all the node's tokens, so both halves inherit it; both halves
         # stay within a locked window, so the swa lock copies; the window-boundary uuid migrates
         # to the root-side (prefix) node and is cleared on the suffix (matches sglang _split_node).

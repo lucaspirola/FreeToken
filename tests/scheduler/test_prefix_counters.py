@@ -29,7 +29,8 @@ def test_the_document_has_every_field_and_the_pin_gauges_start_at_zero():
     assert doc == {
         "hits": 0, "misses": 0, "hit_tokens": 0, "miss_tokens": 0,
         "pooled_hits": 0, "pooled_hit_tokens": 0,
-        "pinned_prefixes": 0, "pinned_tokens": 0, "pin_budget_refusals": 0,
+        "pinned_prefixes": 0, "pinned_tokens": 0, "pinned_slots": 0,
+        "pin_evictions": 0, "pin_budget_refusals": 0,
     }
 
 
@@ -51,7 +52,9 @@ def test_build_scheduler_counters_reads_the_manager_and_distinguishes_absent():
     doc = build_scheduler_counters(None, None, None)
     assert doc["prefix"] is None                          # no manager: off, not idle
 
-    counters = PrefixCounters(hits=3, hit_tokens=3000, pinned_prefixes=1, pinned_tokens=2048)
+    counters = PrefixCounters(hits=3, hit_tokens=3000, pinned_prefixes=1, pinned_tokens=2048,
+                              pinned_slots=1, pin_evictions=2)
     doc = build_scheduler_counters(cache_manager=SimpleNamespace(prefix_counters=counters))
     assert doc["prefix"]["hits"] == 3 and doc["prefix"]["pinned_tokens"] == 2048
+    assert doc["prefix"]["pinned_slots"] == 1 and doc["prefix"]["pin_evictions"] == 2
     assert json.loads(json.dumps(doc)) == doc

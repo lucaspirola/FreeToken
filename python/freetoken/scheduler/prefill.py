@@ -739,7 +739,7 @@ class PrefillManager:
         reqs: List[Req] = []
         chunked_list: List[PendingReq] = []
         prompt_admissions: List[Tuple[int, int, int]] = []
-        batch_prefix_notes: List[Tuple[object, int, bool]] = []
+        batch_prefix_notes: List[Tuple[object, int, bool, object]] = []
         # Snapshot here, before the forward's complete_one() advances cached_len: the tokens
         # forwarded this batch (extend_len) and the prefix-cache hit. SGLang counts the hit
         # once at admission, so continuation chunks (already-chunked reqs) contribute 0.
@@ -802,6 +802,7 @@ class PrefillManager:
                     batch_prefix_notes.append((
                         req.cache_handle, pending_req.input_len,
                         spec is not None and bool(spec.pooling) and spec.directory is None,
+                        getattr(req, "session_id", None),
                     ))
                 log_new_tokens += req.extend_len
                 if not is_continuation:

@@ -1002,9 +1002,25 @@ def parse_args(
         dest="pin_prefix_min_tokens",
         default=ServerArgs.pin_prefix_min_tokens,
         help=(
-            "Prefix auto-pin threshold (hybrid radix cache only). A cached prefix that a "
-            "second request reuses with cached_tokens >= this many is locked against "
-            "eviction until DELETE /v1/cache/pins. 0 disables pinning. Default 1024."
+            "Prefix auto-pin threshold (hybrid radix cache only). A cached prefix at least "
+            "this long that requests from two DIFFERENT sessions match through is locked "
+            "against eviction (a session's own next turn never pins). Released by a newer "
+            "pin over budget (LRU) or DELETE /v1/cache/pins. 0 disables pinning. "
+            "Default 1024."
+        ),
+    )
+
+    parser.add_argument(
+        "--pin-prefix-max-slots",
+        type=int,
+        dest="pin_prefix_max_slots",
+        default=ServerArgs.pin_prefix_max_slots,
+        help=(
+            "GDN state-slot budget for pinned prefixes (every pinned snapshot holds one "
+            "LinearStatePool slot). -1 = auto: the pool's snapshot-cache slots minus 2, "
+            "i.e. pool_slots - 4*concurrency - 3, never the per-request working set. Over "
+            "the budget the least-recently-matched pin is released first "
+            "(scheduler.prefix.pin_evictions). Default -1."
         ),
     )
 
@@ -1014,10 +1030,10 @@ def parse_args(
         dest="pin_prefix_max_tokens",
         default=ServerArgs.pin_prefix_max_tokens,
         help=(
-            "Total token budget for pinned prefixes. Once pinned tokens would exceed it, "
-            "new prefixes are not pinned (counted in /v1/stats "
-            "scheduler.prefix.pin_budget_refusals). Clamped to 25%% of the KV pool; "
-            "0 = that cap. Default 65536."
+            "Total KV token budget for pinned prefixes. Over it the least-recently-matched "
+            "pin is released first (scheduler.prefix.pin_evictions); a pin that does not "
+            "fit even an empty ledger is refused (pin_budget_refusals). Clamped to 25%% of "
+            "the KV pool; 0 = that cap. Default 65536."
         ),
     )
 
@@ -1185,6 +1201,8 @@ def parse_args(
         parser.error("--pin-prefix-min-tokens must be >= 0")
     if kwargs["pin_prefix_max_tokens"] < 0:
         parser.error("--pin-prefix-max-tokens must be >= 0")
+    if kwargs["pin_prefix_max_slots"] < -1:
+        parser.error("--pin-prefix-max-slots must be >= -1 (-1 = auto)")
     if kwargs["trace_dir"] is not None:
         # Expanded once here so ~ and $VAR resolve against the server's own environment.
         # Unlike --hidden-states-dir this may not exist yet: nothing outside the server

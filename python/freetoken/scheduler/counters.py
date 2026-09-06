@@ -190,8 +190,11 @@ class PrefixCounters:
     hidden-state probes (``kv_transfer_params.pooling``), which match only snapshot nodes
     carrying pooled sums; they are counted in ``hits`` / ``hit_tokens`` as well.
 
-    The pin fields are gauges (``pinned_prefixes``, ``pinned_tokens``) plus one counter
-    (``pin_budget_refusals``): see ``CacheManager.note_prompt_admitted``.
+    The pin fields are gauges (``pinned_prefixes``, ``pinned_tokens``, ``pinned_slots`` --
+    the GDN state slots the pinned snapshots hold) plus two counters: ``pin_evictions``
+    (pins released least-recently-matched-first to make room for a newer pin or after an
+    elastic resize) and ``pin_budget_refusals`` (a pin that would not fit even with every
+    other pin released): see ``CacheManager.pin_prefix``.
     """
 
     hits: int = 0
@@ -202,6 +205,8 @@ class PrefixCounters:
     pooled_hit_tokens: int = 0
     pinned_prefixes: int = 0
     pinned_tokens: int = 0
+    pinned_slots: int = 0
+    pin_evictions: int = 0
     pin_budget_refusals: int = 0
 
     def note_admitted(self, prompt_tokens: int, cached_len: int, *, pooled: bool = False) -> None:
@@ -225,6 +230,8 @@ class PrefixCounters:
             "pooled_hit_tokens": self.pooled_hit_tokens,
             "pinned_prefixes": self.pinned_prefixes,
             "pinned_tokens": self.pinned_tokens,
+            "pinned_slots": self.pinned_slots,
+            "pin_evictions": self.pin_evictions,
             "pin_budget_refusals": self.pin_budget_refusals,
         }
 

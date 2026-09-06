@@ -44,8 +44,9 @@ The serving-compliance half of that line:
 | `--force-nonempty-content` | A thinking turn that produces only reasoning answers with the reasoning text instead of an empty `content`. Switchyard treats empty content as a failed turn. |
 | `--max-output-tokens 16384` | Ceiling for a request that sends no `max_completion_tokens`. |
 | `--kv-cache-dtype q8_0` | FP8 KV (FreeToken block scales; the checkpoint's `k_scale`/`v_scale` are ignored). Requires `--attention-backend triton`. |
-| `--pin-prefix-min-tokens N` (default 1024; 0 disables) | Prefix auto-pin (hybrid radix cache): a cached prefix that a *second* request reuses with `cached_tokens >= N` is locked against eviction until `DELETE /v1/cache/pins`. See §3a. |
-| `--pin-prefix-max-tokens N` (default 65536; 0 = the cap) | Total pinned-token budget, clamped at startup to 25% of the KV pool (`num_pages x page_size`; the clamp is logged) because pins never release under pressure. Past it, new prefixes are not pinned and `scheduler.prefix.pin_budget_refusals` counts each refusal. |
+| `--pin-prefix-min-tokens N` (default 1024; 0 disables) | Prefix auto-pin (hybrid radix cache): a cached prefix at least `N` tokens long that requests from *two different sessions* match through is locked against eviction. A session's own next turn never pins. See §3a. |
+| `--pin-prefix-max-tokens N` (default 65536; 0 = the cap) | Pinned-KV budget, clamped at startup to 25% of the KV pool (`num_pages x page_size`; the clamp is logged). Over it the least-recently-matched pin is released first (`scheduler.prefix.pin_evictions`); a pin that does not fit even an empty ledger is refused (`pin_budget_refusals`). |
+| `--pin-prefix-max-slots N` (default -1 = auto) | Pinned GDN state-slot budget: every pinned snapshot holds one `LinearStatePool` slot. Auto = the pool's snapshot-cache slots minus 2, i.e. `pool_slots - 4 x concurrency - 3` (concurrency = `--elastic-initial-requests` when elastic, else `--max-running-requests`; re-derived on an elastic resize), so the 4-per-request working set is never touched. `0` disables snapshot pins (KV-only pins still possible). Same LRU release policy as the token budget. |
 
 Optional knobs that change the contract: `--no-context-preflight` (see §5),
 `--json-retry N` (see §4), `--hidden-states-dir DIR`, `--pooled-sink-dir DIR` (see §6).
@@ -196,25 +197,50 @@ that many conversations share (a long system prompt, a tool manifest, a reposito
 briefing). Under LRU pressure that shared prefix is evicted exactly as often as any other
 leaf, and every requester that lands after the eviction pays the prefill again.
 
-With `--pin-prefix-min-tokens N` (default 1024) the hybrid radix cache pins such a prefix the
-first time it is **reused**: when a prompt is admitted with `cached_tokens >= N`, the matched
-node's root path takes a persistent lock — the tree's own `inc_lock` (full-KV ref on
-node..root, recurrent-state ref on the node and on every snapshot-bearing ancestor), held by
-the cache manager instead of a request — so `evict_full` cannot take the path and
-`evict_mamba` cannot tombstone its snapshot. "Reused" needs no producer bookkeeping: a
-freshly admitted prompt has produced nothing, so any `cached_tokens > 0` at admission is by
-construction a second request on KV a first one donated. A prefix is pinned once
-(re-matching it is a no-op); a longer prompt through an already-pinned path adds only the
-tokens below it to the ledger.
+**A pin is a GDN state slot, not just KV.** A pinned snapshot node holds one
+`LinearStatePool` slot for as long as it is pinned, and that pool — not KV pages — is the
+binding resource on Nemotron-H: it is sized `4 x concurrency` (the per-request working set:
+live + 2 ping-pong + committed snapshot) plus a snapshot cache of `max(4, 2 x concurrency)`
+plus the padding sink, 24 slots at the production profile. The first version of this feature
+(c819a81) budgeted pins in KV tokens only and pinned any prefix a *second request* reused;
+every multi-turn session then pinned its own history on its second turn, 13 pins held 13 of
+the 24 slots, donations had no free slot to land in and no request could hit at all while
+`/v1/stats` looked healthy (`tasks/lessons.md`). The rules below are the fix.
 
-Pins are released only by **`DELETE /v1/cache/pins`** (returns the released
-`pinned_prefixes` / `pinned_tokens`), by a cache rebuild (the tree is discarded), or by a
-restart. `--pin-prefix-max-tokens` (default 65536) caps the total; a pin that would exceed
-it is refused whole and counted. **Pins never starve admission on purpose**: a pinned path is
-protected KV like a session lease, so a reserve or allocate that fails only because too much
-is protected fails exactly as it does today — the server logs one warning naming the pins
-and does *not* unpin automatically. If `pinned_tokens` is a large fraction of the pool and
-`prefill.refusals` / `fresh_admits_deferred` climb, lower the budget or `DELETE` the pins.
+**What pins.** With `--pin-prefix-min-tokens N` (default 1024) the hybrid radix cache pins
+a prefix that is **shared across sessions**. Every node on a hit's matched root path
+remembers the session keys of the requests that matched through it (at most two; the key
+is the resolved session id the API layer already binds — explicit `session_id`, else the
+header / `prompt_cache_key`-inferred lease key — carried as `Req.session_id`). The pin
+target is the deepest node on the path that two *different* keys have matched through and
+whose prefix is `>= N` tokens; a session re-matching its own history records itself and
+pins nothing, and a request with no session key neither records nor pins (both keys must
+be present and different). The producer of a node is not recorded (the commit path never
+learns the node), so the pin fires on the second distinct session seen matching through the
+node. The pin is the tree's own `inc_lock` (full-KV ref on node..root, recurrent-state ref
+on the node and every snapshot-bearing ancestor) held by the cache manager instead of a
+request, so `evict_full` cannot take the path and `evict_mamba` cannot tombstone its
+snapshot. Re-matching a pinned node only refreshes its last-match time; a longer shared
+prompt through a pinned path adds only the tokens and snapshots below it.
+
+**Budgets and release.** Two budgets, each charged with what a new pin adds on top of the
+nodes already locked: `--pin-prefix-max-slots` (state slots = mamba refs taken; default
+auto = `pool_slots - 4 x concurrency - 1 - 2`, i.e. the snapshot-cache part minus two,
+never the working set; re-derived when the elastic tier changes) and
+`--pin-prefix-max-tokens` (KV). When a new pin would exceed either, the **least-recently
+matched** pin is released first (`pin_evictions`); a pin that does not fit even an empty
+ledger is refused whole (`pin_budget_refusals`) without releasing anything. Releasing a pin
+drops every lock no remaining pin needs (a released ancestor's snapshot stays locked while
+a deeper pin still resumes from it). Pins are also released by **`DELETE /v1/cache/pins`**
+(returns the released `pinned_prefixes` / `pinned_tokens`), by a cache rebuild (the tree is
+discarded), by an elastic shrink whose target pool cannot carry them, or by a restart.
+Nothing else can take a pinned node: `evict_full` walks only unlocked leaves, `evict_mamba`
+only unlocked snapshots, `split_at` copies the ref count (and the recorded sessions) to the
+root-side half, and an elastic resize remaps slot ids in place. **Pins still never starve
+admission on purpose**: a reserve or allocate that fails only because too much is protected
+fails as it does for a session lease — the server logs one warning naming the pins and
+their slot budget. If `pinned_slots` sits at the budget while `prefix_tokens` stays at zero,
+the budget is too generous for the workload: lower `--pin-prefix-max-slots` or `DELETE`.
 The plain (non-hybrid) radix cache and the SWA radix are not pinned in this version.
 
 `/v1/stats` reports the reuse the admission gate actually saw under `scheduler.prefix`,
@@ -226,8 +252,9 @@ counted once per prompt on its first chunk (where `PromptAdmittedMsg` is built):
 | `hit_tokens` | sum of `cached_tokens` over hits. |
 | `pooled_hits`, `pooled_hit_tokens` | the subset of `hits` / `hit_tokens` taken by pooled hidden-state probes (`kv_transfer_params.pooling`), which only resume from snapshot nodes carrying pooled sums (see "Pooled requests and the prefix cache" in §6). |
 | `miss_tokens` | sum of the **full prompt length** over misses: the tokens the prefill forwards for them, last token included (`match_req` never matches the last token, so a repeated prompt is a hit with `cached_tokens = prompt_tokens - 1`). The forwarded remainder of a hit is `prompt_tokens_total - hit_tokens - miss_tokens`. |
-| `pinned_prefixes`, `pinned_tokens` | gauges: distinct pinned match nodes and the distinct tokens their root paths cover. |
-| `pin_budget_refusals` | pins refused by `--pin-prefix-max-tokens`. |
+| `pinned_prefixes`, `pinned_tokens`, `pinned_slots` | gauges: distinct pinned nodes, the distinct tokens their root paths cover, and the GDN state slots their snapshots (and locked snapshot ancestors) hold. |
+| `pin_evictions` | pins released least-recently-matched-first to fit a newer pin under `--pin-prefix-max-slots` / `--pin-prefix-max-tokens`, or on an elastic shrink. |
+| `pin_budget_refusals` | pins that would not fit either budget even with every other pin released. |
 
 ---
 

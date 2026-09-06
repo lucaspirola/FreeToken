@@ -77,11 +77,20 @@ def _parse(argv: list[str]):
 def test_pin_flags_default_and_parse():
     args = _parse([])
     assert (args.pin_prefix_min_tokens, args.pin_prefix_max_tokens) == (1024, 65536)
-    args = _parse(["--pin-prefix-min-tokens", "0", "--pin-prefix-max-tokens", "0"])
+    assert args.pin_prefix_max_slots == -1                    # auto: pool geometry minus 2
+    args = _parse(["--pin-prefix-min-tokens", "0", "--pin-prefix-max-tokens", "0",
+                   "--pin-prefix-max-slots", "3"])
     assert (args.pin_prefix_min_tokens, args.pin_prefix_max_tokens) == (0, 0)
+    assert args.pin_prefix_max_slots == 3
+    assert _parse(["--pin-prefix-max-slots", "0"]).pin_prefix_max_slots == 0   # no snapshot pins
 
 
 @pytest.mark.parametrize("flag", ["--pin-prefix-min-tokens", "--pin-prefix-max-tokens"])
 def test_negative_pin_flags_are_a_startup_error(flag):
     with pytest.raises(SystemExit):
         _parse([flag, "-1"])
+
+
+def test_max_slots_below_auto_is_a_startup_error():
+    with pytest.raises(SystemExit):
+        _parse(["--pin-prefix-max-slots", "-2"])

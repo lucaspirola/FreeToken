@@ -22,11 +22,15 @@ class SchedulerConfig(EngineConfig):
     max_prefill_seqs: int | None = None
     cache_type: str = "radix"
     # --- prefix auto-pin (scheduler/cache.py CacheManager.pin_prefix; hybrid radix only) ---
-    # A prefix reused by a second request with cached_len >= min is locked against eviction
-    # until DELETE /v1/cache/pins. 0 disables. max caps the total pinned tokens; past it new
-    # prefixes are not pinned (counted in /v1/stats scheduler.prefix.pin_budget_refusals).
+    # A prefix that two DIFFERENT sessions match through, >= min tokens long, is locked
+    # against eviction. 0 disables. max_tokens caps the pinned KV; max_slots caps the GDN
+    # state slots the pinned snapshots hold (-1 = auto: the pool's snapshot-cache slots
+    # minus 2, never the 4-per-request working set). Over either budget the least-recently
+    # matched pin is released first (scheduler.prefix.pin_evictions); a pin that does not
+    # fit even an empty ledger is refused (pin_budget_refusals).
     pin_prefix_min_tokens: int = 1024
     pin_prefix_max_tokens: int = 65536
+    pin_prefix_max_slots: int = -1
     # --- speculative decoding (scheduler/spec_ngram.py) ---
     # None disables it; "ngram" enables prompt-lookup (n-gram) speculation. Greedy-only and
     # single-stream in v1: a request with temperature > 0, or any step with more than one
