@@ -239,7 +239,7 @@ def test_build_scheduler_counters_distinguishes_off_from_idle():
     }
 
     assert build_scheduler_counters(None, None, None) == {
-        "prefill": None, "spec": None, "session_spill": None, "moe": None
+        "prefill": None, "spec": None, "session_spill": None, "moe": None, "prefix": None
     }
 
 

@@ -2444,7 +2444,7 @@ class Scheduler(SchedulerIOMixin):
     def _note_prefix_admissions(self, batch: Batch) -> None:
         """Prefix hit/miss counters and the auto-pin decision, once per prompt, after the
         batch is prepared (``getattr``: the loop tests drive stub managers/batches)."""
-        note = getattr(self.cache_manager, "note_prompt_admitted", None)
+        note = getattr(getattr(self, "cache_manager", None), "note_prompt_admitted", None)
         notes = getattr(batch, "prefix_notes", None)
         if note is None or not notes:
             return
