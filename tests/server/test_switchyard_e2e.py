@@ -418,3 +418,67 @@ def test_parser_defaults_and_subcommands():
     assert args.duration == "5m" and args.concurrency == 8
     assert args.context_window_tokens == 131072 and args.max_error_rate == 0.0
     assert parser.parse_args(["agents"]).func is sy.cmd_agents
+
+
+def test_contract_parser_accepts_via_router():
+    parser = sy.build_parser()
+    assert parser.parse_args(["contract"]).via_router is False
+    assert parser.parse_args(["contract", "--via-router"]).via_router is True
+
+
+class _FakeHealth:
+    def __init__(self, body):
+        self._body = body
+
+    def json(self):
+        if isinstance(self._body, Exception):
+            raise self._body
+        return self._body
+
+
+class _FakeClient:
+    base = "http://x"
+
+    def __init__(self, body):
+        self.http = self
+        self._body = body
+
+    def get(self, url, timeout=None):
+        assert url.endswith("/health")
+        return _FakeHealth(self._body)
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        ({"status": "ok", "model": "m", "version": "1", "instance_id": "i"}, False),
+        ({"status": "ok"}, True),
+        ({"model": "m"}, True),
+        ([], True),
+        (ValueError("not json"), True),
+    ],
+)
+def test_is_router_from_health_body(body, expected):
+    assert sy._is_router(_FakeClient(body)) is expected
+
+
+def test_session_checks_are_skipped_via_router(capsys):
+    checks = sy.Checks()
+    sy.check_session_header(None, "m", checks, via_router=True)
+    assert [r.ok for r in checks.results] == [None, None]
+    assert [r.name for r in checks.results] == list(sy._SESSION_CHECKS)
+    assert checks.failed() == [] and checks.counted() == []
+    assert len(checks.skipped()) == 2
+    assert all(r.detail == sy._ROUTER_SKIP for r in checks.results)
+    out = capsys.readouterr().out
+    assert out.count("[SKIP]") == 2
+
+
+def test_skipped_checks_do_not_count_as_pass_or_fail():
+    checks = sy.Checks()
+    checks.record("a", True)
+    checks.skip("b", "n/a")
+    checks.record("c", False)
+    assert [r.name for r in checks.counted()] == ["a", "c"]
+    assert [r.name for r in checks.failed()] == ["c"]
+    assert [r.name for r in checks.skipped()] == ["b"]

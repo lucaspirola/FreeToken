@@ -448,7 +448,7 @@ max_output_tokens = 512
 @dataclass
 class Result:
     name: str
-    ok: bool
+    ok: bool | None  # None: skipped -- neither a pass nor a fail
     detail: str = ""
 
 
@@ -462,8 +462,20 @@ class Checks:
         print(f"[{mark}] {name}{(': ' + detail) if detail else ''}", flush=True)
         return bool(ok)
 
+    def skip(self, name: str, reason: str) -> None:
+        """Record a check that does not apply to this target. Excluded from
+        the pass/fail count; the summary reports it separately."""
+        self.results.append(Result(name, None, reason))
+        print(f"[SKIP] {name}: {reason}", flush=True)
+
+    def counted(self) -> list[Result]:
+        return [r for r in self.results if r.ok is not None]
+
+    def skipped(self) -> list[Result]:
+        return [r for r in self.results if r.ok is None]
+
     def failed(self) -> list[Result]:
-        return [r for r in self.results if not r.ok]
+        return [r for r in self.results if r.ok is False]
 
 
 class Client:
@@ -504,6 +516,21 @@ class Client:
         ) as r:
             chunks = [c for c in r.iter_text()]
             return r.status_code, dict(r.headers), "".join(chunks)
+
+
+def _is_router(client: Client) -> bool:
+    """FreeToken's ``/health`` carries ``model`` and ``version``; the Switchyard
+    router's does not. Anything that fails to look like FreeToken is treated as
+    a router (it may also be unreachable -- the checks that follow will say so)."""
+    try:
+        body = client.http.get(f"{client.base}/health", timeout=5.0).json()
+    except Exception:  # noqa: BLE001 -- not FreeToken, or not up
+        return True
+    return not (isinstance(body, dict) and "version" in body and "model" in body)
+
+
+#: Why the session-header checks do not apply through the router.
+_ROUTER_SKIP = "router does not relay upstream response headers; forwarding verified separately"
 
 
 def _served_max_len(client: Client, checks: Checks) -> int:
@@ -670,9 +697,25 @@ def check_context_overflow(
     )
 
 
-def check_session_header(client: Client, model: str, checks: Checks) -> None:
+_SESSION_CHECKS = (
+    "x-switchyard-session-id -> stable X-FreeToken-Session-Id",
+    "session id echoed on the streaming response too",
+)
+
+
+def check_session_header(
+    client: Client, model: str, checks: Checks, via_router: bool = False
+) -> None:
     """``x-switchyard-session-id`` must bind the turn to a KV lease and be echoed
-    as ``X-FreeToken-Session-Id``, stably across turns of one conversation."""
+    as ``X-FreeToken-Session-Id``, stably across turns of one conversation.
+
+    Through the Switchyard router both checks fail by construction (the router
+    builds its own response and never relays upstream headers), so they are
+    skipped there rather than counted."""
+    if via_router:
+        for name in _SESSION_CHECKS:
+            checks.skip(name, _ROUTER_SKIP)
+        return
     session = f"e2e-{int(time.time())}"
     headers = {"x-switchyard-session-id": session}
     seen: list[str | None] = []
@@ -689,7 +732,7 @@ def check_session_header(client: Client, model: str, checks: Checks) -> None:
         seen.append(r.headers.get("X-FreeToken-Session-Id"))
     ok = all(s for s in seen) and seen[0] == seen[1]
     checks.record(
-        "x-switchyard-session-id -> stable X-FreeToken-Session-Id",
+        _SESSION_CHECKS[0],
         ok,
         f"turn1={seen[0]!r} turn2={seen[1]!r}",
     )
@@ -704,7 +747,7 @@ def check_session_header(client: Client, model: str, checks: Checks) -> None:
     )
     echoed = stream_headers.get("x-freetoken-session-id")
     checks.record(
-        "session id echoed on the streaming response too",
+        _SESSION_CHECKS[1],
         echoed == seen[0] and echoed is not None,
         f"streamed={echoed!r}",
     )
@@ -829,12 +872,15 @@ def cmd_contract(args: argparse.Namespace) -> int:
     client = Client(args.base_url, timeout=args.timeout)
     checks = Checks()
     try:
+        via_router = bool(getattr(args, "via_router", False)) or _is_router(client)
+        if via_router:
+            print("target looks like the Switchyard router (not FreeToken)", flush=True)
         served_max = _served_max_len(client, checks)
         check_max_completion_tokens(client, args.model, checks)
         check_reasoning_fields(client, args.model, checks)
         check_cached_tokens(client, args.model, checks)
         check_json_schema_verdict(client, args.model, checks)
-        check_session_header(client, args.model, checks)
+        check_session_header(client, args.model, checks, via_router=via_router)
         check_tool_call(client, args.model, checks)
         if served_max:
             check_context_overflow(client, args.model, served_max, checks)
@@ -843,9 +889,14 @@ def cmd_contract(args: argparse.Namespace) -> int:
     finally:
         client.close()
     failed = checks.failed()
-    print(
-        f"\n{len(checks.results) - len(failed)}/{len(checks.results)} contract checks passed"
-    )
+    counted = checks.counted()
+    skipped = checks.skipped()
+    summary = f"\n{len(counted) - len(failed)}/{len(counted)} contract checks passed"
+    if skipped:
+        summary += f", {len(skipped)} skipped"
+    print(summary)
+    for r in skipped:
+        print(f"  SKIPPED: {r.name}: {r.detail}")
     for r in failed:
         print(f"  FAILED: {r.name}: {r.detail}")
     return 1 if failed else 0
@@ -1063,6 +1114,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="wire-contract checks against FreeToken",
     )
     c.add_argument("--timeout", type=float, default=300.0)
+    c.add_argument(
+        "--via-router",
+        action="store_true",
+        help="target is the Switchyard router, not FreeToken: skip the checks "
+        "that need upstream response headers (auto-detected from /health)",
+    )
     c.set_defaults(func=cmd_contract)
 
     s = sub.add_parser(
