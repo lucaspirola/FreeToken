@@ -2623,3 +2623,275 @@ active +5,551,756, missing +2,590,637 → **53.3 % decode expert-cache hit rate 
 `resources.csv`, `soakStage.log`, `soakPass.log`, `phase_{stage,pass}.log`,
 `stats_after_soak{Stage,Pass}.json`, `stats_{before,after}_probe.json`, `soakStage/`, `soakPass/`.
 Phase windows for `gaps.py`: stage `1788641845 1788643184`, passthrough `1788643184 1788644522`.
+
+---
+
+# Run against `670969f` (2026-09-06, MoE 512 bucket + load-phase RAM watchdog + quiet streaming disconnect) — **PASS on every criterion, both routes**
+
+Tree: `670969f`, **clean**. New since §AA (`8429411`): `22478ef` (ruff only), `9afd48c` (gguf
+stale-build guard, not on this model's path), `7261fa8` (ops tools + an `analyze.py` `__main__`
+guard — verified: it still runs as a script, every number below came out of it), and `670969f`
+itself: **(a)** a MoE prefill **"512" bucket at `BLOCK_M=32`** so `384 < M <= 768` uses it
+(`640 < M <= 768` moves down from the 1024 bucket), with `FREETOKEN_NVFP4_PREFILL_SKIP_BUCKETS=512`
+restoring the old table; **(b)** a **load-phase RAM watchdog** `SOAK_RAM_LOAD_ABORT_GIB`
+(default 0.8) armed on the READY poll, plus `SOAK_HOST_RAM_RESERVE_GB` on `serve.sh`
+(§AA9.2/§AA9.5); **(c)** a **streaming** client disconnect now ends the stream quietly
+(`ClientGone`) instead of raising.
+
+**Verdict: PASS.** All six criteria met on both routes, the ASGI-traceback criterion now covering
+the streaming shape as well.
+
+| criterion | stage | passthrough |
+|---|---|---|
+| 0 errors | **0** ✅ | **0** ✅ |
+| ≤ 1 STALLED | **0** ✅ | **0** ✅ |
+| 0 invariant violations | **0** of 761 checks ✅ | **0** of 687 ✅ |
+| no gap ≥ 60 s | largest **23 s** ✅ | largest **32 s** ✅ |
+| `client_disconnect ≥ 2`, non-stream arm alone | **0 → 1 on its own**, then 1 → 2 ✅ | — |
+| zero `Exception in ASGI application` (both shapes) | **0** ✅ | **0** ✅ |
+
+## AB1. Exact commands
+
+```bash
+systemctl --user stop piro-board-embedder.service      # already inactive
+SOAK_EXTRA_ARGS="--moe-collect-stats" benchmarks/switchyard_soak/run.sh 670969f 20m
+uv run python benchmarks/switchyard_soak/split.py   benchmarks/switchyard_soak/runs/670969f
+uv run python benchmarks/switchyard_soak/analyze.py \
+  benchmarks/switchyard_soak/runs/670969f/phase_{stage,pass}.log
+uv run python benchmarks/switchyard_soak/analyze.py \
+  benchmarks/switchyard_soak/runs/670969f/stats_after_soak{Stage,Pass}.json \
+  benchmarks/switchyard_soak/runs/670969f/stats_{before,after}_probe.json
+uv run python benchmarks/switchyard_soak/gaps.py \
+  benchmarks/switchyard_soak/runs/670969f/phase_stage.log 30 1788658085 1788659456
+uv run python benchmarks/switchyard_soak/gaps.py \
+  benchmarks/switchyard_soak/runs/670969f/phase_pass.log  30 1788659456 1788660779
+```
+
+Reference profile throughout: `SOAK_HOST_RAM_RESERVE_GB` and
+`FREETOKEN_NVFP4_PREFILL_SKIP_BUCKETS` both left **unset**, so `--host-ram-reserve-gb 6` and the
+new 512 bucket are what ran.
+
+## AB2. Result
+
+| | stage | passthrough |
+|---|---|---|
+| verdict (client) | **PASS** | **PASS** |
+| requests / successes / failures | **635 / 635 / 0** | **1977 / 1977 / 0** |
+| error rate | 0.0000 % | 0.0000 % |
+| STALLED intervals | **0** | **0** |
+| p50 / p95 / p99 ms | 24,306 / **72,515** / 118,640 | 6,655 / **27,371** / 52,456 |
+| health / metrics checks, failures | 20 + 20, 0 | 20 + 20, 0 |
+| invalid-request canaries / failures | 3 / 0 | 3 / 0 |
+| detected server restarts | 0 | 0 |
+| scenario failures | none (5/5) | none (5/5) |
+| error records | 0 | 0 |
+| **finishability invariant violations** | **0** | **0** ✅ |
+
+Per-scenario successes — stage: growing-conversation 131, prefix-reuse 131, tool-call-burst 128,
+large-tool-catalog 124, long-context 121. Passthrough: prefix-reuse 397, growing-conversation 395,
+large-tool-catalog 395, long-context 395, tool-call-burst 395.
+
+## AB3. Against §AA (`8429411`), with §Z for reference
+
+| | §Z stage | §AA stage | **§AB stage** | §Z pass | §AA pass | **§AB pass** |
+|---|---|---|---|---|---|---|
+| requests | 704 | 608 | **635** | 2,016 | 2,138 | **1,977** |
+| errors / STALLED | 0/0 | 0/0 | **0/0** ✅ | 0/0 | 0/0 | **0/0** ✅ |
+| p50 ms | 22,160 | 24,642 | **24,306** | 6,651 | 6,408 | 6,655 |
+| p95 ms | 70,865 | 77,765 | **72,515** | 25,946 | 25,991 | 27,371 |
+| p99 ms | 103,773 | 137,978 | **118,640** | 40,773 | 38,757 | 52,456 |
+| **invariant violations** | 0 | 0 | **0** ✅ | 0 | 0 | **0** ✅ |
+| invariant checks / passes | 790 | 793 | 761 | 691 | 751 | 687 |
+| `refusals` | 190 | 163 | **156** | 93 | 170 | **124** |
+| `fresh_admits_deferred` | 317 | 1,151 | **246** | 107 | 82 | **68** |
+| **`fresh_admits_blocked_by_cap`** | 150 | 66 | **20** | 151 | 310 | **165** |
+| `match.tokens_per_pass` | — | 105,323 | **70,554** | — | 96,887 | **96,728** |
+| `match.memo_hits` / `calls` | — | 1,658/3,847 = 43.1 % | **1,269/3,051 = 41.6 %** | — | 1,751/4,508 = 38.8 % | **1,680/4,149 = 40.5 %** |
+| `Released … (admission pressure)` | 439 | 507 | **471** | 563 | 667 | **718** |
+| mean lanes / prefill batch | 3.79 | 3.04 | **3.43** | 4.43 | 4.62 | **4.09** |
+| mean `#running-req` (decode) | 10.32 | 10.29 | **10.76** | 11.92 | 12.10 | **12.44** |
+| decode agg tok/s, median all | 77.5 | 71.5 | 71.6 | 160.0 | 170.8 | 154.8 |
+| decode agg tok/s @ `== 16` | 102.0 (n=23) | 87.2 (n=9) | **93.4 (n=16)** | 196.2 (n=97) | 200.5 (n=122) | 169.8 (n=84) |
+| **prefill instant tok/s (median)** | 2,819 | 2,719 | **3,194 (+17.5 %)** | 1,846 | 2,317 | **1,138 (−51 %)** |
+| **effective new-token prefill rate** | 2,570 | 2,411 | **2,581 (+7.1 %)** | 2,181 | 2,448 | **1,986 (−18.9 %)** |
+| prefill median `#new-token` | — | 3,861 | **5,148** | — | 4,486 | **2,454** |
+| prefix reuse | 86.0 % | 83.6 % | **82.5 %** | 88.9 % | 87.9 % | **89.8 %** |
+| starvation signature | 0.1 % | 0.1 % | **0.0 %** | 0.0 % | 0.0 % | **0.0 %** |
+| leading / trailing silence | 2 s / 3 s | 44 s / 1 s | **2 s / 0 s** | 0 s / 0 s | 2 s / 0 s | **1 s / 0 s** |
+| scheduling wall clock | 99.6 % | 96.6 % | **99.9 %** | 100.0 % | 99.9 % | **99.9 %** |
+| **gaps ≥ 30 s** | 0 | 0 | **0** ✅ | 0 | 1 (36 s) | **1 (32 s)** ✅ |
+| largest gap of any size | 13 s | 13 s | 23 s | 18 s | 36 s | **32 s** |
+| decode batches run eager | 0/492 | 0/489 | **0/459** | (same run) | (same run) | (same run) |
+| session spills / restores | 1,377 / 439 | 1,542 / 479 | **1,475 / 421** | | | |
+| `restores_deferred` | 1 | 3 | **3** | | | |
+| ASGI tracebacks | 0 | 0 | **0** ✅ | 0 | 0 | **0** ✅ |
+
+### The 512 bucket: **positive on stage, confounded on passthrough, not clearly worse**
+
+* **Stage — clearly positive.** Instant prefill median **3,194 tok/s, +17.5 % over §AA** (best
+  since §X's 3,469) and effective new-token rate **2,581 tok/s, +7.1 %**, at *lower* prefix reuse
+  (82.5 % vs 83.6 %, i.e. more new work) over 635 requests instead of 608, with p95 −6.8 % and
+  p99 −14.0 % against §AA. Stage is the heavier-prefill route and it improved on every prefill
+  axis.
+* **Passthrough — down, but on 20 % less prefill work.** Effective rate 1,986 vs 2,448 (−18.9 %)
+  and instant median 1,138 vs 2,317 (−51 %). The phase carried **2.63 M new tokens against §AA's
+  3.28 M (−19.8 %)** at a *higher* prefix reuse (89.8 % vs 87.9 %) over 1,977 vs 2,138 requests —
+  **1,329 new tokens per request against §AA's 1,532 (−13 %)** — and its median chunk nearly
+  halved (`#new-token` 2,454 vs 4,486). Instant tok/s is a per-pass measure and a halved chunk
+  depresses it mechanically, so most of the −51 % is chunk size, not kernel speed.
+* **Aggregate over both phases**: 6.17 M new tokens in 2,694 s = **2,290 tok/s**, against §AA's
+  6.51 M in 2,677 s = 2,431 (−5.8 %) and §Z's 6.28 M in 2,663 s = 2,357 (−2.8 %).
+
+**Read: neutral-to-positive, with the passthrough number unresolved.** Nothing here is the
+signature of a slower kernel — the route that pushed the most new tokens per second got *faster*
+— but the aggregate is 5.8 % under §AA and the bucket is the only prefill change in the diff. If
+a later soak repeats a low passthrough effective rate on comparable work, the A/B is one env var:
+`FREETOKEN_NVFP4_PREFILL_SKIP_BUCKETS=512`. Ticketed §AB9.1.
+
+### Reclaim over-spill watch (§AA9.1): **stable, not worsening**
+
+| | §Z | §AA | **§AB** |
+|---|---|---|---|
+| `Released … (admission pressure)` | 1,002 | 1,174 | **1,189** (+1.3 %) |
+| session spills | 1,377 | 1,542 | **1,475** (−4.3 %) |
+| session restores | 439 | 479 | **421** (−12.1 %) |
+| `restores_deferred` | 1 | 3 | 3 |
+| prefix reuse, stage | 86.0 % | 83.6 % | 82.5 % |
+| prefix reuse, passthrough | 88.9 % | 87.9 % | **89.8 %** |
+
+The reclaim arm keeps firing at §AA's rate (+1.3 %) but the **cost stopped growing**: spills −4.3 %
+and restores −12.1 % against §AA, all with 0 failures, and passthrough prefix reuse **recovered
+above §Z** (89.8 % vs 88.9 %). Stage reuse drifted a further 1.1 pp down, on a phase that
+deliberately carried more new tokens. §AA9.1 stays open as a watch, but there is no escalation.
+
+### `fresh_admits_blocked_by_cap` halved
+
+**185 run-wide (20 stage / +165 passthrough)** against §AA's 376, §Z's 301 and §Y's 204 — the
+lowest of the four post-livelock soaks, with `refusals` also down (280 vs 333) and
+`fresh_admits_deferred` down (314 vs 1,233). The `max_chunked_prefills = 8` cap still binds, but
+this run pressed it least.
+
+### The radix memo holds
+
+7,202 walks over 120,264,406 matched tokens, **2,949 memo hits (40.9 %)**, **82,826 tokens/pass**
+run-wide (§AA 101,069 at 40.8 %). Stage 70,554 tokens/pass at 41.6 %; passthrough phase 96,728 at
+40.5 %. The hit rate is reproducible to 0.1 pp across two soaks; the per-pass token volume tracks
+queue depth, as documented.
+
+## AB4. Invariant, fatals, markers
+
+| check | stage | passthrough | whole run |
+|---|---|---|---|
+| `finishability invariant violated` (`=warn`) | 0 | 0 | **0** ✅ |
+| invariant checks (counter) | 761 | 687 | **1,452** |
+| worst shortfall (counter) | 0 | 0 | **0 tokens** |
+| `committed_pages_required` | 0 | 0 | **0** |
+| `LinearStatePool exhausted` | 0 | 0 | **0** |
+| `Eviction did not free enough space` | 0 | 0 | **0** |
+| oversize `can never be admitted` | 0 | 0 | **0** |
+| `Traceback (most recent call last)` | 0 | 0 | **0** ✅ |
+| `Exception in ASGI application` | 0 | 0 | **0** ✅ (streaming shape included) |
+| engine ERROR / CRITICAL lines | 0 | 0 | **0** |
+| `/health` non-ok | 0 | 0 | **0** (no `health_bad.log`) |
+| aborts (`client_disconnect`/`error`/`explicit`) | 0/0/0 | 0/0/0 | **2**/0/0 (the probe) |
+
+Deadlock signature (§T): leading silence 2 s / 1 s, **trailing silence 0 s / 0 s**, scheduling wall
+clock **99.9 % / 99.9 %** — §AA's 44 s of stage leading silence was a cold start and does not
+repeat (`READY after 29 s` here against 85 s). **Zero gaps ≥ 30 s on stage** (largest 23 s);
+passthrough has **one 32 s gap** at 05:59:05 at `usage=0.77 queue=10 running=5` — the familiar
+spill / `KV protection (admission pressure)` burst, in family with §AA's 36 s and §X's 34 s and
+well inside the 60 s criterion.
+
+`#mamba-slot` full occupancy: 56 stage / 46 passthrough prefill passes at mamba usage 1.00, 7 / 10
+decode batches at 1.00; `LinearStatePool exhausted` 0. `KV grew` 3 (stage), `KV shrank` 0.
+1,077 `client tokens diverge` INFO lines.
+
+## AB5. Disconnect probe — both shapes, now both quiet
+
+| | active 0 → 1 → 0 | `requests.aborts.client_disconnect` |
+|---|---|---|
+| non-streaming | yes, back to 0 in 2 s | 0 → **1** ✅ **on its own** |
+| streaming | yes, back to 0 in 2 s | 1 → **2** ✅ |
+| **total across the probe** | active back to **0** | **+2** — required ≥ 2 ✅ |
+
+`670969f`'s streaming change is validated by absence: **0** `Exception in ASGI application` lines
+in the whole run, the streaming probe included. `125da19` had already silenced the non-streaming
+shape (§Z); both shapes now abort, count, and log nothing. `client_disconnect` stayed 0 through
+both traffic phases.
+
+## AB6. MoE decode counters
+
+| snapshot | `layer_calls` | `active` | `missing` |
+|---|---|---|---|
+| after stage (uptime 1,271 s) | 178,572 | 7,036,925 | 3,634,173 |
+| after passthrough (uptime 2,505 s) | **427,754** | 12,649,525 | 6,293,750 |
+| after probe (uptime 2,512 s) | 428,812 | 12,660,214 | 6,295,861 |
+
+Monotone across 16 elastic capacity changes and 20 graph captures. Passthrough phase:
+active +5,612,600, missing +2,659,577 → **52.6 % decode expert-cache hit rate at c=16**, against
+§AA 53.3 %, §Z 52.9 %, §Y 53.0 % — **four soaks inside 0.7 pp**. Stage 48.4 %; lifetime 50.3 %.
+
+**Extend-cache gate fell sharply**: **4.3 % of 32,982** routed extend layer-forwards (§AA 5.7 %,
+§Z 6.5 %), and stage alone reads **1.5 % of 17,089** against §AA's 4.7 %. The gate fires on small
+extends and the 512 bucket is the only thing in the diff that changes which M lands where, so
+this is the one other place the bucket shows up; it is a routing-mix observation, not a fault
+(0 errors, prefill on this route got faster). Noted in §AB9.1.
+
+## AB7. Host behaviour
+
+* **Load-phase watchdog (new, §AA9.2): armed and correct, but not stress-tested.** `driver.log`
+  records `ram gates: start>=26 load_abort<0.8 warn<4 abort<2 GiB` and then
+  **`load phase cleared the 0.8 GiB floor; MemAvailable now 11.4 GiB`**. The **load-phase minimum
+  was 8.0 GiB** over 6 samples — this load was warm (`READY after 29 s` against §AA's 85 s), so
+  the guard never came near firing. §AA's 1.1 GiB dip was a cold-page-cache 85 s load; the guard
+  is right but its first real test is still ahead.
+* Serving-phase `MemAvailable`: median 6.6 GiB, **floor 2.3 GiB** (§AA 4.6, §Z 4.0, §Y 2.8) — the
+  worst running floor since §Y, 0.3 GiB above the `SOAK_RAM_ABORT_GIB=2` watchdog, which did not
+  fire. `SOAK_HOST_RAM_RESERVE_GB` now exists to raise the reserve without editing `serve.sh`
+  (§AB9.2).
+* Busiest FreeToken process: **median 108.8 % CPU**, max 1,522.0 % — flat across §Y/§Z/§AA/§AB
+  (107.9 / 108.9 / 107.9 / 108.8), no sustained-100 % window.
+* GPU **13.98 GiB median, 14.56 GiB peak** (§AA 13.66 / 15.49); top-process RSS median 20.1 GiB,
+  peak 23.1 GiB. Elastic capacity changes 16, 20 graph captures; **0 of 459 decode batches eager**.
+* **Graceful shutdown in 4 s, GPU back to 0 MiB**, no leftover venv processes.
+
+## AB8. What this run settles
+
+1. **`670969f` is safe to ship.** 0 errors, 0 STALLED, 0 invariant violations of 1,452 checks,
+   0 tracebacks, no gap ≥ 60 s, both disconnect arms counting — on both routes.
+2. **The streaming quiet-disconnect change is validated by absence**: 0 ASGI tracebacks with the
+   streaming probe exercised. Both shapes are now silent and counted.
+3. **The load-phase watchdog works** (armed, reported, cleared at an 8.0 GiB load minimum) but a
+   warm load did not test it.
+4. **The 512 bucket is not a regression on the evidence available**: stage prefill +17.5 % instant
+   / +7.1 % effective, passthrough down on 20 % less new work, aggregate −5.8 % vs §AA.
+5. **§AA9.1 (reclaim over-spill) is not escalating**: releases flat, spills −4.3 %, restores
+   −12.1 %, passthrough prefix reuse recovered to 89.8 %.
+6. **Four consecutive soaks with no §Y5b livelock** and a decode expert-cache hit rate reproducible
+   to 0.7 pp.
+
+## AB9. Still open after this run
+
+1. **512-bucket A/B (new).** Passthrough effective new-token rate 1,986 tok/s (§AA 2,448) and the
+   extend-cache gate at 1.5 % on stage (§AA 4.7 %) are the two places the bucket could be showing
+   through, both confounded by workload this run. One env var settles it:
+   `FREETOKEN_NVFP4_PREFILL_SKIP_BUCKETS=512` on a repeat passthrough phase.
+2. **Serving-phase RAM floor 2.3 GiB** — worst since §Y, 0.3 GiB of margin. `SOAK_HOST_RAM_RESERVE_GB`
+   now makes raising the reserve a one-liner; consider 7 for the next soak and record it as a
+   profile deviation.
+3. **The load-phase watchdog is unproven under a cold load.** The next cold-cache start is its
+   first real test; §AA's run is the reproduction (85 s load, 1.1 GiB minimum).
+4. `fresh_admits_blocked_by_cap` = 185, the lowest of the post-livelock soaks but still nonzero —
+   `max_chunked_prefills = 8` binds; unchanged ticket.
+5. Lane watch (§V7 ticket 1): stage **3.43** (§AA 3.04, §Z 3.79), passthrough **4.09** (§AA 4.62).
+   Both down, both far under ~5, errors and STALLED 0, starvation signature 0.0 % on both routes.
+6. `--moe-prefill-hit-d2d` still off in the P2 profile (`prefill_rows=0` in every snapshot), so
+   `13af13d`'s probe fix remains unexercised by a soak (§V7 ticket 3, unchanged).
+7. `Scheduler is idle` fired 0 times again; idle-gated diagnostics stay unreachable at c=16.
+
+## AB10. Artifacts
+
+`benchmarks/switchyard_soak/runs/670969f/` (gitignored): `driver.log`, `server.log`,
+`resources.csv`, `soakStage.log`, `soakPass.log`, `phase_{stage,pass}.log`,
+`stats_after_soak{Stage,Pass}.json`, `stats_{before,after}_probe.json`, `soakStage/`, `soakPass/`.
+Phase windows for `gaps.py`: stage `1788658085 1788659456`, passthrough `1788659456 1788660779`.
