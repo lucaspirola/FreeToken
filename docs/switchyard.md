@@ -461,13 +461,62 @@ bf16 over the artifact's own `token_ids` (HF's `hidden_states[i + 1]` is block `
 output). Per-layer cosine must exceed 0.99, which absorbs NVFP4/FP8 drift while still
 catching an off-by-one layer index, a final-norm leak, or a dropped prefill chunk.
 
+### First-step logprobs
+
+Opt-in, OpenAI-shaped, first token only: `"logprobs": true` with `"top_logprobs": k`
+(0..20) returns the **first sampled token's** logprob and the `k` most likely tokens of
+that same step under `choices[0].logprobs`. No later step is populated — the object has
+exactly one `content` entry — because the value comes from the final prefill chunk's
+logits row, computed eagerly where the sampler runs (prefill is never CUDA-graphed) and
+never on a decode step. With thinking on, that first token is the first *reasoning*
+token. `logprobs: true` without `top_logprobs` (or `0`) gives the sampled token's
+logprob with an empty `top_logprobs`; `top_logprobs > 20` and `top_logprobs > 0`
+without `logprobs: true` are 400s. Not requested → `choices[0].logprobs` is `null`.
+
+The distribution is `log_softmax` over the **full vocabulary of the raw logits** in
+float32, before temperature / top-p / top-k, so it is the model's own next-token
+distribution, comparable across requests with different sampling settings; the sampled
+token's `logprob` is read from that same distribution (with sampling on, it need not be
+the top entry). `token` is the tokenizer's decoding of the single id (a partial UTF-8
+piece decodes to U+FFFD); `bytes` is that string's UTF-8. Prefix reuse is unaffected: a
+fully cached prompt still forwards its last token, which is the row scored.
+
+```bash
+curl -s http://127.0.0.1:1919/v1/chat/completions -H 'content-type: application/json' -d '{
+  "model": "nemotron-3.5-lightning",
+  "messages": [{"role": "user", "content": "The capital of France is"}],
+  "max_completion_tokens": 4, "logprobs": true, "top_logprobs": 2
+}'
+```
+
+```json
+{
+  "id": "chatcmpl-7", "object": "chat.completion", "model": "nemotron-3.5-lightning",
+  "choices": [{"index": 0, "message": {"role": "assistant", "content": "Paris."},
+               "logprobs": {"content": [{
+                 "token": "Paris", "logprob": -0.031, "bytes": [80, 97, 114, 105, 115],
+                 "top_logprobs": [
+                   {"token": "Paris", "logprob": -0.031, "bytes": [80, 97, 114, 105, 115]},
+                   {"token": " Paris", "logprob": -3.9, "bytes": [32, 80, 97, 114, 105, 115]}
+                 ]}]},
+               "finish_reason": "stop"}],
+  "usage": {"prompt_tokens": 14, "completion_tokens": 2, "total_tokens": 16}
+}
+```
+
+On the stream path the same object rides on the **terminal chunk** (the one carrying
+`finish_reason`), next to `kv_transfer_params`: the first token's text delta may be held
+back by the reasoning parser or a partial stop string, so no earlier chunk is reliably
+the first token's. Every other chunk omits `logprobs`. `/v1/completions` keeps
+rejecting `logprobs` (400) as before.
+
 ---
 
 ## 7. Known limitations
 
 | Not supported | Behavior |
 |---|---|
-| `logprobs` / `top_logprobs > 0` | 400 `invalid_request_error`. Switchyard never sends them; `top_logprobs: 0` is accepted. |
+| `logprobs` beyond the first token | `logprobs: true` returns the first sampled token only (§6, "First-step logprobs"); `top_logprobs > 20`, or `> 0` without `logprobs: true`, is a 400. Switchyard sends `top_logprobs: 0`, a no-op. |
 | `n > 1` | 400 "Only n=1 is supported". Switchyard never sends `n`. |
 | `logit_bias`, `function_call` (legacy) | 400. Use `tools`/`tool_choice`. |
 | `seed` | Ignored; Switchyard never sends it. |
@@ -478,7 +527,8 @@ catching an off-by-one layer index, a final-norm leak, or a dropped prefill chun
 Everything Switchyard *does* send is supported: `max_completion_tokens` (it never
 sends `max_tokens`), `tools`/`tool_choice`/`parallel_tool_calls`, `temperature`,
 `top_p`, `stream` + `stream_options`, `reasoning_effort`, `response_format`,
-`prompt_cache_key`, `user`, `stop`, and the `developer` role (mapped to `system` for
+`prompt_cache_key`, `user`, `stop`, `logprobs`/`top_logprobs` (first step, §6), and the
+`developer` role (mapped to `system` for
 non-Harmony templates). Responses carry `reasoning_content` (Switchyard also accepts
 `reasoning`), `usage.prompt_tokens_details.cached_tokens`,
 `usage.completion_tokens_details.reasoning_tokens`, and terminate SSE with `[DONE]`.

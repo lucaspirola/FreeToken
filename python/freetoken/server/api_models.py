@@ -172,12 +172,15 @@ class ChatCompletionRequest(BaseModel):
     # re-validating the wire shape on every request; /v1/completions keeps the
     # untyped field because it still rejects the feature.
     response_format: ResponseFormat | None = None
-    # Accepted-and-ignored OpenAI fields Switchyard sends. Typed (not swallowed by
-    # extra="allow") so they are visible to the handler: `prompt_cache_key` is a
-    # session-affinity hint (bound to a KV session by the sessions layer),
-    # `top_logprobs` is rejected only when > 0 since logprobs are unsupported.
+    # Accepted OpenAI fields Switchyard sends. Typed (not swallowed by extra="allow")
+    # so they are visible to the handler: `prompt_cache_key` is a session-affinity hint
+    # (bound to a KV session by the sessions layer); `logprobs: true` returns the FIRST
+    # sampled token's logprob with its `top_logprobs` (0..20) most likely alternatives
+    # (docs/switchyard.md, "First-step logprobs"). `top_logprobs: 0` without `logprobs`
+    # is the no-op Switchyard sends.
     prompt_cache_key: str | None = None
     user: str | None = None
+    logprobs: bool | None = None
     top_logprobs: int | None = None
     # FreeToken extension: protect this conversation's completed KV until the next turn,
     # explicit close, disconnect/abort, or idle expiry.

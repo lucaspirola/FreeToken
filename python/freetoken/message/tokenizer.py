@@ -42,6 +42,10 @@ class DetokenizeMsg(BaseTokenizerMsg):
     # engine's HiddenStateCollector. Set once, on the reply that closes the prefill; None
     # on every ordinary request.
     kv_transfer_params: dict | None = None
+    # First-step logprobs (`SamplingParams.logprobs`): `{"token_ids": [sampled, top-1..
+    # top-k], "logprobs": [...]}` from the final prefill chunk's log_softmax. Set once,
+    # on the reply that carries the first sampled token; None otherwise.
+    first_logprobs: dict | None = None
     # KV page-pool usage snapshot at this step (not-evictable used/total), passed
     # through to the frontend for the shell status bar. 0/0 for owned-KV models.
     kv_used_pages: int = 0

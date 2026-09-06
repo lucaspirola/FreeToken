@@ -26,6 +26,12 @@ class SamplingParams:
     # Stop strings (OpenAI `stop` / Anthropic `stop_sequences`). Generation finishes when one
     # appears in the decoded output; the matched substring (and anything after) is trimmed.
     stop_strs: list[str] = field(default_factory=list)
+    # OpenAI `logprobs` / `top_logprobs` on /v1/chat/completions: the engine returns the
+    # first sampled token's logprob (`logprobs`) plus the `top_logprobs` most likely
+    # tokens of that same step, from the final prefill chunk's logits. Nothing for
+    # later steps (docs/switchyard.md, "First-step logprobs").
+    logprobs: bool = False
+    top_logprobs: int = 0
 
     @property
     def is_greedy(self) -> bool:

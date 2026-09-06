@@ -36,7 +36,7 @@ from freetoken.utils import (
 
 from .config import EngineConfig
 from .graph import GraphRunner, get_free_memory
-from .sample import BatchSamplingArgs, Sampler
+from .sample import BatchSamplingArgs, FirstStepLogprobs, Sampler
 from freetoken.kvcache import create_kv_pool, resolve_pool_class
 from freetoken.kvcache.base import CacheRebuildRejected
 from freetoken.kvcache.cache_status import _supports_swa_ratio
@@ -419,6 +419,9 @@ class ForwardOutput(NamedTuple):
     next_tokens_gpu: torch.Tensor
     next_tokens_cpu: torch.Tensor
     copy_done_event: torch.cuda.Event
+    # First-step logprobs for the prefill batch's opted-in requests (host tensors,
+    # valid after copy_done_event); None on decode and when nobody asked.
+    logprobs: FirstStepLogprobs | None = None
 
 
 class Engine:
@@ -1678,11 +1681,14 @@ class Engine:
         batch_logits = logits[: batch.size]
         next_tokens_gpu = self.sampler.sample(batch_logits, args).to(torch.int32)
         next_tokens_cpu = next_tokens_gpu.to("cpu", non_blocking=True)
+        # Eager and prefill-only (a decode batch returns None), so it never lands inside
+        # a captured graph; its copies ride the same stream ahead of copy_done_event.
+        logprobs = self.sampler.first_step_logprobs(batch, batch_logits, next_tokens_gpu)
         copy_done_event = torch.cuda.Event(
             enable_timing=self.config.moe_collect_stats
         )
         copy_done_event.record(self.stream)
-        return ForwardOutput(next_tokens_gpu, next_tokens_cpu, copy_done_event)
+        return ForwardOutput(next_tokens_gpu, next_tokens_cpu, copy_done_event, logprobs)
 
     @torch.inference_mode()
     def spec_verify_forward(self, batch: Batch) -> torch.Tensor:

@@ -101,6 +101,27 @@ def _map_developer_role(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+#: OpenAI's bound on ``top_logprobs``.
+MAX_TOP_LOGPROBS = 20
+
+
+async def _openai_logprobs(first_logprobs: dict, state: Any) -> dict[str, Any]:
+    """The engine's first-step ``{"token_ids", "logprobs"}`` -> OpenAI's
+    ``choices[].logprobs`` object with exactly one ``content`` entry: the first sampled
+    token, its ``top_logprobs`` the top-k of the same distribution. Token ids become
+    text through the frontend tokenizer, off the event loop."""
+    ids = first_logprobs["token_ids"]
+    manager = await asyncio.to_thread(state.frontend_tokenizer)
+    texts = await asyncio.to_thread(
+        lambda: [manager.tokenizer.decode([token_id]) for token_id in ids]
+    )
+    entries = [
+        {"token": text, "logprob": lp, "bytes": list(text.encode("utf-8"))}
+        for text, lp in zip(texts, first_logprobs["logprobs"], strict=True)
+    ]
+    return {"content": [{**entries[0], "top_logprobs": entries[1:]}]}
+
+
 def chat_request_to_genspec(
     req: ChatCompletionRequest,
     model_sampling: dict[str, Any],
@@ -140,17 +161,21 @@ def chat_request_to_genspec(
     messages = render_messages(wire_messages)
     if json_mode:
         messages = apply_json_instruction(messages, schema_instruction(json_schema))
+    sampling_params = resolve_sampling(
+        temperature=req.temperature,
+        top_k=req.top_k,
+        top_p=req.top_p,
+        max_tokens=req.max_tokens,
+        ignore_eos=req.ignore_eos,
+        model_sampling=model_sampling,
+        stop=req.stop,
+    )
+    if req.logprobs:
+        sampling_params.logprobs = True
+        sampling_params.top_logprobs = req.top_logprobs or 0
     return GenSpec(
         messages=messages,
-        sampling_params=resolve_sampling(
-            temperature=req.temperature,
-            top_k=req.top_k,
-            top_p=req.top_p,
-            max_tokens=req.max_tokens,
-            ignore_eos=req.ignore_eos,
-            model_sampling=model_sampling,
-            stop=req.stop,
-        ),
+        sampling_params=sampling_params,
         chat_template_kwargs=ctk,
         template_tools=_tools_for_template(req),
         parser_tools=(_all_tool_dicts(req.tools) if _should_parse_tools(req) else None),
@@ -367,12 +392,17 @@ async def handle_chat_completion(
         return create_error_response("logit_bias is not supported")
     if req.n != 1:
         return create_error_response("Only n=1 is supported", param="n")
-    # Switchyard forwards top_logprobs verbatim; 0 (or absent) asks for nothing, so
-    # only a positive value is a request we cannot serve.
-    if req.top_logprobs is not None and req.top_logprobs > 0:
+    # OpenAI's rule: top_logprobs needs logprobs=true and lies in 0..20. Switchyard
+    # forwards `top_logprobs: 0` without logprobs, which asks for nothing.
+    top_logprobs = req.top_logprobs or 0
+    if top_logprobs > MAX_TOP_LOGPROBS or top_logprobs < 0:
         return create_error_response(
-            "logprobs are not supported; omit top_logprobs or send 0",
+            f"top_logprobs must be between 0 and {MAX_TOP_LOGPROBS}; got {top_logprobs}",
             param="top_logprobs",
+        )
+    if top_logprobs > 0 and not req.logprobs:
+        return create_error_response(
+            "top_logprobs requires logprobs: true", param="top_logprobs"
         )
     # Case/whitespace and the "off" disable synonym stay accepted here because
     # effort_toggle_kwargs normalizes and honors them downstream.
@@ -509,6 +539,11 @@ async def handle_chat_completion(
             {
                 "index": 0,
                 "message": message,
+                "logprobs": (
+                    await _openai_logprobs(result.first_logprobs, state)
+                    if result.first_logprobs is not None
+                    else None
+                ),
                 "finish_reason": result.finish_reason,
             }
         ],
@@ -766,8 +801,19 @@ async def stream_chat_completion_chunks(
                 reasoning_tokens=reasoning_tokens,
                 finish_reason=ev.finish_reason,
             )
+            # First-step logprobs ride the terminal chunk (as kv_transfer_params does):
+            # the first token's delta may be held back by the reasoning parser or a
+            # partial stop string, so no earlier chunk is reliably "the first token's".
             chunk = _chat_chunk(
-                req, uid, [{"delta": {}, "index": 0, "finish_reason": ev.finish_reason}]
+                req, uid, [{
+                    "delta": {}, "index": 0,
+                    "logprobs": (
+                        await _openai_logprobs(ev.first_logprobs, state)
+                        if ev.first_logprobs is not None
+                        else None
+                    ),
+                    "finish_reason": ev.finish_reason,
+                }]
             )
             if ev.kv_transfer_params is not None:
                 # Streaming has no envelope to put this on but the terminal chunk. The

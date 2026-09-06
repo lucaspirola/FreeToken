@@ -788,8 +788,17 @@ class Scheduler(SchedulerIOMixin):
         # before it is no longer evidence that the next pass will refuse too.
         self._admission_stalled = False
 
-        batch, (_, next_tokens_cpu, copy_done) = last_data[0].batch, last_data[1]
+        batch, output = last_data[0].batch, last_data[1]
+        next_tokens_cpu, copy_done = output[1], output[2]
         copy_done.synchronize()
+        # Batch row -> entry index of the first-step logprobs that rode with this batch
+        # (prefill only; a ChunkedReq row never has one).
+        first_logprobs = getattr(output, "logprobs", None)
+        logprob_rows = (
+            {row: j for j, row in enumerate(first_logprobs.rows)}
+            if first_logprobs is not None
+            else {}
+        )
         # Optional for the same reason as the observer below: the low-level drain tests
         # call this with a scheduler-shaped stub.
         capture_states = getattr(self, "_capture_session_states", None)
@@ -894,6 +903,11 @@ class Scheduler(SchedulerIOMixin):
                             self._finish_hidden_states(req)
                             if batch.is_prefill
                             and getattr(req, "hidden_states", None) is not None
+                            else None
+                        ),
+                        first_logprobs=(
+                            first_logprobs.row(logprob_rows[i])
+                            if i in logprob_rows
                             else None
                         ),
                     )

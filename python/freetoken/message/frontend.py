@@ -59,6 +59,9 @@ class UserReply(BaseFrontendMsg):
     # The response's `kv_transfer_params` object for a hidden-state probe (Switchyard's
     # prefill router): `hidden_states_path` and/or `pooled`. None otherwise.
     kv_transfer_params: dict | None = None
+    # First-step logprobs, as DetokenizeMsg.first_logprobs (token ids; the API layer
+    # renders the strings). Set on the first token's reply only; None otherwise.
+    first_logprobs: dict | None = None
 
 
 @dataclass

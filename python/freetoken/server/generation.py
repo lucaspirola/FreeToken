@@ -126,6 +126,9 @@ class GenDone:
     #: (Switchyard's prefill router): the written artifact's ``hidden_states_path``
     #: and/or the inline ``pooled`` vectors. None unless the request opted in.
     kv_transfer_params: dict | None = None
+    #: First-step logprobs (``SamplingParams.logprobs``): ``{"token_ids": [sampled,
+    #: top-1..top-k], "logprobs": [...]}``. None unless the request opted in.
+    first_logprobs: dict | None = None
 
 
 GenEvent = ReasoningDelta | ContentDelta | ToolCallStart | ToolCallArgsDelta | ToolCallsDelta | GenDone
@@ -145,6 +148,8 @@ class GenResult:
     reasoning_tokens: int = 0
     #: See ``GenDone.kv_transfer_params``.
     kv_transfer_params: dict | None = None
+    #: See ``GenDone.first_logprobs``.
+    first_logprobs: dict | None = None
 
 
 @dataclass
@@ -949,6 +954,7 @@ async def _generate_events_core(uid: int, spec: GenSpec, state: Any) -> AsyncIte
     engine_finish_reason: str | None = None
     engine_matched_stop: str | None = None
     kv_transfer_params: dict | None = None
+    first_logprobs: dict | None = None
     async for ack in state.wait_for_ack(uid):
         if getattr(ack, "error", None):
             raise GenerationError(ack.error, getattr(ack, "error_code", None))
@@ -956,6 +962,7 @@ async def _generate_events_core(uid: int, spec: GenSpec, state: Any) -> AsyncIte
         completion_tokens += ack.completion_tokens_delta
         cached_tokens += ack.cached_tokens
         kv_transfer_params = getattr(ack, "kv_transfer_params", None) or kv_transfer_params
+        first_logprobs = getattr(ack, "first_logprobs", None) or first_logprobs
         content_delta = ack.incremental_output
         if reasoning_parser is not None and content_delta:
             was_reasoning = reasoning_parser.in_reasoning
@@ -1042,6 +1049,7 @@ async def _generate_events_core(uid: int, spec: GenSpec, state: Any) -> AsyncIte
         finish_reason, prompt_tokens, completion_tokens,
         matched_stop=engine_matched_stop, cached_tokens=cached_tokens,
         reasoning_tokens=reasoning_tokens, kv_transfer_params=kv_transfer_params,
+        first_logprobs=first_logprobs,
     )
 
 
@@ -1056,6 +1064,7 @@ async def _generate_full_impl(uid: int, spec: GenSpec, state: Any) -> GenResult:
     engine_finish_reason: str | None = None
     engine_matched_stop: str | None = None
     kv_transfer_params: dict | None = None
+    first_logprobs: dict | None = None
     # The split itself is one-shot over the whole completion (below); this second,
     # streaming parser exists only to attribute each ack's tokens to reasoning or
     # content, which a one-shot parse cannot recover.
@@ -1067,6 +1076,7 @@ async def _generate_full_impl(uid: int, spec: GenSpec, state: Any) -> GenResult:
         completion_tokens += ack.completion_tokens_delta
         cached_tokens += ack.cached_tokens
         kv_transfer_params = getattr(ack, "kv_transfer_params", None) or kv_transfer_params
+        first_logprobs = getattr(ack, "first_logprobs", None) or first_logprobs
         if reasoning_meter is not None and ack.incremental_output:
             was_reasoning = reasoning_meter.in_reasoning
             meter_delta, _ = reasoning_meter.parse_stream_chunk(ack.incremental_output)
@@ -1107,4 +1117,5 @@ async def _generate_full_impl(uid: int, spec: GenSpec, state: Any) -> GenResult:
         cached_tokens=cached_tokens,
         reasoning_tokens=reasoning_tokens,
         kv_transfer_params=kv_transfer_params,
+        first_logprobs=first_logprobs,
     )
