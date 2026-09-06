@@ -1360,3 +1360,12 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   change on a route whose width distribution you have measured, keep the one-env-var revert
   (`FREETOKEN_NVFP4_PREFILL_SKIP_BUCKETS`) so the A/B needs no rebuild, and do not read an
   aggregate as a kernel verdict when the two runs carried different work.
+- **A torch pytest run beside the live model is a model-loading job for OOM purposes.**
+  2026-09-06 11:51: the (a) inline-pooling implementer ran the hidden-state test subset plus
+  the whole `tests/` tree while Lightning was serving under the 9 GiB-reserve low-RAM profile;
+  the pytest process reached ~11 GB RSS, the host OOMed and the kernel swept the whole user
+  session (both Claude sessions, proxies, the server). Rule: while a model is loaded, run only
+  torch-free tests (`tests/server` request-shaping and wire tests are fine; anything importing
+  the model, the scheduler with real tensors, or safetensors fixtures is not); run torch suites
+  only in the window when the model is unloaded, and never tell a subagent "run the whole
+  suite too" while the server is up.
