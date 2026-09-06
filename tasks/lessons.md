@@ -1369,3 +1369,13 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   the model, the scheduler with real tensors, or safetensors fixtures is not); run torch suites
   only in the window when the model is unloaded, and never tell a subagent "run the whole
   suite too" while the server is up.
+- **A "pin" on the hybrid radix tree is a Mamba state slot, and the slot pool is the binding
+  resource, not KV pages.** 2026-09-06 22:55: the prefix auto-pin (c819a81) budgeted pins in
+  KV tokens (25 % of the pool) but every pinned snapshot also holds one of 24 GDN state slots;
+  every multi-turn Claude Code session pinned its own prefix on its second turn, 13 pins held
+  13 slots, donations were skipped for lack of a free slot, and no request could hit at all
+  (prefix_tokens 0 across a whole session) while /v1/stats looked healthy. Rule: any feature
+  that locks radix nodes on Nemotron-H must budget in state slots against the concurrency
+  working set (4 per running request) and must have a release path; and "matched by a second
+  request" is not "shared across sessions" -- a session's own next turn matches its history.
+  Live mitigation was `DELETE /v1/cache/pins` on a 60 s loop (unit ft-unpin).

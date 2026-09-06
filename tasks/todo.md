@@ -959,5 +959,8 @@ gave standing GO for agent-requested code adaptation. Server on :1919 restarted 
       nodes donated by pooled requests, pooled match gated on them; `prefix_tokens` + `mean_suffix`
       in the inline block and sink line; scheduler.prefix.pooled_hits/pooled_hit_tokens. Torch
       tests written, not run (live server holds the GPU/RAM); needs a restart to go live.
+- [ ] (h) Fix auto-pin (post-pilot restart): budget pins by Mamba state slots (pool minus 4x
+      working set), pin only prefixes matched from a DIFFERENT session id, release the LRU pin
+      when the budget is hit instead of refusing; then retire the ft-unpin loop.
 - [ ] (c) pooled as first stream event after prefill: queued until the hidden session's bake-off
       says a prompt probe wins.
