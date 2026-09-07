@@ -143,3 +143,74 @@ def test_integrity_rejects_sums_without_a_snapshot_or_at_the_wrong_length(tree):
     node.mamba_value = None
     with pytest.raises(AssertionError):
         tree.check_integrity()
+
+
+# --------------------------------------------------------------------------- #
+# ``sumless_len``: what the pooled gate refused, measured on the same walk
+#
+# ``prefix_tokens: 0`` on a pooled response has two very different causes, and only one
+# of them is a cost the pooled design introduces: (a) no reuse point existed, so the
+# prompt would have missed anyway, versus (b) a live snapshot was there and the sums
+# requirement walked past it. ``match_prefix`` reports the depth it would have reached
+# without that requirement so the counters can tell the two apart.
+# --------------------------------------------------------------------------- #
+def test_sumless_len_reports_the_reuse_the_pooled_gate_refused(tree):
+    tree.insert(ids(1, 2, 3, 4), pages(10, 4), 7)                             # plain producer
+    plain = tree.match_prefix(ids(1, 2, 3, 4, 5))
+    assert (plain.cached_len, plain.sumless_len) == (4, 4)                    # nothing refused
+    pooled = tree.match_prefix(ids(1, 2, 3, 4, 5), pooled=True)
+    assert (pooled.cached_len, pooled.sumless_len) == (0, 4)                  # 4 tokens refused
+
+
+def test_sumless_len_equals_cached_len_when_the_sums_are_there(tree):
+    tree.insert(ids(1, 2, 3, 4), pages(10, 4), 7, pooled_sums=sums(1.0))
+    m = tree.match_prefix(ids(1, 2, 3, 4, 5), pooled=True)
+    assert (m.cached_len, m.sumless_len) == (4, 4)
+
+
+def test_sumless_len_is_zero_when_there_was_no_reuse_point_at_all(tree):
+    """Cause (a): the pooled gate cost this prompt nothing -- it had nothing to refuse."""
+    tree.insert(ids(1, 2, 3, 4), pages(10, 4), 7, pooled_sums=sums(1.0))
+    m = tree.match_prefix(ids(90, 91, 92), pooled=True)
+    assert (m.cached_len, m.sumless_len) == (0, 0)
+    assert tree.match_prefix(ids(90, 91, 92)).sumless_len == 0
+
+
+def test_sumless_len_measures_a_shortened_match_too(tree):
+    """Sums at 4, a deeper bare snapshot at 8: the pooled match keeps 4 and the gate cost
+    the 4 tokens between them."""
+    tree.insert(ids(1, 2, 3, 4), pages(10, 4), 7, pooled_sums=sums(1.0))
+    tree.insert(ids(1, 2, 3, 4, 5, 6, 7, 8), pages(10, 8), 8)                 # deeper, bare
+    m = tree.match_prefix(ids(1, 2, 3, 4, 5, 6, 7, 8, 9), pooled=True)
+    assert (m.cached_len, m.sumless_len) == (4, 8)
+    # Reporting it changes nothing about the match itself.
+    assert m.mamba_value == 7
+    torch.testing.assert_close(m.node.pooled_sums, sums(1.0))
+    tree.check_integrity()
+
+
+def test_reporting_sumless_len_mutates_nothing(tree):
+    """A pure read: no lock taken, no eviction accounting moved, no ref count touched."""
+    tree.insert(ids(1, 2, 3, 4), pages(10, 4), 7)
+    node = tree.match_prefix(ids(1, 2, 3, 4)).node
+    before = (tree.full_evictable, tree.full_protected,
+              tree.mamba_evictable, tree.mamba_protected,
+              node.ref_count, node.mamba_ref_count)
+    for _ in range(3):
+        assert tree.match_prefix(ids(1, 2, 3, 4, 5), pooled=True).sumless_len == 4
+    assert (tree.full_evictable, tree.full_protected,
+            tree.mamba_evictable, tree.mamba_protected,
+            node.ref_count, node.mamba_ref_count) == before
+    tree.check_integrity()
+
+
+def test_a_tombstoned_snapshot_is_not_reuse_the_gate_refused(tree):
+    """``sumless_len`` follows the LIVE-snapshot rule, not just "a node was here": a node
+    whose snapshot was evicted is no reuse point for anyone, pooled or not, so nothing is
+    charged to the pooled gate for it."""
+    tree.insert(ids(1, 2, 3, 4), pages(10, 4), 7)
+    assert tree.evict_mamba(1).mamba_slots == [7]
+    m = tree.match_prefix(ids(1, 2, 3, 4, 5), pooled=True)
+    assert (m.cached_len, m.sumless_len) == (0, 0)
+    assert tree.match_prefix(ids(1, 2, 3, 4, 5)).cached_len == 0
+    tree.check_integrity()

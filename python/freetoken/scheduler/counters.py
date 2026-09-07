@@ -190,6 +190,17 @@ class PrefixCounters:
     hidden-state probes (``kv_transfer_params.pooling``), which match only snapshot nodes
     carrying pooled sums; they are counted in ``hits`` / ``hit_tokens`` as well.
 
+    ``pooled_sumless_misses`` / ``pooled_sumless_miss_tokens`` separate the two reasons a
+    pooled probe forwards more than it had to. A miss because no reuse point existed at
+    all costs the pooled design nothing -- the prompt would have missed anyway. A miss (or
+    a shortened match) because the deepest live snapshot on the path carried no pooled
+    sums is a cost the pooled gate itself introduces, and only that case is counted here:
+    once per prompt, with ``sumless_len - cached_len`` -- the tokens the gate forced back
+    through prefill -- added to the token total. ``HybridRadixCache.match_prefix`` reports
+    ``sumless_len`` from the same walk it already does. Always 0 outside a pooled request
+    on the hybrid radix (no other cache has the sums, so no other cache can refuse for
+    them). They overlap ``misses`` / ``miss_tokens``, which count the whole prompt.
+
     The pin fields are gauges (``pinned_prefixes``, ``pinned_tokens``, ``pinned_slots`` --
     the GDN state slots the pinned snapshots hold) plus two counters: ``pin_evictions``
     (pins released least-recently-matched-first to make room for a newer pin or after an
@@ -203,13 +214,18 @@ class PrefixCounters:
     miss_tokens: int = 0
     pooled_hits: int = 0
     pooled_hit_tokens: int = 0
+    pooled_sumless_misses: int = 0
+    pooled_sumless_miss_tokens: int = 0
     pinned_prefixes: int = 0
     pinned_tokens: int = 0
     pinned_slots: int = 0
     pin_evictions: int = 0
     pin_budget_refusals: int = 0
 
-    def note_admitted(self, prompt_tokens: int, cached_len: int, *, pooled: bool = False) -> None:
+    def note_admitted(
+        self, prompt_tokens: int, cached_len: int, *, pooled: bool = False,
+        sumless_len: int = 0,
+    ) -> None:
         if cached_len > 0:
             self.hits += 1
             self.hit_tokens += cached_len
@@ -219,6 +235,11 @@ class PrefixCounters:
         else:
             self.misses += 1
             self.miss_tokens += max(0, prompt_tokens)
+        # A deeper snapshot existed and the sums requirement is the only thing that
+        # refused it: charge the pooled gate the tokens it sent back through prefill.
+        if pooled and sumless_len > cached_len:
+            self.pooled_sumless_misses += 1
+            self.pooled_sumless_miss_tokens += sumless_len - cached_len
 
     def as_dict(self) -> Dict[str, int]:
         return {
@@ -228,6 +249,8 @@ class PrefixCounters:
             "miss_tokens": self.miss_tokens,
             "pooled_hits": self.pooled_hits,
             "pooled_hit_tokens": self.pooled_hit_tokens,
+            "pooled_sumless_misses": self.pooled_sumless_misses,
+            "pooled_sumless_miss_tokens": self.pooled_sumless_miss_tokens,
             "pinned_prefixes": self.pinned_prefixes,
             "pinned_tokens": self.pinned_tokens,
             "pinned_slots": self.pinned_slots,

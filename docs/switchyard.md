@@ -253,6 +253,7 @@ counted once per prompt on its first chunk (where `PromptAdmittedMsg` is built):
 | `hits`, `misses` | prompts admitted with `cached_tokens > 0` / `== 0` (a multimodal or hidden-state-probe prompt that bypasses the tree is a miss). |
 | `hit_tokens` | sum of `cached_tokens` over hits. |
 | `pooled_hits`, `pooled_hit_tokens` | the subset of `hits` / `hit_tokens` taken by pooled hidden-state probes (`kv_transfer_params.pooling`), which only resume from snapshot nodes carrying pooled sums (see "Pooled requests and the prefix cache" in §6). |
+| `pooled_sumless_misses`, `pooled_sumless_miss_tokens` | what the pooled gate itself costs: pooled prompts whose match was **shortened or lost** because the deepest live snapshot on their path carried no pooled sums, and the tokens that forced back through prefill (the difference between the match with and without the sums requirement). A pooled prompt that had no reuse point at all is NOT counted here — it would have missed anyway. Always 0 outside a pooled request on the hybrid radix. Overlaps `misses`/`hits`, which count the whole prompt. |
 | `miss_tokens` | sum of the **full prompt length** over misses: the tokens the prefill forwards for them, last token included (`match_req` never matches the last token, so a repeated prompt is a hit with `cached_tokens = prompt_tokens - 1`). The forwarded remainder of a hit is `prompt_tokens_total - hit_tokens - miss_tokens`. |
 | `pinned_prefixes`, `pinned_tokens`, `pinned_slots` | gauges: distinct pinned nodes, the distinct tokens their root paths cover, and the GDN state slots their snapshots (and locked snapshot ancestors) hold. |
 | `pin_evictions` | pins released least-recently-matched-first to fit a newer pin under `--pin-prefix-max-slots` / `--pin-prefix-max-tokens`, or on an elastic shrink. |
@@ -562,6 +563,18 @@ request that recomputes such a prefix adds the sums to the existing node. A pool
 request that also writes a file keeps the full bypass (`prefix_tokens` is always `0`).
 Pinned prefixes (§3a) keep their sums. `usage.prompt_tokens_details.cached_tokens`
 (with `--enable-cache-report`) equals `prefix_tokens` for such a request.
+
+**What the sums requirement costs, measured.** `prefix_tokens: 0` on a pooled response
+does not say *why*: the prompt may have had no reuse point at all (the pooled design
+cost nothing — it would have missed anyway), or a live snapshot may have been sitting
+right there carrying no sums, in which case the gate forced a full prefill that an
+ordinary request would have skipped. Only the second is a cost of this feature, and only
+it is counted, under `scheduler.prefix` in `/v1/stats`:
+`pooled_sumless_misses` / `pooled_sumless_miss_tokens` (§3a). The matcher reports, on the
+same walk it already does, the depth it would have reached with the sums requirement
+dropped; the difference against the match it actually returned is the tokens charged.
+Nothing about the match itself changes — it is a pure observation. Measured on the
+5080: a 12.3k-token prompt that fell into case (b) took 1.97 s against 0.57 s warm.
 
 ### Pooled sink (JSONL)
 

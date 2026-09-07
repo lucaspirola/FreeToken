@@ -193,8 +193,12 @@ class CacheManager:
         if self.is_hybrid:
             from freetoken.kvcache.hybrid_radix_cache import HybridCacheHandle
             m = self.prefix_cache.match_prefix(ids, pooled=pooled)
+            # ``sumless_len`` rides the handle so the admission note (prefix_notes ->
+            # note_prompt_admitted) can charge the pooled gate for the reuse it refused,
+            # without a second walk and without a channel of its own.
             return MatchResult(
-                HybridCacheHandle(m.cached_len, m.node, m.kv_indices), mamba_value=m.mamba_value)
+                HybridCacheHandle(m.cached_len, m.node, m.kv_indices, m.sumless_len),
+                mamba_value=m.mamba_value)
         return self.prefix_cache.match_prefix(ids)
 
     @property
@@ -562,7 +566,10 @@ class CacheManager:
         prefix.
         """
         cached_len = handle.cached_len
-        self.prefix_counters.note_admitted(prompt_tokens, cached_len, pooled=pooled)
+        self.prefix_counters.note_admitted(
+            prompt_tokens, cached_len, pooled=pooled,
+            sumless_len=getattr(handle, "sumless_len", 0),
+        )
         node = getattr(handle, "node", None)
         if not self.pinning_enabled or cached_len <= 0 or node is None or node.is_root():
             return

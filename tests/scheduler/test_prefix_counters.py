@@ -29,6 +29,7 @@ def test_the_document_has_every_field_and_the_pin_gauges_start_at_zero():
     assert doc == {
         "hits": 0, "misses": 0, "hit_tokens": 0, "miss_tokens": 0,
         "pooled_hits": 0, "pooled_hit_tokens": 0,
+        "pooled_sumless_misses": 0, "pooled_sumless_miss_tokens": 0,
         "pinned_prefixes": 0, "pinned_tokens": 0, "pinned_slots": 0,
         "pin_evictions": 0, "pin_budget_refusals": 0,
     }
@@ -46,6 +47,31 @@ def test_pooled_hits_are_a_subset_of_hits():
     assert (c.misses, c.miss_tokens) == (1, 300)
     doc = c.as_dict()
     assert doc["pooled_hits"] == 1 and doc["pooled_hit_tokens"] == 256
+
+
+def test_only_the_pooled_miss_the_sums_gate_caused_is_charged_to_it():
+    """``prefix_tokens: 0`` on a pooled response has two causes and only one of them is a
+    cost of the pooled design: a prompt with no reuse point would have missed anyway.
+    ``sumless_len`` (from ``HybridRadixCache.match_prefix``) is what separates them."""
+    c = PrefixCounters()
+    # (a) no usable prefix at all -- the gate refused nothing.
+    c.note_admitted(prompt_tokens=300, cached_len=0, pooled=True, sumless_len=0)
+    assert (c.pooled_sumless_misses, c.pooled_sumless_miss_tokens) == (0, 0)
+    # (b) a live snapshot at 4608 carrying no sums: the gate cost 4608 forwarded tokens.
+    c.note_admitted(prompt_tokens=4706, cached_len=0, pooled=True, sumless_len=4608)
+    assert (c.pooled_sumless_misses, c.pooled_sumless_miss_tokens) == (1, 4608)
+    # A shortened match is the same story with a smaller delta.
+    c.note_admitted(prompt_tokens=4706, cached_len=4096, pooled=True, sumless_len=4608)
+    assert (c.pooled_sumless_misses, c.pooled_sumless_miss_tokens) == (2, 5120)
+    # A pooled hit that lost nothing, and a plain request, touch neither field.
+    c.note_admitted(prompt_tokens=300, cached_len=256, pooled=True, sumless_len=256)
+    c.note_admitted(prompt_tokens=300, cached_len=0, sumless_len=256)      # not pooled
+    assert (c.pooled_sumless_misses, c.pooled_sumless_miss_tokens) == (2, 5120)
+    # They overlap the general ledgers rather than replacing them.
+    assert (c.misses, c.miss_tokens) == (3, 5306)
+    assert (c.hits, c.pooled_hits) == (2, 2)
+    doc = c.as_dict()
+    assert doc["pooled_sumless_misses"] == 2 and doc["pooled_sumless_miss_tokens"] == 5120
 
 
 def test_build_scheduler_counters_reads_the_manager_and_distinguishes_absent():

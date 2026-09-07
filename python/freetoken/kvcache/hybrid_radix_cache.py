@@ -35,6 +35,13 @@ class HybridCacheHandle(BaseCacheHandle):
 
     node: RadixTreeNode
     kv_indices: torch.Tensor
+    #: What ``cached_len`` would have been with the pooled-sums requirement dropped --
+    #: i.e. the deepest live snapshot on the path, sums or no sums. Equal to
+    #: ``cached_len`` on every non-pooled match; strictly greater exactly when the pooled
+    #: gate walked PAST a usable snapshot because it carried no sums, and the difference
+    #: is what that gate cost this request in re-forwarded tokens. Measurement only:
+    #: nothing reads it to decide anything. 0 on handles built outside ``match_req``.
+    sumless_len: int = 0
 
     def get_matched_indices(self) -> torch.Tensor:
         return self.kv_indices
@@ -45,6 +52,7 @@ class HybridMatch(NamedTuple):
     cached_len: int               # truncated to the deepest LIVE-snapshot boundary
     mamba_value: Optional[int]    # GDN snapshot slot to restore from (None = cold start)
     node: RadixTreeNode           # the matched node (lock target; carries pooled_sums on a pooled match)
+    sumless_len: int = 0          # the same truncation ignoring pooled_sums (see HybridCacheHandle)
 
 
 class EvictResult(NamedTuple):
@@ -87,16 +95,30 @@ class HybridRadixCache:
         recurrence from a checkpointed boundary). ``pooled`` (a pooled hidden-state
         request) further requires the node to carry ``pooled_sums``: the requester's mean
         over the skipped positions comes from those, so a snapshot without them is no
-        reuse point for it."""
+        reuse point for it.
+
+        The same walk also reports ``sumless_len``: the depth the match would have reached
+        with that extra requirement dropped. It is a pure observation -- no mutation, no
+        locking, no effect on what is returned -- and exists so the counters can separate
+        "this prompt had no reuse point at all" from "the pooled gate skipped a live
+        snapshot that carried no sums", which is the only cost the pooled design itself
+        introduces. See ``PrefixCounters.pooled_sumless_misses``."""
         node, _ = self._walk(input_ids)
         # walk up to the deepest node whose END boundary has a live snapshot
         cur, end_len = node, self._path_len(node)
+        sumless_len = 0
+        seen_snapshot = False
         while not cur.is_root():
-            if cur.mamba_value is not None and (not pooled or cur.pooled_sums is not None):
-                return HybridMatch(self._collect_kv(cur), end_len, cur.mamba_value, cur)
+            if cur.mamba_value is not None:
+                if not seen_snapshot:            # deepest live snapshot, sums or not
+                    seen_snapshot, sumless_len = True, end_len
+                if not pooled or cur.pooled_sums is not None:
+                    return HybridMatch(
+                        self._collect_kv(cur), end_len, cur.mamba_value, cur, sumless_len
+                    )
             end_len -= cur.length
             cur = cur.parent
-        return HybridMatch(self.empty, 0, None, self.root)
+        return HybridMatch(self.empty, 0, None, self.root, sumless_len)
 
     def insert(self, input_ids: torch.Tensor, kv_indices: torch.Tensor,
                mamba_value: int, pooled_sums: torch.Tensor | None = None) -> Tuple[int, bool]:

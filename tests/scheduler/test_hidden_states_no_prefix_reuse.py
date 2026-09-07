@@ -241,3 +241,194 @@ def test_pin_key_survives_chunked_prefill():
         req.complete_one()
     assert len(seen) == len(PROMPT) // 4
     assert seen == ["switchyard:conv-7"] * len(seen)
+
+
+# --------------------------------------------------------------------------- #
+# What the pooled gate costs: pooled_sumless_misses / pooled_sumless_miss_tokens
+#
+# A pooled-only probe DOES reuse prefixes, but only nodes whose snapshot also carries
+# ``pooled_sums`` (its mean over the skipped positions comes from those). A response with
+# ``prefix_tokens: 0`` therefore hides two very different stories, and only one of them is
+# a cost the pooled design introduces:
+#   (a) no reuse point existed -- the prompt would have missed anyway;
+#   (b) a live snapshot WAS there and carried no sums, so the gate forced a full prefill.
+# ``match_prefix`` reports the depth it would have reached without the sums requirement on
+# the same walk, the handle carries it out through ``prefix_notes``, and only (b) is
+# charged. These drive the real hybrid CacheManager on CPU.
+# --------------------------------------------------------------------------- #
+PREFIX = [1, 2, 3, 4, 5, 6, 7, 8]
+
+
+def _build_hybrid(num_pages: int = 128, num_slots: int = 16):
+    """A hybrid (GDN snapshot) CacheManager -- the only cache that keeps pooled sums, so
+    the only one where the pooled gate can refuse a live reuse point."""
+    from freetoken.kvcache.linear_state_pool import LinearStatePool
+    from freetoken.models.config import LinearGatedDeltaGroupConfig
+    from freetoken.scheduler.cache import CacheManager
+
+    _setup_context()
+    group = LinearGatedDeltaGroupConfig(
+        name="linear", layer_ids=(0,), num_key_heads=2, num_value_heads=4,
+        key_head_dim=16, value_head_dim=16, conv_kernel_dim=4, output_gate=True,
+    )
+    pool = LinearStatePool(
+        group=group, num_slots=num_slots, dtype=torch.bfloat16,
+        device=torch.device("cpu"), tp_size=1,
+    )
+    page_table = torch.zeros((MAX_RUNNING + 1, WIDTH), dtype=torch.int32)
+    return CacheManager(
+        num_pages, 1, page_table, "hybrid_radix", linear_state_pool=pool
+    )
+
+
+def _pooled_spec():
+    from freetoken.hidden_states import HiddenStateSpec
+
+    return HiddenStateSpec(directory=None, layer_ids=[0, 1], pooling=("mean",))
+
+
+def _hybrid_pending(uid: int, tokens: list, spec=None):
+    from freetoken.core import SamplingParams
+    from freetoken.scheduler.utils import PendingReq
+
+    return PendingReq(
+        uid=uid, input_ids=torch.tensor(tokens, dtype=torch.int32),
+        sampling_params=SamplingParams(max_tokens=1), hidden_states=spec,
+    )
+
+
+def _seed_snapshot(cache_manager, tokens: list, slot: int, *, with_sums: bool) -> None:
+    """Put a live GDN snapshot at ``tokens``' end boundary, with or without pooled sums --
+    what a pooled producer (with) or an ordinary turn (without) leaves behind."""
+    sums = torch.full((2, 4), float(slot), dtype=torch.float32) if with_sums else None
+    base = 100 + slot * len(PREFIX) * 2
+    cache_manager.prefix_cache.insert(
+        torch.tensor(tokens, dtype=torch.int32),
+        torch.arange(base, base + len(tokens), dtype=torch.int32),
+        slot,
+        pooled_sums=sums,
+    )
+
+
+def test_a_pooled_miss_with_no_prefix_at_all_is_not_charged_to_the_sums_gate():
+    """Cause (a): nothing was refused, so nothing is charged -- the counter must not
+    simply mirror ``pooled`` misses."""
+    cache_manager = _build_hybrid()
+    pending = _hybrid_pending(1, [90, 91, 92, 93], _pooled_spec())
+    handle = cache_manager.match_req(pending).cuda_handle
+    assert (handle.cached_len, handle.sumless_len) == (0, 0)
+    cache_manager.note_prompt_admitted(handle, 4, pooled=True)
+    counters = cache_manager.prefix_counters
+    assert (counters.misses, counters.miss_tokens) == (1, 4)
+    assert (counters.pooled_sumless_misses, counters.pooled_sumless_miss_tokens) == (0, 0)
+
+
+def test_a_pooled_miss_past_a_sumless_snapshot_is_charged_the_token_delta():
+    """Cause (b): an ordinary turn's snapshot is a reuse point for everyone but a pooled
+    probe, which pays for the whole prefix again."""
+    cache_manager = _build_hybrid()
+    _seed_snapshot(cache_manager, PREFIX, 7, with_sums=False)
+    prompt = PREFIX + [9, 10]
+    # An ordinary request hits that node; the pooled one walks past it to a full miss.
+    assert cache_manager.match_req(_hybrid_pending(1, prompt)).cuda_handle.cached_len == 8
+    handle = cache_manager.match_req(
+        _hybrid_pending(2, prompt, _pooled_spec())
+    ).cuda_handle
+    assert (handle.cached_len, handle.sumless_len) == (0, 8)
+    cache_manager.note_prompt_admitted(handle, len(prompt), pooled=True)
+    counters = cache_manager.prefix_counters
+    assert (counters.misses, counters.miss_tokens) == (1, 10)
+    assert (counters.pooled_sumless_misses, counters.pooled_sumless_miss_tokens) == (1, 8)
+
+
+def test_a_pooled_hit_on_a_sums_bearing_node_is_charged_nothing():
+    cache_manager = _build_hybrid()
+    _seed_snapshot(cache_manager, PREFIX, 7, with_sums=True)
+    prompt = PREFIX + [9, 10]
+    handle = cache_manager.match_req(
+        _hybrid_pending(1, prompt, _pooled_spec())
+    ).cuda_handle
+    assert (handle.cached_len, handle.sumless_len) == (8, 8)
+    cache_manager.note_prompt_admitted(handle, len(prompt), pooled=True)
+    counters = cache_manager.prefix_counters
+    assert (counters.pooled_hits, counters.pooled_hit_tokens) == (1, 8)
+    assert (counters.pooled_sumless_misses, counters.pooled_sumless_miss_tokens) == (0, 0)
+
+
+def test_a_shortened_pooled_match_is_charged_only_the_difference():
+    """Sums at 4, a deeper bare snapshot at 8: the probe keeps 4 and pays for the other 4.
+    It is a hit AND a partial cost of the gate at the same time."""
+    cache_manager = _build_hybrid()
+    _seed_snapshot(cache_manager, PREFIX[:4], 3, with_sums=True)
+    _seed_snapshot(cache_manager, PREFIX, 7, with_sums=False)
+    prompt = PREFIX + [9, 10]
+    handle = cache_manager.match_req(
+        _hybrid_pending(1, prompt, _pooled_spec())
+    ).cuda_handle
+    assert (handle.cached_len, handle.sumless_len) == (4, 8)
+    cache_manager.note_prompt_admitted(handle, len(prompt), pooled=True)
+    counters = cache_manager.prefix_counters
+    assert (counters.hits, counters.pooled_hits, counters.pooled_hit_tokens) == (1, 1, 4)
+    assert (counters.misses, counters.pooled_sumless_misses) == (0, 1)
+    assert counters.pooled_sumless_miss_tokens == 4
+
+
+def test_a_plain_request_never_touches_the_pooled_counters():
+    cache_manager = _build_hybrid()
+    _seed_snapshot(cache_manager, PREFIX, 7, with_sums=False)
+    prompt = PREFIX + [9, 10]
+    handle = cache_manager.match_req(_hybrid_pending(1, prompt)).cuda_handle
+    assert (handle.cached_len, handle.sumless_len) == (8, 8)
+    cache_manager.note_prompt_admitted(handle, len(prompt))
+    counters = cache_manager.prefix_counters
+    assert (counters.hits, counters.hit_tokens) == (1, 8)
+    assert counters.pooled_hits == 0
+    assert (counters.pooled_sumless_misses, counters.pooled_sumless_miss_tokens) == (0, 0)
+
+
+def test_matching_twice_cannot_double_count_the_sums_gate():
+    """Matching counts nothing: the charge is made once, from ``batch.prefix_notes`` ->
+    ``note_prompt_admitted``, on the pass that admits the prompt. The pressure path
+    (``Scheduler._release_soft_session_for_admission``, which calls ``match_req`` for a
+    queued prompt on every stalled iteration) therefore cannot inflate it."""
+    cache_manager = _build_hybrid()
+    _seed_snapshot(cache_manager, PREFIX, 7, with_sums=False)
+    prompt = PREFIX + [9, 10]
+    pending = _hybrid_pending(1, prompt, _pooled_spec())
+    pressure = cache_manager.match_req(pending).cuda_handle    # the pressure path's walk
+    admission = cache_manager.match_req(pending).cuda_handle   # admission's own walk
+    counters = cache_manager.prefix_counters
+    assert (counters.misses, counters.pooled_sumless_misses) == (0, 0)
+    assert (pressure.cached_len, pressure.sumless_len) == (0, 8)
+    assert (admission.cached_len, admission.sumless_len) == (0, 8)
+    cache_manager.note_prompt_admitted(admission, len(prompt), pooled=True)
+    assert (counters.pooled_sumless_misses, counters.pooled_sumless_miss_tokens) == (1, 8)
+
+
+def test_the_pass_memo_cannot_share_a_match_between_a_pooled_and_a_plain_request():
+    """``PrefillAdder._match`` memoizes on ``req.uid``, so the pooled gate's answer is
+    never handed to a request that did not ask for it (and vice versa): one match, one
+    request, one charge. Replaying the memo charges nothing either."""
+    from freetoken.scheduler.prefill import PrefillAdder
+    from freetoken.scheduler.table import TableManager
+
+    cache_manager = _build_hybrid()
+    _seed_snapshot(cache_manager, PREFIX, 7, with_sums=False)
+    memo: dict = {}
+    adder = PrefillAdder(
+        token_budget=0, reserved_size=0, cache_manager=cache_manager,
+        table_manager=TableManager(
+            max_running_reqs=MAX_RUNNING, page_table=cache_manager.page_table
+        ),
+        match_memo=memo,
+    )
+    prompt = PREFIX + [9, 10]
+    plain = _hybrid_pending(1, prompt)
+    pooled = _hybrid_pending(2, prompt, _pooled_spec())
+    assert adder._match(plain).cuda_handle.cached_len == 8
+    assert adder._match(pooled).cuda_handle.cached_len == 0
+    assert adder._match(plain).cuda_handle.cached_len == 8      # replay: still plain's answer
+    assert adder._match(pooled).cuda_handle.sumless_len == 8    # replay: still pooled's
+    assert set(memo) == {1, 2}
+    counters = cache_manager.prefix_counters
+    assert (counters.pooled_sumless_misses, counters.misses, counters.hits) == (0, 0, 0)
