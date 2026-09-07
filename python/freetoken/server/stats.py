@@ -154,10 +154,16 @@ def _swa_page_size(config: Any) -> int:
     return 1
 
 
-def build_stats(state: Any, p95_ms: int, ttft_mean_ms: int) -> dict:
+def build_stats(
+    state: Any, p95_ms: int, ttft_mean_ms: int, pooled_ready_mean_ms: int = 0
+) -> dict:
     """Full /v1/stats doc. throughput is 0 when idle; kv/mamba/swa are null
     when their total is 0 (owned-KV / non-hybrid / non-SWA). kv and swa share one shape:
-    pages + the pool's own page_size (tokens = pages x page_size)."""
+    pages + the pool's own page_size (tokens = pages x page_size).
+
+    ``pooled_ready_mean_ms`` is the hidden-state probe's own latency (admission to the
+    pooled payload), averaged the same way as ``ttft_mean_ms`` and over the same ring;
+    0 when no pooled request is in the window."""
     tr: StatsTracker = state.stats
     config = state.config
     ready_at = getattr(state, "ready_at", None)
@@ -194,6 +200,10 @@ def build_stats(state: Any, p95_ms: int, ttft_mean_ms: int) -> dict:
             "completed": tr.completed,
             "p95_ms": p95_ms,
             "ttft_mean_ms": ttft_mean_ms,
+            # Admission -> early pooled hidden-state event, over the requests that had
+            # one. Deliberately not folded into ttft_mean_ms: the probe payload is
+            # prefill output, not a sampled token.
+            "pooled_ready_mean_ms": pooled_ready_mean_ms,
             "prompt_tokens_total": tr.prompt_tokens_total,
             "completion_tokens_total": tr.completion_tokens_total,
             "aborts": dict(tr.aborts),

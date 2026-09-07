@@ -3,8 +3,10 @@ for inline pooled hidden states.
 
 Pinned: the request-field rules (one path segment, needs ``pooling``, needs the server
 flag), the line written for the plain and the streaming path (keys, decodable base64,
-rendered-prompt hash, session ids), the ``default`` subdirectory, that a write failure
-is logged and never fails the response, and that the append happens under ``flock``.
+rendered-prompt hash, session ids), that exactly one line is written whichever chunk
+carries the block (``early_pooled`` moves it off the terminal chunk), the ``default``
+subdirectory, that a write failure is logged and never fails the response, and that the
+append happens under ``flock``.
 Everything drives the real adapter and sink code; only the engine is faked.
 """
 
@@ -257,3 +259,111 @@ def test_the_line_is_written_under_an_exclusive_flock(tmp_path):
     assert [op for _, op in calls] == [fcntl.LOCK_EX, fcntl.LOCK_UN]
     assert len({fd for fd, _ in calls}) == 1
     assert _lines(tmp_path, "k") == [{"a": 1}]
+
+
+# --------------------------------------------------------------------------- #
+# Early pooled delivery: the sink still records exactly once
+#
+# With ``kv_transfer_params.early_pooled`` the block leaves on its own chunk right
+# after the role chunk and is deliberately NOT repeated on the terminal one, so the
+# sink write has to move with it -- once, never twice, never zero.
+# --------------------------------------------------------------------------- #
+def _early_replies(pooled, *, repeat_on_terminal: bool = False):
+    """The engine attaches the payload to the reply carrying the first sampled token."""
+    return [
+        UserReply(
+            uid=42, incremental_output="The", finished=False,
+            kv_transfer_params={"pooled": pooled},
+        ),
+        UserReply(
+            uid=42, incremental_output="", finished=True, finish_reason="length",
+            kv_transfer_params={"pooled": pooled} if repeat_on_terminal else None,
+        ),
+    ]
+
+
+def _sink_stream_request(early: bool) -> ChatCompletionRequest:
+    return ChatCompletionRequest(
+        model="client-model", messages=[{"role": "user", "content": "score me"}],
+        max_tokens=1, stream=True,
+        kv_transfer_params={
+            "pooling": "both", "layer_ids": [3, 7], "pooled_sink": "s.1",
+            "early_pooled": early,
+        },
+    )
+
+
+def _run_sink_stream(req, state, headers=None):
+    """Drive the handler (which is what installs the sink) and return the SSE events."""
+    async def passthrough(gen, request, uid, session_id=None):
+        async for chunk in gen:
+            yield chunk
+
+    state.stream_with_cancellation = passthrough
+    response = run(handle_chat_completion(req, _request(headers or {}), state, {}))
+    return parse_sse(run(_collect(response.body_iterator)))
+
+
+@pytest.mark.parametrize("early", [True, False])
+def test_the_sink_records_exactly_once_whichever_chunk_carries_the_block(tmp_path, early):
+    pooled = {**_pooled_payload(), "last": _pooled_payload()["mean"]}
+    state = _state(_early_replies(pooled), sink_dir=str(tmp_path))
+    events = _run_sink_stream(
+        _sink_stream_request(early), state, {"x-switchyard-session-id": "sess-1"}
+    )
+    carriers = [e for e in events if isinstance(e, dict) and "kv_transfer_params" in e]
+    assert len(carriers) == 1
+    # early -> the non-terminal chunk carries it; otherwise the terminal one does.
+    assert (carriers[0]["choices"][0]["finish_reason"] is None) is early
+    assert carriers[0]["kv_transfer_params"] == {"pooled": pooled}
+
+    lines = _lines(tmp_path, "s.1")
+    assert len(lines) == 1
+    line = lines[0]
+    assert list(line) == EXPECTED_KEYS[:-1] + ["last", "prompt_sha256"]
+    assert line["request_id"] == carriers[0]["id"] == "chatcmpl-42"
+    assert line["x_switchyard_session_id"] == "sess-1"
+    assert line["layer_ids"] == [3, 7] and line["prefix_tokens"] == 2
+    assert base64.b64decode(line["last"]) == base64.b64decode(pooled["last"])
+    assert line["prompt_sha256"] == hashlib.sha256(b"rendered").hexdigest()
+
+
+def test_a_repeated_payload_on_the_terminal_ack_still_writes_one_line(tmp_path):
+    """Defensive: the payload is engine-side accumulated with ``or``, so the terminal
+    GenDone carries the same object the early chunk already shipped. Neither the wire
+    nor the sink may see it twice."""
+    pooled = _pooled_payload()
+    state = _state(_early_replies(pooled, repeat_on_terminal=True), sink_dir=str(tmp_path))
+    events = _run_sink_stream(_sink_stream_request(True), state)
+    carriers = [e for e in events if isinstance(e, dict) and "kv_transfer_params" in e]
+    assert len(carriers) == 1 and carriers[0]["choices"][0]["finish_reason"] is None
+    assert len(_lines(tmp_path, "s.1")) == 1
+
+
+def test_early_pooled_without_the_server_flag_writes_nothing(tmp_path):
+    """No --pooled-sink-dir: the early chunk still goes out, nothing is recorded."""
+    pooled = _pooled_payload()
+    state = _state(_early_replies(pooled), sink_dir=None)
+    req = ChatCompletionRequest(
+        model="client-model", messages=[{"role": "user", "content": "score me"}],
+        max_tokens=1, stream=True,
+        kv_transfer_params={"pooling": "mean", "layer_ids": [3, 7], "early_pooled": True},
+    )
+    events = _run_sink_stream(req, state)
+    carriers = [e for e in events if isinstance(e, dict) and "kv_transfer_params" in e]
+    assert len(carriers) == 1 and carriers[0]["choices"][0]["finish_reason"] is None
+    assert os.listdir(tmp_path) == []
+
+
+def test_early_pooled_records_under_the_default_subdirectory(tmp_path):
+    pooled = _pooled_payload()
+    state = _state(_early_replies(pooled), sink_dir=str(tmp_path))
+    req = ChatCompletionRequest(
+        model="client-model", messages=[{"role": "user", "content": "score me"}],
+        max_tokens=1, stream=True,
+        kv_transfer_params={"pooling": "mean", "layer_ids": [3, 7], "early_pooled": True},
+    )
+    _run_sink_stream(req, state)
+    assert os.listdir(tmp_path) == ["default"]
+    lines = _lines(tmp_path)
+    assert len(lines) == 1 and lines[0]["prefix_tokens"] == 2

@@ -31,6 +31,10 @@ class RequestRecord:
     completion_tokens: int | None
     stream: bool | None
     error: str | None
+    #: Milliseconds from admission to the early pooled hidden-state event
+    #: (``generation.PooledReady``) — the probe's own latency, kept separate from
+    #: ``ttft_ms`` so it never skews TTFT. None unless the request asked for pooling.
+    pooled_ready_ms: int | None = None
 
 
 class RequestRing:
@@ -74,6 +78,13 @@ class RequestRing:
             return 0
         return int(round(sum(vals) / len(vals)))
 
+    def pooled_ready_mean_ms(self) -> int:
+        """Mean pooled-ready latency over the records that have one (0 when none do)."""
+        vals = [rec.pooled_ready_ms for _idx, rec in self._buf if rec.pooled_ready_ms is not None]
+        if not vals:
+            return 0
+        return int(round(sum(vals) / len(vals)))
+
     def count(self) -> int:
         return self._next
 
@@ -96,6 +107,10 @@ def requests_p95_ms() -> int:
 
 def requests_ttft_mean_ms() -> int:
     return _RING.ttft_mean_ms()
+
+
+def requests_pooled_ready_mean_ms() -> int:
+    return _RING.pooled_ready_mean_ms()
 
 
 def requests_count() -> int:

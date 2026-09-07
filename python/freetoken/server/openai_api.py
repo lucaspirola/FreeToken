@@ -45,6 +45,7 @@ from .generation import (
     GenEvent,
     GenerationError,
     GenSpec,
+    PooledReady,
     ReasoningDelta,
     ToolCallArgsDelta,
     ToolCallsDelta,
@@ -206,6 +207,10 @@ def _hidden_states_spec(
     params = req.kv_transfer_params
     if params is None:
         return None
+    if params.early_pooled and params.pooling is None:
+        # There would be nothing to deliver early. (On a non-streaming request the flag
+        # is accepted and ignored: the response body already carries the block.)
+        raise ValueError("kv_transfer_params.early_pooled requires kv_transfer_params.pooling")
     pooling = POOLINGS[params.pooling] if params.pooling is not None else ()
     writes_file = params.hidden_states_path is not None or not pooling
     directory = (
@@ -660,6 +665,15 @@ async def _resubmit_unbound(spec: GenSpec, state: Any) -> int:
     return await submit_generation(spec, state)
 
 
+def _early_pooled(req: ChatCompletionRequest) -> bool:
+    """``kv_transfer_params.early_pooled``: deliver the pooled hidden-state block on its
+    own chunk right after prefill instead of on the terminal one. Streaming only —
+    ``handle_chat_completion``'s non-streaming body carries the block regardless, and
+    the flag is ignored there rather than refused."""
+    params = getattr(req, "kv_transfer_params", None)
+    return bool(getattr(params, "early_pooled", False)) if params is not None else False
+
+
 async def _open_chat_events(
     uid: int, spec: GenSpec, state: Any
 ) -> tuple[AsyncIterator[GenEvent], Any, bool, GenerationError | None]:
@@ -689,7 +703,9 @@ async def stream_chat_completion_chunks(
     sink: Any = None,
 ) -> AsyncIterator[bytes]:
     """Format generate_events() into the OpenAI chat.completion.chunk SSE stream.
-    ``sink`` (``pooled_sink.PooledSink``) records the terminal chunk's pooled vectors."""
+    ``sink`` (``pooled_sink.PooledSink``) records the pooled vectors off whichever chunk
+    carries them — the early one with ``kv_transfer_params.early_pooled``, the terminal
+    one otherwise. Exactly one of the two ever carries them, so the sink records once."""
     if spec is None:
         spec = chat_request_to_genspec(req, {})
 
@@ -699,6 +715,11 @@ async def stream_chat_completion_chunks(
     reasoning_tokens = 0
     tool_calls_sent = 0
     open_tool: dict[str, Any] | None = None
+    early_pooled = _early_pooled(req)
+    # Whatever the early chunk carried, the terminal chunk must not repeat: the pooled
+    # block is up to ~1.4 MB of base64.
+    pooled_sent = False
+    logprobs_sent = False
 
     events, first_event, have_first, error = await _open_chat_events(uid, spec, state)
     if error is not None and _auto_session_busy(error, spec):
@@ -748,10 +769,28 @@ async def stream_chat_completion_chunks(
                            cached_tokens=cached_tokens, output_tokens=completion_tokens)
                 break
         # Every non-terminal event is output on the wire, so the first one is TTFT. (The
-        # role chunk above is not: it is emitted before the engine has produced anything.)
-        if not isinstance(ev, GenDone):
+        # role chunk above is not: it is emitted before the engine has produced anything;
+        # neither is PooledReady, which is prefill output rather than a sampled token.)
+        if not isinstance(ev, (GenDone, PooledReady)):
             trace.first_token()
-        if isinstance(ev, ReasoningDelta):
+        if isinstance(ev, PooledReady):
+            # The engine has the probe payload: record the probe's own latency whether or
+            # not the client asked for it early, then emit it here only if it did. It
+            # lands after the role chunk and before any content, which is the whole point
+            # -- a peer can escalate to a bigger model and cancel this stream mid-flight.
+            trace.pooled_ready()
+            if early_pooled:
+                choice: dict[str, Any] = {"index": 0, "delta": {}, "finish_reason": None}
+                if ev.first_logprobs is not None:
+                    choice["logprobs"] = await _openai_logprobs(ev.first_logprobs, state)
+                    logprobs_sent = True
+                chunk = _chat_chunk(req, uid, [choice])
+                chunk["kv_transfer_params"] = ev.kv_transfer_params
+                pooled_sent = True
+                if sink is not None and "pooled" in ev.kv_transfer_params:
+                    await sink.record(ev.kv_transfer_params["pooled"])
+                yield _sse(chunk)
+        elif isinstance(ev, ReasoningDelta):
             yield _sse(
                 _chat_chunk(
                     req,
@@ -857,21 +896,23 @@ async def stream_chat_completion_chunks(
             # First-step logprobs ride the terminal chunk (as kv_transfer_params does):
             # the first token's delta may be held back by the reasoning parser or a
             # partial stop string, so no earlier chunk is reliably "the first token's".
+            # Both move to the early pooled chunk under `early_pooled`, and are then
+            # suppressed here rather than duplicated.
             chunk = _chat_chunk(
                 req, uid, [{
                     "delta": {}, "index": 0,
                     "logprobs": (
                         await _openai_logprobs(ev.first_logprobs, state)
-                        if ev.first_logprobs is not None
+                        if ev.first_logprobs is not None and not logprobs_sent
                         else None
                     ),
                     "finish_reason": ev.finish_reason,
                 }]
             )
-            if ev.kv_transfer_params is not None:
-                # Streaming has no envelope to put this on but the terminal chunk. The
-                # probe itself never streams (Switchyard reads a plain JSON response),
-                # so this exists only so the field is not silently lost.
+            if ev.kv_transfer_params is not None and not pooled_sent:
+                # Without `early_pooled`, streaming has no envelope to put this on but the
+                # terminal chunk, so this exists so the field is not silently lost. It also
+                # still runs when the payload never produced a PooledReady event.
                 chunk["kv_transfer_params"] = ev.kv_transfer_params
                 if sink is not None and "pooled" in ev.kv_transfer_params:
                     await sink.record(ev.kv_transfer_params["pooled"])

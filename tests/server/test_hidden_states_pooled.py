@@ -984,3 +984,314 @@ def test_finish_donate_attaches_the_whole_prompt_sum(monkeypatch):
         rtol=1e-6, atol=1e-6,
     )
     assert cm.match_req(_pending(2, [3, 4, 5, 6], spec)).cuda_handle.cached_len == 3
+
+
+# --------------------------------------------------------------------------- #
+# Early pooled delivery (``kv_transfer_params.early_pooled``) -- streaming only
+#
+# The engine already hands the pooled block to the frontend on the reply carrying the
+# FIRST sampled token; without the flag the adapter parks it on the terminal chunk. With
+# it, the block goes out on its own chunk right after the role chunk, so a peer can read
+# the prompt's vectors, decide to escalate, and cancel this stream before it has spent a
+# token. Pinned here: the ordering, the exact chunk, that the payload is never sent
+# twice, and that the probe's latency is measured without being mistaken for TTFT.
+# --------------------------------------------------------------------------- #
+def _early_replies(pooled, *, first_logprobs=None):
+    """What the engine really sends: the probe payload (and the first-step logprobs)
+    ride the FIRST token's reply, not the terminal one."""
+    from freetoken.message.frontend import UserReply
+
+    return [
+        UserReply(
+            uid=42, incremental_output="The", finished=False,
+            kv_transfer_params={"pooled": pooled}, first_logprobs=first_logprobs,
+        ),
+        UserReply(uid=42, incremental_output=" answer", finished=True, finish_reason="length"),
+    ]
+
+
+def _stream_request(**kv) -> ChatCompletionRequest:
+    return ChatCompletionRequest(
+        model="client-model", messages=[{"role": "user", "content": "score me"}],
+        max_tokens=1, stream=True,
+        kv_transfer_params={"pooling": "mean", "layer_ids": [3, 7], **kv},
+    )
+
+
+def _carriers(events) -> list[dict]:
+    return [e for e in events if isinstance(e, dict) and "kv_transfer_params" in e]
+
+
+def _terminal(events) -> list[dict]:
+    return [
+        e for e in events
+        if isinstance(e, dict) and e.get("choices") and e["choices"][0].get("finish_reason")
+    ]
+
+
+def test_early_pooled_is_a_typed_flag_defaulting_off():
+    assert probe_request(pooling="mean").kv_transfer_params.early_pooled is False
+    assert probe_request(pooling="mean", early_pooled=True).kv_transfer_params.early_pooled is True
+
+
+def test_early_pooled_without_pooling_is_a_400():
+    """Same rule and same 400 shape as ``pooled_sink`` without ``pooling``: there would
+    be nothing to deliver early. Checked before the file rules, so this is the message."""
+    state = _pooled_state(hidden_states_dir=None)
+    response = run(handle_chat_completion(
+        probe_request(early_pooled=True, layer_ids=[0, 1]), None, state, {}
+    ))
+    assert response.status_code == 400
+    assert json.loads(response.body)["error"]["param"] == "kv_transfer_params"
+    assert b"early_pooled requires kv_transfer_params.pooling" in response.body
+    assert state.sent is None  # refused before submit
+
+
+def test_early_pooled_is_accepted_and_ignored_without_stream():
+    """Non-streaming already carries the block in the response body; the flag is not an
+    error there, it simply has nothing to change."""
+    pooled = _pooled_payload()
+    state = _pooled_state(
+        [final_reply(kv_transfer_params={"pooled": pooled})], hidden_states_dir=None
+    )
+    payload = run(handle_chat_completion(
+        probe_request(pooling="mean", layer_ids=[3, 7], early_pooled=True), None, state, {}
+    ))
+    assert payload["kv_transfer_params"] == {"pooled": pooled}
+    assert payload["choices"][0]["finish_reason"] == "stop"
+    assert state.sent.hidden_states.pooling == ("mean",)
+
+
+def test_early_pooled_chunk_lands_after_the_role_chunk_and_before_any_content():
+    pooled = _pooled_payload()
+    state = _pooled_state(_early_replies(pooled), hidden_states_dir=None)
+    events = parse_sse(run(_collect(
+        stream_chat_completion_chunks(42, _stream_request(early_pooled=True), state)
+    )))
+    chunks = [e for e in events if isinstance(e, dict)]
+    # Chunk 0 opens the message, chunk 1 is the pooled block, content only after it.
+    assert chunks[0]["choices"][0]["delta"] == {"role": "assistant", "content": ""}
+    early = chunks[1]
+    assert isinstance(early["created"], int)
+    assert early == {
+        "id": "chatcmpl-42",
+        "object": "chat.completion.chunk",
+        "created": early["created"],
+        "model": "client-model",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
+        "kv_transfer_params": {"pooled": pooled},
+    }
+    with_content = [
+        i for i, c in enumerate(chunks) if c["choices"] and c["choices"][0]["delta"].get("content")
+    ]
+    assert with_content and min(with_content) > 1
+    assert events[-1] == "[DONE]"
+    # It is JSON all the way down and decodes to the vectors the engine pooled.
+    back = json.loads(json.dumps(early))["kv_transfer_params"]["pooled"]
+    np.testing.assert_array_equal(
+        decode(back["mean"], back["layer_ids"]),
+        np.arange(2 * HIDDEN, dtype="<f4").reshape(2, HIDDEN),
+    )
+
+
+def test_early_pooled_is_not_repeated_on_the_terminal_chunk():
+    """The block can be ~1.4 MB of base64; sending it twice is a real cost."""
+    pooled = _pooled_payload()
+    state = _pooled_state(_early_replies(pooled), hidden_states_dir=None)
+    events = parse_sse(run(_collect(
+        stream_chat_completion_chunks(42, _stream_request(early_pooled=True), state)
+    )))
+    carriers = _carriers(events)
+    assert len(carriers) == 1
+    assert carriers[0]["choices"][0]["finish_reason"] is None  # not the terminal chunk
+    terminal = _terminal(events)
+    assert len(terminal) == 1 and "kv_transfer_params" not in terminal[0]
+    assert terminal[0]["choices"][0]["finish_reason"] == "length"
+
+
+def test_without_early_pooled_the_payload_still_rides_the_terminal_chunk():
+    """Same engine replies, flag off: today's behaviour, unchanged."""
+    pooled = _pooled_payload()
+    state = _pooled_state(_early_replies(pooled), hidden_states_dir=None)
+    events = parse_sse(run(_collect(
+        stream_chat_completion_chunks(42, _stream_request(), state)
+    )))
+    carriers = _carriers(events)
+    assert len(carriers) == 1
+    assert carriers[0]["choices"][0]["finish_reason"] == "length"
+    assert carriers[0]["kv_transfer_params"] == {"pooled": pooled}
+    # No empty-delta chunk was injected ahead of the content.
+    chunks = [e for e in events if isinstance(e, dict)]
+    assert chunks[1]["choices"][0]["delta"] == {"content": "The"}
+
+
+class _PooledLogprobState(ProbeState):
+    """ProbeState plus the HF tokenizer the logprobs shaping decodes token ids with."""
+
+    def frontend_tokenizer(self):
+        manager = super().frontend_tokenizer()
+        manager.tokenizer = SimpleNamespace(decode=lambda ids: f"t{ids[0]}")
+        return manager
+
+
+FIRST_LOGPROBS = {"token_ids": [5, 5, 9], "logprobs": [-0.25, -0.25, -3.5]}
+EXPECTED_LOGPROBS = {
+    "content": [{
+        "token": "t5", "logprob": -0.25, "bytes": [116, 53],
+        "top_logprobs": [
+            {"token": "t5", "logprob": -0.25, "bytes": [116, 53]},
+            {"token": "t9", "logprob": -3.5, "bytes": [116, 57]},
+        ],
+    }]
+}
+
+
+def test_first_step_logprobs_ride_the_early_chunk_and_not_the_terminal_one():
+    """They arrive on the same engine message as the pooled block, so under
+    ``early_pooled`` they travel with it -- once, in the terminal chunk's own shape."""
+    pooled = _pooled_payload()
+    state = _PooledLogprobState(
+        _early_replies(pooled, first_logprobs=FIRST_LOGPROBS),
+        num_layers=NUM_LAYERS, hidden_states_dir=None,
+    )
+    req = ChatCompletionRequest(
+        model="client-model", messages=[{"role": "user", "content": "score me"}],
+        max_tokens=1, stream=True, logprobs=True, top_logprobs=2,
+        kv_transfer_params={"pooling": "mean", "layer_ids": [3, 7], "early_pooled": True},
+    )
+    events = parse_sse(run(_collect(stream_chat_completion_chunks(42, req, state))))
+    chunks = [e for e in events if isinstance(e, dict)]
+    early = chunks[1]
+    assert early["kv_transfer_params"] == {"pooled": pooled}
+    assert early["choices"][0]["logprobs"] == EXPECTED_LOGPROBS
+    assert early["choices"][0]["delta"] == {}
+    assert early["choices"][0]["finish_reason"] is None
+    terminal = _terminal(events)
+    assert len(terminal) == 1
+    assert terminal[0]["choices"][0]["logprobs"] is None
+    assert "kv_transfer_params" not in terminal[0]
+
+
+def test_logprobs_keep_the_terminal_chunk_when_early_pooled_is_off():
+    pooled = _pooled_payload()
+    state = _PooledLogprobState(
+        _early_replies(pooled, first_logprobs=FIRST_LOGPROBS),
+        num_layers=NUM_LAYERS, hidden_states_dir=None,
+    )
+    req = ChatCompletionRequest(
+        model="client-model", messages=[{"role": "user", "content": "score me"}],
+        max_tokens=1, stream=True, logprobs=True, top_logprobs=2,
+        kv_transfer_params={"pooling": "mean", "layer_ids": [3, 7]},
+    )
+    events = parse_sse(run(_collect(stream_chat_completion_chunks(42, req, state))))
+    terminal = _terminal(events)
+    assert len(terminal) == 1
+    assert terminal[0]["choices"][0]["logprobs"] == EXPECTED_LOGPROBS
+    assert terminal[0]["kv_transfer_params"] == {"pooled": pooled}
+
+
+class _TraceSpy:
+    """Only the trace surface the chat streamer touches, recorded in call order."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def first_token(self) -> None:
+        self.calls.append("first_token")
+
+    def pooled_ready(self) -> None:
+        self.calls.append("pooled_ready")
+
+    def seal(self, **_kw) -> None:
+        self.calls.append("seal")
+
+
+@pytest.mark.parametrize("early", [True, False])
+def test_the_pooled_event_is_never_the_first_token_marker(early):
+    """It is prefill output, not a sampled token: counting it would make the peer's TTFT
+    numbers nonsense. Recorded either way -- the measurement does not need the flag."""
+    state = _pooled_state(_early_replies(_pooled_payload()), hidden_states_dir=None)
+    trace = _TraceSpy()
+    run(_collect(stream_chat_completion_chunks(
+        42, _stream_request(early_pooled=early), state, trace=trace
+    )))
+    assert trace.calls[0] == "pooled_ready"
+    assert trace.calls.count("pooled_ready") == 1
+    assert trace.calls[1] == "first_token"
+    assert trace.calls[-1] == "seal"
+
+
+def test_pooled_ready_ms_is_recorded_beside_ttft_not_as_ttft():
+    from freetoken.server import request_ring
+
+    request_ring.reset()
+    state = _pooled_state(_early_replies(_pooled_payload()), hidden_states_dir=None)
+    run(_collect(stream_chat_completion_chunks(
+        42, _stream_request(early_pooled=True), state
+    )))
+    rows, _ = request_ring.requests_since(0, 1000)
+    row = rows[-1]
+    assert row["path"] == "/v1/chat/completions"
+    assert row["pooled_ready_ms"] is not None and row["ttft_ms"] is not None
+    assert 0 <= row["pooled_ready_ms"] <= row["ttft_ms"] <= row["duration_ms"]
+    assert request_ring.requests_pooled_ready_mean_ms() == row["pooled_ready_ms"]
+
+
+def test_a_request_without_pooling_records_no_pooled_ready_ms():
+    from freetoken.server import request_ring
+
+    request_ring.reset()
+    state = _pooled_state([final_reply()], hidden_states_dir=None)
+    req = ChatCompletionRequest(
+        model="client-model", messages=[{"role": "user", "content": "hi"}],
+        max_tokens=1, stream=True,
+    )
+    run(_collect(stream_chat_completion_chunks(42, req, state)))
+    rows, _ = request_ring.requests_since(0, 1000)
+    assert rows[-1]["pooled_ready_ms"] is None
+    assert request_ring.requests_pooled_ready_mean_ms() == 0
+
+
+def test_stats_reports_the_pooled_ready_mean_beside_the_ttft_mean():
+    """/v1/stats gets it the same way it gets ttft_mean_ms: a mean over the request ring."""
+    from freetoken.server import request_ring
+    from freetoken.server.stats import StatsTracker, build_stats
+
+    request_ring.reset()
+    state = _pooled_state(_early_replies(_pooled_payload()), hidden_states_dir=None)
+    run(_collect(stream_chat_completion_chunks(
+        42, _stream_request(early_pooled=True), state
+    )))
+    mean = request_ring.requests_pooled_ready_mean_ms()
+    assert mean == request_ring.requests_since(0, 1000)[0][-1]["pooled_ready_ms"]
+
+    state.config.served_model_name = "client-model"
+    state.config.served_model_aliases = ()
+    state.config.max_seq_len = 4096
+    state.config.page_size = 1
+    stats_state = SimpleNamespace(
+        stats=StatsTracker(), config=state.config, ready_at=None, instance_id=None
+    )
+    doc = build_stats(stats_state, 0, 0, mean)
+    assert doc["requests"]["pooled_ready_mean_ms"] == mean
+    assert doc["requests"]["ttft_mean_ms"] == 0
+    # Default keeps the field present (and zero) for callers that do not pass it.
+    assert build_stats(stats_state, 0, 0)["requests"]["pooled_ready_mean_ms"] == 0
+
+
+def test_the_trace_record_carries_pooled_ready_ms(monkeypatch):
+    """``Trace.seal`` hands the absolute instant to ``record``, exactly as it does for
+    TTFT; ``record`` turns it into a delta (pinned in tests/server/test_request_trace.py)."""
+    from freetoken.server import request_trace
+
+    captured: dict = {}
+    monkeypatch.setattr(request_trace, "record", lambda **kw: captured.update(kw))
+    state = _pooled_state(_early_replies(_pooled_payload()), hidden_states_dir=None)
+    trace = request_trace.Trace("/v1/chat/completions", [], "client-model", None, True, 1, {})
+    run(_collect(stream_chat_completion_chunks(
+        42, _stream_request(early_pooled=True), state, trace=trace
+    )))
+    assert trace.pooled_ready_at is not None and trace.ttft is not None
+    assert trace.arrival <= trace.pooled_ready_at <= trace.ttft
+    assert captured["pooled_ready"] == trace.pooled_ready_at
+    assert captured["ttft"] == trace.ttft

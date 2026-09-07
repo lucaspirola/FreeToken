@@ -112,6 +112,27 @@ class ToolCallsDelta:
 
 
 @dataclass
+class PooledReady:
+    """The hidden-state probe payload, the moment the engine has it.
+
+    The engine attaches ``kv_transfer_params`` to the DetokenizeMsg carrying the FIRST
+    sampled token (``scheduler/scheduler.py``, gated on ``batch.is_prefill``), so this
+    event is emitted after prefill and before any reasoning/content delta of the same
+    ack — i.e. before the first visible token. It carries exactly the object the
+    terminal ``GenDone`` also carries (same dict, not a copy), plus the first-step
+    logprobs that ride the same message.
+
+    Emitted at most once per generation attempt, whether or not the client asked for
+    early delivery: it is the adapters that decide whether to put it on the wire (only
+    ``kv_transfer_params.early_pooled`` does, and then the terminal chunk must not
+    repeat it). It is NOT a token — never count it as the first-token marker.
+    """
+
+    kv_transfer_params: dict
+    first_logprobs: dict | None = None
+
+
+@dataclass
 class GenDone:
     finish_reason: str
     prompt_tokens: int
@@ -131,7 +152,10 @@ class GenDone:
     first_logprobs: dict | None = None
 
 
-GenEvent = ReasoningDelta | ContentDelta | ToolCallStart | ToolCallArgsDelta | ToolCallsDelta | GenDone
+GenEvent = (
+    ReasoningDelta | ContentDelta | ToolCallStart | ToolCallArgsDelta | ToolCallsDelta
+    | PooledReady | GenDone
+)
 
 
 @dataclass
@@ -637,6 +661,7 @@ def _record_generation(
     completion_tokens: int,
     error: str | None,
     first_token_at: float | None = None,
+    pooled_ready_at: float | None = None,
 ) -> None:
     """Log one generation request into the request ring. Every protocol adapter converges here,
     so token totals are captured whatever endpoint served the request — unlike the HTTP
@@ -655,6 +680,9 @@ def _record_generation(
             model=_served_model_name(),
             duration_ms=int((time.monotonic() - start) * 1000),
             ttft_ms=int((first_token_at - start) * 1000) if first_token_at is not None else None,
+            pooled_ready_ms=(
+                int((pooled_ready_at - start) * 1000) if pooled_ready_at is not None else None
+            ),
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             stream=stream,
@@ -673,12 +701,18 @@ async def generate_events(
     prompt_tokens = 0
     completion_tokens = 0
     first_token_at: float | None = None
+    pooled_ready_at: float | None = None
     error: str | None = None
     try:
         async for ev in _generate_events_json(uid, spec, state):
             if isinstance(ev, GenDone):
                 prompt_tokens = ev.prompt_tokens
                 completion_tokens = ev.completion_tokens
+            elif isinstance(ev, PooledReady):
+                # Prefill output, not a token: it must not become TTFT, or the probe's
+                # own latency would masquerade as the model's time-to-first-token.
+                if pooled_ready_at is None:
+                    pooled_ready_at = time.monotonic()
             elif first_token_at is None:
                 first_token_at = time.monotonic()
             yield ev
@@ -689,7 +723,7 @@ async def generate_events(
         _record_generation(
             source=source, stream=True, start=start,
             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, error=error,
-            first_token_at=first_token_at,
+            first_token_at=first_token_at, pooled_ready_at=pooled_ready_at,
         )
 
 
@@ -966,6 +1000,7 @@ async def _generate_events_core(uid: int, spec: GenSpec, state: Any) -> AsyncIte
     engine_matched_stop: str | None = None
     kv_transfer_params: dict | None = None
     first_logprobs: dict | None = None
+    pooled_ready = False  # PooledReady is emitted at most once per attempt
     async for ack in state.wait_for_ack(uid):
         if getattr(ack, "error", None):
             raise GenerationError(ack.error, getattr(ack, "error_code", None))
@@ -974,6 +1009,12 @@ async def _generate_events_core(uid: int, spec: GenSpec, state: Any) -> AsyncIte
         cached_tokens += ack.cached_tokens
         kv_transfer_params = getattr(ack, "kv_transfer_params", None) or kv_transfer_params
         first_logprobs = getattr(ack, "first_logprobs", None) or first_logprobs
+        if kv_transfer_params is not None and not pooled_ready:
+            # The probe payload rides the first sampled token's message, so this is the
+            # earliest an adapter can have it -- and it is emitted before this same ack's
+            # reasoning/content deltas, so nothing visible precedes it on the wire.
+            pooled_ready = True
+            yield PooledReady(kv_transfer_params, first_logprobs)
         content_delta = ack.incremental_output
         if reasoning_parser is not None and content_delta:
             was_reasoning = reasoning_parser.in_reasoning

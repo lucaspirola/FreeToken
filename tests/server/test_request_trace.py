@@ -105,6 +105,24 @@ def test_round_trip_records_every_field_the_replay_needs(rt, tmp_path):
     assert r["duration_ms"] >= r["ttft_ms"]
     assert len(r["msg_chain"]) == len(r["msg_chars"]) == len(r["msg_roles"]) == 2
     assert r["msg_roles"] == ["system", "user"]
+    # No pooled probe on this request: the field exists and is null.
+    assert r["pooled_ready_ms"] is None
+
+
+def test_pooled_ready_ms_is_recorded_as_its_own_delta(rt, tmp_path):
+    """The hidden-state probe's latency (admission -> the early pooled event) is a
+    separate column from ttft_ms: the payload is prefill output, not a sampled token, so
+    folding it into TTFT would make a probing peer's numbers meaningless."""
+    rt.configure(str(tmp_path))
+    trace = rt.start("/v1/chat/completions", messages=_msgs("score me"), stream=True)
+    trace.pooled_ready()
+    trace.first_token()
+    trace.pooled_ready()  # idempotent: the first observation wins
+    trace.seal(request_id="chatcmpl-7", prompt_tokens=12, output_tokens=1)
+    (r,) = _read(rt, tmp_path)
+    assert r["pooled_ready_ms"] is not None and r["pooled_ready_ms"] >= 0.0
+    assert r["ttft_ms"] is not None
+    assert r["pooled_ready_ms"] <= r["ttft_ms"] <= r["duration_ms"]
 
 
 def test_no_prompt_text_by_default(rt, tmp_path):

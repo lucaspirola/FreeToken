@@ -365,6 +365,7 @@ curl http://127.0.0.1:1919/v1/chat/completions \
 | `include_output_tokens` | Accepted and ignored. FreeToken exports prompt positions only, which is all the router pools. |
 | `pooling` | `"mean"`, `"last"` or `"both"`: return the pooled prompt vectors inline (see "Inline pooled hidden states" below). Set without `hidden_states_path`, no file is written. |
 | `pooled_sink` | One path segment (`^[A-Za-z0-9._-]{1,64}$`, not `.`/`..`): the subdirectory of `--pooled-sink-dir` whose `pooled.jsonl` also receives this request's pooled vectors (see "Pooled sink (JSONL)" below). Requires `pooling`; refused (400) without the server flag. |
+| `early_pooled` | `true` delivers the pooled block on its **own SSE chunk right after prefill**, before the first content token, instead of on the terminal chunk (see "Early pooled delivery" below). **Streaming only**; requires `pooling` (400 without it), accepted and ignored on a non-streaming request. Default `false`. |
 
 `kv_transfer_params` is typed **only** on `/v1/chat/completions`. On `/v1/completions`,
 `/v1/messages` and `/v1/responses` it lands in the untyped extras and is ignored.
@@ -459,7 +460,81 @@ file rules apply to the whole request (`--hidden-states-dir` set, contiguous-fro
 `layer_ids`, the token cap, and the full prefix-cache bypass). `max_tokens` may exceed
 1; the vectors are pooled from the prefill and the completion is whatever it is. A
 pooled request binds no session lease, like the file probe (below). On the stream path
-`pooled` rides on the terminal chunk, like `hidden_states_path`.
+`pooled` rides on the terminal chunk by default, like `hidden_states_path` — see "Early
+pooled delivery" for how to move it to the front of the stream instead.
+
+#### Early pooled delivery (`early_pooled`)
+
+**Streaming only.** A non-streaming call already gets the block in the response body
+(above) and needs nothing here; `early_pooled` on such a request is accepted and
+ignored, not refused. To use this you must switch the local route to a streaming call.
+
+By default the pooled block rides the **terminal** chunk — the one carrying
+`finish_reason` — which is useless to a consumer that wants to look at the prompt's
+vectors *while the local generation is still running*. Send
+`kv_transfer_params.early_pooled: true` and the block instead goes out on its own chunk
+as soon as the engine has it, which is right after prefill:
+
+```bash
+curl -N http://127.0.0.1:1919/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "nemotron-3.5-lightning",
+    "messages": [{"role": "user", "content": "Return one short sentence."}],
+    "stream": true, "max_tokens": 256,
+    "kv_transfer_params": {
+      "pooling": "mean", "layer_ids": [0, 13, 26, 51], "early_pooled": true
+    }
+  }'
+```
+
+The chunk is an ordinary `chat.completion.chunk` with an **empty delta** and a top-level
+`kv_transfer_params` carrying exactly the object the terminal chunk would have carried:
+
+```json
+{"id": "chatcmpl-7", "object": "chat.completion.chunk", "created": 1757000000,
+ "model": "nemotron-3.5-lightning",
+ "choices": [{"index": 0, "delta": {}, "finish_reason": null}],
+ "kv_transfer_params": {
+   "pooled": {
+     "layer_ids": [0, 13, 26, 51], "hidden": 2688,
+     "prompt_tokens": 4706, "prefix_tokens": 4608, "dtype": "float32",
+     "mean": "<base64 ...>", "mean_suffix": "<base64 ...>"
+   }
+ }}
+```
+
+Note that `layer_ids`, `hidden`, `prompt_tokens`, `prefix_tokens` and `dtype` live
+**inside** `pooled`, exactly as in the non-streaming body — this is the same object,
+passed through unchanged, only moved.
+
+**Ordering guarantee.** The chunk lands *after* the opening role chunk
+(`delta: {"role": "assistant", "content": ""}`) and *before* any chunk carrying
+`content`, `reasoning_content` or `tool_calls`. In practice it is chunk index 1. It is
+emitted **at most once** per request. A client can therefore read the vectors, decide to
+escalate to another target, and drop the connection before the local generation has
+produced anything it would have to throw away.
+
+**It is not repeated at the end.** With `early_pooled` on, the terminal chunk carries no
+`kv_transfer_params` — the block can be ~1.4 MB of base64 (14,336 base64 characters per
+layer per field: 4 layers ≈ 57 KB, all 52 ≈ 745 KB per field), and sending it twice is a
+real cost. With the flag off, behaviour is exactly as before.
+
+**First-step logprobs move with it.** `logprobs: true` normally parks the object on the
+terminal chunk (§"First-step logprobs"); they ride the same engine message as the pooled
+block, so under `early_pooled` they appear in the early chunk's `choices[0].logprobs`
+instead — in the identical shape — and the terminal chunk's `logprobs` is then `null`.
+
+**`--pooled-sink-dir` is unaffected:** the JSONL line is written exactly once either way,
+off whichever chunk carries the block.
+
+**Measuring it.** The server records the probe's own latency separately from TTFT, so
+you do not have to infer it from the wire: `requests.pooled_ready_mean_ms` in
+`/v1/stats` (a mean over the same request ring as `ttft_mean_ms`, `0` when no pooled
+request is in the window) and `pooled_ready_ms` per request in a `--trace-dir` record.
+Both are milliseconds from request admission to the pooled block being available, and
+the early event deliberately does **not** count as the first token — a probe would
+otherwise make `ttft_mean_ms` meaningless.
 
 #### Pooled requests and the prefix cache
 
@@ -586,9 +661,13 @@ consuming will fill the disk.
 
 CPU: `tests/server/test_hidden_states_probe.py` (wire + validation + writer round trip),
 `tests/server/test_hidden_states_pooled.py` (pooled variant: rules, chunked
-accumulation, response placement, parity with client-side pooling of the artifact,
+accumulation, response placement, `early_pooled` ordering / exact chunk / no duplicate /
+logprobs / `pooled_ready_ms`, parity with client-side pooling of the artifact,
 prefix hits through the hybrid cache manager: inherited sums, boundary sums,
-`prefix_tokens`/`mean_suffix`), `tests/kvcache/radix/test_hybrid_radix_pooled.py`
+`prefix_tokens`/`mean_suffix`), `tests/server/test_streaming_model_matrix.py` (the
+pooled axis: the event is first and single for every parser family, the chat chunk's
+placement, the other adapters are unaffected),
+`tests/kvcache/radix/test_hybrid_radix_pooled.py`
 (sums on the tree: pooled match gating, dedup, tombstone/eviction/split/lock),
 `tests/scheduler/test_hidden_states_no_prefix_reuse.py`,
 `tests/models/test_nemotron_h_hidden_states.py` (the hook captures the post-block
@@ -668,8 +747,11 @@ curl -s http://127.0.0.1:1919/v1/chat/completions -H 'content-type: application/
 On the stream path the same object rides on the **terminal chunk** (the one carrying
 `finish_reason`), next to `kv_transfer_params`: the first token's text delta may be held
 back by the reasoning parser or a partial stop string, so no earlier chunk is reliably
-the first token's. Every other chunk omits `logprobs`. `/v1/completions` keeps
-rejecting `logprobs` (400) as before.
+the first token's. Every other chunk omits `logprobs`. The one exception is
+`kv_transfer_params.early_pooled` (§"Early pooled delivery"): the logprobs arrive on the
+same engine message as the pooled block, so they travel with it on the early chunk and
+the terminal chunk's `logprobs` is then `null`. `/v1/completions` keeps rejecting
+`logprobs` (400) as before.
 
 ---
 

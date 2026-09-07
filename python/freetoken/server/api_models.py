@@ -126,7 +126,10 @@ class KvTransferParams(BaseModel):
     the prompt-token cap does not apply; with both, the file is written under the file
     rules as well. ``pooled_sink`` names the subdirectory (one path segment) of
     ``--pooled-sink-dir`` whose ``pooled.jsonl`` also receives the pooled vectors; it
-    requires ``pooling`` and a server started with that flag. See docs/switchyard.md
+    requires ``pooling`` and a server started with that flag. ``early_pooled`` moves the
+    pooled block off the terminal SSE chunk onto its own chunk emitted right after
+    prefill (streaming only; it requires ``pooling`` and is ignored, not refused, on a
+    non-streaming request, whose body carries the block anyway). See docs/switchyard.md
     section 6.
 
     This model is the only place ``kv_transfer_params`` is typed. /v1/completions,
@@ -141,6 +144,7 @@ class KvTransferParams(BaseModel):
     include_output_tokens: bool = False
     pooling: Literal["mean", "last", "both"] | None = None
     pooled_sink: str | None = None
+    early_pooled: bool = False
 
 
 class ChatCompletionRequest(BaseModel):

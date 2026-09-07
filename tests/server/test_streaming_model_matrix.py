@@ -1,6 +1,6 @@
 """Correctness matrix across every supported model family.
 
-Two axes, per the parser combinations `args.py` auto-infers for supported models:
+Three axes, per the parser combinations `args.py` auto-infers for supported models:
 
 * TOOL-CALL STREAMING: for every tool_call_parser, the streamed events under
   randomized chunking must agree with the non-streaming path on the same text —
@@ -9,6 +9,10 @@ Two axes, per the parser combinations `args.py` auto-infers for supported models
 * REASONING DELIVERY: for every reasoning-capable family, thinking text must
   arrive intact and separated from content at each API entry point
   (/v1/responses, /v1/messages, /v1/chat/completions), streaming and not.
+* POOLED HIDDEN STATES: for every family, the pooled probe payload must be the
+  first thing off the engine (`PooledReady`), must land on its own chat chunk
+  between the role chunk and anything visible under `early_pooled`, must never be
+  sent twice, and must leave the other two adapters' wires untouched.
 
 Run:  PYTHONPATH=python <venv>/bin/python -m pytest tests/server/test_streaming_model_matrix.py -v
 """
@@ -37,6 +41,7 @@ from freetoken.server.generation import (  # noqa: E402
     ContentDelta,
     GenDone,
     GenSpec,
+    PooledReady,
     ReasoningDelta,
     ToolCallArgsDelta,
     ToolCallsDelta,
@@ -701,3 +706,151 @@ def test_trailing_text_parity_with_non_stream(family):
 
     assert norm(_content(events)) == norm(full.content)
     assert [c.name for c in _calls(events)] == [c.name for c in full.tool_calls] == ["read"]
+
+
+# --------------------------------------------------------------------------- #
+# Axis 3: pooled hidden states on the streaming path
+#         (kv_transfer_params.pooling + early_pooled)
+#
+# The probe payload rides the engine reply for the FIRST sampled token, so the core
+# emits exactly one PooledReady before anything visible. Pinned here for every parser
+# combination and under randomized chunking: it stays first, the chat streamer puts it
+# on its own chunk right after the role chunk and never twice, and the two adapters
+# that do not know the event are unaffected by it.
+# --------------------------------------------------------------------------- #
+POOLED = {
+    "pooled": {
+        "layer_ids": [0, 13, 26, 51], "hidden": 4, "prompt_tokens": 41, "prefix_tokens": 0,
+        "dtype": "float32", "mean": "bWVhbg==", "mean_suffix": "c3VmZml4",
+    }
+}
+
+
+class PooledFakeState(FakeState):
+    """FakeState whose FIRST ack also carries the probe payload -- where the engine really
+    attaches it (the DetokenizeMsg for the first sampled token)."""
+
+    async def wait_for_ack(self, uid):
+        last = len(self._chunks) - 1
+        for i, chunk in enumerate(self._chunks):
+            yield UserReply(
+                uid=uid,
+                incremental_output=chunk,
+                finished=(i == last),
+                finish_reason=self._finish_reason if i == last else None,
+                prompt_tokens_delta=1 if i == 0 else 0,
+                completion_tokens_delta=1,
+                kv_transfer_params=POOLED if i == 0 else None,
+            )
+
+
+def _pooled_chat_request(early: bool) -> ChatCompletionRequest:
+    return ChatCompletionRequest.model_validate({
+        "model": "m", "messages": [{"role": "user", "content": "hi"}], "stream": True,
+        "kv_transfer_params": {"pooling": "mean", "early_pooled": early},
+    })
+
+
+def _chunks_of(frames) -> list[dict]:
+    return [d for _t, d in frames if d is not None]
+
+
+@pytest.mark.parametrize("name", sorted(REASONING_FAMILIES))
+def test_pooled_ready_is_the_first_event_and_arrives_exactly_once(name):
+    tool, reasoning, text = _reasoning_fixture(name)
+    state = PooledFakeState(
+        _random_chunks(text, 23), tool_call_parser=tool, reasoning_parser=reasoning
+    )
+
+    async def drain():
+        return [ev async for ev in generate_events(42, _spec(), state)]
+
+    events = asyncio.run(drain())
+    _assert_stream_invariants(events, tool)
+    assert isinstance(events[0], PooledReady)
+    assert sum(isinstance(ev, PooledReady) for ev in events) == 1
+    assert events[0].kv_transfer_params is POOLED
+    assert events[0].first_logprobs is None
+    # GenDone keeps carrying it: which chunk it lands on is the adapter's decision.
+    assert events[-1].kv_transfer_params is POOLED
+    # And nothing about the generation itself changed.
+    assert _reasoning(events).strip() == THINKING
+    assert _content(events).strip() == ANSWER
+    assert [c.name for c in _calls(events)] == ["read"]
+
+
+@pytest.mark.parametrize("name", sorted(REASONING_FAMILIES))
+def test_early_pooled_chunk_precedes_everything_visible_at_the_chat_entrypoint(name):
+    tool, reasoning, text = _reasoning_fixture(name)
+    state = PooledFakeState(
+        _random_chunks(text, 29), tool_call_parser=tool, reasoning_parser=reasoning
+    )
+    frames = _sse_frames(
+        stream_chat_completion_chunks(42, _pooled_chat_request(True), state, _spec())
+    )
+    chunks = _chunks_of(frames)
+    assert chunks[0]["choices"][0]["delta"] == {"role": "assistant", "content": ""}
+    early = chunks[1]
+    assert early["kv_transfer_params"] == POOLED
+    assert early["choices"] == [{"index": 0, "delta": {}, "finish_reason": None}]
+    assert [c for c in chunks if "kv_transfer_params" in c] == [early]
+
+    # The role chunk, then the pooled chunk, then everything the client can see.
+    visible = [i for i, d in enumerate(chunks) if d["choices"] and d["choices"][0]["delta"]]
+    assert visible[0] == 0 and visible[1] > 1
+
+    # The reasoning / content / tool-call stream is untouched by the insertion.
+    deltas = [c["delta"] for d in chunks for c in d.get("choices", [])]
+    assert "".join(x.get("reasoning_content", "") for x in deltas).strip() == THINKING
+    assert "".join(x.get("content", "") or "" for x in deltas).strip() == ANSWER
+    args = "".join(
+        tc["function"].get("arguments", "") for x in deltas for tc in x.get("tool_calls", [])
+    )
+    assert json.loads(args) == READ_ARGS
+    terminal = [d for d in chunks if d["choices"] and d["choices"][0].get("finish_reason")]
+    assert len(terminal) == 1 and "kv_transfer_params" not in terminal[0]
+
+
+@pytest.mark.parametrize("name", sorted(REASONING_FAMILIES))
+def test_without_the_flag_the_pooled_block_stays_on_the_terminal_chunk(name):
+    tool, reasoning, text = _reasoning_fixture(name)
+    state = PooledFakeState(
+        _random_chunks(text, 31), tool_call_parser=tool, reasoning_parser=reasoning
+    )
+    frames = _sse_frames(
+        stream_chat_completion_chunks(42, _pooled_chat_request(False), state, _spec())
+    )
+    chunks = _chunks_of(frames)
+    carriers = [d for d in chunks if "kv_transfer_params" in d]
+    assert len(carriers) == 1
+    assert carriers[0]["choices"][0]["finish_reason"] is not None
+    assert carriers[0]["kv_transfer_params"] == POOLED
+    # No empty-delta chunk was injected anywhere ahead of the terminal one.
+    assert all(
+        d["choices"][0]["delta"] for d in chunks
+        if d["choices"] and d["choices"][0].get("finish_reason") is None
+    )
+
+
+@pytest.mark.parametrize("name", sorted(REASONING_FAMILIES))
+def test_the_other_adapters_ignore_the_pooled_event(name):
+    """anthropic_api / responses_api dispatch GenEvent with elif-isinstance chains and no
+    else, so a PooledReady is silently dropped there. That is intended -- the probe is a
+    chat-completions feature -- but it must not perturb or crash their streams."""
+    tool, reasoning, text = _reasoning_fixture(name)
+    events = _stream_events(_random_chunks(text, 37), tool, reasoning)
+    spliced = [PooledReady(POOLED), *events]
+
+    baseline = _sse_frames(A.anthropic_event_stream(_aiter(events), "m", 1))
+    with_pooled = _sse_frames(A.anthropic_event_stream(_aiter(spliced), "m", 1))
+    assert [t for t, _d in with_pooled] == [t for t, _d in baseline]
+    assert with_pooled[-1][0] == "message_stop"
+
+    req = ResponsesRequest.model_validate({"model": "m", "input": "hi", "stream": True})
+    rp_base = _sse_frames(RP.responses_stream_generator(_aiter(events), req, "resp_1", 0))
+    rp_pooled = _sse_frames(RP.responses_stream_generator(_aiter(spliced), req, "resp_1", 0))
+    assert [t for t, _d in rp_pooled] == [t for t, _d in rp_base]
+
+    # Neither wire leaks the payload.
+    for _t, data in [*with_pooled, *rp_pooled]:
+        assert data is None or "kv_transfer_params" not in json.dumps(data)

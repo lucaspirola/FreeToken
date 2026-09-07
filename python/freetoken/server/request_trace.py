@@ -269,6 +269,7 @@ def record(
     output_tokens: int | None = None,
     reasoning_tokens: int | None = None,
     ttft: float | None = None,
+    pooled_ready: float | None = None,
     finished: float | None = None,
     finish_reason: str | None = None,
     status: str = "ok",
@@ -276,8 +277,10 @@ def record(
 ) -> None:
     """Append one trace record. No-op unless ``--trace-dir`` was given; never raises.
 
-    ``arrival``/``ttft``/``finished`` are ``time.time()`` values (``ttft`` is the absolute
-    time of the first token, not a delta -- the record stores the delta).
+    ``arrival``/``ttft``/``pooled_ready``/``finished`` are ``time.time()`` values (``ttft``
+    is the absolute time of the first token, not a delta -- the record stores the delta).
+    ``pooled_ready`` is the moment the hidden-state probe payload became available (the
+    early pooled event); null on every request that asked for no pooling.
     """
     if _dir is None or _failed:
         return
@@ -299,6 +302,9 @@ def record(
             "output_tokens": output_tokens,
             "reasoning_tokens": reasoning_tokens,
             "ttft_ms": None if ttft is None else round((ttft - arrival) * 1e3, 3),
+            "pooled_ready_ms": (
+                None if pooled_ready is None else round((pooled_ready - arrival) * 1e3, 3)
+            ),
             "duration_ms": round((now - arrival) * 1e3, 3),
             "finish_reason": finish_reason,
             "status": status,
@@ -337,6 +343,9 @@ class _NullTrace:
     def first_token(self) -> None:
         pass
 
+    def pooled_ready(self) -> None:
+        pass
+
     def seal(self, **_: Any) -> None:
         pass
 
@@ -355,7 +364,7 @@ class Trace:
     """
 
     __slots__ = ("route", "arrival", "messages", "model", "session_id", "stream",
-                 "max_tokens", "sampling", "ttft", "_sealed")
+                 "max_tokens", "sampling", "ttft", "pooled_ready_at", "_sealed")
 
     def __init__(self, route: str, messages: Any, model: str | None,
                  session_id: str | None, stream: bool | None,
@@ -369,11 +378,18 @@ class Trace:
         self.max_tokens = max_tokens
         self.sampling = sampling
         self.ttft: float | None = None
+        self.pooled_ready_at: float | None = None
         self._sealed = False
 
     def first_token(self) -> None:
         if self.ttft is None:
             self.ttft = time.time()
+
+    def pooled_ready(self) -> None:
+        """The hidden-state probe payload became available (generation.PooledReady).
+        Deliberately not first_token(): it is prefill output, not a sampled token."""
+        if self.pooled_ready_at is None:
+            self.pooled_ready_at = time.time()
 
     def seal(self, **kw: Any) -> None:
         """Write the record. Idempotent: a request that ends twice (a stream that raises
@@ -391,6 +407,7 @@ class Trace:
             max_tokens=self.max_tokens,
             sampling=self.sampling,
             ttft=self.ttft,
+            pooled_ready=self.pooled_ready_at,
             **kw,
         )
 
