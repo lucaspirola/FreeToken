@@ -961,10 +961,12 @@ gave standing GO for agent-requested code adaptation. Server on :1919 restarted 
       tests written, not run (live server holds the GPU/RAM); needs a restart to go live.
 - [x] (h) Fix auto-pin (9eb7cc0, live 2026-09-07 01:10; ft-unpin retired). Gap: pooled requests carry no
       session key (no lease), so pins only fire from non-pooled traffic.
-- [ ] (i) next window: let pooled requests carry the header-derived session key for pin
-      matching WITHOUT taking a lease (openai_api.py:489 sets spec.session_id None for them).
-      Original (h) spec: budget pins by Mamba state slots (pool minus 4x
-      working set), pin only prefixes matched from a DIFFERENT session id, release the LRU pin
-      when the budget is hit instead of refusing; then retire the ft-unpin loop.
+- [x] (i) Lease-free `pin_key` (2b86f9b, live 2026-09-07 after the pilot end): the resolved
+      client session id rides GenSpec -> TokenizeMsg/UserMsg -> PendingReq -> Req as
+      `pin_key` and feeds the auto-pin's cross-session rule, while `spec.session_id` stays
+      None for pooled/hidden-state requests so they still bind no lease. 1646 passed,
+      30 skipped (+4 new). Live probe, three pooled sessions over a shared 6400-token
+      prefix, all with `X-FreeToken-Session-Id: null`: hits 2, pooled_hits 2,
+      pinned_prefixes 1, pinned_tokens 6400, pinned_slots 1, pin_evictions 0.
 - [ ] (c) pooled as first stream event after prefill: queued until the hidden session's bake-off
       says a prompt probe wins.
