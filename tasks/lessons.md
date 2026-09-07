@@ -1379,3 +1379,30 @@ check for `Discarded cold session ...: client token prefix changed` before blami
   working set (4 per running request) and must have a release path; and "matched by a second
   request" is not "shared across sessions" -- a session's own next turn matches its history.
   Live mitigation was `DELETE /v1/cache/pins` on a 60 s loop (unit ft-unpin).
+
+## 2026-09-07 — Verify the premise before changing code to satisfy it
+
+A peer asked for a matcher change: "a pooled request must never come back without
+`mean`; match the deepest ancestor carrying pooled sums, else miss." I accepted the
+premise, told them I would do it, and briefed an investigation into how to change the
+hybrid radix matcher — the exact code path that once silently broke every prefix hit.
+
+The behaviour was already implemented. `HybridRadixCache.match_prefix` takes a `pooled`
+flag whose walk-up condition is `cur.mamba_value is not None and (not pooled or
+cur.pooled_sums is not None)`, and `CacheManager.match_req` sets it for any request with
+`kv_transfer_params.pooling`. What looked like a real gap was a defensive branch in
+`hidden_states.py` that is unreachable on this cache.
+
+Two failures fed each other: the peer reasoned from observed symptoms, and my first
+investigation reported the defensive branch as a live risk without ever reading the
+matcher's own gate. The second investigation caught it, and a live mixed-traffic probe
+settled it in three requests.
+
+**Rule:** before writing code to add a behaviour someone reports missing, read the
+function that would already implement it and prove it is absent. When the report comes
+from outside the codebase, that proof is cheap and the change it prevents may not be.
+Prefer a live experiment over a code argument when the system is running and the
+experiment is three requests long.
+
+**Corollary:** a subagent's report is evidence, not a finding. When it says a risky
+change is needed, verify the load-bearing claim yourself before acting on it.

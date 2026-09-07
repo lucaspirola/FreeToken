@@ -968,5 +968,16 @@ gave standing GO for agent-requested code adaptation. Server on :1919 restarted 
       30 skipped (+4 new). Live probe, three pooled sessions over a shared 6400-token
       prefix, all with `X-FreeToken-Session-Id: null`: hits 2, pooled_hits 2,
       pinned_prefixes 1, pinned_tokens 6400, pinned_slots 1, pin_evictions 0.
-- [ ] (c) pooled as first stream event after prefill: queued until the hidden session's bake-off
+- [x] (c) Early pooled stream event (f606163 + b6a47be, live 2026-09-07). `kv_transfer_params.early_pooled`
+      moves the pooled block off the terminal SSE chunk onto its own chunk emitted right after prefill,
+      after the role chunk and before any content, so Switchyard can escalate mid-stream and cancel.
+      First-step logprobs ride it; the terminal chunk then carries neither (no ~1.4 MB duplicate).
+      Streaming only; non-streaming bodies are unchanged. `pooled_ready_ms` in the trace/ring and
+      `requests.pooled_ready_mean_ms` in /v1/stats, kept out of TTFT. New counters
+      `pooled_sumless_misses` / `pooled_sumless_miss_tokens` separate "no prefix existed" from
+      "the pooled-sums gate refused a live snapshot", which is the only cost the pooled design adds.
+      1716 passed, 30 skipped. Live: cold ROLE->POOLED->CONTENT at 3.18 s (prefix_tokens 0), warm hit
+      at 0.60 s (prefix_tokens 12288), logprobs on the pooled chunk, and with the flag absent the
+      order is unchanged (ROLE->CONTENT->POOLED-on-terminal). Counter charged 1 miss / 12288 tokens
+      for exactly the one mixed-traffic fallback.
       says a prompt probe wins.
