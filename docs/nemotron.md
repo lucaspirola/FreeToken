@@ -130,6 +130,34 @@ ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
 16 concurrent requests. With `FREETOKEN_PIN_BUDGET_GB=17` every expert layer is pinned and
 `--moe-pageable-gpu` is not needed (keeping the decode CUDA graphs).
 
+**`--kv-grow-step-tokens` costs the whole prefix cache on a prefix-reuse-heavy workload.**
+Setting it arms `_growable_shrink_pending` on *every* finished request
+(`scheduler/scheduler.py`, `_free_req_resources`), and `_maybe_shrink_growable_kv` then runs at
+the next idle moment and calls `evict_all_unlocked_prefixes()` — throwing away the entire
+prefix cache — *before* it knows a shrink is achievable. When it is not, the eviction is pure
+loss. Measured over one 2026-09-08 replay run: 565 such teardowns against 67 successful
+releases, 89% pure loss, 11.5M prefix pages evicted. A/B on identical prompts (24 turns,
+34-69k-token prompts, concurrency 2, pooled hidden states over 52 layers), with an
+identical-prefix probe after each generation that must hit by construction:
+
+| | with `--kv-grow-step-tokens 65536` | without |
+|---|---|---|
+| identical-prefix probe hit rate | 45.8% | **100%** |
+| teardowns / pages evicted | 14 / 819,596 | 0 / 0 |
+| median probe latency | 8.9 s | 1.3 s |
+| wall clock | 427 s | 281 s |
+| decode | 41.7 tok/s | 43.0-43.4 tok/s |
+
+Dropping it forces dropping `--elastic-initial-requests` too (the engine refuses the
+combination: "requires --kv-grow-step-tokens so MoE residency can fund and reclaim the extra
+GDN state"), which sizes the GDN state pool for `--max-running-requests` up front — Mamba
+slots 24 → 96 and about **1.5 GiB more resident host RAM**. That is the real cost; the
+expert-cache/decode penalty did not materialise. Keep the P2 line for multi-agent session
+serving where KV is genuinely idle between turns and worth borrowing back; drop the flag for
+prefix-reuse-heavy batch work (replay, evaluation, teacher forcing). Host RAM to launch is
+~26.9 GiB free, since the loader's own torch/CUDA init consumes ~2.8 GiB before the expert-bank
+preflight reads MemAvailable.
+
 **Decode CUDA graphs on this profile (fixed 2026-09-05).** `--elastic-initial-requests`
 recaptures the decode graphs at every capacity tier, and the tier's set used to stop at 8
 (`_elastic_graph_batch_sizes` returned `(1,2,3,4,8)`); `can_use_cuda_graph` gates on the

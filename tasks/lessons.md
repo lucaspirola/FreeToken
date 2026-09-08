@@ -1406,3 +1406,43 @@ experiment is three requests long.
 
 **Corollary:** a subagent's report is evidence, not a finding. When it says a risky
 change is needed, verify the load-bearing claim yourself before acting on it.
+
+## 2026-09-08 — A "shrink" path that destroys the cache before checking it can shrink
+
+A peer's prefix hit rate decayed 56% -> 11% over a long run. Their queue was ordered to
+exploit the radix cache and their post-answer probe re-sent an identical prefix seconds
+later, so a miss was impossible to explain by ordering. Root cause: setting
+`--kv-grow-step-tokens` arms `_growable_shrink_pending` on EVERY finished request
+(`scheduler/scheduler.py`, `_free_req_resources`); at the next idle moment
+`_maybe_shrink_growable_kv` calls `evict_all_unlocked_prefixes()` — the entire prefix cache —
+and only then discovers no shrink was achievable. 565 such events against 67 real releases in
+one day: 89% pure loss, 11.5M pages evicted. Removing the flag deletes the only production
+caller of that eviction. Measured on identical prompts: identical-prefix probe hit rate
+45.8% -> 100%, median probe 8.9 s -> 1.3 s, wall clock -34%.
+
+**Three mistakes of mine worth keeping:**
+
+1. **I diagnosed the symptom correctly and the cause wrongly, then said the cause out loud.**
+   I told the peer it was MoE cache contention and named `--kv-reserve-tokens` as the fix.
+   That flag is a startup budget floor (default 8192, not 0) with no role in the runtime
+   teardown path; it would have changed nothing and I would have "verified" it. Checking the
+   source before touching the launch line is what caught it — and it is exactly the step that
+   feels skippable once you have already committed to a cause in writing.
+
+2. **The fix had a dependency I did not predict.** `--elastic-initial-requests` requires
+   `--kv-grow-step-tokens`; the server refuses to start without it. On the mid-run restart I
+   originally offered, the server would have refused to boot with a live workload waiting.
+   This is the argument for "stop and fix properly with testing" over a quick restart.
+
+3. **I predicted a cost that never appeared and missed the one that did.** I warned of ~7.5%
+   of the expert cache and a decode penalty; decode went 41.7 -> 43.0-43.4 tok/s, i.e. better.
+   The actual cost is ~1.5 GiB more resident host RAM, because dropping the elastic tier sizes
+   the GDN state pool for all `--max-running-requests` up front (Mamba slots 24 -> 96). On a
+   host that has OOM-killed this server three times, that is the trade that matters.
+
+**Rules.** Always take the baseline on the unchanged config FIRST — if the harness cannot
+reproduce the fault before the change, nothing it shows afterwards is evidence. Prefer an
+instrument whose expected value is known a priori (a probe that must hit by construction) over
+an aggregate that mixes several effects. And when a peer reports a behaviour as missing or
+broken, read the function that would implement it before agreeing to change code — see the
+2026-09-07 entry for the same lesson learned the other way round.
