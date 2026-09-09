@@ -404,12 +404,28 @@ order-of-magnitude separation between `mean` and `last` as the load-bearing part
 
 Consequences for a consumer: `mean` is safe to treat as prompt-defined. `last` is a
 function of cache state as well as the turn, so features built on it are not comparable
-across differing cache conditions — including between offline collection and live serving.
-`--kv-cache-dtype auto` removes the precision asymmetry (both tiles bf16) and keeps prefix
-reuse, at ~2 bytes/element against 1.0625 — for a 262,144-token pool, ~1.7 GiB against
-~0.9 GiB. Whether 6-14% is the *expected* magnitude for a 0.4% KV perturbation through 52
-blocks is **not established**; it needs the experiment (same prompt cold and warm under
-q8_0, then under auto), not more reasoning.
+across differing cache conditions.
+
+**Do not "fix" this by changing the KV dtype.** `--kv-cache-dtype auto` would remove the
+precision asymmetry (both tiles bf16, ~1.7 GiB against ~0.9 GiB for a 262,144-token pool),
+and it was considered and **rejected** on 2026-09-09. The reason is the one that is easy to
+miss: serving runs the same weights *and the same KV quantization* as offline collection.
+Making collection deterministic while serving stays variable does not remove train/serve
+skew, it manufactures it — a model trained on clean features would be consuming a signal
+that never occurs in production. The variation is a property of the input that a downstream
+consumer must be robust to, not noise to eliminate. The same argument rules out collecting
+with prefix reuse disabled.
+
+What a consumer should do instead: record `prefix_tokens` per record (it is in every pooled
+payload) and check whether a learned signal is partly just reading cache state — e.g.
+predict `prefix_tokens` *from* the features; if that succeeds, the signal is suspect
+whatever the serving config does. Watch the *distribution* too: ordered batch replay sits
+at prefix fractions 0.97-1.00, while live session traffic is wider, so a training set drawn
+only from near-fully-cached turns may not generalise to colder ones.
+
+Whether 6-14% is the *expected* magnitude for a 0.4% KV perturbation through 52 blocks is
+**not established**; it needs an experiment (same prompt cold and warm under q8_0, then
+under auto), not more reasoning. That question is independent of the decision above.
 
 **Test gap:** nothing in this repo asserts cold-versus-warm equivalence for any view. The
 only parity benchmark is the file probe against transformers (per-layer cosine > 0.99,
