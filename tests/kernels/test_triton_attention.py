@@ -328,7 +328,7 @@ def test_decode_launch_config_selects_ornith_quantized_tuning_only():
     assert decode_launch_config(
         quant_name="q8_0", head_dim=256, num_q_heads=16, num_kv_heads=2,
         compute_capability=(8, 9),
-    ) == (16, 64, 4)
+    ) == (32, 64, 4)
     assert decode_launch_config(
         quant_name="q8_0", head_dim=256, num_q_heads=16, num_kv_heads=2,
         compute_capability=(12, 0),
@@ -373,7 +373,7 @@ def test_decode_launch_config_keeps_tuned_branches_when_the_sm_count_is_known():
     tuned = [
         ("int4", (8, 9), (32, 32, 4)),
         ("int4", (12, 0), (64, 64, 8)),
-        ("q8_0", (8, 9), (16, 64, 4)),
+        ("q8_0", (8, 9), (32, 64, 4)),
         ("q8_0", (12, 0), (64, 64, 4)),
         ("q8_q6", (12, 0), (64, 32, 8)),
         ("q6_q5", (12, 0), (128, 32, 4)),
@@ -416,6 +416,33 @@ def test_decode_launch_config_fills_the_gpu_for_untuned_head_shapes():
     assert _grid_filling_splits(num_q_heads=64, num_kv_heads=8, sm_count=84) == 16
     assert _grid_filling_splits(num_q_heads=32, num_kv_heads=32, sm_count=84) == 8
     assert _grid_filling_splits(num_q_heads=32, num_kv_heads=2, sm_count=2048) == 128
+
+
+def test_decode_runtime_splits_q8_ada_batch_two_fills_the_gpu():
+    """q8_0 on Ada captures 32-split scratch but batch one/four run faster at 16.
+
+    2026-09-08 RTX 2000 Ada sweep (bench_ornith_attention q8_0): batch two at 16
+    splits leaves 32 ragged CTAs on 22 SMs, while 32 splits fill exactly two
+    waves (-10.6% at 262K); batch one and four prefer 16. The runtime rule drops
+    non-batch-two to 16 and never exceeds the scratch the capture allocated.
+    """
+    from freetoken.kernel.triton.attention import decode_runtime_splits
+
+    kw = dict(
+        preferred_splits=32, head_dim=256, num_q_heads=16, num_kv_heads=2,
+        compute_capability=(8, 9),
+    )
+    assert decode_runtime_splits(scratch_splits=32, batch=1, quant_name="q8_0", **kw) == 16
+    assert decode_runtime_splits(scratch_splits=32, batch=2, quant_name="q8_0", **kw) == 32
+    assert decode_runtime_splits(scratch_splits=32, batch=4, quant_name="q8_0", **kw) == 16
+    # A capture that allocated only 16 (older buffer) is never exceeded.
+    assert decode_runtime_splits(scratch_splits=16, batch=2, quant_name="q8_0", **kw) == 16
+    # Other formats and other GPUs are untouched.
+    assert decode_runtime_splits(scratch_splits=32, batch=1, quant_name="q8_q6", **kw) == 32
+    assert decode_runtime_splits(
+        scratch_splits=64, batch=2, quant_name="q8_0",
+        **{**kw, "compute_capability": (12, 0)},
+    ) == 32
 
 
 def test_decode_launch_config_environment_override():

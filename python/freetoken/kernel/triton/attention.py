@@ -190,10 +190,14 @@ def _tuned_decode_launch_config(
         # infers quant8 from the cache tensors. Accept both so CUDA-graph scratch
         # is allocated for all 64 splits and the kernel can actually select them.
         if compute_capability == (8, 9):
-            # RTX 2000 Ada sweep: 16 splits is 2-5% faster than 64 at
-            # 50K/254K and statistically tied at 170K. The 64-token tile and
-            # four-warps geometry remain the fastest correct configuration.
-            return 16, 64, 4
+            # RTX 2000 Ada (2026-09-08 re-sweep, bench_ornith_attention q8_0): 16
+            # splits is fastest for batch one (1.495 vs 1.530 ms at 262K; batch one
+            # underfills the 22-SM part either way) but leaves batch TWO at 32
+            # ragged CTAs. 32 splits costs ~2.3% at batch one yet wins 10.6% at
+            # batch two (2.77 vs 3.10 ms at 262K) because 64 CTAs fill exactly two
+            # waves. Capture scratch at 32 and let decode_runtime_splits drop to 16
+            # for the batch sizes where 16 wins. Tile/warps unchanged.
+            return 32, 64, 4
         return 64, 64, 4
     if sm_count:
         # Untuned geometry on a known GPU (Nemotron 3.5 Lightning's 32Q/2KV/D128 is the
@@ -242,6 +246,14 @@ def decode_runtime_splits(
         and num_kv_heads == 2
     ):
         if batch == 2 and quant_name == "int4":
+            splits = min(splits, 16)
+        # Symmetric q8_0 captures scratch at 32 splits (the batch-two optimum:
+        # 64 CTAs = two full waves on 22 SMs, -10.6% at 262K). Batch one and
+        # batch four run measurably faster at 16 (1.495 vs 1.530 ms batch one,
+        # 5.51 vs 5.53/5.57 ms batch four at 262K), so drop to 16 there; the
+        # scratch holds 32, so this only ever shrinks the launch. Sweep:
+        # bench_ornith_attention q8_0, 2026-09-08.
+        if quant_name in {"q8_0", "quant8"} and batch != 2:
             splits = min(splits, 16)
         # Four concurrent Q8/Q6 streams already expose enough stage-one work;
         # 16 splits match or beat 32 from 16K through 262K and reduce stage-two
