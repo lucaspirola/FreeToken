@@ -198,6 +198,13 @@ class Qwen3_5GatedDeltaNet(BaseOP):
             g, beta = self._gate_params(a, b)
             g = g.reshape(1, total, self.num_v_heads)
             beta = beta.float().reshape(1, total, self.num_v_heads)
+            # Speculative verify: record this layer's scan inputs so the commit can replay
+            # the accepted prefix into the live slot. The verify forward runs against the
+            # scratch slot (fla.cache_indices), so the live state is untouched; see
+            # models/qwen3_5_moe/spec_scan.py. Recorded tensors are fresh outputs of
+            # _conv_prefill/_gate_params (never mutated downstream), so no clone is needed.
+            if getattr(batch, "spec_capture", None) is not None:
+                batch.spec_capture.record(self, q, k, v, g, beta, conv_in)
             # The chunk kernel reads + writes back initial_state[cache_indices] in place;
             # fresh sequences (cached_len==0) must start from a zeroed slot.
             if fla.fresh_state_indices is not None:

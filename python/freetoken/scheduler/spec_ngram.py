@@ -474,7 +474,7 @@ class SpecNgramDecoder:
         if getattr(cm, "is_swa", False):
             return False, "sliding-window attention has no per-step KV rollback"
         if pool is not None:
-            if pool.state_layout != "mamba2":
+            if pool.state_layout not in ("mamba2", "kv"):
                 return False, f"recurrent state layout {pool.state_layout!r} has no verify commit"
             if not getattr(cm, "is_hybrid", False):
                 # Non-hybrid keys the state slot on table_idx, which is also the page-table
@@ -800,7 +800,7 @@ class SpecNgramDecoder:
                 input_tuple = sch._prepare_batch(batch).input_tuple
             batch.logits_indices = self._rows(m)
             if scratch is not None:
-                capture = _make_capture(m, fused=self.fused_commit)
+                capture = _make_capture(m, fused=self.fused_commit, pool=pool)
                 batch.spec_capture = capture
             batch.input_ids = sch.token_pool[input_tuple]
             prep_ms = (time.perf_counter() - t0) * 1e3
@@ -1056,7 +1056,19 @@ class SpecNgramDecoder:
         sch.send_result(reply)
 
 
-def _make_capture(num_tokens: int, *, fused: bool = True):
+def _make_capture(num_tokens: int, *, fused: bool = True, pool=None):
+    """Build the capture for the pool's recurrent-state layout.
+
+    ``state_layout == "mamba2"`` (Nemotron-3.5) replays the SSD scan;
+    ``state_layout == "kv"`` (Ornith / Qwen3.5-MoE GDN) replays the gated-delta-rule
+    chunk scan. Both record per-layer inputs during the verify forward and re-advance
+    the live slot by the accepted prefix.
+    """
+    layout = getattr(pool, "state_layout", "mamba2")
+    if layout == "kv":
+        from freetoken.models.qwen3_5_moe.spec_scan import GdnSpecScanCapture
+
+        return GdnSpecScanCapture(num_tokens, fused=fused)
     from freetoken.models.nemotron_h.spec_scan import SpecScanCapture
 
     return SpecScanCapture(num_tokens, fused=fused)
