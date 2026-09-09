@@ -368,6 +368,56 @@ curl http://127.0.0.1:1919/v1/chat/completions \
 | `pooled_sink` | One path segment (`^[A-Za-z0-9._-]{1,64}$`, not `.`/`..`): the subdirectory of `--pooled-sink-dir` whose `pooled.jsonl` also receives this request's pooled vectors (see "Pooled sink (JSONL)" below). Requires `pooling`; refused (400) without the server flag. |
 | `early_pooled` | `true` delivers the pooled block on its **own SSE chunk right after prefill**, before the first content token, instead of on the terminal chunk (see "Early pooled delivery" below). **Streaming only**; requires `pooling` (400 without it), accepted and ignored on a non-streaming request. Default `false`. |
 
+### `last` is not cache-independent (measured 2026-09-09)
+
+`mean` is exact over the whole prompt on a prefix hit — the docstring says so and the
+arithmetic backs it (`prefix_sum + forwarded`, divided by `prompt_tokens`). **No such
+promise is made for `last`, and it does not hold.**
+
+With a quantized KV cache (`--kv-cache-dtype q8_0`, the production default) the attention
+kernel treats fresh and cached tokens at *different precisions in the same call*: the
+current chunk's K/V are stored into the quantized pool (`attention/triton.py:214`) and then
+passed to the extend kernel as raw bf16 alongside it (`:280-281`), where the extend tile is
+loaded with a bare `tl.load` — no dequantization (`kernel/triton/attention.py:1596-1621`) —
+while prefix tiles go through a dequantizing loader (`:269-284`). Q8_0 is symmetric int8,
+32 elements per fp16 scale, so its error is ~0.4% of each block's largest element
+(`kvcache/quant.py:26-29,195-201,264`).
+
+A *cold* run is not full precision either: at `--max-prefill-length 8192` a 100k prompt is
+13 chunks and each is stored quantized before later chunks attend over it. What actually
+varies between two runs of an identical prompt is **which ~8192-token window lands in the
+bf16 extend region** — i.e. chunk alignment, which a prefix hit shifts.
+
+Measured by the Switchyard session on 5 paired turns (same `turn_id`, two different
+`prefix_tokens`), relative L2 between runs:
+
+| view | relative L2 |
+|---|---|
+| `mean` | 6.6e-05 .. 1.6e-04 (fp32 accumulation floor) |
+| `last` | 6.3e-02 .. 1.4e-01 |
+| `mean_suffix` | 2.6e-01 .. 9.0e-01 (window is defined by the split; expected) |
+
+On 10 further pairs where `prefix_tokens` reproduced exactly, all three views were **bitwise
+identical** — so generation is deterministic at T=0 and the spread is attributable to
+alignment, not nondeterminism. n=5 from one project: treat magnitudes as indicative, the
+order-of-magnitude separation between `mean` and `last` as the load-bearing part.
+
+Consequences for a consumer: `mean` is safe to treat as prompt-defined. `last` is a
+function of cache state as well as the turn, so features built on it are not comparable
+across differing cache conditions — including between offline collection and live serving.
+`--kv-cache-dtype auto` removes the precision asymmetry (both tiles bf16) and keeps prefix
+reuse, at ~2 bytes/element against 1.0625 — for a 262,144-token pool, ~1.7 GiB against
+~0.9 GiB. Whether 6-14% is the *expected* magnitude for a 0.4% KV perturbation through 52
+blocks is **not established**; it needs the experiment (same prompt cold and warm under
+q8_0, then under auto), not more reasoning.
+
+**Test gap:** nothing in this repo asserts cold-versus-warm equivalence for any view. The
+only parity benchmark is the file probe against transformers (per-layer cosine > 0.99,
+below), and file probes set `no_prefix_cache`, so they never exercise a cache hit. The
+fixture shape that would close it: one prompt, two `prefix_tokens` values, per-view
+tolerances — `mean` at ~1e-4, `last` at a tolerance someone has to justify rather than
+assume.
+
 `kv_transfer_params` is typed **only** on `/v1/chat/completions`. On `/v1/completions`,
 `/v1/messages` and `/v1/responses` it lands in the untyped extras and is ignored.
 
