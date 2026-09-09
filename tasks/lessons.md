@@ -1446,3 +1446,24 @@ instrument whose expected value is known a priori (a probe that must hit by cons
 an aggregate that mixes several effects. And when a peer reports a behaviour as missing or
 broken, read the function that would implement it before agreeing to change code — see the
 2026-09-07 entry for the same lesson learned the other way round.
+
+## 2026-09-09 — Instrument the neighbourhood; do not correlate timestamps against it
+
+A recurring ~3.3 GB process was pulling host MemAvailable to ~5.5 GiB next to a live
+model. I sampled with `ps` twice at 15 s intervals, missed a spike that lasted seconds
+both times, and then reasoned from timestamps with the peer about which of our pipelines
+it might be. Neither of us could see it. The peer eventually wrote a 60-line `/proc`
+sampler at 0.25 s resolution with a rolling max per (pid, cmdline) and a ~10 MB footprint,
+and it named the actual consumer within seconds — a foreign `codex` session, neither of
+ours, consistent with an earlier `cargo test` spike I had attributed to the same parent.
+
+**Rule:** when an intermittent resource consumer matters, the FIRST move is a sampler fast
+enough to catch it, not a slower sampler plus inference. My 15 s `ps` loop could not
+resolve a 2-3 s spike even in principle, so every conclusion drawn from it was going to be
+speculation dressed as observation. Cost of the right tool: ~60 lines and a few MB. Cost
+of the wrong approach: two sessions and several messages, and a wrong suggestion sent to a
+peer (I proposed making their shard flush incremental; they measured it at 33.5 MB per
+batch — I had proposed a fix for a mechanism I never sized).
+
+**Corollary:** before suggesting an optimisation to someone else, size the mechanism you
+are blaming. "It could be X" is worth sending only when X is big enough to matter.
