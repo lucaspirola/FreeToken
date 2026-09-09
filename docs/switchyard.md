@@ -399,8 +399,20 @@ Measured by the Switchyard session on 5 paired turns (same `turn_id`, two differ
 
 On 10 further pairs where `prefix_tokens` reproduced exactly, all three views were **bitwise
 identical** — so generation is deterministic at T=0 and the spread is attributable to
-alignment, not nondeterminism. n=5 from one project: treat magnitudes as indicative, the
-order-of-magnitude separation between `mean` and `last` as the load-bearing part.
+alignment, not nondeterminism.
+
+Independently reproduced on this server (2026-09-09, different prompts and a different
+harness, n=12 paired cold/warm sends of the same prompt): `mean` 1.4e-05 .. 4.2e-05 (median
+2.3e-05), `last` 3.4e-02 .. 1.25e-01 (median 6.7e-02), `mean_suffix` 1.1e-01 .. 5.0e-01.
+Same two orders of magnitude between `mean` and `last`, so the effect is established rather
+than indicated.
+
+**What is NOT measured:** whether the deviation *scales* with cached fraction. Both
+measurements landed at prefix fractions of 0.97+ — a harness that sends the prompt cold
+first caches the whole thing, so the later "warm" send matches that full entry rather than
+any shorter prefix seeded afterwards. Testing the scaling needs two server lifetimes (one
+to collect cold references for N distinct prompts, then a restart, then one that seeds a
+prefix at fraction f before each prompt). Do not cite a scaling relationship as measured.
 
 Consequences for a consumer: `mean` is safe to treat as prompt-defined. `last` is a
 function of cache state as well as the turn, so features built on it are not comparable
