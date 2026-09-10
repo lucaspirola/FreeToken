@@ -1467,3 +1467,27 @@ batch — I had proposed a fix for a mechanism I never sized).
 
 **Corollary:** before suggesting an optimisation to someone else, size the mechanism you
 are blaming. "It could be X" is worth sending only when X is big enough to matter.
+
+---
+
+## 2026-09-10 — A launch script in the repo is not the running configuration
+
+A peer asked for the live serving profile so a third party could implement against it.
+The subagent I sent to collect the facts answered from `benchmarks/switchyard_soak/serve.sh`
+and `docs/switchyard.md` §1 — both plausible, both in-repo, both **stale** — and produced a
+confident, correctly cited, wrong claim: "that line sets no `--pooled-sink-dir`, so a
+request naming `pooled_sink` is a 400 against this instance." The live unit does set it.
+Four flags differed in total, including the two removed the previous day for the KV
+teardown bug, whose absence is the single most consequential fact about the instance.
+
+**Rule:** the live config comes from the live process. `systemctl --user show UNIT -p ExecStart`,
+`/v1/models`, `/v1/stats`, `/v1/cache/status` — those are the source of truth for "what is
+running". Repo launch scripts and docs are the source of truth for *defaults and intent*,
+and they drift the moment a flag changes on the box. Never let a repo file answer a question
+phrased "current".
+
+**Corollary for delegation:** a citation is evidence the claim was read somewhere, not
+evidence it is true of production. When I brief a subagent on a live system, say explicitly
+which questions must be answered from the running process, or I will get well-sourced
+answers about a configuration nobody is using. Here the report's own defaults table was
+right and its "live" section was wrong — the mistake was in my brief, not its work.
