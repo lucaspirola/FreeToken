@@ -1491,3 +1491,26 @@ evidence it is true of production. When I brief a subagent on a live system, say
 which questions must be answered from the running process, or I will get well-sourced
 answers about a configuration nobody is using. Here the report's own defaults table was
 right and its "live" section was wrong — the mistake was in my brief, not its work.
+
+---
+
+## 2026-09-12 — `systemd-run --user` strips PATH; JIT kernels that shell out need it explicit
+
+Launching FreeToken via `systemd-run --user` (a fresh session's first launch, unit not
+pre-existing) failed 20s into load: `tvm_ffi` JIT-compiles an indexing kernel and shells
+out to `nvidia-smi` to detect the CUDA compute cap, but the transient unit's PATH is
+systemd's minimal default and does not include `/usr/lib/wsl/lib`, where WSL2 exposes
+`nvidia-smi`. `FileNotFoundError: nvidia-smi` inside `tvm_ffi/cpp/extension.py`, escalated
+to `RuntimeError: Could not detect CUDA compute_cap automatically`, took down the scheduler
+process (frontend stayed up and served a clean 503 rather than hanging).
+
+**Rule:** any `systemd-run --user` launch of FreeToken needs `--setenv=PATH=...` including
+`/usr/lib/wsl/lib`, or set `--setenv=TVM_FFI_CUDA_ARCH_LIST=12.0` directly (RTX 5080 = sm_120)
+to skip the shell-out entirely — the more robust of the two, since it removes the dependency
+rather than papering over the PATH. Interactive-shell launches never hit this because the
+shell's PATH already carries it; only a from-scratch transient unit does.
+
+**Verify past "server responded 200 to /health"**: uvicorn accepts connections before the
+scheduler subprocess finishes init, so `/health` returning 200 does not mean the model
+loaded. GPU memory climbing past ~12 GiB, then one real completion request succeeding, is
+the actual readiness signal.
