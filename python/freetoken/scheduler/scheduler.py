@@ -1435,7 +1435,9 @@ class Scheduler(SchedulerIOMixin):
             logger.info_rank0("Session %s expired after idle timeout", sid)
             self._close_session(sid, discard_state=False)
 
-    def _release_soft_session_handle(self, session_id: str, reason: str) -> bool:
+    def _release_soft_session_handle(
+        self, session_id: str, reason: str, *, require_checkpoint: bool = False
+    ) -> bool:
         session = getattr(self, "_sessions", {}).get(session_id)
         if (
             session is None
@@ -1444,7 +1446,14 @@ class Scheduler(SchedulerIOMixin):
             or session.handle is None
         ):
             return False
-        self._spill_soft_session(session_id, session)
+        checkpointed = self._spill_soft_session(session_id, session)
+        if require_checkpoint and not checkpointed:
+            logger.info_rank0(
+                "Kept soft session %s protected: handoff checkpoint unavailable (%s)",
+                session_id,
+                reason,
+            )
+            return False
         self.cache_manager.unlock(session.handle)
         # The unlock hands a whole conversation's prefix back to the evictable pool, so
         # every ``match_req`` result the current pass memoized described a tree that no
@@ -1529,16 +1538,16 @@ class Scheduler(SchedulerIOMixin):
                 self.config.host_ram_reserve_gb,
             )
 
-    def _spill_soft_session(self, session_id: str, session: SessionLease) -> None:
+    def _spill_soft_session(self, session_id: str, session: SessionLease) -> bool:
         store = getattr(self, "_session_spill_store", None)
         handle = session.handle
         if store is None or handle is None or session.token_ids is None:
-            return
+            return False
         node = getattr(handle, "node", None)
         linear_slot = getattr(node, "mamba_value", None)
         page_indices = handle.get_matched_indices()
         if linear_slot is None or len(page_indices) != len(session.token_ids):
-            return
+            return False
         self._discard_session_spill(session)
         capture = getattr(self, "_state_capture", None)
         if capture is not None:
@@ -1564,7 +1573,7 @@ class Scheduler(SchedulerIOMixin):
                 "resume will recompute if its GPU prefix is evicted",
                 session_id,
             )
-            return
+            return False
         session.spill = record
         logger.info_rank0(
             "Spilled soft session %s: %d tokens, %s, %.2f GiB in %.3f s (%.2f GiB/s)",
@@ -1575,6 +1584,7 @@ class Scheduler(SchedulerIOMixin):
             elapsed,
             record.byte_size / (1 << 30) / max(elapsed, 1e-9),
         )
+        return bool(record.valid)
 
     @torch.inference_mode()
     def _restore_cold_session(self, session_id: str, input_ids: torch.Tensor) -> bool:
@@ -2002,16 +2012,24 @@ class Scheduler(SchedulerIOMixin):
 
     @torch.inference_mode()
     def _maybe_shrink_growable_kv(self) -> None:
-        """Physically release unused KV steps and restore expert residency after teardown."""
+        """Release unused KV steps at an idle or queued-agent handoff boundary."""
         grow_step_tokens = getattr(
             getattr(self, "config", None), "kv_grow_step_tokens", 0
         )
         if not grow_step_tokens or not getattr(self, "_growable_shrink_pending", False):
             return
-        # A queued helper is about to consume the space again. Deferring avoids a costly
-        # decommit/rebuild/recapture immediately followed by the inverse operation.
-        if self.prefill_manager.runnable:
+        # overlap_loop publishes the previous forward in ``_last_data`` before it calls us.
+        # Until that batch is drained, kernels may still read KV/expert pointers and exports
+        # may still borrow request pages. Keep the trigger armed. Supported growable mode
+        # uses normal_loop, which drains each forward before the next iteration.
+        if getattr(self, "_last_data", None) is not None:
             return
+        # Compaction copies are issued from scheduler context while expert rebuilds use the
+        # engine stream. Establish an explicit all-borrowers-drained boundary before the first
+        # possible spill, metadata rewrite, VMM unmap or graph teardown.
+        self.stream.synchronize()
+        if self.engine.stream is not self.stream:
+            self.engine.stream.synchronize()
         self._growable_shrink_pending = False
         cm = self.cache_manager
         step = grow_step_tokens // self.config.page_size
@@ -2019,31 +2037,76 @@ class Scheduler(SchedulerIOMixin):
         if cm.committed_pages <= initial:
             return
 
-        # Ask whether a shrink is POSSIBLE before paying for it with the prefix cache.
-        # ``page_usage()``'s used_pages is ``committed - free - evictable``, which is exactly
-        # what ``evict_all_unlocked_prefixes()`` would leave occupied, so the best target any
-        # continuation of this function can reach is computable here -- and
-        # ``compact_active_pages`` returns ``max(target_pages, required)``, so compaction can
-        # only raise it, never beat it. If that best case cannot get below the current
-        # commitment, the eviction is pure loss: the whole prefix cache thrown away at an
-        # idle moment for a shrink that was never going to happen. §Y5b's timeline opens with
-        # two of those, 4 s apart, immediately before a 576 s stall spent re-prefilling.
-        used_pages, _total_pages = cm.page_usage()
-        best_target = max(initial, math.ceil(used_pages / step) * step)
-        if best_target >= cm.committed_pages:
+        pending = list(getattr(self.prefill_manager, "pending_list", ()))
+        handoff = bool(pending)
+        future_pages = self._growable_handoff_demand_pages(pending)
+
+        # Growable KV currently enforces page_size=1 at config time, so the pending
+        # token promises above are page counts here. If the incoming agent alone needs
+        # the current commitment, releasing unrelated sessions would buy no shrink and
+        # only turn a reusable GPU prefix into a disk restore.
+        if handoff and math.ceil(future_pages / step) * step >= cm.committed_pages:
             logger.debug_rank0(
-                "Growable KV teardown skipped: protected/live pages already need %d of %d "
-                "committed pages, so no step can be released; prefix cache kept",
-                used_pages,
+                "Growable KV handoff kept at %d pages: queued agent needs %d",
+                cm.committed_pages,
+                future_pages,
+            )
+            return
+
+        if handoff:
+            incoming_sessions = {
+                p.session_id for p in pending if getattr(p, "session_id", None)
+            }
+            candidates = sorted(
+                (
+                    (lease.last_used_at, sid)
+                    for sid, lease in getattr(self, "_sessions", {}).items()
+                    if sid not in incoming_sessions
+                    and lease.reclaimable
+                    and lease.active_uid is None
+                    and lease.handle is not None
+                ),
+                key=lambda item: item[0],
+            )
+            for _last_used, sid in candidates:
+                # A handoff may discard the outgoing GPU history only after a complete,
+                # valid cold checkpoint owns it. Release every eligible outgoing lease,
+                # not merely enough for one step: physical KV should follow the incoming
+                # active agent rather than retain most of the previous agent's footprint.
+                # Explicit/protected leases are absent from candidates and remain hard floors.
+                if not self._release_soft_session_handle(
+                    sid, "queued-agent handoff", require_checkpoint=True
+                ):
+                    logger.info_rank0(
+                        "Growable KV handoff shrink deferred: outgoing session %s "
+                        "has no valid checkpoint",
+                        sid,
+                    )
+                    return
+
+        used_pages, _total_pages = cm.page_usage()
+        best_target = max(
+            initial, math.ceil((used_pages + future_pages) / step) * step
+        )
+        if best_target > cm.committed_pages - step:
+            logger.debug_rank0(
+                "Growable KV shrink skipped: protected/live plus queued demand needs %d "
+                "of %d committed pages",
+                used_pages + future_pages,
                 cm.committed_pages,
             )
             return
 
-        evicted = cm.evict_all_unlocked_prefixes()
         occupied_pages = cm.committed_pages - len(cm.free_slots)
-        compacted_target = max(initial, math.ceil(occupied_pages / step) * step)
+        evicted = self._evict_growable_prefix_pages(
+            max(0, occupied_pages - best_target)
+        )
+        occupied_pages = cm.committed_pages - len(cm.free_slots)
+        compacted_target = max(
+            best_target, math.ceil(occupied_pages / step) * step
+        )
         compacted_target = cm.compact_active_pages(
-            list(self.decode_manager.running_reqs),
+            self._elastic_live_requests(),
             compacted_target,
             self.engine.kv_cache.copy_pages,
         )
@@ -2067,6 +2130,40 @@ class Scheduler(SchedulerIOMixin):
                 new_pages,
                 self.engine.moe_offload_cache.cache_size,
             )
+
+    def _growable_handoff_demand_pages(self, pending) -> int:
+        """Physical headroom already promised to the next queued agent(s)."""
+        if not pending:
+            return 0
+        head = pending[0]
+        chunked = getattr(head, "chunked_req", None)
+        if chunked is None:
+            # The matched prefix becomes non-evictable on admission, so the final physical
+            # footprint is conservative and independent of whether it is reused or filled.
+            head_need = max(0, head.input_len - 1) + head.output_len
+        else:
+            # Forwarded pages are already in page_usage(); count only the promise remaining.
+            head_need = max(0, head.input_len - chunked.cached_len) + head.output_len
+        reserve_fn = getattr(self.prefill_manager, "finishability_reservation", None)
+        reserved = int(reserve_fn()) if reserve_fn is not None else 0
+        return max(head_need, reserved)
+
+    def _evict_growable_prefix_pages(self, pages: int) -> int:
+        """Request only the needed LRU eviction; whole leaves/cascades may overshoot."""
+        if pages <= 0:
+            return 0
+        cm = self.cache_manager
+        tokens = pages * cm.page_size
+        if cm.is_hybrid:
+            result = cm.prefix_cache.evict_full(tokens)
+            indices = result.kv_indices
+            if result.mamba_slots:
+                cm.linear_state_pool.free(result.mamba_slots)
+        else:
+            indices = cm.prefix_cache.evict(tokens)
+        if len(indices):
+            cm._free(indices)
+        return len(indices) // cm.page_size
 
     def _elastic_live_requests(self) -> list[Req]:
         """Every request object that currently owns GDN slots (deduplicated)."""

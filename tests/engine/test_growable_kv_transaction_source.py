@@ -166,6 +166,27 @@ def test_post_graph_planning_failure_restores_graph_readiness():
     assert obj.moe_offload_cache.cache_size == 8
 
 
+def test_shrink_partial_graph_teardown_failure_restores_graph_readiness():
+    obj, methods = _engine(_Pool(16), _Moe(4))
+    restores = []
+
+    def fail_reset():
+        raise RuntimeError("injected graph reset failure")
+
+    obj.attn_backend.reset_capture = fail_reset
+    obj.ensure_decode_graphs = lambda: (
+        restores.append(tuple(obj._pending_graph_bs)),
+        setattr(obj, "_pending_graph_bs", None),
+    )
+    with pytest.raises(RuntimeError, match="graph reset"):
+        methods.shrink_runtime_kv(obj, 8)
+
+    assert restores == [(1,)]
+    assert obj._pending_graph_bs is None
+    assert obj.kv_cache.committed_pages == 16
+    assert obj.moe_offload_cache.cache_size == 4
+
+
 def test_explicit_and_implicit_cpu_splits_resolve_without_changing_cache_ownership():
     tree = ast.parse(ENGINE.read_text())
     funcs = [

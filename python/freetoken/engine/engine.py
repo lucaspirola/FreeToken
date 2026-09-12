@@ -1444,12 +1444,11 @@ class Engine:
             self.sync_all_ranks()
         recapture = target_moe < moe.cache_size
         recapture_graphs = recapture and self._pending_graph_bs is None
-        if recapture:
-            if self._pending_graph_bs is None:
+        try:
+            if recapture and self._pending_graph_bs is None:
                 self._pending_graph_bs = list(self.graph_runner.graph_bs_list)
                 self.attn_backend.reset_capture()
                 self.graph_runner.destroy_cuda_graphs()
-        try:
             commit_bytes = kv_bytes - pool.mapped_bytes_for_pages(old_pages)
             required_free = commit_bytes + 256 * 1024 * 1024
             live_free_before = self._sync_get_memory()[0]
@@ -1555,15 +1554,13 @@ class Engine:
             self.sync_all_ranks()
         recapture = target_moe != old_moe
         recapture_graphs = recapture and self._pending_graph_bs is None
-        if recapture:
-            if self._pending_graph_bs is None:
-                self._pending_graph_bs = list(self.graph_runner.graph_bs_list)
-                self.attn_backend.reset_capture()
-                self.graph_runner.destroy_cuda_graphs()
-
         # Free KV first so expert-cache expansion never needs old and new geometries resident
         # simultaneously. Stable virtual addresses keep all surviving KV views valid.
         try:
+            if recapture and self._pending_graph_bs is None:
+                self._pending_graph_bs = list(self.graph_runner.graph_bs_list)
+                self.attn_backend.reset_capture()
+                self.graph_runner.destroy_cuda_graphs()
             pool.decommit_pages(target_pages)
             if recapture:
                 moe.prefill_overlap = (
