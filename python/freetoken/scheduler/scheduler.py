@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import time
@@ -37,7 +38,7 @@ from freetoken.utils import (
 
 from .cache import PIN_WORKING_SET_SLOTS_PER_REQUEST, CacheManager
 from .config import SchedulerConfig
-from .counters import build_scheduler_counters
+from .counters import GrowableHandoffEvents, build_scheduler_counters
 from .decode import DecodeManager
 from .io import SchedulerIOMixin
 from .prefill import ChunkedReq, PrefillManager
@@ -263,6 +264,8 @@ class Scheduler(SchedulerIOMixin):
         # in-flight boundary, compacts surviving private pages, decommits a free suffix, and
         # spends the returned VRAM on MoE expert slots.
         self._growable_shrink_pending = False
+        self._growable_handoff_events = GrowableHandoffEvents()
+        self._growable_handoff_pending: tuple[int, int] | None = None
         self._elastic_capacity = (
             config.elastic_initial_requests or config.max_running_req
         )
@@ -756,6 +759,7 @@ class Scheduler(SchedulerIOMixin):
             return
 
         forward_input = self._schedule_next_batch()
+        self._finalize_growable_handoff(forward_input)
         ongoing_data = None
         if forward_input is not None:
             # already inside engine_stream_ctx (run_forever); restore on the engine stream
@@ -2120,7 +2124,37 @@ class Scheduler(SchedulerIOMixin):
             )
             return
 
-        old_pages, new_pages = self.engine.shrink_runtime_kv(target)
+        head = pending[0] if handoff else None
+        event_sequence = None
+        handoff_events = getattr(self, "_growable_handoff_events", None)
+        if head is not None and handoff_events is not None:
+            event_sequence = handoff_events.begin({
+                "attempt_monotonic_ns": time.monotonic_ns(),
+                "head_uid_hash": self._handoff_identity(getattr(head, "uid", None)),
+                "head_session_hash": self._handoff_identity(
+                    getattr(head, "session_id", None)),
+                "pending_count": len(pending),
+                "before_committed_pages": int(cm.committed_pages),
+                "before_expert_slots": int(self.engine.moe_offload_cache.cache_size),
+                "requested_pages": int(target),
+                "after_committed_pages": None,
+                "after_expert_slots": None,
+                "admitted_uid_hash": None,
+                "admitted_batch_is_prefill": None,
+                "admitted_committed_pages": None,
+                "admitted_expert_slots": None,
+                "pre_forward_monotonic_ns": None,
+                "qualified": False,
+                "outcome": "attempting",
+            })
+        try:
+            old_pages, new_pages = self.engine.shrink_runtime_kv(target)
+        except Exception as exc:
+            if event_sequence is not None:
+                handoff_events.update(
+                    event_sequence, outcome="error",
+                    error_type=type(exc).__name__, completed_monotonic_ns=time.monotonic_ns())
+            raise
         if new_pages < old_pages:
             cm.remove_committed_pages(new_pages)
             logger.info_rank0(
@@ -2130,6 +2164,51 @@ class Scheduler(SchedulerIOMixin):
                 new_pages,
                 self.engine.moe_offload_cache.cache_size,
             )
+            if event_sequence is not None:
+                handoff_events.update(
+                    event_sequence, outcome="awaiting_pre_forward_admission",
+                    after_committed_pages=int(new_pages),
+                    after_expert_slots=int(self.engine.moe_offload_cache.cache_size),
+                    resize_completed_monotonic_ns=time.monotonic_ns())
+                self._growable_handoff_pending = (
+                    event_sequence, int(getattr(head, "uid")))
+        elif event_sequence is not None:
+            handoff_events.update(
+                event_sequence, outcome="no_resize", after_committed_pages=int(new_pages),
+                after_expert_slots=int(self.engine.moe_offload_cache.cache_size),
+                completed_monotonic_ns=time.monotonic_ns())
+
+    @staticmethod
+    def _handoff_identity(value) -> str | None:
+        if value is None:
+            return None
+        return hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:16]
+
+    def _finalize_growable_handoff(self, forward_input) -> None:
+        """Bind a resize to the queued head selected next, before its forward executes."""
+        pending = getattr(self, "_growable_handoff_pending", None)
+        if pending is None:
+            return
+        sequence, expected_uid = pending
+        batch = getattr(forward_input, "batch", None)
+        reqs = list(getattr(batch, "reqs", ()))
+        admitted = next((req for req in reqs if getattr(req, "uid", None) == expected_uid), None)
+        first_uid = getattr(reqs[0], "uid", None) if reqs else None
+        is_prefill = getattr(batch, "is_prefill", None)
+        qualified = admitted is not None and is_prefill is True
+        self._growable_handoff_events.update(
+            sequence,
+            outcome="success" if qualified else "not_qualified",
+            qualified=qualified,
+            admitted_uid_hash=self._handoff_identity(
+                getattr(admitted, "uid", None) if qualified else first_uid),
+            admitted_batch_is_prefill=is_prefill,
+            admitted_committed_pages=int(self.cache_manager.committed_pages),
+            admitted_expert_slots=int(self.engine.moe_offload_cache.cache_size),
+            pre_forward_monotonic_ns=time.monotonic_ns(),
+        )
+        self._growable_handoff_pending = None
+        self._publish_scheduler_counters(force=True)
 
     def _growable_handoff_demand_pages(self, pending) -> int:
         """Physical headroom already promised to the next queued agent(s)."""
@@ -2685,6 +2764,7 @@ class Scheduler(SchedulerIOMixin):
             moe=getattr(getattr(self, "engine", None), "moe_offload_cache", None),
             moe_collect_stats=bool(getattr(config, "moe_collect_stats", False)),
             cache_manager=getattr(self, "cache_manager", None),
+            growable_handoff_events=getattr(self, "_growable_handoff_events", None),
         )
         if doc == self._counters_published:
             return  # nothing moved since the last snapshot; do not spend a message on it

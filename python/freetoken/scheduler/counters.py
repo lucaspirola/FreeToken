@@ -26,6 +26,32 @@ from typing import Any, Dict
 # resolution is per-lane there and geometric above it.
 _LANE_BUCKETS = ((0, "0"), (1, "1"), (2, "2"), (3, "3"), (4, "4"), (8, "5-8"), (16, "9-16"))
 _LANE_OVERFLOW = "17+"
+_HANDOFF_EVENT_LIMIT = 16
+
+
+@dataclass
+class GrowableHandoffEvents:
+    """Bounded authoritative record of queued-head KV/MoE resize handoffs."""
+
+    next_sequence: int = 1
+    events: list[Dict[str, Any]] = field(default_factory=list)
+
+    def begin(self, event: Dict[str, Any]) -> int:
+        sequence = self.next_sequence
+        self.next_sequence += 1
+        self.events.append({"sequence": sequence, **event})
+        del self.events[:-_HANDOFF_EVENT_LIMIT]
+        return sequence
+
+    def update(self, sequence: int, **fields: Any) -> None:
+        for event in reversed(self.events):
+            if event["sequence"] == sequence:
+                event.update(fields)
+                return
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {"next_sequence": self.next_sequence,
+                "events": [dict(event) for event in self.events]}
 
 
 def lane_bucket(lanes: int) -> str:
@@ -304,6 +330,7 @@ def build_scheduler_counters(
     moe: Any = None,
     moe_collect_stats: bool = False,
     cache_manager: Any = None,
+    growable_handoff_events: Any = None,
 ) -> Dict[str, Any]:
     """The ``/v1/stats["scheduler"]`` document.
 
@@ -331,4 +358,6 @@ def build_scheduler_counters(
     if spill is not None:
         doc["session_spill"] = spill.as_dict()
     doc["moe"] = build_moe_counters(moe, moe_collect_stats)
+    if growable_handoff_events is not None:
+        doc["growable_handoff"] = growable_handoff_events.as_dict()
     return doc
