@@ -44,6 +44,9 @@ class ServerArgs(SchedulerConfig):
     # prompt_tokens_details.cached_tokens, Anthropic cache_read_input_tokens, Responses
     # input_tokens_details.cached_tokens). Mirrors sglang's --enable-cache-report.
     enable_cache_report: bool = False
+    # Opt-in allocator telemetry exposed through /v1/stats. It performs no CUDA sync or
+    # peak reset; see engine.cuda_memory for the allocator-counter scope.
+    cuda_memory_telemetry: bool = False
     # Answer with the model's own reasoning when a turn produces reasoning but no visible
     # content and no tool call (--force-nonempty-content). Per request, a chat template
     # kwarg of the same name overrides it; thinking-off turns default to on.
@@ -681,6 +684,16 @@ def parse_args(
             "it for every admission either way); the flag gates reporting only. On /v1/messages "
             "the flag additionally makes input_tokens EXCLUDE the cached prefix, matching "
             "Anthropic billing semantics."
+        ),
+    )
+
+    parser.add_argument(
+        "--cuda-memory-telemetry",
+        action="store_true",
+        default=ServerArgs.cuda_memory_telemetry,
+        help=(
+            "Expose opt-in CUDA allocator current/peak counters through /v1/stats. "
+            "Does not synchronize or reset allocator peak statistics."
         ),
     )
 

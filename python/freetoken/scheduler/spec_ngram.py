@@ -1032,6 +1032,9 @@ class SpecNgramDecoder:
         swa_tokens = sch._swa_token_usage()
         if reply:
             mem = sch._gpu_mem_bytes()
+            # Keep this optional for minimal scheduler doubles used by speculative-decoder
+            # tests; production Scheduler always supplies the no-sync sampler.
+            cuda_memory = getattr(sch, "_cuda_memory_telemetry", lambda: None)()
             mamba_used, mamba_total = mamba_slots or (0, 0)
             swa_used, swa_total = swa_tokens or (0, 0)
             for msg in reply:
@@ -1042,6 +1045,7 @@ class SpecNgramDecoder:
                 msg.swa_used_tokens = swa_used
                 msg.swa_total_tokens = swa_total
                 msg.gpu_mem_bytes = mem
+                msg.cuda_memory = cuda_memory
         sch.status_reporter.report_batch(
             Batch(reqs=[req], phase="decode"),
             running_reqs=len(sch.decode_manager.running_reqs),

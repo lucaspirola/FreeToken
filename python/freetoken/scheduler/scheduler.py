@@ -950,6 +950,7 @@ class Scheduler(SchedulerIOMixin):
         swa_tokens = self._swa_token_usage()
         if reply:
             mem = self._gpu_mem_bytes()
+            cuda_memory = self._cuda_memory_telemetry()
             mamba_used, mamba_total = mamba_slots or (0, 0)
             swa_used, swa_total = swa_tokens or (0, 0)
             for m in reply:
@@ -960,6 +961,7 @@ class Scheduler(SchedulerIOMixin):
                 m.swa_used_tokens = swa_used
                 m.swa_total_tokens = swa_total
                 m.gpu_mem_bytes = mem
+                m.cuda_memory = cuda_memory
         self.status_reporter.report_batch(
             batch,
             running_reqs=len(self.decode_manager.running_reqs),
@@ -1033,6 +1035,14 @@ class Scheduler(SchedulerIOMixin):
         if self.device.type != "cuda":
             return 0
         return torch.cuda.memory_reserved(self.device)
+
+    def _cuda_memory_telemetry(self) -> dict | None:
+        """Opt-in no-sync snapshot at the existing reply-batch boundary."""
+        from freetoken.engine.cuda_memory import allocator_snapshot
+
+        return allocator_snapshot(
+            torch, self.device, bool(getattr(self.config, "cuda_memory_telemetry", False))
+        )
 
     def _process_one_msg(self, msg: BaseBackendMsg) -> None:
         if isinstance(msg, BatchBackendMsg):

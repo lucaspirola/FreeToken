@@ -270,6 +270,7 @@ def tokenize_worker(
                         swa_used_tokens=msg.swa_used_tokens,
                         swa_total_tokens=msg.swa_total_tokens,
                         gpu_mem_bytes=msg.gpu_mem_bytes,
+                        cuda_memory=msg.cuda_memory,
                         kv_transfer_params=msg.kv_transfer_params,
                         first_logprobs=msg.first_logprobs,
                     )

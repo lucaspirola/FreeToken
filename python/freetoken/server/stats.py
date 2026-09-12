@@ -37,6 +37,12 @@ class StatsTracker:
         self.swa_used_tokens = 0
         self.swa_total_tokens = 0
         self.vram_bytes = 0
+        # Last opt-in allocator snapshot. Its embedded scope describes PyTorch's last
+        # peak reset and is intentionally not a per-request high-water mark.
+        self.cuda_memory: dict | None = None
+        self.cuda_memory_sample_count = 0
+        self.cuda_memory_min_driver_free_bytes: int | None = None
+        self._cuda_memory_last_sample_timestamp_ns: int | None = None
         # Cumulative aborts by reason. "Aborting request %d" is debug-only in the scheduler,
         # so a soak log cannot count these -- and the three reasons are only distinguishable
         # HERE, at the call site: the wire carries one untagged AbortMsg for all of them.
@@ -94,6 +100,20 @@ class StatsTracker:
             self.swa_total_tokens = reply.swa_total_tokens
         if getattr(reply, "gpu_mem_bytes", 0) > 0:
             self.vram_bytes = reply.gpu_mem_bytes
+        if getattr(reply, "cuda_memory", None) is not None:
+            self.cuda_memory = reply.cuda_memory
+            timestamp = reply.cuda_memory.get("sample_timestamp_ns")
+            if timestamp is not None and timestamp != self._cuda_memory_last_sample_timestamp_ns:
+                self._cuda_memory_last_sample_timestamp_ns = timestamp
+                self.cuda_memory_sample_count += 1
+                driver_free = reply.cuda_memory.get("driver_free_bytes")
+                if driver_free is not None:
+                    self.cuda_memory_min_driver_free_bytes = min(
+                        self.cuda_memory_min_driver_free_bytes
+                        if self.cuda_memory_min_driver_free_bytes is not None
+                        else driver_free,
+                        driver_free,
+                    )
         if getattr(reply, "finished", False):
             uid = getattr(reply, "uid", None)
             if uid in self._inflight:
@@ -191,6 +211,15 @@ def build_stats(
         "mamba": mamba,
         "swa": swa,
         "vram_bytes": tr.vram_bytes,
+        "cuda_memory": (
+            {
+                **tr.cuda_memory,
+                "stats_sample_count": tr.cuda_memory_sample_count,
+                "stats_min_driver_free_bytes": tr.cuda_memory_min_driver_free_bytes,
+            }
+            if tr.cuda_memory is not None
+            else None
+        ),
         "throughput": {
             "decode_tps": round(tr.decode_tps(), 1),
             "prefill_tps": round(tr.prefill_tps(), 1),

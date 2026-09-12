@@ -58,6 +58,9 @@ class DetokenizeMsg(BaseTokenizerMsg):
     swa_total_tokens: int = 0
     # Bytes this engine process holds on the GPU (torch reserved pool). 0 on CPU.
     gpu_mem_bytes: int = 0
+    # Optional no-sync CUDA allocator telemetry. Peak values are since PyTorch's last
+    # internal reset, never per request (see engine.cuda_memory).
+    cuda_memory: dict | None = None
 
 
 @dataclass
