@@ -18,10 +18,10 @@ def test_checkpoint_compact_shrink_grow_restore_preserves_hybrid_session(
     tmp_path, request, tier
 ):
     kv, linear, manager = _pools()
-    # The legacy spill fixture puts the primary MHA pool in CacheManager.swa_pool only as a
-    # convenient reference. This is a hybrid-radix/MHA test, not SWA; clear that test-only
-    # alias so the production compaction capability guard sees the real family.
-    manager.swa_pool = None
+    # This is the real Scheduler constructor wiring: its generic plug-in argument carries
+    # the primary pool for every model. Identity alone must not misclassify MHA as SWA.
+    assert manager.swa_pool is kv
+    assert not manager.swa_paged
     store = SessionSpillStore(
         kv,
         linear,
@@ -126,3 +126,15 @@ def test_checkpoint_compact_shrink_grow_restore_preserves_hybrid_session(
     manager.check_integrity()
 
     manager.unlock(restored)
+
+
+@pytest.mark.parametrize("capability", ["swa_radix", "swa_paged"])
+def test_compaction_still_rejects_real_swa_capabilities(capability):
+    _kv, _linear, manager = _pools()
+    if capability == "swa_radix":
+        manager.is_swa = True
+    else:
+        # HybridSWAKVCache and DSV4 both advertise this capability to CacheManager.
+        manager.swa_paged = True
+    with pytest.raises(RuntimeError, match="does not support SWA"):
+        manager.compact_active_pages([], 8, lambda *_: None)

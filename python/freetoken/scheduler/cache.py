@@ -295,7 +295,11 @@ class CacheManager:
         """
         if self.page_size != 1:
             raise RuntimeError("growable KV compaction currently requires page_size=1")
-        if self.is_swa or self.swa_pool is not None:
+        # Scheduler passes the primary KV pool through ``swa_pool`` for every model so a
+        # non-None reference does not identify SWA (Nemotron's growable MHA pool arrives
+        # here too). ``swa_paged`` is the actual secondary-window capability advertised by
+        # HybridSWAKVCache and DSV4; ``is_swa`` additionally covers the SWA radix manager.
+        if self.is_swa or self.swa_paged:
             raise RuntimeError("growable KV compaction does not support SWA caches")
         if target_pages >= self.committed_pages:
             return self.committed_pages
