@@ -31,6 +31,7 @@ import os
 import shutil
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -53,6 +54,43 @@ STATE_FAMILIES = ("gdn_conv", "gdn_recurrent")
 # Look-ahead spacing of the extra boundary states, and their hard count bound.
 DEFAULT_STATE_STRIDE_TOKENS = 65_536
 MAX_STATE_SNAPSHOTS = 8
+# ``byte_size`` describes tensor payload, while torch's zip container, filenames, and manifest
+# consume additional disk. Durable publication reserves this much per rewritten generation and
+# verifies the actual generation stays inside it before switching the manifest.
+DURABLE_GENERATION_OVERHEAD = 64 << 20
+
+
+class _BoundedWriter:
+    """File-like sink that refuses a serializer write before crossing its byte limit."""
+
+    def __init__(self, path: Path, limit: int) -> None:
+        self._stream = path.open("xb")
+        self._limit = max(0, int(limit))
+        self._written = 0
+
+    def write(self, data) -> int:
+        size = len(data)
+        if self._written + size > self._limit:
+            raise OSError("serialized checkpoint exceeded reserved generation bytes")
+        written = self._stream.write(data)
+        self._written += written
+        return written
+
+    def flush(self) -> None:
+        self._stream.flush()
+
+    def fileno(self) -> int:
+        return self._stream.fileno()
+
+    def tell(self) -> int:
+        return self._written
+
+    def close(self) -> None:
+        self._stream.close()
+
+    @property
+    def closed(self) -> bool:
+        return self._stream.closed
 
 
 @dataclass
@@ -78,6 +116,7 @@ class SessionSpillRecord:
     created_at: float = 0.0
     last_used_at: float = 0.0
     directory: Path | None = field(default=None)
+    token_file: Path | None = field(default=None)
 
     @property
     def state_boundaries(self) -> list[int]:
@@ -88,6 +127,31 @@ class SessionSpillRecord:
         """Deepest stored boundary at or below ``matched_len`` (0 = nothing usable)."""
         usable = [b for b in self.state_boundaries if b <= matched_len]
         return max(usable) if usable else 0
+
+
+@dataclass(frozen=True)
+class DurableSessionSource:
+    """A resident session snapshot included in an explicit durability barrier."""
+
+    session_id: str
+    token_ids: torch.Tensor
+    page_indices: torch.Tensor
+    linear_slot: int
+    extra_states: Sequence[tuple[int, int]] = ()
+    captured_states: Sequence[tuple[int, torch.Tensor, torch.Tensor]] = ()
+
+
+@dataclass(frozen=True)
+class DurableSpillResult:
+    """Result whose ``complete`` bit is the only safe stop acknowledgement.
+
+    Completed replacements remain valid if a later session fails and are listed in
+    ``durable_session_ids``. Resident cache handles are never owned or mutated here.
+    """
+
+    complete: bool
+    durable_session_ids: tuple[str, ...]
+    error: str | None = None
 
 
 @dataclass
@@ -273,11 +337,13 @@ class SessionSpillStore:
 
     # ------------------------------------------------------------- persistence
 
-    def _write_manifest(self, record: SessionSpillRecord) -> None:
-        directory = record.directory
-        if directory is None or record.tier != "disk":
-            return
-        manifest = {
+    def _manifest_document(
+        self, record: SessionSpillRecord, *, tokens_name: str | None = None
+    ) -> dict:
+        tokens_name = tokens_name or (
+            record.token_file.name if record.token_file is not None else TOKENS_NAME
+        )
+        return {
             "version": MANIFEST_VERSION,
             "session_id": record.session_id,
             "model_id": self.model_id,
@@ -288,17 +354,26 @@ class SessionSpillStore:
             "fingerprint": _jsonable(record.fingerprint),
             "created_at": record.created_at,
             "last_used_at": record.last_used_at,
+            "tokens": tokens_name,
             "chunks": [
                 [chunk.family, chunk.layer, chunk.start, chunk.file.name]
                 for chunk in record.chunks
                 if chunk.file is not None
             ],
         }
+
+    def _write_manifest(self, record: SessionSpillRecord) -> None:
+        directory = record.directory
+        if directory is None or record.tier != "disk":
+            return
+        manifest = self._manifest_document(record)
         path = directory / MANIFEST_NAME
         tmp = directory / (MANIFEST_NAME + ".tmp")
         tmp.write_text(json.dumps(manifest), encoding="utf-8")
         tmp.chmod(0o600)
+        self._fsync_file(tmp)
         tmp.replace(path)
+        self._fsync_dir(directory)
 
     def _load_record(self, directory: Path) -> SessionSpillRecord | None:
         """Rebuild one on-disk record, or return None when it must be deleted."""
@@ -317,7 +392,10 @@ class SessionSpillStore:
         if manifest.get("fingerprint") != _jsonable(live):
             return None
         try:
-            tokens = torch.load(directory / TOKENS_NAME, map_location="cpu", weights_only=True)
+            tokens_name = manifest.get("tokens", TOKENS_NAME)
+            if not isinstance(tokens_name, str) or Path(tokens_name).name != tokens_name:
+                return None
+            tokens = torch.load(directory / tokens_name, map_location="cpu", weights_only=True)
         except Exception:
             return None
         if not isinstance(tokens, torch.Tensor) or tokens.dtype != torch.int32:
@@ -356,6 +434,7 @@ class SessionSpillStore:
             created_at=float(manifest.get("created_at", 0.0)),
             last_used_at=float(manifest.get("last_used_at", 0.0)),
             directory=directory,
+            token_file=directory / tokens_name,
         )
 
     def _adopt_root(self) -> None:
@@ -545,6 +624,7 @@ class SessionSpillStore:
                 record.directory = target
                 torch.save(tokens, target / TOKENS_NAME)
                 (target / TOKENS_NAME).chmod(0o600)
+                record.token_file = target / TOKENS_NAME
             for ordinal, (family, layer, start, value) in enumerate(sources):
                 value = value.contiguous()
                 if tier == "ram":
@@ -623,6 +703,7 @@ class SessionSpillStore:
             chunk.file = path
         record.tier = "disk"
         record.directory = target
+        record.token_file = target / TOKENS_NAME
         self.ram_bytes = max(0, self.ram_bytes - record.byte_size)
         self.disk_bytes += record.byte_size
         try:
@@ -652,6 +733,283 @@ class SessionSpillStore:
                 self.discard(record)
                 dropped += 1
         return demoted, dropped
+
+    # ---------------------------------------------------- explicit durability barrier
+
+    @staticmethod
+    def _fsync_file(path: Path) -> None:
+        with path.open("rb") as stream:
+            os.fsync(stream.fileno())
+
+    @staticmethod
+    def _fsync_dir(path: Path) -> None:
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def _source_plan(self, source: DurableSessionSource):
+        num_pages = int(len(source.page_indices))
+        states: dict[int, int | tuple[torch.Tensor, torch.Tensor]] = {
+            int(boundary): (conv, recurrent)
+            for boundary, conv, recurrent in source.captured_states
+        }
+        states.update({int(boundary): int(slot) for boundary, slot in source.extra_states})
+        states[num_pages] = int(source.linear_slot)
+        boundaries = self._select_state_boundaries(states, num_pages)
+        tokens = source.token_ids.detach().to(device="cpu", dtype=torch.int32).clone()
+        return tokens, states, boundaries, self._payload_bytes(num_pages, tokens, len(boundaries))
+
+    @staticmethod
+    def _save_bounded(value: torch.Tensor, path: Path, limit: int) -> None:
+        writer = _BoundedWriter(path, limit)
+        try:
+            torch.save(value, writer)
+            writer.flush()
+            os.fsync(writer.fileno())
+        finally:
+            writer.close()
+
+    def _owned_physical_bytes(self) -> int:
+        """Actual files retained by this store, including stale generations and temp files."""
+        total = 0
+        try:
+            entries = tuple(self.root.iterdir())
+        except OSError:
+            return self.disk_budget_bytes + 1
+        for entry in entries:
+            # Durable generations are written only inside deterministic session-hash dirs.
+            # Do not charge unrelated root files or legacy-looking operator content to this
+            # store's configured cap.
+            if not (
+                entry.is_dir()
+                and len(entry.name) == 64
+                and all(character in "0123456789abcdef" for character in entry.name)
+            ):
+                continue
+            for path in entry.rglob("*"):
+                try:
+                    if path.is_file():
+                        total += path.stat().st_size
+                except OSError:
+                    return self.disk_budget_bytes + 1
+        return total
+
+    def _install_durable_record(
+        self, record: SessionSpillRecord, previous: SessionSpillRecord | None
+    ) -> None:
+        if previous is not None:
+            self._records = [candidate for candidate in self._records if candidate is not previous]
+            if previous.tier == "ram":
+                self.ram_bytes = max(0, self.ram_bytes - previous.byte_size)
+            else:
+                self.disk_bytes = max(0, self.disk_bytes - previous.byte_size)
+            previous.valid = False
+            previous.chunks.clear()
+        self._records.append(record)
+        self._by_session[record.session_id] = record
+        self.disk_bytes += record.byte_size
+
+    def _publish_durable(
+        self,
+        session_id: str,
+        token_ids: torch.Tensor,
+        num_pages: int,
+        byte_size: int,
+        chunks: Iterable[tuple[str, int, int, torch.Tensor]],
+        previous: SessionSpillRecord | None,
+    ) -> SessionSpillRecord:
+        """Publish generation-qualified payloads, switching only the manifest last."""
+        directory = self._record_dir(session_id)
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        generation = uuid.uuid4().hex
+        created: list[Path] = []
+        published = False
+        record = SessionSpillRecord(
+            token_ids=token_ids,
+            num_pages=num_pages,
+            byte_size=byte_size,
+            fingerprint=self.kv_pool.session_spill_fingerprint(),
+            tier="disk",
+            chunks=[],
+            session_id=session_id,
+            created_at=time.time(),
+            last_used_at=time.time(),
+            directory=directory,
+        )
+        tokens_name = f"{generation}-tokens.pt"
+        generation_limit = byte_size + DURABLE_GENERATION_OVERHEAD
+
+        def remaining_bytes() -> int:
+            return generation_limit - sum(
+                path.stat().st_size for path in created if path.is_file()
+            )
+
+        try:
+            tokens_path = directory / tokens_name
+            created.append(tokens_path)
+            self._save_bounded(token_ids, tokens_path, remaining_bytes())
+            tokens_path.chmod(0o600)
+            record.token_file = tokens_path
+            for ordinal, (family, layer, start, value) in enumerate(chunks):
+                path = directory / f"{generation}-{ordinal:06d}.pt"
+                created.append(path)
+                self._save_bounded(value.contiguous(), path, remaining_bytes())
+                path.chmod(0o600)
+                record.chunks.append(SpillChunk(family, layer, start, file=path))
+            manifest = self._manifest_document(record, tokens_name=tokens_name)
+            temporary = directory / f"{MANIFEST_NAME}.{generation}.tmp"
+            created.append(temporary)
+            manifest_bytes = json.dumps(manifest).encode("utf-8")
+            if len(manifest_bytes) > remaining_bytes():
+                raise OSError("serialized checkpoint manifest exceeded reserved generation bytes")
+            temporary.write_bytes(manifest_bytes)
+            temporary.chmod(0o600)
+            self._fsync_file(temporary)
+            actual_generation = sum(
+                path.stat().st_size for path in created if path.is_file()
+            )
+            if actual_generation > byte_size + DURABLE_GENERATION_OVERHEAD:
+                raise ValueError("serialized generation exceeded bounded overhead")
+            temporary.replace(directory / MANIFEST_NAME)
+            published = True
+            self._fsync_dir(directory)
+            self._fsync_dir(self.root)
+            verified = self._load_record(directory)
+            if (
+                verified is None
+                or verified.session_id != session_id
+                or verified.byte_size != byte_size
+                or verified.num_pages != num_pages
+                or len(verified.chunks) != len(record.chunks)
+            ):
+                raise ValueError("published checkpoint verification failed")
+        except Exception:
+            # Once manifest-last publication happened, readers and a restarted store see the
+            # new generation. Keep in-memory ownership aligned even when the final directory
+            # fsync failed; the barrier still reports failure because durability is unproven.
+            if published:
+                self._install_durable_record(record, previous)
+            else:
+                for path in created:
+                    path.unlink(missing_ok=True)
+            raise
+        self._install_durable_record(record, previous)
+        keep = {MANIFEST_NAME, tokens_name, *(chunk.file.name for chunk in record.chunks)}
+        for path in directory.iterdir():
+            if path.name not in keep:
+                path.unlink(missing_ok=True)
+        self._fsync_dir(directory)
+        self._fsync_dir(self.root)
+        return record
+
+    def persist_durable(
+        self, sources: Sequence[DurableSessionSource] = ()
+    ) -> DurableSpillResult:
+        """Make all valid records and resident ``sources`` durable without LRU eviction.
+
+        Capacity is conservative: both the final unique checkpoint set and the peak
+        old-plus-new generation footprint must fit the configured disk/total caps. Payloads
+        are written one tensor at a time. Successful earlier publications remain durable if a
+        later publication fails, but ``complete`` is false until every intended id confirms.
+        """
+        if not self.persist:
+            return DurableSpillResult(False, (), "persistent session spill is disabled")
+        by_source: dict[str, DurableSessionSource] = {}
+        plans = {}
+        try:
+            for source in sources:
+                if not source.session_id or source.session_id in by_source:
+                    raise ValueError("durability sources require unique non-empty session ids")
+                by_source[source.session_id] = source
+                plans[source.session_id] = self._source_plan(source)
+        except Exception as exc:
+            return DurableSpillResult(False, (), f"invalid resident source: {exc}")
+
+        existing = {record.session_id: record for record in self._records if record.valid}
+        expected = set(existing) | set(by_source)
+        final_bytes = sum(
+            plans[sid][3] if sid in plans else existing[sid].byte_size for sid in expected
+        )
+        write_bytes = sum(
+            plans[sid][3] + DURABLE_GENERATION_OVERHEAD
+            if sid in plans
+            else existing[sid].byte_size + DURABLE_GENERATION_OVERHEAD
+            for sid in expected
+            if sid in plans or existing[sid].tier == "ram"
+        )
+        # The old generation remains until manifest-last publication. Therefore the hard disk
+        # budget must cover the current disk payload plus every staged replacement, not merely
+        # the smaller final logical set.
+        physical_bytes = self._owned_physical_bytes()
+        peak_bytes = physical_bytes + write_bytes
+        if final_bytes > self.disk_budget_bytes or final_bytes > self.limit_bytes:
+            return DurableSpillResult(False, (), "final durable set exceeds configured capacity")
+        if peak_bytes > self.disk_budget_bytes or peak_bytes > self.limit_bytes:
+            return DurableSpillResult(False, (), "replacement generations exceed peak capacity")
+        try:
+            free_disk = shutil.disk_usage(self.root).free
+        except OSError as exc:
+            return DurableSpillResult(False, (), f"disk capacity check failed: {exc}")
+        if write_bytes + (1 << 30) > free_disk:
+            return DurableSpillResult(False, (), "filesystem reserve would be violated")
+
+        durable: list[str] = []
+        for session_id in sorted(expected):
+            previous = existing.get(session_id)
+            try:
+                if session_id in plans:
+                    source = by_source[session_id]
+                    tokens, states, boundaries, byte_size = plans[session_id]
+                    if source.page_indices.device.type == "cuda":
+                        torch.cuda.synchronize(source.page_indices.device)
+
+                    def resident_chunks():
+                        yield from self.kv_pool.iter_session_spill_tensors(
+                            source.page_indices, chunk_pages=16_384
+                        )
+                        pool = self.linear_state_pool
+                        for boundary in boundaries:
+                            state = states[boundary]
+                            pair = (
+                                (pool.conv_states[:, state], pool.recurrent_states[:, state])
+                                if isinstance(state, int)
+                                else state
+                            )
+                            for family, value in zip(STATE_FAMILIES, pair, strict=True):
+                                yield family, -1, boundary, value.cpu().clone()
+
+                    self._publish_durable(
+                        session_id, tokens, len(source.page_indices), byte_size,
+                        resident_chunks(), previous,
+                    )
+                elif previous is not None and previous.tier == "ram":
+                    def ram_chunks():
+                        for chunk in previous.chunks:
+                            if chunk.value is None:
+                                raise ValueError("RAM checkpoint chunk has no tensor")
+                            yield chunk.family, chunk.layer, chunk.start, chunk.value
+
+                    self._publish_durable(
+                        session_id, previous.token_ids, previous.num_pages,
+                        previous.byte_size, ram_chunks(), previous,
+                    )
+                elif previous is not None:
+                    token_file = previous.token_file or previous.directory / TOKENS_NAME
+                    self._fsync_file(token_file)
+                    self._fsync_file(previous.directory / MANIFEST_NAME)
+                    for chunk in previous.chunks:
+                        self._fsync_file(chunk.file)
+                    self._fsync_dir(previous.directory)
+                    self._fsync_dir(self.root)
+                    verified = self._load_record(previous.directory)
+                    if verified is None or verified.session_id != session_id:
+                        raise ValueError("durable checkpoint verification failed")
+                durable.append(session_id)
+            except Exception as exc:
+                return DurableSpillResult(False, tuple(durable), f"{session_id}: {exc}")
+        return DurableSpillResult(True, tuple(durable), None)
 
     @staticmethod
     def _chunk_needed(chunk: SpillChunk, num_pages: int | None, boundary: int | None) -> bool:
@@ -856,6 +1214,7 @@ class SessionSpillStore:
             chunk.file = None
         record.tier = "ram"
         record.directory = None
+        record.token_file = None
         self.disk_bytes = max(0, self.disk_bytes - record.byte_size)
         self.ram_bytes += record.byte_size
         if directory is not None:
