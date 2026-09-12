@@ -20,6 +20,8 @@ from freetoken.message import (
     CacheRebuildResultMsg,
     CloseSessionBackendMsg,
     DetokenizeMsg,
+    DurableCheckpointBackendMsg,
+    DurableCheckpointResultMsg,
     ErrorReplyMsg,
     ExitMsg,
     PromptAdmittedMsg,
@@ -260,6 +262,8 @@ class Scheduler(SchedulerIOMixin):
         # A received-but-not-yet-executed runtime cache rebuild (CacheRebuildBackendMsg),
         # run at the next idle safe point in overlap_loop. None when no rebuild is pending.
         self._pending_rebuild: CacheRebuildBackendMsg | None = None
+        self._pending_durable_checkpoint: DurableCheckpointBackendMsg | None = None
+        self._durable_checkpoint_result: DurableCheckpointResultMsg | None = None
         # Set when a request releases pages. Growable mode checks this at the next no-forward-
         # in-flight boundary, compacts surviving private pages, decommits a free suffix, and
         # spends the returned VRAM on MoE expert slots.
@@ -630,18 +634,22 @@ class Scheduler(SchedulerIOMixin):
         # before the message loop is what makes the check airtight: the batch launched later
         # this iteration can only be probed by messages of the NEXT iteration, which sees it here.
         self._last_data = last_data
-        self._expire_sessions()
-        self._release_due_soft_sessions()
-        self._enforce_session_host_reserve()
+        sealed_checkpoint = bool(getattr(self, "_durable_checkpoint_sealed", False))
+        if not sealed_checkpoint:
+            self._expire_sessions()
+            self._release_due_soft_sessions()
+            self._enforce_session_host_reserve()
         blocking = not (
             last_data is not None  # don't block if we have a batch to be processed
             or self.prefill_manager.runnable
             or self.decode_manager.runnable
             or self._pending_rebuild
             is not None  # a queued rebuild to drain toward + execute
+            or self._pending_durable_checkpoint is not None
             or getattr(self, "_growable_shrink_pending", False)
             or self._sessions_need_service()
         )
+        blocking = blocking or sealed_checkpoint
         if blocking:
             # About to park: publish now (bypassing the rate limit) so a poll taken while
             # the scheduler is idle sees the burst that just finished, not a 2 s-old
@@ -652,6 +660,10 @@ class Scheduler(SchedulerIOMixin):
             time.sleep(0.01)
         for msg in messages:
             self._process_one_msg(msg)
+
+        self._execute_pending_durable_checkpoint()
+        if getattr(self, "_durable_checkpoint_sealed", False):
+            return None
 
         self._maybe_shrink_growable_kv()
         self._maybe_resize_elastic_capacity()
@@ -718,16 +730,20 @@ class Scheduler(SchedulerIOMixin):
         return ongoing_data
 
     def normal_loop(self) -> None:
-        self._expire_sessions()
-        self._release_due_soft_sessions()
-        self._enforce_session_host_reserve()
+        sealed_checkpoint = bool(getattr(self, "_durable_checkpoint_sealed", False))
+        if not sealed_checkpoint:
+            self._expire_sessions()
+            self._release_due_soft_sessions()
+            self._enforce_session_host_reserve()
         blocking = not (
             self.prefill_manager.runnable
             or self.decode_manager.runnable
             or self._pending_rebuild is not None  # a queued rebuild to execute at idle
+            or self._pending_durable_checkpoint is not None
             or getattr(self, "_growable_shrink_pending", False)
             or self._sessions_need_service()
         )
+        blocking = blocking or sealed_checkpoint
         if blocking:
             # About to park: publish now (bypassing the rate limit) so a poll taken while
             # the scheduler is idle sees the burst that just finished, not a 2 s-old
@@ -738,6 +754,10 @@ class Scheduler(SchedulerIOMixin):
             time.sleep(0.01)
         for msg in messages:
             self._process_one_msg(msg)
+
+        self._execute_pending_durable_checkpoint()
+        if getattr(self, "_durable_checkpoint_sealed", False):
+            return
 
         self._maybe_shrink_growable_kv()
         self._maybe_resize_elastic_capacity()
@@ -1055,6 +1075,9 @@ class Scheduler(SchedulerIOMixin):
         elif isinstance(msg, ExitMsg):
             raise KeyboardInterrupt
         elif isinstance(msg, UserMsg):
+            if getattr(self, "_durable_checkpoint_sealed", False):
+                self.send_result([ErrorReplyMsg(uid=msg.uid, error="server checkpoint is sealed")])
+                return
             logger.debug_rank0("Received user msg: %s", msg)
             tombstones = getattr(self, "_abort_tombstones", None)
             if tombstones is not None and msg.uid in tombstones:
@@ -1182,6 +1205,10 @@ class Scheduler(SchedulerIOMixin):
             # accounting barrier for FrontendManager/prepare-stop.
             self._pending_abort_acks.add(msg.uid)
         elif isinstance(msg, CloseSessionBackendMsg):
+            if getattr(self, "_durable_checkpoint_sealed", False):
+                self.send_result([SessionClosedResultMsg(
+                    session_id=msg.session_id, request_id=msg.request_id, status="sealed")])
+                return
             existed, active_uid = self._close_session(msg.session_id)
             if active_uid is None:
                 self.send_result(
@@ -1198,7 +1225,21 @@ class Scheduler(SchedulerIOMixin):
                     msg.request_id,
                     msg.session_id,
                 )
+        elif isinstance(msg, DurableCheckpointBackendMsg):
+            cached = getattr(self, "_durable_checkpoint_result", None)
+            if cached is not None and cached.operation_id == msg.operation_id:
+                self.send_result([cached])
+            elif cached is not None or self._pending_durable_checkpoint is not None:
+                self.send_result([DurableCheckpointResultMsg(
+                    operation_id=msg.operation_id, status="conflict",
+                    error="another durable checkpoint operation owns this process")])
+            else:
+                self._pending_durable_checkpoint = msg
         elif isinstance(msg, UnpinPrefixesBackendMsg):
+            if getattr(self, "_durable_checkpoint_sealed", False):
+                self.send_result([UnpinPrefixesResultMsg(
+                    request_id=msg.request_id, pinned_prefixes=0, pinned_tokens=0)])
+                return
             # Synchronous: dec_lock on a handful of nodes, safe between any two batches
             # (a pin is an extra ref, never the only one a live request depends on).
             released = self.cache_manager.unpin_all()
@@ -1207,7 +1248,11 @@ class Scheduler(SchedulerIOMixin):
             # v1 scope: only if_idle, single-rank, non-owned-KV. drain mode and TP rebuild
             # need the drain-gate / all-rank failure-agreement machinery (deferred), so we
             # reject them cleanly rather than ship hang-prone half-wired paths.
-            if not self.cache_manager.supports_runtime_rebuild:
+            if getattr(self, "_durable_checkpoint_sealed", False):
+                self._reply_rebuild(msg.request_id, "busy", "durable checkpoint is sealed")
+            elif self._pending_durable_checkpoint is not None:
+                self._reply_rebuild(msg.request_id, "busy", "durable checkpoint is pending")
+            elif not self.cache_manager.supports_runtime_rebuild:
                 self._reply_rebuild(
                     msg.request_id,
                     "unsupported",
@@ -1230,14 +1275,111 @@ class Scheduler(SchedulerIOMixin):
                 or self.decode_manager.runnable
                 or getattr(self, "_sessions", {})
             ):
-                # if_idle: refuse rather than wait. (finished_reqs hold no resources — they
-                # are already freed — so they do not block a rebuild.)
                 self._reply_rebuild(msg.request_id, "busy")
             else:
                 self._pending_rebuild = msg
         else:
             logger.error(f"Unknown message type: {type(msg)}")
             raise NotImplementedError
+
+    def _execute_pending_durable_checkpoint(self) -> None:
+        msg = getattr(self, "_pending_durable_checkpoint", None)
+        if msg is None:
+            return
+        # The opt-in prepare-stop caller has already closed admission and drained frontend
+        # accounting. Verify the scheduler-side safe point rather than trying to create it.
+        reason = None
+        store = getattr(self, "_session_spill_store", None)
+        if self.config.tp_info.size != 1:
+            reason = "durable checkpoint unsupported under TP > 1"
+        elif not self.config.kv_grow_step_tokens:
+            reason = "durable checkpoint requires growable KV normal-loop mode"
+        elif store is None or not store.persist or store.disk_budget_bytes <= 0:
+            reason = "persistent disk session spill is unavailable"
+        elif self._last_data is not None or self.prefill_manager.runnable or self.decode_manager.runnable:
+            reason = "scheduler is not drained"
+        elif self._pending_rebuild is not None:
+            reason = "cache rebuild conflicts with durable checkpoint"
+        sessions = getattr(self, "_sessions", {})
+        if reason is None and len(sessions) > 64:
+            reason = "too many session leases for bounded durability barrier"
+        if reason is None and any(lease.active_uid is not None for lease in sessions.values()):
+            reason = "an active session lease remains"
+        if reason is not None:
+            reply = DurableCheckpointResultMsg(
+                operation_id=msg.operation_id, status="unsupported", error=reason)
+            self._pending_durable_checkpoint = None
+            self.send_result([reply])
+            return
+
+        from .session_spill import DurableSessionSource
+
+        sources = []
+        try:
+            capture = getattr(self, "_state_capture", None)
+            if capture is not None:
+                capture.synchronize()
+            for session_id, lease in sorted(sessions.items()):
+                if lease.handle is None:
+                    if lease.spill is None or not lease.spill.valid:
+                        reason = f"idle lease {self._session_hash(session_id)} has no durable source"
+                        break
+                    continue
+                node = getattr(lease.handle, "node", None)
+                linear_slot = getattr(node, "mamba_value", None)
+                page_indices = lease.handle.get_matched_indices()
+                if (lease.token_ids is None or linear_slot is None or
+                        len(page_indices) != len(lease.token_ids)):
+                    reason = f"idle lease {self._session_hash(session_id)} is not checkpointable"
+                    break
+                sources.append(DurableSessionSource(
+                    session_id=session_id, token_ids=lease.token_ids,
+                    page_indices=page_indices, linear_slot=linear_slot,
+                    extra_states=self.cache_manager.hybrid_session_state_boundaries(lease.handle),
+                    captured_states=lease.state_captures))
+        except Exception as exc:
+            reason = f"durable source extraction failed: {type(exc).__name__}: {exc}"
+        if reason is None:
+            try:
+                result = store.persist_durable(sources)
+            except Exception as exc:
+                result = None
+                reason = f"durable persistence failed: {type(exc).__name__}: {exc}"
+            finally:
+                # Manifest-last publication may have replaced some records even when a
+                # later write raised. Never leave leases pointing at invalidated aliases.
+                for session_id, lease in sessions.items():
+                    try:
+                        current = store.get(session_id)
+                    except Exception:
+                        current = None
+                    if current is not None and current.valid:
+                        lease.spill = current
+        if reason is None:
+            durable = sorted(result.durable_session_ids)
+            hashes = [self._session_hash(session_id) for session_id in durable]
+            digest = hashlib.sha256("\n".join(hashes).encode()).hexdigest()
+            complete = result.complete and set(sessions).issubset(durable)
+            reason = result.error if not complete else None
+            if result.complete and not complete:
+                reason = "durable result omitted one or more session leases"
+            reply = DurableCheckpointResultMsg(
+                operation_id=msg.operation_id, status="complete" if complete else "failed",
+                durable_count=len(durable), durable_digest=digest,
+                durable_hashes=hashes[:64], durable_hashes_truncated=len(hashes) > 64,
+                error=reason)
+        else:
+            reply = DurableCheckpointResultMsg(
+                operation_id=msg.operation_id, status="failed", error=reason)
+        self._pending_durable_checkpoint = None
+        if reply.status == "complete":
+            self._durable_checkpoint_result = reply
+            self._durable_checkpoint_sealed = True
+        self.send_result([reply])
+
+    @staticmethod
+    def _session_hash(session_id: str) -> str:
+        return hashlib.sha256(session_id.encode()).hexdigest()[:16]
 
     def _capture_session_states(self, batch) -> None:
         """Copy each session request's just-written boundary snapshot to the host.

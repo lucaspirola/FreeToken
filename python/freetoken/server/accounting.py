@@ -44,6 +44,9 @@ async def prepare_stop_accounting(
     *,
     drain_timeout_s: float = 5.0,
     abort_timeout_s: float = 3.0,
+    checkpoint_sessions: bool = False,
+    checkpoint_operation_id: str | None = None,
+    checkpoint_timeout_s: float = 120.0,
 ) -> dict[str, Any]:
     """Close admission, drain/abort accepted work, and return one idempotent sealed snapshot.
 
@@ -60,8 +63,15 @@ async def prepare_stop_accounting(
 
     async with lock:
         sealed = getattr(state, "_sealed_accounting", None)
-        if sealed is not None:
+        checkpoint = (sealed or {}).get("checkpoint")
+        if sealed is not None and not checkpoint_sessions:
             return dict(sealed)
+        if (sealed is not None and checkpoint_sessions and isinstance(checkpoint, dict)
+                and checkpoint.get("complete") is True
+                and checkpoint.get("operation_id") == checkpoint_operation_id):
+            return dict(sealed)
+        if checkpoint_sessions and not checkpoint_operation_id:
+            raise AccountingDrainError("checkpoint_operation_id is required")
 
         maintenance = getattr(state, "maintenance_state", "serving")
         if maintenance == "rebuilding":
@@ -98,22 +108,44 @@ async def prepare_stop_accounting(
         uptime_s = (
             max(0, int(time.monotonic() - ready_at)) if ready_at is not None else 0
         )
-        sealed = {
+        accounting = dict(sealed or {
             "instance_id": state.instance_id,
             "model_id": getattr(config, "served_model_name", None),
             "prompt_tokens_total": int(stats.prompt_tokens_total),
             "completion_tokens_total": int(stats.completion_tokens_total),
             "uptime_s": uptime_s,
             "drain_complete": True,
-        }
-        state._sealed_accounting = dict(sealed)
-        return sealed
+        })
+        if checkpoint_sessions:
+            try:
+                reply = await state.durable_checkpoint(
+                    checkpoint_operation_id, checkpoint_timeout_s)
+            except Exception as exc:
+                raise AccountingDrainError(f"durable checkpoint barrier failed: {exc}") from exc
+            if reply.status != "complete":
+                raise AccountingDrainError(
+                    f"durable checkpoint barrier {reply.status}: {reply.error or 'no detail'}")
+            if reply.operation_id != checkpoint_operation_id:
+                raise AccountingDrainError("durable checkpoint correlation mismatch")
+            accounting["checkpoint"] = {
+                "required": True, "complete": True, "durable": True,
+                "operation_id": reply.operation_id,
+                "durable_count": reply.durable_count,
+                "durable_digest": reply.durable_digest,
+                "durable_hashes": reply.durable_hashes or [],
+                "durable_hashes_truncated": reply.durable_hashes_truncated,
+            }
+        state._sealed_accounting = dict(accounting)
+        return accounting
 
 
 class PrepareStopBody(BaseModel):
     # Keep the total below the daemon's independent 15s upstream timeout.
     drain_timeout_s: float = Field(default=5.0, ge=0.0, le=10.0)
     abort_timeout_s: float = Field(default=3.0, ge=0.0, le=4.0)
+    checkpoint_sessions: bool = False
+    checkpoint_operation_id: str | None = Field(default=None, min_length=1, max_length=128)
+    checkpoint_timeout_s: float = Field(default=120.0, ge=0.0, le=300.0)
 
 
 def _is_loopback(host: str | None) -> bool:
@@ -151,6 +183,9 @@ def register_accounting_routes(app: FastAPI, get_state: Callable[[], Any]) -> No
                 get_state(),
                 drain_timeout_s=body.drain_timeout_s,
                 abort_timeout_s=body.abort_timeout_s,
+                checkpoint_sessions=body.checkpoint_sessions,
+                checkpoint_operation_id=body.checkpoint_operation_id,
+                checkpoint_timeout_s=body.checkpoint_timeout_s,
             )
         except AccountingDrainError as exc:
             return JSONResponse(

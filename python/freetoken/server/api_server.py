@@ -25,6 +25,8 @@ from freetoken.message import (
     CacheRebuildMsg,
     CloseSessionMsg,
     CacheRebuildReply,
+    DurableCheckpointMsg,
+    DurableCheckpointReply,
     SchedulerCountersReply,
     SessionClosedReply,
     TokenizeMsg,
@@ -196,6 +198,8 @@ class FrontendManager:
     rebuild_futures: Dict[str, asyncio.Future] = field(default_factory=dict)
     session_close_futures: Dict[str, asyncio.Future] = field(default_factory=dict)
     unpin_futures: Dict[str, asyncio.Future] = field(default_factory=dict)
+    durable_checkpoint_futures: Dict[str, asyncio.Future] = field(default_factory=dict)
+    durable_checkpoint_results: Dict[str, DurableCheckpointReply] = field(default_factory=dict)
     client_launch_sessions: Dict[str, set[str]] = field(default_factory=dict)
     # Lifecycle gate. Starts "loading" (uvicorn binds before weights finish; the three
     # API adapters 503 until this flips) -> "serving" once all workers ack ready ->
@@ -318,6 +322,14 @@ class FrontendManager:
                 if fut is not None and not fut.done():
                     fut.set_result(msg)
                 continue
+            if isinstance(msg, DurableCheckpointReply):
+                if msg.status == "complete":
+                    self.durable_checkpoint_results.clear()
+                    self.durable_checkpoint_results[msg.operation_id] = msg
+                fut = self.durable_checkpoint_futures.pop(msg.operation_id, None)
+                if fut is not None and not fut.done():
+                    fut.set_result(msg)
+                continue
             for msg in _unwrap_msg(msg):
                 # Global accounting follows actual admitted/sampled work even after the HTTP
                 # client disconnects and abort_user removes its ack queue. Delivery to a live
@@ -393,6 +405,25 @@ class FrontendManager:
     async def send_one(self, msg: BaseTokenizerMsg):
         self._create_listener_once()
         await self.send_tokenizer.put(msg)
+
+    async def durable_checkpoint(self, operation_id: str, timeout_s: float):
+        cached = self.durable_checkpoint_results.get(operation_id)
+        if cached is not None:
+            return cached
+        if self.durable_checkpoint_results:
+            raise RuntimeError("another durable checkpoint operation completed")
+        future = self.durable_checkpoint_futures.get(operation_id)
+        if future is None:
+            if self.durable_checkpoint_futures:
+                raise RuntimeError("another durable checkpoint operation is pending")
+            future = asyncio.get_running_loop().create_future()
+            self.durable_checkpoint_futures[operation_id] = future
+            try:
+                await self.send_one(DurableCheckpointMsg(operation_id=operation_id))
+            except Exception:
+                self.durable_checkpoint_futures.pop(operation_id, None)
+                raise
+        return await asyncio.wait_for(asyncio.shield(future), timeout=max(0.0, timeout_s))
 
     async def wait_for_ack(self, uid: int):
         event = self.event_map[uid]
@@ -1177,6 +1208,11 @@ def run_api_server(config: ServerArgs, start_backend: Callable[[], "Any"], run_s
         # No CacheRebuildReply will ever arrive from a dead backend, so wake any caller blocked
         # in dispatch_rebuild's await now — otherwise it strands until the full rebuild timeout.
         _GLOBAL_STATE.fail_pending_rebuilds(message)
+        for operation_id, future in list(
+                _GLOBAL_STATE.durable_checkpoint_futures.items()):
+            _GLOBAL_STATE.durable_checkpoint_futures.pop(operation_id, None)
+            if not future.done():
+                future.set_exception(RuntimeError(f"backend failed: {message}"))
         # Then take the whole serve down (see _exit_after_backend_death). Shell mode is excluded:
         # a person is sitting at that TUI, the API is theirs alone, and its stop path is ^C.
         if not run_shell:

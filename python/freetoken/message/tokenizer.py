@@ -130,6 +130,22 @@ class SessionClosedResultMsg(BaseTokenizerMsg):
 
 
 @dataclass
+class DurableCheckpointMsg(BaseTokenizerMsg):
+    operation_id: str
+
+
+@dataclass
+class DurableCheckpointResultMsg(BaseTokenizerMsg):
+    operation_id: str
+    status: str
+    durable_count: int = 0
+    durable_digest: str | None = None
+    durable_hashes: list[str] | None = None
+    durable_hashes_truncated: bool = False
+    error: str | None = None
+
+
+@dataclass
 class UnpinPrefixesMsg(BaseTokenizerMsg):
     # api server -> tokenizer worker (passthrough to UnpinPrefixesBackendMsg):
     # DELETE /v1/cache/pins releases every auto-pinned prefix.

@@ -63,6 +63,11 @@ class CloseSessionBackendMsg(BaseBackendMsg):
 
 
 @dataclass
+class DurableCheckpointBackendMsg(BaseBackendMsg):
+    operation_id: str
+
+
+@dataclass
 class UnpinPrefixesBackendMsg(BaseBackendMsg):
     # tokenizer worker -> scheduler: release every auto-pinned prefix (DELETE /v1/cache/pins).
     request_id: str

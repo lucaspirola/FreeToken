@@ -92,6 +92,17 @@ class SessionClosedReply(BaseFrontendMsg):
 
 
 @dataclass
+class DurableCheckpointReply(BaseFrontendMsg):
+    operation_id: str
+    status: str
+    durable_count: int = 0
+    durable_digest: str | None = None
+    durable_hashes: list[str] | None = None
+    durable_hashes_truncated: bool = False
+    error: str | None = None
+
+
+@dataclass
 class UnpinPrefixesReply(BaseFrontendMsg):
     request_id: str
     pinned_prefixes: int

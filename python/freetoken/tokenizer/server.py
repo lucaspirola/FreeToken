@@ -20,6 +20,10 @@ from freetoken.message import (
     CloseSessionBackendMsg,
     CloseSessionMsg,
     DetokenizeMsg,
+    DurableCheckpointBackendMsg,
+    DurableCheckpointMsg,
+    DurableCheckpointReply,
+    DurableCheckpointResultMsg,
     ErrorReplyMsg,
     PromptAdmittedMsg,
     SchedulerCountersMsg,
@@ -210,6 +214,14 @@ def tokenize_worker(
                             session_id=m.session_id, request_id=m.request_id
                         )
                     )
+                elif isinstance(m, DurableCheckpointMsg):
+                    send_backend.put(DurableCheckpointBackendMsg(operation_id=m.operation_id))
+                elif isinstance(m, DurableCheckpointResultMsg):
+                    send_frontend.put(DurableCheckpointReply(
+                        operation_id=m.operation_id, status=m.status,
+                        durable_count=m.durable_count, durable_digest=m.durable_digest,
+                        durable_hashes=m.durable_hashes,
+                        durable_hashes_truncated=m.durable_hashes_truncated, error=m.error))
                 elif isinstance(m, UnpinPrefixesMsg):
                     send_backend.put(UnpinPrefixesBackendMsg(request_id=m.request_id))
                 elif isinstance(m, UnpinPrefixesResultMsg):
@@ -240,6 +252,8 @@ def tokenize_worker(
                         CloseSessionMsg,
                         SessionClosedResultMsg,
                         ErrorReplyMsg,
+                        DurableCheckpointMsg,
+                        DurableCheckpointResultMsg,
                         PromptAdmittedMsg,
                         SchedulerCountersMsg,
                         UnpinPrefixesMsg,
