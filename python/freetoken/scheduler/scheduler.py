@@ -1649,6 +1649,24 @@ class Scheduler(SchedulerIOMixin):
                 record.token_ids[:length]
             )
             if missing > allocatable:
+                pool = getattr(self.engine, "kv_cache", None)
+                can_grow = bool(
+                    getattr(pool, "growable", False)
+                    and getattr(self.config, "kv_grow_step_tokens", 0)
+                )
+                if not can_grow:
+                    # The fixed arena has no safe way to make additional physical pages.
+                    # Keep the checkpoint for a later retry; the normal admission path can
+                    # still re-prefill the request without relying on this optimization.
+                    store.counters.restores_deferred += 1
+                    logger.debug_rank0(
+                        "Deferred cold restore of session %s: %d pages missing, only %d "
+                        "static-arena pages allocatable",
+                        session_id,
+                        missing,
+                        allocatable,
+                    )
+                    return False
                 required = cm.committed_pages + missing - allocatable
                 old_pages, new_pages = self.engine.grow_runtime_kv(required)
                 if new_pages > old_pages:

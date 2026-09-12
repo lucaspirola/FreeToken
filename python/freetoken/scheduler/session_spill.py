@@ -239,7 +239,6 @@ class SessionSpillStore:
             or config.tp_info.size != 1
             or config.page_size != 1
             or linear is None
-            or not getattr(pool, "growable", False)
             or not hasattr(pool, "iter_session_spill_tensors")
         ):
             return None
