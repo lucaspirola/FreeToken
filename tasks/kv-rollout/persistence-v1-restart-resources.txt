@@ -1,0 +1,12 @@
+timestamp=2026-09-12T23:35:40+04:00
+pid=714611
+control_group=/user.slice/user-1000.slice/user@1000.service/app.slice/freetoken-serve.service
+memory.current=20158509056
+
+memory.peak=23536209920
+
+memory.swap.current=0
+
+MemAvailable:=10300684 KiB
+SwapFree:=2106380 KiB
+13946, 2032, 16303

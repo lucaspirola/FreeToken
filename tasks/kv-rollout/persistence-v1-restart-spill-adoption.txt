@@ -1,0 +1,1 @@
+Sep 12 23:35:12 TESSERACT uv[714706]: [2026-09-12|23:35:12|core|rank=0] INFO     Session spill root /home/lucas/.cache/freetoken/spill: adopted 142 checkpoint(s), removed 0 stale entr(ies)

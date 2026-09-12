@@ -1,0 +1,1 @@
+Sep 12 23:35:13 TESSERACT uv[714630]: [2026-09-12|23:35:13|FrontendAPI] INFO     API server is ready to serve on 127.0.0.1:1919
