@@ -98,6 +98,7 @@ class _Prefetch:
     record: SessionSpillRecord
     cancel: threading.Event
     started: float
+    reserved_bytes: int
     thread: threading.Thread | None = None
     values: list[torch.Tensor] | None = None
 
@@ -210,6 +211,10 @@ class SessionSpillStore:
         # is silent, and a spill that did not fit its budget is one warning line.
         self.counters = SpillCounters()
         self._prefetch: _Prefetch | None = None
+        # Bytes promised to the active disk->RAM reader.  The tensors are allocated by
+        # that background thread before they become a tracked RAM record, so ``ram_bytes``
+        # alone is not an admission bound while a prefetch is running.
+        self._prefetch_reserved_bytes = 0
         # A promotion installed by a reap nobody asked for (``start_prefetch``'s own
         # housekeeping), held until the caller that does ask for it collects it.
         self._promoted: str | None = None
@@ -446,7 +451,11 @@ class SessionSpillStore:
     def _ram_has_room(self, byte_size: int) -> bool:
         # The extra 256 MiB covers one bounded D2H gather and Python/torch metadata.
         ram_headroom = _mem_available_bytes() - self.host_reserve_bytes - (256 << 20)
-        return byte_size <= self.ram_budget_bytes - self.ram_bytes and byte_size <= ram_headroom
+        return (
+            byte_size
+            <= self.ram_budget_bytes - self.ram_bytes - self._prefetch_reserved_bytes
+            and byte_size <= ram_headroom - self._prefetch_reserved_bytes
+        )
 
     def _choose_tier(self, byte_size: int) -> str | None:
         if self._ram_has_room(byte_size):
@@ -739,8 +748,14 @@ class SessionSpillStore:
             # an optimization, but a budget that never lets it run is worth seeing.
             self.counters.prefetches_failed += 1
             return False
+        # Reserve the complete record before the reader can allocate its first tensor.
+        # Cancellation deliberately leaves this charged until collect_prefetch joins and
+        # reaps the reader, because it may still hold tensors while observing the event.
         cancel = threading.Event()
-        state = _Prefetch(session_id, record, cancel, time.perf_counter())
+        state = _Prefetch(
+            session_id, record, cancel, time.perf_counter(), record.byte_size
+        )
+        self._prefetch_reserved_bytes += state.reserved_bytes
 
         def _read() -> None:
             values: list[torch.Tensor] = []
@@ -755,7 +770,16 @@ class SessionSpillStore:
 
         state.thread = threading.Thread(target=_read, name="session-prefetch", daemon=True)
         self._prefetch = state
-        state.thread.start()
+        try:
+            state.thread.start()
+        except RuntimeError:
+            # No reader can hold values when Thread.start itself fails.
+            self._prefetch = None
+            self._prefetch_reserved_bytes = max(
+                0, self._prefetch_reserved_bytes - state.reserved_bytes
+            )
+            self.counters.prefetches_failed += 1
+            return False
         self.counters.prefetches += 1
         return True
 
@@ -786,13 +810,28 @@ class SessionSpillStore:
             or not record.valid
             or record.tier != "disk"
             or len(values) != len(record.chunks)
-            or not self._ram_has_room(record.byte_size)
+            # The tensors are already allocated, so check the live reserve itself rather
+            # than asking _ram_has_room and charging their reservation a second time.
+            or _mem_available_bytes() < self.host_reserve_bytes + (256 << 20)
         ):
+            # The thread is no longer alive here. Drop its references before returning the
+            # reservation to admissions.
+            state.values = None
+            values = None
+            self._prefetch_reserved_bytes = max(
+                0, self._prefetch_reserved_bytes - state.reserved_bytes
+            )
             if not state.cancel.is_set():
                 # Not a cancellation: the read tore, the record was evicted under it, or RAM
                 # moved. The promotion is lost and the restore reads from disk.
                 self.counters.prefetches_failed += 1
             return None
+        # Transfer the charge from the in-flight reservation to the resident record.  Do
+        # not call _ram_has_room here: that would double-charge this prefetch against its
+        # own reservation, while all other RAM admissions were already kept outside it.
+        self._prefetch_reserved_bytes = max(
+            0, self._prefetch_reserved_bytes - state.reserved_bytes
+        )
         self._promote_to_ram(record, values)
         self.counters.prefetches_collected += 1
         logger.info_rank0(
@@ -848,6 +887,7 @@ class SessionSpillStore:
     def shutdown(self) -> None:
         """Persisting shutdown only flushes manifests; the root survives for the next run."""
         self.cancel_prefetch()
+        self.collect_prefetch(wait=True)
         self._promoted = None
         if not self.persist:
             for record in list(self._records):
