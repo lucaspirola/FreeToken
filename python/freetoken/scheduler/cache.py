@@ -278,50 +278,95 @@ class CacheManager:
         target_pages: int,
         copy_pages,
     ) -> int:
-        """Move request-owned high pages into low holes and return the resulting ceiling.
+        """Move represented high pages into low holes and return the safe physical ceiling.
 
-        Prefix-owned pages are deliberately immovable: radix nodes also retain their physical
-        ids. Pages after a request's matched prefix belong only to that live request, so their
-        page-table entries can be safely rewritten. If a protected high prefix prevents the
-        requested target, the returned ceiling remains above it and shrink is conservative.
+        This is a metadata transaction at the caller's no-forward-in-flight boundary.  The
+        caller is responsible for supplying every live/chunked/export borrower and for draining
+        asynchronous GPU/export users; seeing one owner cannot prove that an external alias does
+        not exist. Prefix nodes are mutated in place, which deliberately preserves their locks,
+        GDN snapshots,
+        pooled sums and pin bookkeeping.  The copy happens before any reference/free-list
+        mutation, so a failed device copy leaves allocator metadata unchanged. Metadata publish
+        itself is limited to in-place tensor replacements plus one preallocated free-list swap.
+
+        ``reqs`` must include every live request, including parked chunked prefills.  A page
+        absent from both the prefix tree and those request rows is conservatively immovable: it
+        remains allocated and therefore raises the returned ceiling rather than being dropped.
         """
         if self.page_size != 1:
             raise RuntimeError("growable KV compaction currently requires page_size=1")
+        if self.is_swa or self.swa_pool is not None:
+            raise RuntimeError("growable KV compaction does not support SWA caches")
         if target_pages >= self.committed_pages:
             return self.committed_pages
         first_page_id = self.page_index_offset
+        last_page_id = first_page_id + self.committed_pages
         cutoff_id = first_page_id + target_pages
-        low_free = self.free_slots[self.free_slots < cutoff_id]
 
-        high_private: list[torch.Tensor] = []
+        free_ids = [int(v) for v in self.free_slots.tolist()]
+        if len(free_ids) != len(set(free_ids)):
+            raise RuntimeError("KV free-list contains duplicate pages")
+        if any(v < first_page_id or v >= last_page_id for v in free_ids):
+            raise RuntimeError("KV free-list contains a page outside the committed range")
+
+        # Keep the actual tensors, not reconstructed handles: all aliases are rewritten only
+        # after the physical copies succeed.  Hybrid handles cache a separate kv_indices tensor;
+        # plain radix handles derive theirs from these same node values.
+        references: list[torch.Tensor] = []
+        prefix = self.prefix_cache
+        root = getattr(prefix, "root", getattr(prefix, "root_node", None))
+        if root is not None:
+            stack = [root]
+            while stack:
+                node = stack.pop()
+                stack.extend(node.children.values())
+                if not node.is_root():
+                    references.append(node.value)
+
         for req in reqs:
             if req.table_idx == -1:
                 continue
-            private_start = int(req.cache_handle.cached_len)
-            private_end = int(req.cached_len)
-            if private_end > private_start:
-                row = self.page_table[req.table_idx, private_start:private_end]
-                high_private.append(row[row >= cutoff_id])
-        if high_private and len(low_free) > 0:
-            sources = torch.unique(torch.cat(high_private), sorted=True)
-            count = min(len(sources), len(low_free))
-            sources = sources[:count]
-            destinations = torch.sort(low_free)[0][:count]
+            live_end = int(req.cached_len)
+            if live_end > 0:
+                references.append(self.page_table[req.table_idx, :live_end])
+            handle_indices = getattr(req.cache_handle, "kv_indices", None)
+            if handle_indices is not None and len(handle_indices) > 0:
+                references.append(handle_indices)
+
+        represented: set[int] = set()
+        for ref in references:
+            ids = [int(v) for v in ref.tolist()]
+            if any(v < first_page_id or v >= last_page_id for v in ids):
+                raise RuntimeError("KV reference contains a page outside the committed range")
+            represented.update(ids)
+        if represented.intersection(free_ids):
+            raise RuntimeError("KV page is both referenced and present on the free-list")
+
+        low_free_ids = sorted(v for v in free_ids if v < cutoff_id)
+        high_sources = sorted(v for v in represented if v >= cutoff_id)
+        count = min(len(high_sources), len(low_free_ids))
+        if count:
+            sources = torch.tensor(high_sources[:count], dtype=torch.int32, device=self.device)
+            destinations = torch.tensor(low_free_ids[:count], dtype=torch.int32,
+                                        device=self.device)
+            remap = dict(zip(high_sources[:count], low_free_ids[:count], strict=True))
+            destination_set = set(remap.values())
+            new_free = [v for v in free_ids if v not in destination_set]
+            new_free.extend(remap.keys())
+            published_free = torch.tensor(new_free, dtype=torch.int32, device=self.device)
+
+            # One bounded dense lookup (4 MiB per million committed pages), then one gather per
+            # reference tensor. Avoid a scan/kernel launch per moved page: a 1M-token compaction
+            # must remain O(total references + committed pages), not O(references * moves).
+            lookup = torch.arange(first_page_id, last_page_id, dtype=torch.int32,
+                                  device=self.device)
+            lookup[(sources - first_page_id).to(torch.long)] = destinations
+            rewritten = [lookup[(ref - first_page_id).to(torch.long)] for ref in references]
             copy_pages(sources, destinations)
 
-            # Rewrite every private reference. In normal decode these ids are unique, but a
-            # global replacement keeps the operation correct if a future path aliases one.
-            for req in reqs:
-                if req.table_idx == -1:
-                    continue
-                private_start = int(req.cache_handle.cached_len)
-                private_end = int(req.cached_len)
-                row = self.page_table[req.table_idx, private_start:private_end]
-                for src, dst in zip(sources, destinations, strict=True):
-                    row[row == src] = dst
-
-            keep = ~torch.isin(self.free_slots, destinations)
-            self.free_slots = torch.cat((self.free_slots[keep], sources.to(torch.int32)))
+            for ref, replacement in zip(references, rewritten, strict=True):
+                ref.copy_(replacement)
+            self.free_slots = published_free
 
         free_mask = torch.zeros(
             self.committed_pages, dtype=torch.bool, device=self.device

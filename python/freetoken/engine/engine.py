@@ -1105,6 +1105,7 @@ class Engine:
         re-capture. Does NOT reload weights or host expert banks. The caller (scheduler) must
         guarantee no in-flight prefill/decode.
         """
+        self._refuse_if_growable_transition_failed()
         config = self.config
         if (
             moe_cache_size is None
@@ -1364,6 +1365,55 @@ class Engine:
                 hi = mid - 1
         return lo, kv_bytes
 
+    def _rollback_growable_kv_transition(
+        self,
+        *,
+        old_pages: int,
+        old_moe: int,
+        old_overlap: bool,
+        recapture_graphs: bool,
+    ) -> None:
+        """Best-effort rollback for an interrupted MoE/KV ownership transfer.
+
+        Ordinary allocation failures are recoverable: MHA VMM commits are reversible and
+        the expert banks remain resident on the host across ``OffloadMoeCache.rebuild``.
+        A CUDA context error is not recoverable; mark the engine poisoned and re-raise so the
+        scheduler cannot resume against a half-built cache.
+        """
+        pool = self.kv_cache
+        moe = self.moe_offload_cache
+        assert moe is not None
+        try:
+            current_pages = int(pool.committed_pages)
+            # When growth got as far as the KV commit, return those mappings before asking
+            # the old, larger expert geometry to fit again.
+            if current_pages > old_pages:
+                pool.decommit_pages(old_pages)
+            if moe.cache_size != old_moe:
+                moe.prefill_overlap = old_overlap
+                moe.rebuild(old_moe)
+            else:
+                moe.prefill_overlap = old_overlap
+            # Shrink frees KV before growing experts. Restore the (smaller) old expert cache
+            # first, then recommit the exact recorded VMM suffix.
+            if int(pool.committed_pages) < old_pages:
+                pool.commit_pages(old_pages)
+            object.__setattr__(self.config, "moe_cache_size", old_moe)
+            if recapture_graphs:
+                self.ensure_decode_graphs()
+        except Exception:
+            self._growable_transition_failed = True
+            logger.exception(
+                "Growable KV rollback failed; engine is not safe to resume"
+            )
+            raise
+
+    def _refuse_if_growable_transition_failed(self) -> None:
+        if getattr(self, "_growable_transition_failed", False):
+            raise RuntimeError(
+                "growable KV/MoE rollback failed; engine restart is required"
+            )
+
     @torch.inference_mode()
     def grow_runtime_kv(self, required_pages: int) -> tuple[int, int]:
         """Commit the next KV suffix at a safe batch boundary and fund it from MoE slots.
@@ -1373,6 +1423,7 @@ class Engine:
         and recaptured. The growable scheduler runs without scheduler/forward overlap, making
         this method's entry a no-forward-in-flight boundary.
         """
+        self._refuse_if_growable_transition_failed()
         pool = self.kv_cache
         old_pages = int(getattr(pool, "committed_pages", self.num_pages))
         if required_pages <= old_pages:
@@ -1385,69 +1436,90 @@ class Engine:
         moe = self.moe_offload_cache
         assert moe is not None, "growable KV requires the MoE offload cache"
         old_moe = moe.cache_size
+        old_overlap = moe.prefill_overlap
         target_moe, kv_bytes = self._plan_growable_kv(target_pages)
 
         torch.cuda.synchronize(self.device)
         if self.config.tp_info.size > 1:
             self.sync_all_ranks()
         recapture = target_moe < moe.cache_size
+        recapture_graphs = recapture and self._pending_graph_bs is None
         if recapture:
             if self._pending_graph_bs is None:
                 self._pending_graph_bs = list(self.graph_runner.graph_bs_list)
                 self.attn_backend.reset_capture()
                 self.graph_runner.destroy_cuda_graphs()
-        commit_bytes = kv_bytes - pool.mapped_bytes_for_pages(old_pages)
-        required_free = commit_bytes + 256 * 1024 * 1024
-        live_free_before = self._sync_get_memory()[0]
-        expected_free = (
-            live_free_before
-            + self._growable_moe_bytes(old_moe)
-            - self._growable_moe_bytes(target_moe)
-        )
-        # Pick the final geometry before allocating it. Rebuilding a second time can
-        # strand the first replacement in a partially occupied CUDA allocator segment,
-        # so the nominally released bytes never make it back to the driver.
-        desired_free = required_free + 128 * 1024 * 1024
-        if expected_free < desired_free:
-            shortage = desired_free - expected_free
-            target_moe, _ = self._plan_growable_kv(
-                target_pages,
-                extra_vmm_reserve_bytes=shortage + 64 * 1024 * 1024,
+        try:
+            commit_bytes = kv_bytes - pool.mapped_bytes_for_pages(old_pages)
+            required_free = commit_bytes + 256 * 1024 * 1024
+            live_free_before = self._sync_get_memory()[0]
+            expected_free = (
+                live_free_before
+                + self._growable_moe_bytes(old_moe)
+                - self._growable_moe_bytes(target_moe)
             )
-            if target_moe >= old_moe:
-                raise RuntimeError(
-                    "growable KV live-memory guard could not fund the next VMM commit"
+            # Pick the final geometry before allocating it. Rebuilding a second time can
+            # strand the first replacement in a partially occupied CUDA allocator segment,
+            # so the nominally released bytes never make it back to the driver.
+            desired_free = required_free + 128 * 1024 * 1024
+            if expected_free < desired_free:
+                shortage = desired_free - expected_free
+                target_moe, _ = self._plan_growable_kv(
+                    target_pages,
+                    extra_vmm_reserve_bytes=shortage + 64 * 1024 * 1024,
                 )
-            if not recapture:
-                if self._pending_graph_bs is None:
-                    self._pending_graph_bs = list(self.graph_runner.graph_bs_list)
-                    self.attn_backend.reset_capture()
-                    self.graph_runner.destroy_cuda_graphs()
-                recapture = True
-        if recapture:
-            moe.prefill_overlap = (
-                self._growable_moe_prefill_overlap and target_moe >= 2 * moe.num_experts
+                if target_moe >= old_moe:
+                    raise RuntimeError(
+                        "growable KV live-memory guard could not fund the next VMM commit"
+                    )
+                if not recapture:
+                    recapture_graphs = self._pending_graph_bs is None
+                    if self._pending_graph_bs is None:
+                        self._pending_graph_bs = list(self.graph_runner.graph_bs_list)
+                        self.attn_backend.reset_capture()
+                        self.graph_runner.destroy_cuda_graphs()
+                    recapture = True
+        except Exception:
+            self._rollback_growable_kv_transition(
+                old_pages=old_pages,
+                old_moe=old_moe,
+                old_overlap=old_overlap,
+                recapture_graphs=recapture_graphs,
             )
-            moe.rebuild(target_moe)
-            object.__setattr__(self.config, "moe_cache_size", target_moe)
-        live_free = self._sync_get_memory()[0]
-        logger.info_rank0(
-            "Growable-KV pre-commit: %s free, %s commit, %s required "
-            "(allocator %s allocated / %s reserved)",
-            mem_GB(live_free),
-            mem_GB(commit_bytes),
-            mem_GB(required_free),
-            mem_GB(torch.cuda.memory_allocated(self.device)),
-            mem_GB(torch.cuda.memory_reserved(self.device)),
-        )
-        if live_free < required_free:
-            raise RuntimeError(
-                "growable KV refused an unsafe VMM commit: "
-                f"need {mem_GB(required_free)} free, have {mem_GB(live_free)}"
+            raise
+        try:
+            if recapture:
+                moe.prefill_overlap = (
+                    self._growable_moe_prefill_overlap and target_moe >= 2 * moe.num_experts
+                )
+                moe.rebuild(target_moe)
+                object.__setattr__(self.config, "moe_cache_size", target_moe)
+            live_free = self._sync_get_memory()[0]
+            logger.info_rank0(
+                "Growable-KV pre-commit: %s free, %s commit, %s required "
+                "(allocator %s allocated / %s reserved)",
+                mem_GB(live_free),
+                mem_GB(commit_bytes),
+                mem_GB(required_free),
+                mem_GB(torch.cuda.memory_allocated(self.device)),
+                mem_GB(torch.cuda.memory_reserved(self.device)),
             )
-        pool.commit_pages(target_pages)
-        if self.config.tp_info.size > 1:
-            self.sync_all_ranks()
+            if live_free < required_free:
+                raise RuntimeError(
+                    "growable KV refused an unsafe VMM commit: "
+                    f"need {mem_GB(required_free)} free, have {mem_GB(live_free)}"
+                )
+            pool.commit_pages(target_pages)
+            if self.config.tp_info.size > 1:
+                self.sync_all_ranks()
+        except Exception:
+            self._rollback_growable_kv_transition(
+                old_pages=old_pages,
+                old_moe=old_moe,
+                old_overlap=old_overlap,
+                recapture_graphs=recapture_graphs,
+            )
+            raise
         logger.info_rank0(
             "Committed growable KV through %d tokens (%s physical); MoE slots %d -> %d",
             target_pages,
@@ -1460,6 +1532,7 @@ class Engine:
     @torch.inference_mode()
     def shrink_runtime_kv(self, target_pages: int) -> tuple[int, int]:
         """Decommit a free KV suffix and regrow the expert cache from the released VRAM."""
+        self._refuse_if_growable_transition_failed()
         pool = self.kv_cache
         old_pages = int(getattr(pool, "committed_pages", self.num_pages))
         if target_pages >= old_pages:
@@ -1473,6 +1546,7 @@ class Engine:
         moe = self.moe_offload_cache
         assert moe is not None, "growable KV requires the MoE offload cache"
         old_moe = moe.cache_size
+        old_overlap = moe.prefill_overlap
         target_moe, kv_bytes = self._plan_growable_kv(target_pages)
         old_kv_bytes = pool.mapped_bytes_for_pages(old_pages)
 
@@ -1480,6 +1554,7 @@ class Engine:
         if self.config.tp_info.size > 1:
             self.sync_all_ranks()
         recapture = target_moe != old_moe
+        recapture_graphs = recapture and self._pending_graph_bs is None
         if recapture:
             if self._pending_graph_bs is None:
                 self._pending_graph_bs = list(self.graph_runner.graph_bs_list)
@@ -1488,15 +1563,24 @@ class Engine:
 
         # Free KV first so expert-cache expansion never needs old and new geometries resident
         # simultaneously. Stable virtual addresses keep all surviving KV views valid.
-        pool.decommit_pages(target_pages)
-        if recapture:
-            moe.prefill_overlap = (
-                self._growable_moe_prefill_overlap and target_moe >= 2 * moe.num_experts
+        try:
+            pool.decommit_pages(target_pages)
+            if recapture:
+                moe.prefill_overlap = (
+                    self._growable_moe_prefill_overlap and target_moe >= 2 * moe.num_experts
+                )
+                moe.rebuild(target_moe)
+                object.__setattr__(self.config, "moe_cache_size", target_moe)
+            if self.config.tp_info.size > 1:
+                self.sync_all_ranks()
+        except Exception:
+            self._rollback_growable_kv_transition(
+                old_pages=old_pages,
+                old_moe=old_moe,
+                old_overlap=old_overlap,
+                recapture_graphs=recapture_graphs,
             )
-            moe.rebuild(target_moe)
-            object.__setattr__(self.config, "moe_cache_size", target_moe)
-        if self.config.tp_info.size > 1:
-            self.sync_all_ranks()
+            raise
         logger.info_rank0(
             "Released growable KV %d -> %d tokens (%s returned); MoE slots %d -> %d",
             old_pages,
@@ -1542,6 +1626,7 @@ class Engine:
         graphs and expert slots are released first on growth; on shrink, compacted
         GDN storage is released before expert residency is restored.
         """
+        self._refuse_if_growable_transition_failed()
         initial = self.config.elastic_initial_requests
         if initial is None or self.linear_state_pool is None:
             raise RuntimeError("elastic capacity is not enabled for this engine")
@@ -1657,6 +1742,7 @@ class Engine:
         )
 
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
+        self._refuse_if_growable_transition_failed()
         assert torch.cuda.current_stream() == self.stream
         # Hidden-state capture exists only on the prefill path (begin_batch returns None
         # for a decode batch, and for any prefill batch with no probe request in it), so
@@ -1700,6 +1786,7 @@ class Engine:
         (``--speculative ngram`` refuses a sampling request), so it needs no sampler.
         Always eager -- CUDA graphs are captured for one-token decode batches only.
         """
+        self._refuse_if_growable_transition_failed()
         assert torch.cuda.current_stream() == self.stream
         assert batch.is_prefill and batch.size == 1, "verify batch is one extend request"
         assert batch.logits_indices is not None, "verify batch must keep every logits row"
@@ -2545,10 +2632,8 @@ def _adjust_config(config: EngineConfig):
             raise ValueError(
                 "growable KV requires --moe-backend offload and --moe-cache-auto"
             )
-        if config.moe_cpu_layers:
-            raise ValueError("growable KV does not support CPU MoE layer splits")
         if resolve_pool_class(config.model_config) is not MHAKVCache:
-            raise ValueError("growable KV currently supports dense MHA KV pools only")
+            raise ValueError("growable KV currently supports MHA KV pools only")
         initial_pages = config.kv_grow_step_tokens // config.page_size
         if initial_pages >= config.num_page_override:
             raise ValueError(
