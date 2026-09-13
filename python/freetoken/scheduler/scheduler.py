@@ -2255,6 +2255,7 @@ class Scheduler(SchedulerIOMixin):
             self._elastic_live_requests(),
             compacted_target,
             self.engine.kv_cache.copy_pages,
+            self._elastic_retained_session_handles(),
         )
         target = max(initial, math.ceil(compacted_target / step) * step)
         if target >= cm.committed_pages:
@@ -2395,6 +2396,15 @@ class Scheduler(SchedulerIOMixin):
             if pending.chunked_req is not None
         )
         return list({id(req): req for req in reqs}.values())
+
+    def _elastic_retained_session_handles(self) -> list[object]:
+        """Every resident lease alias, including idle and explicit/protected sessions."""
+        handles = (
+            lease.handle
+            for lease in getattr(self, "_sessions", {}).values()
+            if lease.handle is not None
+        )
+        return list({id(handle): handle for handle in handles}.values())
 
     def _elastic_demand(self) -> int:
         # Every pending item is one independent agent. A chunked continuation is not

@@ -159,6 +159,56 @@ def test_growable_manager_compacts_hybrid_prefix_and_all_live_aliases():
     assert match.node.pooled_sums.tolist() == [[3.0]]
 
 
+def test_growable_manager_compacts_idle_and_protected_session_handle_aliases_once():
+    from freetoken.kvcache.hybrid_radix_cache import HybridCacheHandle
+
+    table = torch.zeros((1, 16), dtype=torch.int32)
+    manager = CacheManager(
+        num_pages=16, page_size=1, page_table=table, type="hybrid_radix",
+        linear_state_pool=SimpleNamespace(track_chunk_size=1), committed_pages=8,
+        page_index_offset=1,
+    )
+    tokens = torch.tensor([31, 32], dtype=torch.int32)
+    pooled = torch.tensor([[7.5, 8.5]])
+    manager.prefix_cache.insert(
+        tokens, torch.tensor([7, 8], dtype=torch.int32), mamba_value=4,
+        pooled_sums=pooled,
+    )
+    match = manager.prefix_cache.match_prefix(tokens, pooled=True)
+    manager.prefix_cache.inc_lock(match.node)
+    # retain_prefix/match_req materializes an index tensor separate from node.value. Model
+    # idle and explicit/protected leases with two such aliases to the same locked node.
+    idle = HybridCacheHandle(match.cached_len, match.node, match.kv_indices.clone())
+    protected = HybridCacheHandle(match.cached_len, match.node, match.kv_indices.clone())
+    manager.free_slots = torch.tensor([1, 2, 3, 4, 5, 6], dtype=torch.int32)
+    before_free = manager.free_slots.clone()
+
+    with pytest.raises(RuntimeError, match="copy failed"):
+        manager.compact_active_pages(
+            [], 6, lambda _src, _dst: (_ for _ in ()).throw(RuntimeError("copy failed")),
+            [idle, protected, idle],
+        )
+    assert match.node.value.tolist() == [7, 8]
+    assert idle.get_matched_indices().tolist() == [7, 8]
+    assert protected.get_matched_indices().tolist() == [7, 8]
+    assert torch.equal(manager.free_slots, before_free)
+
+    copied = []
+    assert manager.compact_active_pages(
+        [], 6, lambda src, dst: copied.append((src.tolist(), dst.tolist())),
+        [idle, protected, idle],  # repeated ownership must not publish a second remap
+    ) == 6
+    assert copied == [([7, 8], [1, 2])]
+    assert match.node.value.tolist() == [1, 2]
+    # This getter is what the later session checkpoint/spill path consumes.
+    assert idle.get_matched_indices().tolist() == [1, 2]
+    assert protected.get_matched_indices().tolist() == [1, 2]
+    assert match.node.mamba_value == 4
+    assert match.node.mamba_ref_count == 1
+    assert match.node.ref_count == 1
+    assert torch.equal(match.node.pooled_sums, pooled)
+
+
 def test_growable_manager_copy_failure_does_not_publish_metadata():
     table = torch.zeros((1, 8), dtype=torch.int32)
     manager = CacheManager(8, 1, table, "naive", committed_pages=8,

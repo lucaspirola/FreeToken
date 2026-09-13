@@ -4,7 +4,7 @@ import os
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Tuple
+from typing import TYPE_CHECKING, Iterable, List, Tuple
 
 import torch
 from freetoken.core import Req
@@ -277,13 +277,15 @@ class CacheManager:
         reqs: List[Req],
         target_pages: int,
         copy_pages,
+        retained_handles: Iterable[BaseCacheHandle] = (),
     ) -> int:
         """Move represented high pages into low holes and return the safe physical ceiling.
 
         This is a metadata transaction at the caller's no-forward-in-flight boundary.  The
-        caller is responsible for supplying every live/chunked/export borrower and for draining
-        asynchronous GPU/export users; seeing one owner cannot prove that an external alias does
-        not exist. Prefix nodes are mutated in place, which deliberately preserves their locks,
+        caller is responsible for supplying every live/chunked/export borrower, plus every
+        retained handle whose indices are an independent tensor, and for draining asynchronous
+        GPU/export users; seeing one owner cannot prove that an external alias does not exist.
+        Prefix nodes are mutated in place, which deliberately preserves their locks,
         GDN snapshots,
         pooled sums and pin bookkeeping.  The copy happens before any reference/free-list
         mutation, so a failed device copy leaves allocator metadata unchanged. Metadata publish
@@ -317,6 +319,15 @@ class CacheManager:
         # after the physical copies succeed.  Hybrid handles cache a separate kv_indices tensor;
         # plain radix handles derive theirs from these same node values.
         references: list[torch.Tensor] = []
+        reference_ids: set[int] = set()
+
+        def add_reference(ref: torch.Tensor | None) -> None:
+            # A request may carry the same retained session handle. Rewriting one tensor twice
+            # is redundant; publish each independent alias exactly once.
+            if ref is not None and len(ref) > 0 and id(ref) not in reference_ids:
+                reference_ids.add(id(ref))
+                references.append(ref)
+
         prefix = self.prefix_cache
         root = getattr(prefix, "root", getattr(prefix, "root_node", None))
         if root is not None:
@@ -325,17 +336,19 @@ class CacheManager:
                 node = stack.pop()
                 stack.extend(node.children.values())
                 if not node.is_root():
-                    references.append(node.value)
+                    add_reference(node.value)
 
         for req in reqs:
             if req.table_idx == -1:
                 continue
             live_end = int(req.cached_len)
             if live_end > 0:
-                references.append(self.page_table[req.table_idx, :live_end])
+                add_reference(self.page_table[req.table_idx, :live_end])
             handle_indices = getattr(req.cache_handle, "kv_indices", None)
-            if handle_indices is not None and len(handle_indices) > 0:
-                references.append(handle_indices)
+            add_reference(handle_indices)
+
+        for handle in retained_handles:
+            add_reference(getattr(handle, "kv_indices", None))
 
         represented: set[int] = set()
         for ref in references:

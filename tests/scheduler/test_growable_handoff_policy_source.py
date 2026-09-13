@@ -49,8 +49,9 @@ class _CM:
     def page_usage(self):
         return self.used, self.committed_pages
 
-    def compact_active_pages(self, reqs, target, copy):
+    def compact_active_pages(self, reqs, target, copy, retained_handles=()):
         self.compact_reqs = list(reqs)
+        self.compact_handles = list(retained_handles)
         return target
 
     def remove_committed_pages(self, target):
@@ -70,6 +71,7 @@ def _scheduler(*, pending, cm=None, shrink_error=None):
         "_growable_handoff_demand_pages",
         "_evict_growable_prefix_pages",
         "_release_soft_session_handle",
+        "_elastic_retained_session_handles",
     )
     cm = cm or _CM()
     calls = []
@@ -109,6 +111,9 @@ def _scheduler(*, pending, cm=None, shrink_error=None):
         _release_soft_session_handle=lambda *a, **k: True,
     )
     obj._growable_handoff_demand_pages = methods._growable_handoff_demand_pages.__get__(obj)
+    obj._elastic_retained_session_handles = (
+        methods._elastic_retained_session_handles.__get__(obj)
+    )
     obj.engine.stream = SimpleNamespace(synchronize=lambda: None)
     return obj, methods, calls
 
@@ -118,6 +123,25 @@ def test_long_to_short_queued_handoff_shrinks_one_or_more_steps():
     methods._maybe_shrink_growable_kv(obj)
     assert calls and calls[0] <= 24
     assert obj.cache_manager.removed == [calls[0]]
+
+
+def test_shrink_supplies_all_resident_session_handles_including_protected():
+    obj, methods, _calls = _scheduler(pending=[])
+    idle = object()
+    protected = object()
+    obj._sessions = {
+        "idle": SimpleNamespace(handle=idle),
+        "protected": SimpleNamespace(handle=protected),
+        "spilled": SimpleNamespace(handle=None),
+        "duplicate": SimpleNamespace(handle=idle),
+    }
+
+    methods._maybe_shrink_growable_kv(obj)
+
+    assert {id(handle) for handle in obj.cache_manager.compact_handles} == {
+        id(idle), id(protected)
+    }
+    assert len(obj.cache_manager.compact_handles) == 2
 
 
 def test_large_incoming_agent_avoids_pointless_shrink_and_regrowth():
