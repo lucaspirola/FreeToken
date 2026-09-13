@@ -11,6 +11,8 @@ from .base import BaseKVCachePool
 from .quant import NONE, KVQuantSpec
 from .quant_storage import QuantizedKVStorageMixin
 
+COPY_PAGE_SCRATCH_LIMIT_BYTES = 32 * 1024 * 1024
+
 
 class MHAKVCache(QuantizedKVStorageMixin, BaseKVCachePool):
     """
@@ -305,25 +307,45 @@ class MHAKVCache(QuantizedKVStorageMixin, BaseKVCachePool):
     def copy_pages(self, source_pages: torch.Tensor, destination_pages: torch.Tensor) -> None:
         """Copy complete physical pages for scheduler compaction.
 
-        Page zero is the graph dummy page and is never supplied here. The copy is enqueued on
-        the caller's current stream; the scheduler performs compaction only at a no-forward-
-        in-flight boundary and rewrites page-table references after these copies.
+        The copy is enqueued on the caller's current stream; the scheduler performs compaction
+        only at a no-forward-in-flight boundary and rewrites page-table references after these
+        copies. Some CPU/accounting pools use offset zero, so validation follows the actual
+        storage range rather than imposing the production allocator's dummy-page convention.
         """
         if source_pages.numel() != destination_pages.numel():
             raise ValueError("source and destination page counts differ")
         if source_pages.numel() == 0:
             return
+        integer_dtypes = {
+            torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64,
+        }
+        if (source_pages.ndim != 1 or destination_pages.ndim != 1
+                or source_pages.dtype not in integer_dtypes
+                or destination_pages.dtype not in integer_dtypes):
+            raise ValueError("copy page indices must be one-dimensional integer tensors")
         src = source_pages.to(device=self._device, dtype=torch.long)
         dst = destination_pages.to(device=self._device, dtype=torch.long)
-        if self._asymmetric:
-            self._k_buffer.index_copy_(1, dst, self._k_buffer.index_select(1, src))
-            self._v_buffer.index_copy_(1, dst, self._v_buffer.index_select(1, src))
-        else:
-            self._kv_buffer.index_copy_(2, dst, self._kv_buffer.index_select(2, src))
+        page_limit = self._committed_pages
+        if (bool((src < 0).any()) or bool((dst < 0).any())
+                or bool((src > page_limit).any()) or bool((dst > page_limit).any())):
+            raise ValueError("copy page index outside committed physical storage range")
+        if (torch.unique(src).numel() != src.numel()
+                or torch.unique(dst).numel() != dst.numel()):
+            raise ValueError("copy page indices must be unique")
+        if bool(torch.isin(src, dst).any()):
+            raise ValueError("overlapping page copies are unsupported")
+
+        buffers = (
+            ((self._k_buffer, 1), (self._v_buffer, 1))
+            if self._asymmetric else ((self._kv_buffer, 2),)
+        )
         if self._scale_buffer is not None:
-            self._scale_buffer.index_copy_(
-                2, dst, self._scale_buffer.index_select(2, src)
-            )
+            buffers = (*buffers, (self._scale_buffer, 2))
+        chunk_pages = self._copy_page_chunk_size(buffers)
+        for begin in range(0, src.numel(), chunk_pages):
+            chunk_src = src[begin:begin + chunk_pages]
+            chunk_dst = dst[begin:begin + chunk_pages]
+            self._copy_page_payload(buffers, chunk_src, chunk_dst)
 
     def session_spill_fingerprint(self) -> tuple:
         """Exact storage geometry used to reject incompatible cold checkpoints."""
@@ -578,3 +600,21 @@ class MHAKVCache(QuantizedKVStorageMixin, BaseKVCachePool):
     @property
     def num_layers(self) -> int:
         return self._num_layers
+
+    @staticmethod
+    def _copy_page_chunk_size(buffers: Sequence[tuple[torch.Tensor, int]]) -> int:
+        scratch_per_page = max(
+            buffer.numel() // buffer.shape[page_dim] * buffer.element_size()
+            for buffer, page_dim in buffers
+        )
+        # One physical page is the indivisible copy unit; a geometry whose single page is
+        # larger than the cap still progresses one page at a time.
+        return max(1, COPY_PAGE_SCRATCH_LIMIT_BYTES // scratch_per_page)
+
+    @staticmethod
+    def _copy_page_payload(buffers, source_pages, destination_pages) -> None:
+        for buffer, page_dim in buffers:
+            buffer.index_copy_(
+                page_dim, destination_pages,
+                buffer.index_select(page_dim, source_pages),
+            )
