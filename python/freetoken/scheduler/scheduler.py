@@ -268,6 +268,13 @@ class Scheduler(SchedulerIOMixin):
         # in-flight boundary, compacts surviving private pages, decommits a free suffix, and
         # spends the returned VRAM on MoE expert slots.
         self._growable_shrink_pending = False
+        # Set for the window between _maybe_shrink_growable_kv's borrower-drained stream
+        # sync and the return of engine.shrink_runtime_kv. A node compaction legitimately
+        # skipped as locked stays safe only if nothing unlocks it before the physical
+        # decommit it computed a ceiling against actually lands; a reentrant release in
+        # that window would hand such a node to evict_mamba/evict_full with a decommit or
+        # graph recapture still in flight. See _release_soft_session_handle.
+        self._growable_shrink_in_flight = False
         self._growable_handoff_events = GrowableHandoffEvents()
         self._growable_handoff_pending: tuple[int, int] | None = None
         self._elastic_capacity = (
@@ -1592,6 +1599,20 @@ class Scheduler(SchedulerIOMixin):
             or session.handle is None
         ):
             return False
+        if getattr(self, "_growable_shrink_in_flight", False):
+            # A growable shrink has already computed its decommit ceiling against this
+            # node's current lock state (compact_active_pages ran with it protected/
+            # represented); unlocking it before that ceiling's physical decommit and any
+            # graph recapture finish could hand evict_mamba/evict_full a node whose pages
+            # or GDN slot the shrink is mid-tearing-down or about to reuse. Defer instead:
+            # the caller (reserve_mamba_slots -> the same admission gates as an exhausted
+            # pool) treats a refusal as ordinary backpressure, not a failure.
+            logger.info_rank0(
+                "Kept soft session %s protected: growable KV shrink in flight (%s)",
+                session_id,
+                reason,
+            )
+            return False
         checkpointed = self._spill_soft_session(session_id, session)
         if require_checkpoint and not checkpointed:
             logger.info_rank0(
@@ -2012,7 +2033,9 @@ class Scheduler(SchedulerIOMixin):
         for _last_used, sid in candidates:
             if not pressured():
                 break
-            released |= self._release_soft_session_handle(sid, "admission pressure")
+            released |= self._release_soft_session_handle(
+                sid, "admission pressure", require_checkpoint=True
+            )
         return released
 
     def _invalidate_match_memo(self) -> None:
@@ -2056,7 +2079,9 @@ class Scheduler(SchedulerIOMixin):
         for _last_used, sid in candidates:
             if cm.mamba_available_size >= n:
                 break
-            released |= self._release_soft_session_handle(sid, "GDN state-slot pressure")
+            released |= self._release_soft_session_handle(
+                sid, "GDN state-slot pressure", require_checkpoint=True
+            )
         return released
 
     def _reclaim_for_blocked_prefill(self) -> bool:
@@ -2230,96 +2255,107 @@ class Scheduler(SchedulerIOMixin):
                     )
                     return
 
-        used_pages, _total_pages = cm.page_usage()
-        best_target = max(
-            initial, math.ceil((used_pages + future_pages) / step) * step
-        )
-        if best_target > cm.committed_pages - step:
-            logger.debug_rank0(
-                "Growable KV shrink skipped: protected/live plus queued demand needs %d "
-                "of %d committed pages",
-                used_pages + future_pages,
-                cm.committed_pages,
-            )
-            return
-
-        occupied_pages = cm.committed_pages - len(cm.free_slots)
-        evicted = self._evict_growable_prefix_pages(
-            max(0, occupied_pages - best_target)
-        )
-        occupied_pages = cm.committed_pages - len(cm.free_slots)
-        compacted_target = max(
-            best_target, math.ceil(occupied_pages / step) * step
-        )
-        compacted_target = cm.compact_active_pages(
-            self._elastic_live_requests(),
-            compacted_target,
-            self.engine.kv_cache.copy_pages,
-            self._elastic_retained_session_handles(),
-        )
-        target = max(initial, math.ceil(compacted_target / step) * step)
-        if target >= cm.committed_pages:
-            logger.info_rank0(
-                "Growable KV teardown evicted %d prefix pages; protected/live pages keep "
-                "%d tokens committed",
-                evicted,
-                cm.committed_pages,
-            )
-            return
-
-        head = pending[0] if handoff else None
-        event_sequence = None
-        handoff_events = getattr(self, "_growable_handoff_events", None)
-        if head is not None and handoff_events is not None:
-            event_sequence = handoff_events.begin({
-                "attempt_monotonic_ns": time.monotonic_ns(),
-                "head_uid_hash": self._handoff_identity(getattr(head, "uid", None)),
-                "head_session_hash": self._handoff_identity(
-                    getattr(head, "session_id", None)),
-                "pending_count": len(pending),
-                "before_committed_pages": int(cm.committed_pages),
-                "before_expert_slots": int(self.engine.moe_offload_cache.cache_size),
-                "requested_pages": int(target),
-                "after_committed_pages": None,
-                "after_expert_slots": None,
-                "admitted_uid_hash": None,
-                "admitted_batch_is_prefill": None,
-                "admitted_committed_pages": None,
-                "admitted_expert_slots": None,
-                "pre_forward_monotonic_ns": None,
-                "qualified": False,
-                "outcome": "attempting",
-            })
+        # From here on, compact_active_pages computes a decommit ceiling against the
+        # CURRENT lock state and engine.shrink_runtime_kv physically tears down/recaptures
+        # against it. A node compaction protects/represents because it is locked stays safe
+        # only if nothing unlocks it before that ceiling's decommit actually lands, so no
+        # reentrant, non-checkpointed session release (mamba_reclaim_hook, admission
+        # pressure) may run until this method returns; see _release_soft_session_handle.
+        self._growable_shrink_in_flight = True
         try:
-            old_pages, new_pages = self.engine.shrink_runtime_kv(target)
-        except Exception as exc:
-            if event_sequence is not None:
-                handoff_events.update(
-                    event_sequence, outcome="error",
-                    error_type=type(exc).__name__, completed_monotonic_ns=time.monotonic_ns())
-            raise
-        if new_pages < old_pages:
-            cm.remove_committed_pages(new_pages)
-            logger.info_rank0(
-                "KV shrank %d -> %d tokens after agent teardown; MoE cache restored to "
-                "%d slots",
-                old_pages,
-                new_pages,
-                self.engine.moe_offload_cache.cache_size,
+            used_pages, _total_pages = cm.page_usage()
+            best_target = max(
+                initial, math.ceil((used_pages + future_pages) / step) * step
             )
-            if event_sequence is not None:
+            if best_target > cm.committed_pages - step:
+                logger.debug_rank0(
+                    "Growable KV shrink skipped: protected/live plus queued demand needs %d "
+                    "of %d committed pages",
+                    used_pages + future_pages,
+                    cm.committed_pages,
+                )
+                return
+
+            occupied_pages = cm.committed_pages - len(cm.free_slots)
+            evicted = self._evict_growable_prefix_pages(
+                max(0, occupied_pages - best_target)
+            )
+            occupied_pages = cm.committed_pages - len(cm.free_slots)
+            compacted_target = max(
+                best_target, math.ceil(occupied_pages / step) * step
+            )
+            compacted_target = cm.compact_active_pages(
+                self._elastic_live_requests(),
+                compacted_target,
+                self.engine.kv_cache.copy_pages,
+                self._elastic_retained_session_handles(),
+            )
+            target = max(initial, math.ceil(compacted_target / step) * step)
+            if target >= cm.committed_pages:
+                logger.info_rank0(
+                    "Growable KV teardown evicted %d prefix pages; protected/live pages keep "
+                    "%d tokens committed",
+                    evicted,
+                    cm.committed_pages,
+                )
+                return
+
+            head = pending[0] if handoff else None
+            event_sequence = None
+            handoff_events = getattr(self, "_growable_handoff_events", None)
+            if head is not None and handoff_events is not None:
+                event_sequence = handoff_events.begin({
+                    "attempt_monotonic_ns": time.monotonic_ns(),
+                    "head_uid_hash": self._handoff_identity(getattr(head, "uid", None)),
+                    "head_session_hash": self._handoff_identity(
+                        getattr(head, "session_id", None)),
+                    "pending_count": len(pending),
+                    "before_committed_pages": int(cm.committed_pages),
+                    "before_expert_slots": int(self.engine.moe_offload_cache.cache_size),
+                    "requested_pages": int(target),
+                    "after_committed_pages": None,
+                    "after_expert_slots": None,
+                    "admitted_uid_hash": None,
+                    "admitted_batch_is_prefill": None,
+                    "admitted_committed_pages": None,
+                    "admitted_expert_slots": None,
+                    "pre_forward_monotonic_ns": None,
+                    "qualified": False,
+                    "outcome": "attempting",
+                })
+            try:
+                old_pages, new_pages = self.engine.shrink_runtime_kv(target)
+            except Exception as exc:
+                if event_sequence is not None:
+                    handoff_events.update(
+                        event_sequence, outcome="error",
+                        error_type=type(exc).__name__,
+                        completed_monotonic_ns=time.monotonic_ns())
+                raise
+            if new_pages < old_pages:
+                cm.remove_committed_pages(new_pages)
+                logger.info_rank0(
+                    "KV shrank %d -> %d tokens after agent teardown; MoE cache restored to "
+                    "%d slots",
+                    old_pages,
+                    new_pages,
+                    self.engine.moe_offload_cache.cache_size,
+                )
+                if event_sequence is not None:
+                    handoff_events.update(
+                        event_sequence, outcome="awaiting_pre_forward_admission",
+                        after_committed_pages=int(new_pages),
+                        after_expert_slots=int(self.engine.moe_offload_cache.cache_size),
+                        resize_completed_monotonic_ns=time.monotonic_ns())
+                    self._growable_handoff_pending = (
+                        event_sequence, int(getattr(head, "uid")))
+            elif event_sequence is not None:
                 handoff_events.update(
-                    event_sequence, outcome="awaiting_pre_forward_admission",
-                    after_committed_pages=int(new_pages),
+                    event_sequence, outcome="no_resize", after_committed_pages=int(new_pages),
                     after_expert_slots=int(self.engine.moe_offload_cache.cache_size),
-                    resize_completed_monotonic_ns=time.monotonic_ns())
-                self._growable_handoff_pending = (
-                    event_sequence, int(getattr(head, "uid")))
-        elif event_sequence is not None:
-            handoff_events.update(
-                event_sequence, outcome="no_resize", after_committed_pages=int(new_pages),
-                after_expert_slots=int(self.engine.moe_offload_cache.cache_size),
-                completed_monotonic_ns=time.monotonic_ns())
+                    completed_monotonic_ns=time.monotonic_ns())
+        finally:
+            self._growable_shrink_in_flight = False
 
     @staticmethod
     def _handoff_identity(value) -> str | None:

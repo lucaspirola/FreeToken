@@ -250,6 +250,10 @@ def _blocked_scheduler(pending_list):
         "idle": SessionLease("idle-handle", 300.0, reclaimable=True, last_used_at=1.0)
     }
     scheduler._session_spill_store = None
+    # Release now requires an actual checkpoint; this fixture has no spill store wired at
+    # all, so stand in for "the checkpoint succeeded" -- these tests are about reclaim scan
+    # ordering, not checkpoint validity (covered separately in test_session_spill.py).
+    scheduler._spill_soft_session = lambda *_a, **_k: True
     scheduler._growable_shrink_pending = False
     scheduler.restored = []
     scheduler._restore_cold_session = lambda sid, ids: scheduler.restored.append(sid)
