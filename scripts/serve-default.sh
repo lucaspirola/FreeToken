@@ -2,9 +2,12 @@
 # Default serving profile for the persistent `freetoken-serve` system unit
 # (scripts/systemd/freetoken-serve.service). Change the profile HERE, not in the unit.
 #
-# Single-lane elastic profile: ONE session resident on the GPU at a time (max experts,
-# 6 GDN state slots), every other session checkpointed to RAM/disk and swapped back in on
-# its turn. KV starts at one 64K step and grows on demand up to 1M tokens, funded from
+# Single-lane elastic profile: ONE session resident on the GPU at a time (max experts),
+# every other session checkpointed to RAM/disk and swapped back in on its turn.
+# --linear-state-slots 13 = the 4-slot working set of that one lane + padding + 8 GDN
+# snapshot slots (~80 MB each) so cold-session restores and prefix snapshots have somewhere
+# to land; with 6 slots the single-lane soak logged "no GDN snapshot slot available for
+# cold session restore" on every swap-in and fell back to a full re-prefill. KV starts at one 64K step and grows on demand up to 1M tokens, funded from
 # the on-GPU expert cache only when VRAM actually runs out. The expert cache is a
 # fixed-capacity VMM arena (FREETOKEN_EXPERT_ARENA=1), so growing or shrinking it never
 # reallocates buffers and decode CUDA graphs are never recaptured.
@@ -26,7 +29,7 @@ mkdir -p "$CACHE"/{hidden-states,pooled-sink,spill,trace,logs}
 exec uv run ft serve \
   --model /home/lucas/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   --host 127.0.0.1 --port "${FREETOKEN_PORT:-1919}" \
-  --max-running-requests 1 --linear-state-slots 6 --kv-grow-step-tokens 65536 \
+  --max-running-requests 1 --linear-state-slots 13 --kv-grow-step-tokens 65536 \
   --num-tokens 1048576 --max-seq-len-override 1048576 --kv-cache-dtype q8_0 \
   --attention-backend triton --moe-backend offload --moe-cache-auto --moe-cache-policy lfu \
   --memory-ratio 0.91 --max-prefill-length 8192 \
