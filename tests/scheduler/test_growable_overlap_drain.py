@@ -237,6 +237,62 @@ def test_shrink_path_drains_before_shrink_runtime_kv():
     assert cm.removed, "the shrink must actually have run, not been deferred"
 
 
+def test_message_path_drain_resyncs_last_data_before_shrink_drain():
+    """Regression: a message handler (e.g. ``_restore_cold_session``'s cold-restore
+    growth path) can drain ``self._last_data`` to ``None`` itself, mid message-loop.
+    ``overlap_loop``'s LOCAL ``last_data`` must be re-synced from ``self._last_data``
+    right after the message loop, or a queued shrink's drain point below re-drains the
+    SAME already-drained ``ForwardData`` a second time -- double-applying its results
+    (e.g. ``Req.append_host`` for one sampled token twice)."""
+    calls: list = []
+    obj = _base_overlap_stub(calls)
+    obj.config = SimpleNamespace(kv_grow_step_tokens=8, page_size=1, adaptive_scheduler=False)
+    obj._growable_shrink_pending = True
+    cm = _CM(committed=32, used=8, occupied=24)
+    obj.cache_manager = cm
+    obj.prefill_manager = SimpleNamespace(
+        runnable=False, schedule_next_batch=lambda _b: None, pending_list=[]
+    )
+    obj.decode_manager = SimpleNamespace(
+        runnable=False, schedule_next_batch=lambda: None, running_reqs=[]
+    )
+
+    def shrink(target):
+        calls.append(("shrink_runtime_kv", target))
+        return cm.committed_pages, target
+
+    obj.engine.shrink_runtime_kv = shrink
+    obj.engine.moe_offload_cache = SimpleNamespace(cache_size=99)
+    obj.engine.kv_cache = SimpleNamespace(copy_pages=lambda *_: None)
+    obj._evict_growable_prefix_pages = lambda pages: (
+        setattr(cm, "free_slots", cm.free_slots + list(range(pages))) or pages
+    )
+
+    # A pending message; the loop must call ``receive_msg`` non-blocking-or-not and
+    # then dispatch it to ``_process_one_msg``.
+    obj.receive_msg = lambda blocking: ["cold-restore-grow"]
+
+    def fake_process_one_msg(msg):
+        # Simulate _restore_cold_session's cold-restore growth drain: it drains
+        # whatever is currently in-flight and clears self._last_data, exactly as the
+        # real method does at scheduler.py ~1899-1903.
+        Scheduler._drain_inflight(obj, obj._last_data)
+        obj._last_data = None
+
+    obj._process_one_msg = fake_process_one_msg
+
+    last_data = SimpleNamespace(marker="prev-forward")
+    Scheduler.overlap_loop(obj, last_data)
+
+    # The end-of-iteration call at overlap_loop's tail always invokes
+    # ``_process_last_data`` even when there is nothing left to drain (``None``, once
+    # ``self._last_data`` re-synced) -- harmless, since the real method no-ops on
+    # ``None``. What must NOT happen is a second drain of the *original* batch.
+    assert calls.count(("process_last_data", last_data)) == 1, (
+        f"expected exactly one drain of the original batch, no re-drain; got {calls}"
+    )
+
+
 def test_shrink_in_flight_guard_still_refuses_release_under_overlap():
     """Requirement 4: ``_growable_shrink_in_flight`` (and the release guard it arms in
     ``_release_soft_session_handle``) must still work when the shrink is reached through
