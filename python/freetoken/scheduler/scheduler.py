@@ -839,6 +839,12 @@ class Scheduler(SchedulerIOMixin):
         use_normal_loop = ENV.DISABLE_OVERLAP_SCHEDULING or (
             self.config.kv_grow_step_tokens and not growable_overlap
         )
+        logger.info_rank0(
+            "Scheduler loop: %s (kv_grow_step_tokens=%s, growable_overlap=%s)",
+            "normal" if use_normal_loop else "overlap",
+            self.config.kv_grow_step_tokens,
+            bool(growable_overlap),
+        )
         if use_normal_loop:
             with self.engine_stream_ctx:
                 self.engine.stream.wait_stream(self.stream)
@@ -1891,6 +1897,10 @@ class Scheduler(SchedulerIOMixin):
                     )
                     return False
                 required = cm.committed_pages + missing - allocatable
+                # Message-path growth runs before overlap_loop's own drain points.
+                last_data = getattr(self, "_last_data", None)
+                if last_data is not None:
+                    self._last_data = self._drain_inflight(last_data)
                 old_pages, new_pages = self.engine.grow_runtime_kv(required)
                 if new_pages > old_pages:
                     cm.add_committed_pages(new_pages)
