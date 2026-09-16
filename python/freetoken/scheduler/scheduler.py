@@ -641,7 +641,13 @@ class Scheduler(SchedulerIOMixin):
         ``None``; callers assign it straight to ``last_data`` (and ``self._last_data``).
         """
         self.stream.wait_stream(self.engine.stream)
-        self._process_last_data(last_data)
+        if last_data is not None:
+            # ``_process_last_data`` already no-ops on ``None``; guard explicitly so a
+            # caller passing an already-drained (``None``) batch -- e.g. overlap_loop
+            # re-syncing after a message-path drain -- reads unambiguously as a no-op
+            # rather than a second drain. ``_flush_abort_acks`` still runs unconditionally,
+            # matching the prior behavior.
+            self._process_last_data(last_data)
         self._flush_abort_acks()
         return None
 
@@ -686,6 +692,13 @@ class Scheduler(SchedulerIOMixin):
         self._execute_pending_durable_checkpoint()
         if getattr(self, "_durable_checkpoint_sealed", False):
             return None
+
+        # Message-path handlers (e.g. the cold-restore growth drain inside
+        # _restore_cold_session) may already have drained ``self._last_data`` and set it
+        # to ``None`` while processing a message above. Re-sync the local ``last_data``
+        # from it now so the drain points below (shrink, spec peek, the final drain) see
+        # that and don't run ``_process_last_data`` a second time on the same batch.
+        last_data = self._last_data
 
         # _maybe_shrink_growable_kv refuses to run while ``_last_data`` is still set (its
         # own page-usage/occupancy bookkeeping is only accurate once the previous batch's
