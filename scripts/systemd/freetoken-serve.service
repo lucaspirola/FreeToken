@@ -26,6 +26,7 @@ StandardError=append:/home/lucas/.cache/freetoken/logs/ft_serve.log
 OOMScoreAdjust=1000
 LimitMEMLOCK=infinity
 TimeoutStopSec=90
+SuccessExitStatus=143
 Restart=no
 
 [Install]
