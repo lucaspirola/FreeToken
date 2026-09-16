@@ -29,7 +29,7 @@ exec uv run ft serve \
   --max-running-requests 1 --linear-state-slots 6 --kv-grow-step-tokens 65536 \
   --num-tokens 1048576 --max-seq-len-override 1048576 --kv-cache-dtype q8_0 \
   --attention-backend triton --moe-backend offload --moe-cache-auto --moe-cache-policy lfu \
-  --memory-ratio 0.91 --max-prefill-length 4096 \
+  --memory-ratio 0.91 --max-prefill-length 8192 \
   --host-ram-reserve-gb "${FREETOKEN_HOST_RAM_RESERVE_GB:-0}" \
   --session-spill-ram-gb 1 --session-spill-disk-gb 50 --session-spill-limit-gb 50 \
   --session-spill-dir "$CACHE/spill" \
