@@ -577,23 +577,21 @@ class OffloadMoeCache:
     ) -> list[tuple[int, int]]:
         """Per-chunk ``(offset, size)`` VMM ranges for one bank's row byte count.
 
-        Each chunk is rounded up to a whole number of ``granularity`` bytes
-        INDEPENDENTLY (matching ``cache_budget.arena_bytes_for_usable``'s byte
-        model exactly -- granule waste in one chunk is never fungible with
-        another chunk's slack), and chunks are packed back to back at the
-        resulting (possibly padded) offsets. This is only address-compatible
-        with plain ``slot * row_bytes`` indexing when every full chunk's byte
-        count already lands on a granule boundary, which
-        ``_alloc_arena_bank_cache`` asserts before this is ever called.
+        Cumulative granule-aligned partition of the linear ``slot * row_bytes``
+        layout: chunk k covers bytes ``[round_up(boundary_k*row_bytes, g),
+        round_up(boundary_{k+1}*row_bytes, g))``. No padding is ever inserted
+        between chunks, so plain ``slot * row_bytes`` indexing is exact for
+        every ``row_bytes``/``granularity`` pair -- unlike rounding each chunk's
+        byte count independently, this never requires ``step_slots * row_bytes``
+        to itself land on a granule boundary. A chunk may be empty (0 bytes)
+        when its slots fit inside the previous chunk's rounding; callers must
+        skip zero-size entries before calling ``commit_ranges``/``uncommit_ranges``
+        (which reject size == 0) while keeping one list entry per chunk so
+        indices stay aligned with ``_arena_boundaries``.
         """
-        ranges = []
-        offset = 0
         boundaries = self._arena_boundaries
-        for start, end in zip(boundaries, boundaries[1:]):
-            size = div_ceil((end - start) * row_bytes, granularity) * granularity
-            ranges.append((offset, size))
-            offset += size
-        return ranges
+        byte_bounds = [div_ceil(b * row_bytes, granularity) * granularity for b in boundaries]
+        return list(zip(byte_bounds, (e - s for s, e in zip(byte_bounds, byte_bounds[1:]))))
 
     def _alloc_arena_bank_cache(
         self, shape: tuple[int, ...], dtype: torch.dtype, name: str, granularity: int
@@ -612,31 +610,26 @@ class OffloadMoeCache:
         from freetoken.kernel.vmm import VMMTensor
 
         capacity = self.slot_capacity
-        step_slots = self._arena_step_slots
         slots = shape[0]
         assert slots <= capacity, (name, slots, capacity)
         row_bytes = math.prod(shape[1:]) * torch.empty((), dtype=dtype).element_size()
-        if (step_slots * row_bytes) % granularity != 0:
-            raise ValueError(
-                f"FREETOKEN_EXPERT_ARENA requires arena_step_slots * row_bytes to land "
-                f"on a VMM granule boundary, so a full chunk's mapped range matches "
-                f"plain slot*row_bytes addressing exactly (bank {name!r}: "
-                f"step_slots={step_slots} * row_bytes={row_bytes} = "
-                f"{step_slots * row_bytes} bytes, granularity={granularity} bytes); "
-                "choose a different arena_step_slots or slot_capacity for this "
-                "quant_format's row size"
-            )
+        # Cumulative granule-aligned chunking (see _arena_chunk_ranges) keeps plain
+        # slot*row_bytes addressing exact for any row_bytes/granularity pair, so there
+        # is no alignment precondition on arena_step_slots here.
         chunk_ranges = self._arena_chunk_ranges(row_bytes, granularity)
         reserved_bytes = chunk_ranges[-1][0] + chunk_ranges[-1][1] if chunk_ranges else 0
         committed_chunks = self._arena_boundaries.index(slots)
         initial_ranges = chunk_ranges[:committed_chunks]
         assert initial_ranges, (name, slots, self._arena_boundaries)
+        # commit_ranges/VMMTensor reject zero-size ranges; a chunk can be empty when its
+        # slots fit inside the previous chunk's rounding (see _arena_chunk_ranges).
+        mapped_ranges = [r for r in initial_ranges if r[1] > 0]
         allocation = VMMTensor(
             (capacity, *shape[1:]),
             dtype=dtype,
             device=self.device,
             reserved_bytes=reserved_bytes,
-            initial_ranges=initial_ranges,
+            initial_ranges=mapped_ranges,
         )
         self._direct_bank_allocations.append(allocation)
         self._arena_banks[name] = {
@@ -1263,7 +1256,9 @@ class OffloadMoeCache:
             ranges = meta["chunk_ranges"][idx_n:idx_current]
             if not ranges:
                 continue
-            meta["allocation"].uncommit_ranges(ranges)
+            nonempty = [r for r in ranges if r[1] > 0]
+            if nonempty:
+                meta["allocation"].uncommit_ranges(nonempty)
             released += sum(size for _, size in ranges)
         return released
 
@@ -1277,12 +1272,15 @@ class OffloadMoeCache:
                 ranges = meta["chunk_ranges"][idx_current:idx_n]
                 if not ranges:
                     continue
-                meta["allocation"].commit_ranges(ranges)
-                committed_meta.append((meta, ranges))
+                nonempty = [r for r in ranges if r[1] > 0]
+                if nonempty:
+                    meta["allocation"].commit_ranges(nonempty)
+                committed_meta.append((meta, nonempty))
                 committed += sum(size for _, size in ranges)
         except Exception:
-            for meta, ranges in reversed(committed_meta):
-                meta["allocation"].uncommit_ranges(ranges)
+            for meta, nonempty in reversed(committed_meta):
+                if nonempty:
+                    meta["allocation"].uncommit_ranges(nonempty)
             raise
         # Newly committed slots were already invalidated (id_of_slot == -1) either
         # from initial construction or from a prior shrink -- nothing to reset here.

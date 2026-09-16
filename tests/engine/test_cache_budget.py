@@ -652,28 +652,27 @@ def test_arena_bytes_monotonic_nondecreasing():
 
 def test_arena_bytes_hand_computed_example_is_nonlinear():
     capacity, step = 10, 4
+    g = 2 * _MiB
 
-    # Chunk 0 (slots 0..4): per bank round_up(4*row, 2MiB).
-    def chunk_bytes(slots):
-        return sum(-(-(slots * row) // (2 * _MiB)) * 2 * _MiB for row in _HAND_ROWS)
+    # Cumulative granule-aligned boundary bytes: round_up(slots * row, g) per bank, summed.
+    def boundary_bytes(slots):
+        return sum(-(-(slots * row) // g) * g for row in _HAND_ROWS)
 
-    chunk0 = chunk_bytes(4)  # first 4-slot chunk
-    chunk1 = chunk_bytes(4)  # second 4-slot chunk (same size, same bytes)
-    chunk2 = chunk_bytes(2)  # final partial chunk (10 - 8 = 2 slots)
+    b4 = boundary_bytes(4)  # boundary after chunk 0 (slots 0..4)
+    b8 = boundary_bytes(8)  # boundary after chunk 1 (slots 4..8)
+    b10 = boundary_bytes(10)  # boundary after the final partial chunk (slots 8..10)
 
     # usable=1..4 all commit only chunk 0 (a chunk is committed whole).
-    assert arena_bytes_for_usable(1, capacity, step, _HAND_ROWS) == chunk0
-    assert arena_bytes_for_usable(4, capacity, step, _HAND_ROWS) == chunk0
+    assert arena_bytes_for_usable(1, capacity, step, _HAND_ROWS) == b4
+    assert arena_bytes_for_usable(4, capacity, step, _HAND_ROWS) == b4
     # usable=5 forces chunk 1 to commit too, even though only one more slot is needed --
-    # this is the non-linearity: bytes jump by a whole chunk, not by one slot's worth.
-    assert arena_bytes_for_usable(5, capacity, step, _HAND_ROWS) == chunk0 + chunk1
-    assert arena_bytes_for_usable(8, capacity, step, _HAND_ROWS) == chunk0 + chunk1
-    # usable=9,10 commit the final partial (2-slot) chunk.
-    assert arena_bytes_for_usable(10, capacity, step, _HAND_ROWS) == chunk0 + chunk1 + chunk2
-    # And bytes-per-slot is NOT the naive uniform "cache_size * per_slot_bytes" product:
-    # doubling committed slots from 4 to 8 does not double the total (would be 2x, but the
-    # granule rounding + chunking makes it exactly 2x here only by coincidence of the hand
-    # example -- assert the general non-uniformity instead via a case that breaks it).
+    # this is the non-linearity: bytes jump to the slot-8 cumulative boundary, not by one
+    # slot's worth.
+    assert arena_bytes_for_usable(5, capacity, step, _HAND_ROWS) == b8
+    assert arena_bytes_for_usable(8, capacity, step, _HAND_ROWS) == b8
+    # usable=9,10 commit the final partial (2-slot) chunk, landing on the slot-10 boundary.
+    assert arena_bytes_for_usable(10, capacity, step, _HAND_ROWS) == b10
+    # And bytes-per-slot is NOT the naive uniform "cache_size * per_slot_bytes" product.
     assert arena_bytes_for_usable(9, capacity, step, _HAND_ROWS) != 9 * (
         arena_bytes_for_usable(1, capacity, step, _HAND_ROWS)
     )

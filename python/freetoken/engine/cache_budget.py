@@ -82,15 +82,11 @@ def expert_cache_bytes(
 
 
 def _arena_chunk_boundaries(capacity: int, step_slots: int) -> tuple[int, ...]:
-    """Usable-slot values that land exactly on a commit-chunk boundary, ascending.
-
-    Chunk 0 covers slots ``[0, step_slots)``, chunk 1 covers ``[step_slots, 2*step_slots)``,
-    and so on; the final chunk is partial when ``capacity`` is not a multiple of
-    ``step_slots``. Boundaries are the cumulative slot counts after each chunk, i.e. the
-    only ``usable_slots`` values a real commit/uncommit ladder can ever sit at (every
-    ``uncommit_ranges`` call must exactly match a prior ``commit_ranges`` mapping -- see
-    ``kernel/csrc/vmm_tensor.cpp`` -- so partial-chunk ``usable`` values are never real).
-    """
+    """Usable-slot values landing exactly on a commit-chunk boundary, ascending:
+    ``[0, step_slots, 2*step_slots, ..., capacity]`` (final chunk partial if ``capacity``
+    is not a multiple of ``step_slots``). These are the only ``usable_slots`` values a
+    real commit/uncommit ladder can sit at (``uncommit_ranges`` must exactly match a
+    prior ``commit_ranges`` mapping -- see ``kernel/csrc/vmm_tensor.cpp``)."""
     assert step_slots > 0
     boundaries = [0]
     while boundaries[-1] < capacity:
@@ -105,51 +101,27 @@ def arena_bytes_for_usable(
     bank_row_bytes: "list[int] | tuple[int, ...]",
     granule: int = 2 * 1024 * 1024,
 ) -> int:
-    """Bytes actually MAPPED across all banks when ``usable_slots`` of ``capacity`` are
-    usable, given a chunk ladder of ``step_slots``-slot chunks (the last one possibly
-    partial, up to ``capacity``).
+    """Bytes actually mapped across all banks when ``usable_slots`` of ``capacity`` are
+    usable, given a ``step_slots``-slot commit ladder (last chunk possibly partial).
 
-    Each bank (e.g. one ``(tensor bank, layer)`` allocation: gate_up weights, gate_up
-    scales, down weights, down scales, ... -- see ``bank_row_bytes`` contract below) is
-    committed independently, one VMM mapping per chunk per bank, and each mapping is
-    rounded UP to a whole number of ``granule``-byte pages because ``cuMemMap`` can only
-    map whole granules (``VMMTensor`` in ``kernel/vmm.py`` / ``vmm_tensor.cpp``). So a
-    chunk's mapped bytes for one bank is ``round_up(chunk_slots * row_bytes, granule)``,
-    NOT ``chunk_slots * row_bytes`` -- the rounding remainder is real, wasted, mapped
-    memory that must be counted, and it differs per bank because row sizes differ. Bytes
-    are therefore piecewise-linear (a step function) in ``usable_slots``, not linear.
+    The ladder only commits whole chunks, so ``usable_slots`` rounds up to the next
+    chunk boundary (capped at ``capacity``); each bank's mapped bytes for that boundary
+    is ``round_up(boundary * row_bytes, granule)`` -- a cumulative granule-aligned
+    partition of the linear ``slot * row_bytes`` layout, so there is never any padding
+    between chunks and plain slot indexing stays exact. Bytes are a step function of
+    ``usable_slots``, not linear, since the rounding remainder differs per bank.
 
-    ``usable_slots`` need not itself sit on a chunk boundary (a caller probing "what if I
-    committed to N slots" may pass any value in ``[0, capacity]``); the number of chunks
-    actually committed to make ``usable_slots`` slots usable is
-    ``ceil(usable_slots / step_slots)`` (clamped so total committed slots never exceeds
-    ``capacity``), since a partial chunk cannot be committed -- the ladder always maps
-    whole chunks.
-
-    ``bank_row_bytes``: one entry per independent commit-tracked allocation -- i.e. per
-    ``(bank, layer)`` pair as allocated by ``OffloadMoeCache._alloc_device_bank_cache``
-    (one ``VMMTensor`` per bank per layer; see offload_cache.py ~448-472), each entry
-    being that allocation's per-slot row byte count (``element_size * prod(row_shape)``).
-    This is a flat list across all banks and all layers, not grouped -- the arena has no
-    notion of "bank" beyond "one more independent row-byte-sized allocation to round".
-
-    Rounding direction: always UP (``div_ceil``), per chunk, per bank -- matching what
-    the VMM layer must actually map. Never round the aggregate; granule waste in one
-    chunk is not fungible with slack in another because each chunk is a separate mapping.
+    ``bank_row_bytes``: one entry per independent commit-tracked allocation (per
+    ``(bank, layer)`` pair, as allocated by ``OffloadMoeCache._alloc_device_bank_cache``),
+    each entry being that allocation's per-slot row byte count. Flat across banks and
+    layers, in no particular grouping.
     """
     assert 0 <= usable_slots <= capacity
     assert step_slots > 0
     if usable_slots == 0:
         return 0
-    num_chunks = div_ceil(usable_slots, step_slots)
-    total = 0
-    remaining = capacity
-    for chunk_index in range(num_chunks):
-        chunk_slots = min(step_slots, remaining)
-        remaining -= chunk_slots
-        for row_bytes in bank_row_bytes:
-            total += div_ceil(chunk_slots * row_bytes, granule) * granule
-    return total
+    boundary = min(div_ceil(usable_slots, step_slots) * step_slots, capacity)
+    return sum(div_ceil(boundary * row_bytes, granule) * granule for row_bytes in bank_row_bytes)
 
 
 def usable_for_target_free_bytes(

@@ -31,10 +31,11 @@ _STEP = 16
 def _make_arena_cache(device: torch.device) -> OffloadMoeCache:
     """Build a small bf16 arena cache with the gate forced on for construction.
 
-    Row bytes are deliberately set to (a multiple of) the VMM allocation
-    granularity so ``arena_step_slots * row_bytes`` lands on a granule boundary
-    for both banks regardless of the actual hardware granularity value -- the
-    precondition ``_alloc_arena_bank_cache`` asserts before mapping anything.
+    Row bytes are set to (a multiple of) the VMM allocation granularity here so
+    the ladder's chunk bytes are round numbers in assertions below; the cumulative
+    granule-aligned chunking (see ``offload_cache._arena_chunk_ranges``) does not
+    actually require this -- see ``test_unaligned_row_bytes_keeps_slot_addressing_linear``
+    for a bank whose row size does not divide the granularity.
     """
     granularity = allocation_granularity(device)
     gate_up_elems = granularity // 2  # row_bytes == granularity (bf16 = 2 bytes/elem)
@@ -236,3 +237,93 @@ def test_gate_off_is_byte_for_byte_unchanged():
     assert cache.arena_layout is None
     with pytest.raises(AssertionError):
         cache.set_usable_slots(32)
+
+
+# Real NVFP4 Nemotron gate_up row size: 8192 * 609 bytes. Not a multiple of any real VMM
+# granularity (2 MiB on the H100/RTX class devices this runs against), so the old
+# per-chunk-independent rounding would have refused ``arena_step_slots=8`` here with a
+# ValueError. The cumulative granule-aligned partition (offload_cache._arena_chunk_ranges)
+# has no such precondition.
+_UNALIGNED_ROW_BYTES = 8192 * 609
+_UNALIGNED_CAPACITY = 32
+_UNALIGNED_STEP = 8
+
+
+def _make_unaligned_row_cache(device: torch.device) -> OffloadMoeCache:
+    assert _UNALIGNED_ROW_BYTES % 2 == 0  # must divide evenly into bf16 elements
+    gate_up_elems = _UNALIGNED_ROW_BYTES // 2
+    gate_up = torch.zeros(
+        (_NUM_EXPERTS, gate_up_elems), dtype=torch.bfloat16, pin_memory=True
+    )
+    down = torch.zeros((_NUM_EXPERTS, 128), dtype=torch.bfloat16, pin_memory=True)
+
+    offload_cache_module.FREETOKEN_EXPERT_ARENA = True
+    try:
+        cache = OffloadMoeCache(
+            num_layers=_NUM_LAYERS,
+            num_experts=_NUM_EXPERTS,
+            cache_size=_UNALIGNED_CAPACITY,
+            device=device,
+            quant_format="bf16",
+            prefill_overlap=False,  # floor == num_experts
+            slot_capacity=_UNALIGNED_CAPACITY,
+            arena_step_slots=_UNALIGNED_STEP,
+        )
+        cache.direct_device_banks = True
+        cache.set_bank_sources({"gate_up": [gate_up], "down": [down]})
+    finally:
+        offload_cache_module.FREETOKEN_EXPERT_ARENA = False
+    return cache
+
+
+def test_unaligned_row_bytes_keeps_slot_addressing_linear():
+    """gate_up's row size (8192*609 B) does not divide any real VMM granularity, so this
+    would have raised under the old per-chunk-independent rounding. Under the cumulative
+    partition it must construct cleanly, price via the same ``arena_bytes_for_usable``
+    model, and -- the actual correctness bar -- keep ``slot * row_bytes`` addressing exact
+    across a shrink/grow cycle: data written to low (always-resident) slots before the
+    shrink must read back unchanged afterwards.
+    """
+    device = torch.device("cuda")
+    cache = _make_unaligned_row_cache(device)
+    row_bytes = _bank_row_bytes(cache)
+    assert _UNALIGNED_ROW_BYTES in row_bytes
+
+    granularity = allocation_granularity(device)
+    assert (_UNALIGNED_STEP * _UNALIGNED_ROW_BYTES) % granularity != 0, (
+        "test is meaningless unless this row/step combination is actually unaligned"
+    )
+
+    # _NUM_EXPERTS (4) is below the floor's own chunk boundary; shrink to n=8, the
+    # smallest real chunk boundary at/above the floor (2*4 or 4, either way < 8).
+    n = _UNALIGNED_STEP
+    assert n in offload_cache_module.OffloadMoeCache._arena_chunk_boundaries(
+        _UNALIGNED_CAPACITY, _UNALIGNED_STEP
+    )
+    # Write a distinct known pattern into every slot that stays resident after the shrink.
+    pattern = {i: float(i + 1) for i in range(n)}
+    for slot, value in pattern.items():
+        cache.bank_caches["gate_up"][slot].fill_(value)
+    torch.cuda.synchronize(device)
+
+    expected_released = arena_bytes_for_usable(
+        _UNALIGNED_CAPACITY, _UNALIGNED_CAPACITY, _UNALIGNED_STEP, row_bytes
+    ) - arena_bytes_for_usable(n, _UNALIGNED_CAPACITY, _UNALIGNED_STEP, row_bytes)
+    released = cache.set_usable_slots(n)
+    torch.cuda.synchronize(device)
+    assert released == expected_released
+    assert released > 0
+
+    for slot, value in pattern.items():
+        readback = cache.bank_caches["gate_up"][slot]
+        assert torch.all(readback == value), (slot, value)
+
+    committed = cache.set_usable_slots(_UNALIGNED_CAPACITY)
+    torch.cuda.synchronize(device)
+    assert committed == released
+
+    # The low slots were never unmapped by the shrink (they are below the floor), so their
+    # data must still be exactly what was written before the shrink/grow round trip.
+    for slot, value in pattern.items():
+        readback = cache.bank_caches["gate_up"][slot]
+        assert torch.all(readback == value), (slot, value)
