@@ -652,7 +652,7 @@ class Scheduler(SchedulerIOMixin):
             or self.decode_manager.runnable
             or self._pending_rebuild
             is not None  # a queued rebuild to drain toward + execute
-            or self._pending_durable_checkpoint is not None
+            or getattr(self, "_pending_durable_checkpoint", None) is not None
             or getattr(self, "_growable_shrink_pending", False)
             or self._sessions_need_service()
         )
@@ -746,7 +746,7 @@ class Scheduler(SchedulerIOMixin):
             self.prefill_manager.runnable
             or self.decode_manager.runnable
             or self._pending_rebuild is not None  # a queued rebuild to execute at idle
-            or self._pending_durable_checkpoint is not None
+            or getattr(self, "_pending_durable_checkpoint", None) is not None
             or getattr(self, "_growable_shrink_pending", False)
             or self._sessions_need_service()
         )
