@@ -21,6 +21,16 @@ _HYBRID_FETCH_BY_RECENCY = (
 _LFU_RECENCY_TOKENS_OVERRIDE = os.getenv("FREETOKEN_LFU_RECENCY_TOKENS")
 _LFU_RECENCY_BONUS_OVERRIDE = os.getenv("FREETOKEN_LFU_RECENCY_BONUS")
 
+# Expert-arena prerequisite (default off => the legacy host-scalar kernels below are
+# untouched). When set, the sized-cache LRU/eviction/index kernels take their slot
+# range (class_begin/class_end) and usable-slot bound as device pointers, read
+# in-kernel via tl.load, instead of as host scalars baked into the launch. A host
+# scalar embedded in a captured CUDA graph node is frozen at capture time; a value
+# read from device memory is re-read on every replay, which is what lets a future
+# step shrink/grow the usable slot count without recapturing decode graphs. See
+# OffloadMoeCache.usable_slots / lru_slot_range_device in offload_cache.py.
+FREETOKEN_EXPERT_ARENA = os.getenv("FREETOKEN_EXPERT_ARENA", "0").strip() == "1"
+
 
 def _lfu_recency_config(cache) -> tuple[int, int]:
     tokens = (
@@ -70,9 +80,39 @@ def ensure_experts(cache, layer_id: int, expert_ids: torch.Tensor) -> None:
 
 
 def _ensure_experts_sized_gpu(cache, layer_id, expert_ids, begin, end) -> None:
+    recency_tokens, recency_bonus = _lfu_recency_config(cache)
+    if FREETOKEN_EXPERT_ARENA:
+        block_e = triton.next_power_of_2(cache.num_experts)
+        block_c = triton.next_power_of_2(cache.slot_capacity)
+        _ensure_experts_sized_kernel_v2[(1,)](
+            expert_ids,
+            cache.slot_for_id,
+            cache.id_of_slot,
+            cache.usage,
+            cache.step,
+            cache.evict_slots,
+            cache.src_indices,
+            cache.num_indices,
+            cache.lru_stats[layer_id],
+            cache.expert_frequency,
+            cache.policy_steps,
+            layer_id,
+            expert_ids.numel(),
+            cache.lru_slot_range_device(layer_id),
+            cache.usable_slots,
+            cache.num_experts,
+            cache.slot_capacity,
+            BLOCK_E=block_e,
+            BLOCK_C=block_c,
+            COLLECT_STATS=cache.collect_stats,
+            POLICY_LFU=cache.cache_policy_id == 1,
+            LFU_RECENCY_CALLS=recency_tokens * cache.num_layers,
+            LFU_RECENCY_BONUS=recency_bonus,
+            num_warps=8 if block_c >= 2048 else 4,
+        )
+        return
     block_e = triton.next_power_of_2(cache.num_experts)
     block_c = triton.next_power_of_2(cache.cache_size)
-    recency_tokens, recency_bonus = _lfu_recency_config(cache)
     _ensure_experts_sized_kernel[(1,)](
         expert_ids,
         cache.slot_for_id,
@@ -232,6 +272,35 @@ def _ensure_experts_hybrid_gpu(
     cache, layer_id: int, expert_ids: torch.Tensor, max_fetch: int, frac_q16: int,
     class_begin: int, class_end: int,
 ) -> None:
+    if FREETOKEN_EXPERT_ARENA:
+        block_e = triton.next_power_of_2(cache.num_experts)
+        block_c = triton.next_power_of_2(cache.slot_capacity)
+        _ensure_experts_hybrid_kernel_v2[(1,)](
+            expert_ids,
+            cache.slot_for_id,
+            cache.id_of_slot,
+            cache.usage,
+            cache.step,
+            cache.active_mask,
+            cache.evict_slots,
+            cache.src_indices,
+            cache.num_indices,
+            cache.num_missing_full,
+            cache.expert_recency,
+            layer_id,
+            expert_ids.numel(),
+            int(max_fetch),
+            int(frac_q16),
+            cache.lru_slot_range_device(layer_id),
+            cache.usable_slots,
+            cache.num_experts,
+            cache.slot_capacity,
+            BLOCK_E=block_e,
+            BLOCK_C=block_c,
+            BY_RECENCY=_HYBRID_FETCH_BY_RECENCY,
+            num_warps=8 if block_c >= 2048 else 4,
+        )
+        return
     block_e = triton.next_power_of_2(cache.num_experts)
     block_c = triton.next_power_of_2(cache.cache_size)
     num_warps = 8 if block_c >= 2048 else 4
@@ -347,6 +416,23 @@ def _materialize_layer_gpu(cache, layer_id: int) -> None:
 
 
 def _materialize_layer_sized_gpu(cache, layer_id: int, begin: int, end: int) -> None:
+    if FREETOKEN_EXPERT_ARENA:
+        block = triton.next_power_of_2(max(cache.num_experts, cache.slot_capacity))
+        _materialize_layer_sized_kernel_v2[(1,)](
+            cache.slot_for_id,
+            cache.id_of_slot,
+            cache.usage,
+            cache.step,
+            cache.evict_slots,
+            cache.src_indices,
+            cache.num_indices,
+            layer_id,
+            cache.lru_slot_range_device(layer_id),
+            cache.num_experts,
+            cache.slot_capacity,
+            BLOCK=block,
+        )
+        return
     block = triton.next_power_of_2(max(cache.num_experts, end - begin))
     _materialize_layer_sized_kernel[(1,)](
         cache.slot_for_id,
@@ -506,6 +592,137 @@ def _ensure_experts_sized_kernel(
         tl.store(expert_ids_ptr + i, global_slot - class_begin)
 
 
+@triton.jit(do_not_specialize=["layer_id", "num_active"])
+def _ensure_experts_sized_kernel_v2(
+    expert_ids_ptr,
+    slot_for_id_ptr,
+    id_of_slot_ptr,
+    usage_ptr,
+    step_ptr,
+    evict_slots_ptr,
+    src_indices_ptr,
+    num_indices_ptr,
+    stats_ptr,
+    frequency_ptr,
+    policy_steps_ptr,
+    layer_id,
+    num_active,
+    bounds_ptr,  # [2] int32: (class_begin, class_end), device-resident (see lru_slot_range_device)
+    usable_ptr,  # [1] int32: usable-slot bound, device-resident (see OffloadMoeCache.usable_slots)
+    num_experts: tl.constexpr,
+    cache_size: tl.constexpr,  # == slot_capacity: fixed arena size, not the live usable count
+    BLOCK_E: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+    COLLECT_STATS: tl.constexpr,
+    POLICY_LFU: tl.constexpr,
+    LFU_RECENCY_CALLS: tl.constexpr,
+    LFU_RECENCY_BONUS: tl.constexpr,
+):
+    """Gated (``FREETOKEN_EXPERT_ARENA=1``) twin of ``_ensure_experts_sized_kernel``.
+
+    Identical logic, except ``class_begin``/``class_end``/the usable-slot bound are
+    read from device memory via ``tl.load`` instead of arriving as host scalars. A
+    host scalar becomes part of a captured CUDA graph node's frozen launch state;
+    a value loaded from a persistent device tensor is re-read on every replay, so a
+    future in-place write to ``usable_ptr`` (shrink/grow) takes effect without
+    recapturing the decode graph. At ``usable == cache_size`` (today's only case)
+    this produces bit-identical results to the legacy kernel.
+    """
+    class_begin = tl.load(bounds_ptr + 0)
+    class_end = tl.load(bounds_ptr + 1)
+    usable = tl.load(usable_ptr)
+
+    step = tl.load(step_ptr) + 1
+    tl.store(step_ptr, step)
+    base = layer_id * num_experts
+
+    off_e = tl.arange(0, BLOCK_E)
+    e_mask = off_e < num_experts
+    is_active = tl.zeros((BLOCK_E,), dtype=tl.int1)
+    active_count = tl.zeros((BLOCK_E,), dtype=tl.int32)
+    for i in tl.range(num_active):
+        e = tl.load(expert_ids_ptr + i)
+        is_active = is_active | (off_e == e)
+        active_count += (off_e == e).to(tl.int32)
+    if POLICY_LFU:
+        policy_step = tl.load(policy_steps_ptr + layer_id) + 1
+        tl.store(policy_steps_ptr + layer_id, policy_step)
+        frequency = tl.load(frequency_ptr + base + off_e, mask=e_mask, other=0)
+        frequency = tl.where((policy_step & 255) == 0, frequency >> 1, frequency)
+        frequency += active_count
+        tl.store(frequency_ptr + base + off_e, frequency, mask=e_mask)
+    slot = tl.load(slot_for_id_ptr + base + off_e, mask=e_mask, other=-1)
+    is_missing = is_active & (slot < 0) & e_mask
+    num_missing = tl.sum(is_missing.to(tl.int32))
+    tl.store(num_indices_ptr, num_missing.to(tl.int64))
+    tl.store(usage_ptr + slot, step, mask=is_active & (slot >= 0))
+    missing_rank = tl.cumsum(is_missing.to(tl.int32)) - 1
+
+    if COLLECT_STATS:
+        tl.store(stats_ptr + 0, tl.load(stats_ptr + 0) + tl.sum(is_active.to(tl.int64)))
+        tl.store(stats_ptr + 1, tl.load(stats_ptr + 1) + num_missing.to(tl.int64))
+        tl.store(stats_ptr + 2, tl.load(stats_ptr + 2) + 1)
+
+    if num_missing > 0:
+        off_c = tl.arange(0, BLOCK_C)
+        allowed = (off_c >= class_begin) & (off_c < class_end) & (off_c < usable)
+        oid = tl.load(id_of_slot_ptr + off_c, mask=allowed, other=-1)
+        usage = tl.load(
+            usage_ptr + off_c,
+            mask=allowed,
+            other=9223372036854775807,
+        ).to(tl.int64)
+        owner_active = allowed & False
+        for i in tl.range(num_active):
+            expert = tl.load(expert_ids_ptr + i)
+            owner_active = owner_active | (oid == base + expert)
+        usage = tl.where(owner_active | (~allowed), 9223372036854775807, usage)
+        if POLICY_LFU:
+            owner_frequency = tl.load(
+                frequency_ptr + oid,
+                mask=allowed & (oid >= 0),
+                other=-1,
+            )
+            if LFU_RECENCY_CALLS > 0:
+                owner_frequency += tl.where(
+                    (step - usage) <= LFU_RECENCY_CALLS,
+                    LFU_RECENCY_BONUS,
+                    0,
+                )
+            owner_frequency = tl.where(
+                owner_active | (~allowed), 2147483647, owner_frequency
+            )
+        for i in tl.range(num_missing):
+            if POLICY_LFU:
+                min_frequency = tl.min(owner_frequency, axis=0)
+                victim_usage = tl.where(
+                    owner_frequency == min_frequency,
+                    usage,
+                    9223372036854775807,
+                )
+                victim = tl.argmin(victim_usage, axis=0).to(tl.int32)
+            else:
+                victim = tl.argmin(usage, axis=0).to(tl.int32)
+            old_id = tl.sum(tl.where(off_c == victim, oid, 0))
+            if old_id >= 0:
+                tl.store(slot_for_id_ptr + old_id, -1)
+            expert = tl.sum(tl.where((missing_rank == i) & is_missing, off_e, 0))
+            tl.store(id_of_slot_ptr + victim, base + expert)
+            tl.store(slot_for_id_ptr + base + expert, victim)
+            tl.store(usage_ptr + victim, step)
+            tl.store(evict_slots_ptr + i, victim - class_begin)
+            tl.store(src_indices_ptr + i, expert)
+            usage = tl.where(off_c == victim, 9223372036854775807, usage)
+            if POLICY_LFU:
+                owner_frequency = tl.where(off_c == victim, 2147483647, owner_frequency)
+
+    # Downstream compact tensors are indexed with class-local row ids.
+    for i in tl.range(num_active):
+        expert = tl.load(expert_ids_ptr + i)
+        global_slot = tl.load(slot_for_id_ptr + base + expert)
+        tl.store(expert_ids_ptr + i, global_slot - class_begin)
+
+
 @triton.jit
 def _reset_cache_kernel(
     slot_for_id_ptr,
@@ -608,6 +825,48 @@ def _materialize_layer_sized_kernel(
     tl.store(num_indices_ptr, num_experts)
 
 
+@triton.jit(do_not_specialize=["layer_id"])
+def _materialize_layer_sized_kernel_v2(
+    slot_for_id_ptr,
+    id_of_slot_ptr,
+    usage_ptr,
+    step_ptr,
+    evict_slots_ptr,
+    src_indices_ptr,
+    num_indices_ptr,
+    layer_id,
+    bounds_ptr,  # [2] int32: (class_begin, class_end), device-resident
+    num_experts: tl.constexpr,
+    cache_size: tl.constexpr,  # == slot_capacity
+    BLOCK: tl.constexpr,
+):
+    """Gated twin of ``_materialize_layer_sized_kernel``; see
+    ``_ensure_experts_sized_kernel_v2`` for why bounds move to a device pointer."""
+    class_begin = tl.load(bounds_ptr + 0)
+    class_end = tl.load(bounds_ptr + 1)
+
+    off = tl.arange(0, BLOCK)
+    class_size = class_end - class_begin
+    class_mask = off < class_size
+    expert_mask = off < num_experts
+    global_slot = class_begin + off
+    base = layer_id * num_experts
+    old_id = tl.load(id_of_slot_ptr + global_slot, mask=class_mask, other=-1)
+
+    same_layer = class_mask & (old_id >= base) & (old_id < base + num_experts)
+    tl.store(id_of_slot_ptr + global_slot, -1, mask=same_layer)
+    tl.store(usage_ptr + global_slot, 0, mask=same_layer)
+    overwritten = expert_mask & (old_id >= 0) & (~same_layer)
+    tl.store(slot_for_id_ptr + old_id, -1, mask=overwritten)
+
+    step = tl.load(step_ptr) + 1
+    tl.store(step_ptr, step)
+    tl.store(id_of_slot_ptr + global_slot, base + off, mask=expert_mask)
+    tl.store(slot_for_id_ptr + base + off, global_slot, mask=expert_mask)
+    tl.store(usage_ptr + global_slot, step, mask=expert_mask)
+    tl.store(evict_slots_ptr + off, off, mask=expert_mask)
+    tl.store(src_indices_ptr + off, off, mask=expert_mask)
+    tl.store(num_indices_ptr, num_experts)
 
 
 @triton.jit(do_not_specialize=[
@@ -732,6 +991,116 @@ def _ensure_experts_hybrid_kernel(
 
     # Bump every active expert's recency to this step (LRU on the expert): an overflow miss
     # computed on the CPU now ranks high if it recurs, so it gets fetched next time.
+    if BY_RECENCY:
+        step_vec = tl.zeros((BLOCK_E,), dtype=tl.int64) + step
+        tl.store(expert_recency_ptr + base + off_e, step_vec, mask=is_active & e_mask)
+
+
+@triton.jit(do_not_specialize=[
+    "layer_id", "num_active", "max_fetch", "fetch_frac_q16"
+])
+def _ensure_experts_hybrid_kernel_v2(
+    expert_ids_ptr,
+    slot_for_id_ptr,
+    id_of_slot_ptr,
+    usage_ptr,
+    step_ptr,
+    active_mask_ptr,
+    evict_slots_ptr,
+    src_indices_ptr,
+    num_indices_ptr,
+    num_missing_full_ptr,
+    expert_recency_ptr,
+    layer_id,
+    num_active,
+    max_fetch,
+    fetch_frac_q16,
+    bounds_ptr,  # [2] int32: (class_begin, class_end), device-resident
+    usable_ptr,  # [1] int32: usable-slot bound, device-resident
+    num_experts: tl.constexpr,
+    cache_size: tl.constexpr,  # == slot_capacity
+    BLOCK_E: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+    BY_RECENCY: tl.constexpr,
+):
+    """Gated twin of ``_ensure_experts_hybrid_kernel``; see
+    ``_ensure_experts_sized_kernel_v2`` for why bounds/usable move to device
+    pointers."""
+    class_begin = tl.load(bounds_ptr + 0)
+    class_end = tl.load(bounds_ptr + 1)
+    usable = tl.load(usable_ptr)
+
+    step = tl.load(step_ptr) + 1
+    tl.store(step_ptr, step)
+    base = layer_id * num_experts
+
+    # ---- Phase 1: active + missing over experts ----
+    off_e = tl.arange(0, BLOCK_E)
+    e_mask = off_e < num_experts
+    is_active = tl.zeros((BLOCK_E,), dtype=tl.int1)
+    for i in tl.range(num_active):
+        e = tl.load(expert_ids_ptr + i)
+        is_active = is_active | (off_e == e)
+    tl.store(active_mask_ptr + off_e, is_active.to(tl.int32), mask=e_mask)
+    slot = tl.load(slot_for_id_ptr + base + off_e, mask=e_mask, other=-1)
+    is_missing = is_active & (slot == -1) & e_mask
+    num_missing = tl.sum(is_missing.to(tl.int32))
+    # Cap the fetches; the overflow misses are computed on the CPU (left non-resident).
+    if fetch_frac_q16 > 0:
+        lo = (num_missing * fetch_frac_q16) >> 16
+        cost_lo = tl.maximum(lo * ((1 << 16) - fetch_frac_q16), (num_missing - lo) * fetch_frac_q16)
+        cost_hi = tl.maximum(
+            (lo + 1) * ((1 << 16) - fetch_frac_q16), (num_missing - lo - 1) * fetch_frac_q16
+        )
+        max_fetch = tl.where(cost_lo <= cost_hi, lo, lo + 1)
+    num_fetch = tl.minimum(num_missing, max_fetch)
+    tl.store(num_missing_full_ptr, num_missing.to(tl.int64))
+    tl.store(num_indices_ptr, num_fetch.to(tl.int64))
+    is_hit = is_active & (slot >= 0)
+    tl.store(usage_ptr + slot, step, mask=is_hit)
+
+    if BY_RECENCY:
+        rec = tl.load(expert_recency_ptr + base + off_e, mask=e_mask, other=-1).to(tl.int64)
+        score = tl.where(
+            is_missing, rec * num_experts + (num_experts - 1 - off_e), -1152921504606846976
+        ).to(tl.int64)
+    else:
+        missing_rank = tl.cumsum(is_missing.to(tl.int32)) - 1
+
+    # ---- Phase 2: evict victims by argmin(usage), only for the capped fetches ----
+    if num_fetch > 0:
+        off_c = tl.arange(0, BLOCK_C)
+        c_mask = (off_c >= class_begin) & (off_c < class_end) & (off_c < usable)
+        oid = tl.load(id_of_slot_ptr + off_c, mask=c_mask, other=-1)
+        u = tl.load(usage_ptr + off_c, mask=c_mask, other=9223372036854775807).to(tl.int64)
+        owner_active = c_mask & False
+        for i in tl.range(num_active):
+            ei = tl.load(expert_ids_ptr + i)
+            owner_active = owner_active | (oid == base + ei)
+        u = tl.where(owner_active | (~c_mask), 9223372036854775807, u)
+        for i in tl.range(num_fetch):
+            victim = tl.argmin(u, axis=0).to(tl.int32)
+            old_id = tl.sum(tl.where(off_c == victim, oid, 0))
+            if old_id >= 0:
+                tl.store(slot_for_id_ptr + old_id, -1)
+            if BY_RECENCY:
+                e = tl.argmax(score, axis=0).to(tl.int32)
+                score = tl.where(off_e == e, -1152921504606846976, score)
+            else:
+                e = tl.sum(tl.where((missing_rank == i) & is_missing, off_e, 0))
+            tl.store(id_of_slot_ptr + victim, base + e)
+            tl.store(slot_for_id_ptr + base + e, victim)
+            tl.store(usage_ptr + victim, step)
+            tl.store(evict_slots_ptr + i, victim - class_begin)
+            tl.store(src_indices_ptr + i, e)  # layer-local row
+            u = tl.where(off_c == victim, 9223372036854775807, u)
+
+    # ---- Phase 3: rewrite expert_ids -> slot id (hit/fetched) or -1 (overflow -> CPU) ----
+    for i in tl.range(num_active):
+        e = tl.load(expert_ids_ptr + i)
+        s = tl.load(slot_for_id_ptr + base + e)
+        tl.store(expert_ids_ptr + i, tl.where(s >= 0, s - class_begin, -1))
+
     if BY_RECENCY:
         step_vec = tl.zeros((BLOCK_E,), dtype=tl.int64) + step
         tl.store(expert_recency_ptr + base + off_e, step_vec, mask=is_active & e_mask)

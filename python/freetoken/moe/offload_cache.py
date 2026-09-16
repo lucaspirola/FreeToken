@@ -305,6 +305,22 @@ class OffloadMoeCache:
         self._class_bank_caches: list[dict[str, torch.Tensor]] = []
         self._prefill_borrow_class: int | None = None
         self._lru_size = self.cache_size
+        # Expert-arena prerequisite: a device-side "how many slots are usable" value,
+        # plus the fixed slot-arena capacity it will eventually shrink/grow within.
+        # ``slot_capacity`` == ``cache_size`` and ``usable_slots`` == ``cache_size`` for
+        # every layer today (no behavior change) -- a later step lets a shrink/grow write
+        # ``usable_slots`` in place instead of calling ``rebuild`` (which reallocates
+        # buffers and forces every decode CUDA graph to be destroyed/recaptured). See
+        # ``lru_slot_range_device`` and the ``FREETOKEN_EXPERT_ARENA`` gate in
+        # offload_kernels.py: a host scalar baked into a captured CUDA graph node is
+        # frozen at capture time, but a value read from device memory via ``tl.load``
+        # is re-read on every replay.
+        self.slot_capacity = self.cache_size
+        self.usable_slots = torch.tensor(
+            [self.cache_size], dtype=torch.int32, device=self.device
+        )
+        self._layer_slot_bounds: torch.Tensor | None = None
+        self._sync_layer_slot_bounds()
         # per-layer host residency: the GPU movement paths require "pinned"; LOCKED/PAGEABLE layers decode on the CPU executor and prefill via copy_missing's pageable branch
         # _unpinned_layers is the derived id set the hot paths test against
         self.layer_residency: list[str] = []
@@ -535,6 +551,7 @@ class OffloadMoeCache:
         self._class_ranges = [(0, self.cache_size)]
         self._class_bank_caches = []
         self._prefill_borrow_class = None
+        self._sync_layer_slot_bounds()
         self._variable_bank_rows.clear()
         self._bank_cache_shapes.clear()
         self.bank_sources.clear()
@@ -635,6 +652,7 @@ class OffloadMoeCache:
             self._class_ranges.append((begin, begin + capacity))
             begin += capacity
         self._lru_size = begin
+        self._sync_layer_slot_bounds()
 
         self.bank_caches.clear()
         self._class_bank_caches = []
@@ -882,6 +900,10 @@ class OffloadMoeCache:
         self._class_bank_caches = []
         self._direct_bank_allocations = []
         self.cache_size = cache_size
+        self.slot_capacity = cache_size
+        self.usable_slots = torch.tensor(
+            [cache_size], dtype=torch.int32, device=self.device
+        )
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
         # 3. Reallocate the slot cache from the retained host sources.
@@ -897,6 +919,7 @@ class OffloadMoeCache:
                 (self.bank_sources[n], self.bank_caches[n]) for n in self.bank_schema
             ]
             self._build_copy_plan()  # slot caches were reallocated -> refresh fused-copy addrs
+        self._sync_layer_slot_bounds()
         # 4. Reallocate cache_size-shaped bookkeeping; reset the slot map (cold start).
         self.slot_for_id.fill_(-1)
         self.id_of_slot = torch.full(
@@ -1140,10 +1163,55 @@ class OffloadMoeCache:
         self.reset()
 
     def lru_slot_range(self, layer_id: int) -> tuple[int, int]:
-        """Allowed global LRU slot range; kernels emit class-local row ids."""
+        """Allowed global LRU slot range; kernels emit class-local row ids.
+
+        Host-int form: the fallback/debug path, and the only form the CPU
+        reference kernels use (no CUDA graph capture there). See
+        :meth:`lru_slot_range_device` for the device-resident counterpart the
+        gated GPU kernel path reads from.
+        """
         if self._size_class_enabled:
             return self._class_ranges[self._layer_cache_class[layer_id]]
         return 0, self.cache_size
+
+    def lru_slot_range_device(self, layer_id: int) -> torch.Tensor:
+        """Device-resident ``[class_begin, class_end)`` pair for ``layer_id``.
+
+        A view (no copy) into ``self._layer_slot_bounds``, kept in sync with
+        :meth:`lru_slot_range` by :meth:`_sync_layer_slot_bounds`. The gated
+        ``FREETOKEN_EXPERT_ARENA`` kernel path reads bounds through this
+        tensor's pointer via ``tl.load`` inside the kernel instead of receiving
+        ``class_begin``/``class_end`` as host scalars, so updating this
+        tensor's contents after a CUDA graph capture takes effect on the next
+        replay.
+        """
+        return self._layer_slot_bounds[layer_id]
+
+    def _sync_layer_slot_bounds(self) -> None:
+        """Refresh the persistent per-layer device bounds tensor.
+
+        Call after anything that changes slot geometry: ``__post_init__``,
+        ``set_bank_sources`` (both the uniform and mixed-GGUF size-class
+        paths) and ``rebuild``. Recomputes host-side via
+        :meth:`lru_slot_range` (already correct for both the uniform and
+        size-class cases) and copies into the existing device tensor in
+        place when the shape is unchanged, so an already-captured CUDA graph
+        that references this tensor's storage keeps seeing it.
+        """
+        bounds = torch.empty((self.num_layers, 2), dtype=torch.int32)
+        for layer_id in range(self.num_layers):
+            begin, end = self.lru_slot_range(layer_id)
+            bounds[layer_id, 0] = begin
+            bounds[layer_id, 1] = end
+        bounds = bounds.to(self.device)
+        if (
+            self._layer_slot_bounds is None
+            or self._layer_slot_bounds.shape != bounds.shape
+            or self._layer_slot_bounds.device != bounds.device
+        ):
+            self._layer_slot_bounds = bounds
+        else:
+            self._layer_slot_bounds.copy_(bounds)
 
     def alphas_for_slots(
         self, layer_id: int
