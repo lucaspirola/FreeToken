@@ -7,7 +7,7 @@ from typing import Iterator
 
 import torch
 from flashlib.kernels.slot_cache import N_STATS, Stat
-from freetoken.utils import init_logger
+from freetoken.utils import div_ceil, init_logger
 
 # Fuse the per-bank expert copies into a single multi-bank launch (one per copy_missing
 # instead of one per bank). Set FREETOKEN_FUSED_COPY=0 to force the legacy per-bank path
@@ -139,6 +139,17 @@ _BANK_BYTES_PER_EXPERT = {
 # dimension; moe_align_block_size requires round_up(experts, 32) < 1024, i.e. <= 992.
 MARLIN_MAX_CACHE_SIZE = 992
 
+# Step 3 of the growable-KV-funds-MoE-shrink design: a fixed-capacity slot ARENA whose
+# usable slot count can shrink/grow in place (OffloadMoeCache.set_usable_slots) without
+# reallocating the expert banks or the id_of_slot/usage/evict_slots/src_indices
+# bookkeeping, so captured decode CUDA graphs never need to be destroyed/recaptured.
+# Prerequisites (already merged): d040324 (usable_slots device tensor + gated _v2
+# kernels in offload_kernels.py that mask on it) and fa1de29 (cache_budget.py's
+# arena_bytes_for_usable / usable_for_target_free_bytes byte model, which this
+# module's bank_row_bytes/arena_layout attributes feed). Default OFF: with the gate
+# unset, OffloadMoeCache behavior is byte-for-byte identical to before this change.
+FREETOKEN_EXPERT_ARENA = os.environ.get("FREETOKEN_EXPERT_ARENA", "0").strip() == "1"
+
 
 @dataclass
 class OffloadMoeCache:
@@ -196,6 +207,19 @@ class OffloadMoeCache:
     # fewer bytes. 0 disables (always the legacy full-layer prefill stream).
     # FREETOKEN_MOE_EXTEND_CACHE_TOKENS overrides it for A/B without re-plumbing args.
     extend_cache_tokens: int = 64
+    # Expert-arena (FREETOKEN_EXPERT_ARENA) ceiling: the fixed slot count the VMM
+    # arena's virtual address space is reserved for; ``cache_size`` remains the
+    # INITIAL usable slot count (must itself sit on a chunk boundary -- see
+    # ``arena_step_slots``). ``None`` defaults to ``cache_size`` (no headroom).
+    # Ignored entirely when the gate is off.
+    slot_capacity: int | None = None
+    # Expert-arena chunk size, in slots: each independent (bank) VMM allocation
+    # commits/uncommits whole ``arena_step_slots``-slot chunks (the last one
+    # partial, up to ``slot_capacity``) -- see ``cache_budget.arena_bytes_for_usable``
+    # for the exact byte model this must match. ``None`` defaults to
+    # ``slot_capacity`` (a single degenerate chunk spanning the whole arena).
+    # Ignored entirely when the gate is off.
+    arena_step_slots: int | None = None
 
     def __post_init__(self) -> None:
         policy_ids = {"lru": 0, "lfu": 1}
@@ -224,6 +248,48 @@ class OffloadMoeCache:
         # direct VMM-backed allocations.  Ordinary static caches keep torch.empty.
         self.direct_device_banks = False
         self._direct_bank_allocations: list[object] = []
+        # Expert-arena resolution. Must happen before id_of_slot/usage/evict_slots/
+        # src_indices below, which allocate at ``slot_capacity`` (not ``cache_size``)
+        # under the gate so a later set_usable_slots() shrink/grow never reallocates
+        # them. Off the gate this collapses to slot_capacity == cache_size, i.e. no
+        # behavior change.
+        self._expert_arena_enabled = FREETOKEN_EXPERT_ARENA
+        self._arena_banks: dict[str, dict] = {}
+        if self._expert_arena_enabled:
+            if self.quant_format in ("nvfp4_marlin", "nvfp4_b12x"):
+                raise ValueError(
+                    f"FREETOKEN_EXPERT_ARENA=1 does not support quant_format="
+                    f"{self.quant_format!r} (marlin/b12x tiled GEMM formats); unset the "
+                    "gate or use the triton nvfp4 backend"
+                )
+            capacity = (
+                self.slot_capacity if self.slot_capacity is not None else self.cache_size
+            )
+            if capacity < self.cache_size:
+                raise ValueError(
+                    f"slot_capacity {capacity} is below the initial cache_size "
+                    f"{self.cache_size}: the arena ceiling cannot be smaller than the "
+                    "initial usable count"
+                )
+            step_slots = (
+                self.arena_step_slots if self.arena_step_slots is not None else capacity
+            )
+            if step_slots <= 0:
+                raise ValueError(f"arena_step_slots must be positive, got {step_slots}")
+            self.slot_capacity = capacity
+            self._arena_step_slots = step_slots
+            self._arena_boundaries = self._arena_chunk_boundaries(capacity, step_slots)
+            if self.cache_size not in self._arena_boundaries:
+                raise ValueError(
+                    f"initial cache_size {self.cache_size} is not an expert-arena chunk "
+                    f"boundary {self._arena_boundaries} (step_slots={step_slots}, "
+                    f"capacity={capacity}); a non-boundary usable count has no ladder "
+                    "chunk to grow/shrink against"
+                )
+        else:
+            self.slot_capacity = self.cache_size
+            self._arena_step_slots = None
+            self._arena_boundaries = None
         # num_experts floor + nvfp4_marlin slot cap, shared with the runtime-rebuild path.
         self.validate_rebuild(self.cache_size)
         assert not self.prefill_overlap or self.cache_size >= 2 * self.num_experts, (
@@ -242,13 +308,13 @@ class OffloadMoeCache:
         # id == layer_id * num_experts + expert, so one array replaces the (layer,
         # expert) pair and evicting a slot needs no decode.
         self.id_of_slot = torch.full(
-            (self.cache_size,),
+            (self.slot_capacity,),
             -1,
             dtype=torch.int32,
             device=self.device,
         )
         self.usage = torch.zeros(
-            (self.cache_size,), dtype=torch.int64, device=self.device
+            (self.slot_capacity,), dtype=torch.int64, device=self.device
         )
         self.step = torch.zeros((), dtype=torch.int64, device=self.device)
         # Aging LFU admission/eviction state. Frequency is kept per logical
@@ -266,7 +332,9 @@ class OffloadMoeCache:
             (self.num_experts,), dtype=torch.int32, device=self.device
         )
         # lru_ensure validates these against plan = min(batch * top_k, cache_size), so num_experts elements would under-size them
-        plan_slots = max(self.num_experts, self.cache_size)
+        # (allocate at slot_capacity, the arena ceiling, so a later shrink/grow never
+        # needs to resize -- off the gate, slot_capacity == cache_size, unchanged)
+        plan_slots = max(self.num_experts, self.slot_capacity)
         self.evict_slots = torch.empty(
             (plan_slots,), dtype=torch.int32, device=self.device
         )
@@ -315,7 +383,8 @@ class OffloadMoeCache:
         # offload_kernels.py: a host scalar baked into a captured CUDA graph node is
         # frozen at capture time, but a value read from device memory via ``tl.load``
         # is re-read on every replay.
-        self.slot_capacity = self.cache_size
+        # (self.slot_capacity/_arena_step_slots/_arena_boundaries already resolved above,
+        # before the slot_capacity-sized bookkeeping tensors were allocated)
         self.usable_slots = torch.tensor(
             [self.cache_size], dtype=torch.int32, device=self.device
         )
@@ -462,7 +531,7 @@ class OffloadMoeCache:
         self.extend_cache_misses = 0
 
     def _alloc_device_bank_cache(
-        self, shape: tuple[int, ...], dtype: torch.dtype
+        self, shape: tuple[int, ...], dtype: torch.dtype, name: str | None = None
     ) -> torch.Tensor:
         if not self.direct_device_banks or self.device.type != "cuda":
             return torch.empty(shape, dtype=dtype, device=self.device)
@@ -470,6 +539,8 @@ class OffloadMoeCache:
         from freetoken.kernel.vmm import VMMTensor, allocation_granularity
 
         granularity = allocation_granularity(self.device)
+        if self._expert_arena_enabled and name is not None:
+            return self._alloc_arena_bank_cache(shape, dtype, name, granularity)
         nbytes = math.prod(shape) * torch.empty((), dtype=dtype).element_size()
         mapped_bytes = ((nbytes + granularity - 1) // granularity) * granularity
         chunk_bytes = max(granularity, (256 * 1024 * 1024 // granularity) * granularity)
@@ -485,6 +556,94 @@ class OffloadMoeCache:
             initial_ranges=ranges,
         )
         self._direct_bank_allocations.append(allocation)
+        return allocation.tensor
+
+    @staticmethod
+    def _arena_chunk_boundaries(capacity: int, step_slots: int) -> list[int]:
+        """Slot-count boundaries of the commit ladder: [0, step, 2*step, ..., capacity].
+
+        Mirrors ``freetoken.engine.cache_budget``'s private chunking helper exactly
+        (duplicated here rather than imported, since that module is a separate
+        ownership boundary); the two must never drift, or ``arena_bytes_for_usable``
+        would price a byte model this code does not actually implement.
+        """
+        boundaries = [0]
+        while boundaries[-1] < capacity:
+            boundaries.append(min(boundaries[-1] + step_slots, capacity))
+        return boundaries
+
+    def _arena_chunk_ranges(
+        self, row_bytes: int, granularity: int
+    ) -> list[tuple[int, int]]:
+        """Per-chunk ``(offset, size)`` VMM ranges for one bank's row byte count.
+
+        Each chunk is rounded up to a whole number of ``granularity`` bytes
+        INDEPENDENTLY (matching ``cache_budget.arena_bytes_for_usable``'s byte
+        model exactly -- granule waste in one chunk is never fungible with
+        another chunk's slack), and chunks are packed back to back at the
+        resulting (possibly padded) offsets. This is only address-compatible
+        with plain ``slot * row_bytes`` indexing when every full chunk's byte
+        count already lands on a granule boundary, which
+        ``_alloc_arena_bank_cache`` asserts before this is ever called.
+        """
+        ranges = []
+        offset = 0
+        boundaries = self._arena_boundaries
+        for start, end in zip(boundaries, boundaries[1:]):
+            size = div_ceil((end - start) * row_bytes, granularity) * granularity
+            ranges.append((offset, size))
+            offset += size
+        return ranges
+
+    def _alloc_arena_bank_cache(
+        self, shape: tuple[int, ...], dtype: torch.dtype, name: str, granularity: int
+    ) -> torch.Tensor:
+        """Reserve one bank's full-``slot_capacity`` VA and commit chunks up to
+        the initial usable count (``shape[0]``, always a chunk boundary; enforced
+        in ``__post_init__``).
+
+        The returned tensor always has shape ``(slot_capacity, *shape[1:])`` --
+        NOT ``shape[0]`` -- because the whole point of the arena is that this
+        tensor's identity/pointer/shape never change again: ``set_usable_slots``
+        only maps/unmaps physical pages behind it and moves ``usable_slots``, so
+        every consumer (``_build_copy_plan``'s base addresses, any captured decode
+        CUDA graph node) keeps seeing the same address.
+        """
+        from freetoken.kernel.vmm import VMMTensor
+
+        capacity = self.slot_capacity
+        step_slots = self._arena_step_slots
+        slots = shape[0]
+        assert slots <= capacity, (name, slots, capacity)
+        row_bytes = math.prod(shape[1:]) * torch.empty((), dtype=dtype).element_size()
+        if (step_slots * row_bytes) % granularity != 0:
+            raise ValueError(
+                f"FREETOKEN_EXPERT_ARENA requires arena_step_slots * row_bytes to land "
+                f"on a VMM granule boundary, so a full chunk's mapped range matches "
+                f"plain slot*row_bytes addressing exactly (bank {name!r}: "
+                f"step_slots={step_slots} * row_bytes={row_bytes} = "
+                f"{step_slots * row_bytes} bytes, granularity={granularity} bytes); "
+                "choose a different arena_step_slots or slot_capacity for this "
+                "quant_format's row size"
+            )
+        chunk_ranges = self._arena_chunk_ranges(row_bytes, granularity)
+        reserved_bytes = chunk_ranges[-1][0] + chunk_ranges[-1][1] if chunk_ranges else 0
+        committed_chunks = self._arena_boundaries.index(slots)
+        initial_ranges = chunk_ranges[:committed_chunks]
+        assert initial_ranges, (name, slots, self._arena_boundaries)
+        allocation = VMMTensor(
+            (capacity, *shape[1:]),
+            dtype=dtype,
+            device=self.device,
+            reserved_bytes=reserved_bytes,
+            initial_ranges=initial_ranges,
+        )
+        self._direct_bank_allocations.append(allocation)
+        self._arena_banks[name] = {
+            "allocation": allocation,
+            "row_bytes": row_bytes,
+            "chunk_ranges": chunk_ranges,
+        }
         return allocation.tensor
 
     def set_bank_sources(
@@ -540,6 +699,12 @@ class OffloadMoeCache:
             for layer in range(self.num_layers)
         ]
         if self.quant_format == "gguf" and len(set(signatures)) > 1:
+            if self._expert_arena_enabled:
+                raise NotImplementedError(
+                    "FREETOKEN_EXPERT_ARENA=1 does not support mixed-GGUF size classes "
+                    f"({len(set(signatures))} distinct row signatures across layers); "
+                    "unset the gate or use a uniform-signature GGUF checkpoint"
+                )
             if unpinned:
                 raise NotImplementedError(
                     "mixed-GGUF GPU size classes currently require pinned host banks"
@@ -586,8 +751,11 @@ class OffloadMoeCache:
                         "variable-size expert rows must use flat uint8 storage"
                     )
             self._bank_cache_shapes[name] = cache_tail
+            # shape[0] is the INITIAL usable count (cache_size); under the arena gate,
+            # _alloc_device_bank_cache reserves/returns a slot_capacity-sized tensor
+            # regardless and only uses this to size the initial commit ladder.
             self.bank_caches[name] = self._alloc_device_bank_cache(
-                (self.cache_size, *cache_tail), dtype
+                (self.cache_size, *cache_tail), dtype, name=name
             )
         self.banks = [
             (self.bank_sources[n], self.bank_caches[n]) for n in self.bank_schema
@@ -899,8 +1067,18 @@ class OffloadMoeCache:
         self.bank_caches = {}
         self._class_bank_caches = []
         self._direct_bank_allocations = []
+        self._arena_banks = {}
         self.cache_size = cache_size
         self.slot_capacity = cache_size
+        if self._expert_arena_enabled:
+            # A full rebuild reallocates every bank from scratch (the very thing the
+            # arena exists to avoid): it collapses the arena to a single degenerate
+            # chunk spanning exactly the new cache_size, with no growth headroom.
+            # set_usable_slots is the elastic path; rebuild remains the destructive
+            # fallback and is not expected to preserve a caller's slot_capacity/
+            # arena_step_slots across the call.
+            self._arena_step_slots = cache_size
+            self._arena_boundaries = self._arena_chunk_boundaries(cache_size, cache_size)
         self.usable_slots = torch.tensor(
             [cache_size], dtype=torch.int32, device=self.device
         )
@@ -913,7 +1091,7 @@ class OffloadMoeCache:
             for name in self.bank_schema:
                 head = self.bank_sources[name][0]
                 self.bank_caches[name] = self._alloc_device_bank_cache(
-                    (cache_size, *self._bank_cache_shapes[name]), head.dtype
+                    (cache_size, *self._bank_cache_shapes[name]), head.dtype, name=name
                 )
             self.banks = [
                 (self.bank_sources[n], self.bank_caches[n]) for n in self.bank_schema
@@ -972,6 +1150,146 @@ class OffloadMoeCache:
         # as the device-side LRU counters reset above. The gather tasks survive a
         # narrow descriptor refresh, so their host counters must be reset explicitly.
         self.reset_stats()
+
+    @property
+    def bank_row_bytes(self) -> list[int] | None:
+        """Per-(bank) row byte count, one entry per independent arena VMM allocation.
+
+        ``None`` unless ``FREETOKEN_EXPERT_ARENA=1`` and the arena has actually been
+        built (``set_bank_sources`` has run). Consumed by
+        ``freetoken.engine.cache_budget.arena_bytes_for_usable`` /
+        ``engine.py``'s ``_growable_moe_bytes`` (``getattr(moe, "bank_row_bytes",
+        None)``) together with :attr:`arena_layout` to price a shrink/grow target
+        in real mapped bytes. Order matches ``self.bank_schema``.
+        """
+        if not self._expert_arena_enabled or not self._arena_banks:
+            return None
+        return [
+            self._arena_banks[name]["row_bytes"]
+            for name in self.bank_schema
+            if name in self._arena_banks
+        ]
+
+    @property
+    def arena_layout(self) -> tuple[int, int] | None:
+        """``(slot_capacity, arena_step_slots)``, or ``None`` off the gate / before
+        ``set_bank_sources``. See :attr:`bank_row_bytes`."""
+        if not self._expert_arena_enabled or not self._arena_banks:
+            return None
+        return (self.slot_capacity, self._arena_step_slots)
+
+    def set_usable_slots(self, n: int) -> int:
+        """Shrink or grow the usable slot count in place -- no reallocation.
+
+        Unlike :meth:`rebuild`, this never touches ``bank_caches``, ``id_of_slot``,
+        ``usage``, ``evict_slots``, ``src_indices`` or the fused-copy descriptors:
+        they are already sized to ``slot_capacity`` and their base addresses never
+        move, so a decode CUDA graph captured against them stays valid. Only the
+        VMM arena's committed physical pages and ``usable_slots`` (read by the
+        gated ``_v2`` kernels in ``offload_kernels.py`` via ``tl.load``, so a
+        graph replay picks up the new bound with no recapture) change.
+
+        Precondition (caller's responsibility, not enforced here beyond a device
+        sync before the shrink invalidation): this must run at a no-forward-in-
+        flight boundary. No decode or prefill work may be enqueued concurrently,
+        because (a) a shrink physically unmaps pages behind slots a still-in-flight
+        kernel could be reading, and (b) ``set_usable_slots`` mutates
+        ``id_of_slot``/``slot_for_id``/``usage`` with plain (non-graph-captured)
+        torch ops on the current stream.
+
+        Returns the bytes actually released (shrink, negative-of-sign avoided by
+        returning a plain byte count) or committed (grow); this must equal
+        ``|arena_bytes_for_usable(new, ...) - arena_bytes_for_usable(old, ...)|``
+        for the same ``arena_layout``/``bank_row_bytes`` (see
+        ``freetoken.engine.cache_budget``).
+        """
+        assert self._expert_arena_enabled, (
+            "set_usable_slots requires FREETOKEN_EXPERT_ARENA=1"
+        )
+        assert self._arena_banks, "set_bank_sources must run before set_usable_slots"
+        current = int(self.usable_slots.item())
+        if n == current:
+            return 0
+        if n > self.slot_capacity or n < 0:
+            raise ValueError(
+                f"set_usable_slots target {n} is outside [0, {self.slot_capacity}]"
+            )
+        if n not in self._arena_boundaries:
+            raise ValueError(
+                f"set_usable_slots target {n} is not an arena chunk boundary "
+                f"{self._arena_boundaries} (arena_step_slots={self._arena_step_slots})"
+            )
+        # The prefill double buffer borrows slots [0, 2*num_experts) whenever prefill
+        # overlap is enabled; those slots must never be unmapped. Conservatively also
+        # floor at num_experts (the validate_rebuild floor) when overlap is off.
+        floor = 2 * self.num_experts if self.prefill_overlap else self.num_experts
+        if n < floor:
+            raise ValueError(
+                f"set_usable_slots target {n} is below the floor {floor} "
+                + (
+                    "(2*num_experts: the prefill double buffer owns slots [0, 2E))"
+                    if self.prefill_overlap
+                    else "(num_experts)"
+                )
+            )
+        if n < current:
+            return self._arena_shrink(n, current)
+        return self._arena_grow(current, n)
+
+    def _arena_shrink(self, n: int, current: int) -> int:
+        # (a) Invalidate every expert id whose slot falls in [n, current): the same
+        # pattern _invalidate_prefill_buffer uses for the (fixed) double-buffer slots.
+        old_ids = self.id_of_slot[n:current]
+        valid = old_ids >= 0
+        self.slot_for_id.view(-1)[old_ids[valid].long()] = -1
+        old_ids.fill_(-1)
+        self.usage[n:current].zero_()
+        # (b) Finish everything that might still be reading/writing those slots
+        # before their physical pages are unmapped underneath them.
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        # (c) Publish the new bound. Kernels re-read this via tl.load every launch
+        # (including CUDA graph replays), so this alone makes them stop selecting
+        # slots >= n -- before the unmap in (d) makes those slots physically unsafe.
+        self.usable_slots[0] = n
+        self.cache_size = n
+        self._sync_layer_slot_bounds()
+        # (d) Uncommit the tail chunks above n, exactly matching the ladder chunks
+        # _alloc_arena_bank_cache mapped (uncommit_ranges requires an exact match).
+        idx_n = self._arena_boundaries.index(n)
+        idx_current = self._arena_boundaries.index(current)
+        released = 0
+        for meta in self._arena_banks.values():
+            ranges = meta["chunk_ranges"][idx_n:idx_current]
+            if not ranges:
+                continue
+            meta["allocation"].uncommit_ranges(ranges)
+            released += sum(size for _, size in ranges)
+        return released
+
+    def _arena_grow(self, current: int, n: int) -> int:
+        idx_current = self._arena_boundaries.index(current)
+        idx_n = self._arena_boundaries.index(n)
+        committed_meta: list[tuple[dict, list[tuple[int, int]]]] = []
+        committed = 0
+        try:
+            for meta in self._arena_banks.values():
+                ranges = meta["chunk_ranges"][idx_current:idx_n]
+                if not ranges:
+                    continue
+                meta["allocation"].commit_ranges(ranges)
+                committed_meta.append((meta, ranges))
+                committed += sum(size for _, size in ranges)
+        except Exception:
+            for meta, ranges in reversed(committed_meta):
+                meta["allocation"].uncommit_ranges(ranges)
+            raise
+        # Newly committed slots were already invalidated (id_of_slot == -1) either
+        # from initial construction or from a prior shrink -- nothing to reset here.
+        self.usable_slots[0] = n
+        self.cache_size = n
+        self._sync_layer_slot_bounds()
+        return committed
 
     def set_alphas(
         self, gate_up_alpha: torch.Tensor | None, down_alpha: torch.Tensor | None
