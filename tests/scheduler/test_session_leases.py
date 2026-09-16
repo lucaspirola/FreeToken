@@ -148,6 +148,11 @@ def test_admission_pressure_releases_oldest_idle_soft_session_only():
             return SimpleNamespace(cuda_handle=SimpleNamespace(cached_len=0))
 
     scheduler.cache_manager = _PressureCache()
+    # Release now requires an actual checkpoint (require_checkpoint=True at this call
+    # site); this fixture has no spill store wired at all, so stand in for "the checkpoint
+    # succeeded" -- what this test exercises is LRU/pressure candidate selection, not
+    # checkpoint validity (covered separately in test_session_spill.py).
+    scheduler._spill_soft_session = lambda *_a, **_k: True
     scheduler._sessions = {
         "old-soft": SessionLease(
             "old-handle", 300.0, reclaimable=True, last_used_at=1.0
@@ -694,6 +699,10 @@ def test_a_restore_blocked_by_the_resident_session_is_retried_before_admission()
     scheduler._sessions["A"] = SessionLease(
         "A-handle", 300.0, reclaimable=True, last_used_at=1.0
     )
+    # Release now requires an actual checkpoint; "A-handle" is a plain string stand-in with
+    # no node to spill, so simulate a successful checkpoint the way the round trip itself is
+    # covered elsewhere (test_session_spill.py). This test is about the retry ordering.
+    scheduler._spill_soft_session = lambda *_a, **_k: True
     pending = _queued(2, "B")
     # A real PendingReq carries a tensor; the checkpoint covers all but its last token.
     pending.input_ids = torch.tensor([1, 2, 3, 4, 5], dtype=torch.int32)

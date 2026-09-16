@@ -209,6 +209,12 @@ def _scheduler_with_lease(cm, lease, *, reclaimable=True, token_ids=None):
     sched.cache_manager = cm
     sched._session_spill_store = None
     sched.config = SimpleNamespace(auto_session_grace_seconds=0.0)
+    # The release sites now require an actual checkpoint (require_checkpoint=True); this
+    # fixture never wired a real SessionSpillStore even before that (store is None above),
+    # so stand in for "the checkpoint succeeded" the same way the store's own round-trip
+    # is covered separately (test_session_spill.py). What is under test here is the LRU/
+    # pressure selection and the production hook wiring, not checkpoint validity.
+    sched._spill_soft_session = lambda *_a, **_k: True
     sched._sessions = {
         "a": SessionLease(
             handle=lease,
@@ -325,7 +331,7 @@ def test_scheduler_state_slot_reclaim_releases_the_lru_idle_lease():
     sched.cache_manager = SimpleNamespace(is_hybrid=True, mamba_available_size=0)
     sched._sessions = {"old": _Lease(1.0), "new": _Lease(2.0)}
 
-    def _release(sid, reason):
+    def _release(sid, reason, *, require_checkpoint=False):
         released.append(sid)
         sched.cache_manager.mamba_available_size = 1   # one slot is enough
         return True

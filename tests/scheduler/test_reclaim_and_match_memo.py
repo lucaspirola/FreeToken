@@ -140,8 +140,12 @@ class _SchedulerStub:
 
         return getattr(Scheduler, name).__get__(self, type(self))
 
-    def _spill_soft_session(self, session_id, session) -> None:
+    def _spill_soft_session(self, session_id, session) -> bool:
         self.released.append(session_id)  # the checkpoint itself is not under test
+        # Since ``require_checkpoint=True`` is now mandatory at every release site this
+        # stub reaches, report success unconditionally: what these tests exercise is lock
+        # accounting and candidate selection, not checkpoint validity.
+        return True
 
     def _prefetch_queued_session(self):
         self.prefetched += 1
