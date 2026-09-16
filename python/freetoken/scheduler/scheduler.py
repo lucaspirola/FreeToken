@@ -630,6 +630,21 @@ class Scheduler(SchedulerIOMixin):
         if self.config.tp_info.size > 1:
             self.sync_all_ranks()
 
+    def _drain_inflight(self, last_data: ForwardData | None) -> None:
+        """Establish a no-forward-in-flight boundary: wait for the engine stream to
+        finish the previous batch, then process its results on the host.
+
+        Used wherever an operation needs the guarantee ``normal_loop`` gets for free
+        (no forward executing against the buffers/bookkeeping it is about to touch) --
+        speculative decoding bursts, and, under ``FREETOKEN_GROWABLE_OVERLAP``, growable
+        KV's ``grow_runtime_kv``/``shrink_runtime_kv`` resize points. Always returns
+        ``None``; callers assign it straight to ``last_data`` (and ``self._last_data``).
+        """
+        self.stream.wait_stream(self.engine.stream)
+        self._process_last_data(last_data)
+        self._flush_abort_acks()
+        return None
+
     def overlap_loop(self, last_data: ForwardData | None) -> ForwardData | None:
         """
         The main loop of overlapping scheduling and execution.
@@ -672,6 +687,13 @@ class Scheduler(SchedulerIOMixin):
         if getattr(self, "_durable_checkpoint_sealed", False):
             return None
 
+        # _maybe_shrink_growable_kv refuses to run while ``_last_data`` is still set (its
+        # own page-usage/occupancy bookkeeping is only accurate once the previous batch's
+        # completions have landed). Under FREETOKEN_GROWABLE_OVERLAP that pending batch is
+        # exactly the one this iteration hasn't drained yet -- drain it here so a queued
+        # shrink actually gets to run instead of being deferred every iteration forever.
+        if getattr(self, "_growable_shrink_pending", False) and last_data is not None:
+            last_data = self._last_data = self._drain_inflight(last_data)
         self._maybe_shrink_growable_kv()
         self._maybe_resize_elastic_capacity()
 
@@ -698,10 +720,7 @@ class Scheduler(SchedulerIOMixin):
         spec_req = spec.peek(stale=last_data is not None) if spec is not None else None
         if spec_req is not None:
             drain0 = time.perf_counter()
-            self.stream.wait_stream(self.engine.stream)
-            self._process_last_data(last_data)
-            self._flush_abort_acks()
-            last_data = self._last_data = None
+            last_data = self._last_data = self._drain_inflight(last_data)
             spec.stats.t_drain += (time.perf_counter() - drain0) * 1e3
             spec.stats.drains += 1
             if spec.run_step(spec_req):
@@ -715,6 +734,12 @@ class Scheduler(SchedulerIOMixin):
         # placeholder, which the multimodal merge then rejects).
         self.stream.wait_stream(self.engine.stream)
         forward_input = self._schedule_next_batch()
+        # ``_schedule_next_batch`` may have drained ``last_data`` itself (see the growth
+        # check inside it) to give ``grow_runtime_kv`` a no-forward-in-flight boundary
+        # before ``_prepare_batch`` calls it. Pick up that change so the drain below does
+        # not run ``_process_last_data`` a second time on an already-drained batch.
+        last_data = self._last_data
+        self._finalize_growable_handoff(forward_input)
         ongoing_data = None
         if forward_input is not None:
             with self.engine_stream_ctx:  # run the batch in the engine's stream
@@ -803,7 +828,18 @@ class Scheduler(SchedulerIOMixin):
         # backend's per-batch SNAPSHOT (staged in prepare_for_replay right before the replay, on
         # the same stream, like the generic out_loc copy_from), not the live slot maps -- so the
         # next batch's allocate_paged cannot corrupt the in-flight graph replay. DSV4 overlaps.
-        if ENV.DISABLE_OVERLAP_SCHEDULING or self.config.kv_grow_step_tokens:
+        #
+        # Growable KV (kv_grow_step_tokens) defaults to normal_loop because grow/shrink need a
+        # no-forward-in-flight boundary that normal_loop gives for free. Design step 6: the
+        # expert arena (810c89b) resizes the KV/expert cache without destroying decode graphs,
+        # so overlap_loop can host growth/shrink behind an explicit drain (_drain_inflight,
+        # inside _schedule_next_batch's growth check and before _maybe_shrink_growable_kv) --
+        # opt in with FREETOKEN_GROWABLE_OVERLAP=1.
+        growable_overlap = self.config.kv_grow_step_tokens and ENV.GROWABLE_OVERLAP
+        use_normal_loop = ENV.DISABLE_OVERLAP_SCHEDULING or (
+            self.config.kv_grow_step_tokens and not growable_overlap
+        )
+        if use_normal_loop:
             with self.engine_stream_ctx:
                 self.engine.stream.wait_stream(self.stream)
                 while True:
@@ -2191,8 +2227,13 @@ class Scheduler(SchedulerIOMixin):
             return
         # overlap_loop publishes the previous forward in ``_last_data`` before it calls us.
         # Until that batch is drained, kernels may still read KV/expert pointers and exports
-        # may still borrow request pages. Keep the trigger armed. Supported growable mode
-        # uses normal_loop, which drains each forward before the next iteration.
+        # may still borrow request pages. Keep the trigger armed. normal_loop drains each
+        # forward before the next iteration, so ``_last_data`` is always None there.
+        # Under FREETOKEN_GROWABLE_OVERLAP, overlap_loop drains ``_last_data`` itself
+        # (via ``_drain_inflight``) right before calling us whenever a shrink is pending,
+        # so this early-return is normally not what defers a shrink in that mode -- it
+        # stays as the safety net for the durable-checkpoint-sealed early return above,
+        # which skips straight past that drain.
         if getattr(self, "_last_data", None) is not None:
             return
         # Compaction copies are issued from scheduler context while expert rebuilds use the
@@ -2710,6 +2751,27 @@ class Scheduler(SchedulerIOMixin):
         except Exception as e:  # noqa: BLE001
             logger.warning(f"could not log cache geometry: {e!r}")
 
+    def _batch_needs_kv_growth(self, batch: Batch) -> bool:
+        """True when ``_prepare_batch`` would call ``engine.grow_runtime_kv`` for this
+        batch, without performing the resize. Mirrors the condition inside
+        ``_prepare_batch`` so a caller (``overlap_loop`` via ``_schedule_next_batch``) can
+        drain the previous forward BEFORE the growth call, instead of after.
+
+        Duck-typed like the rest of this file's cross-component reads: the low-level
+        scheduler tests drive ``_schedule_next_batch`` with cache-manager stubs that
+        implement only what the behavior under test needs (often by monkeypatching
+        ``_prepare_batch`` itself), so a stub that cannot answer this question is treated
+        as "no growth needed" rather than raising.
+        """
+        if not getattr(getattr(self, "config", None), "kv_grow_step_tokens", 0):
+            return False
+        cm = getattr(self, "cache_manager", None)
+        required_fn = getattr(cm, "committed_pages_required", None)
+        if required_fn is None:
+            return False
+        required = required_fn(batch.reqs)
+        return required > getattr(cm, "committed_pages", 0)
+
     def _prepare_batch(self, batch: Batch) -> ForwardInput:
         if self.config.kv_grow_step_tokens:
             required = self.cache_manager.committed_pages_required(batch.reqs)
@@ -2837,6 +2899,15 @@ class Scheduler(SchedulerIOMixin):
         self._admission_stalled = batch is None
         if batch is None:
             return None
+        # ``_prepare_batch`` below calls ``engine.grow_runtime_kv`` unconditionally when
+        # growable KV is on; if this batch actually needs more pages, drain the still
+        # in-flight previous forward (overlap_loop only -- ``_last_data`` is always None
+        # under normal_loop) first, so the resize runs at a no-forward-in-flight boundary
+        # instead of racing the busy stream.
+        if self._batch_needs_kv_growth(batch):
+            last_data = getattr(self, "_last_data", None)
+            if last_data is not None:
+                self._last_data = self._drain_inflight(last_data)
         forward_input = self._prepare_batch(batch)
         if getattr(getattr(self, "config", None), "adaptive_scheduler", False):
             batch.scheduler_started_at = time.perf_counter()

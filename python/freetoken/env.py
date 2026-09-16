@@ -70,6 +70,11 @@ class EnvClassSingleton:
     # backend runtime
     FLASHINFER_USE_TENSOR_CORES = EnvOption()
     DISABLE_OVERLAP_SCHEDULING = EnvBool(False)
+    # Design step 6: growable KV (kv_grow_step_tokens) defaults to normal_loop because a
+    # resize needs a no-forward-in-flight boundary. The expert arena (810c89b) resizes the
+    # KV/expert cache without destroying decode graphs, so overlap_loop can host growth/
+    # shrink behind an explicit drain -- opt in here once that has soaked.
+    GROWABLE_OVERLAP = EnvBool(False)
     PYNCCL_MAX_BUFFER_SIZE = EnvMem(1024**3)
     # GatedDeltaNet recurrent (SSM) state dtype: float32 (default) | bfloat16 | float16.
     # fp32 matches the Qwen3.x configs (mamba_ssm_dtype); fp16/bf16 halves the GDN state
