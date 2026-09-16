@@ -1261,8 +1261,18 @@ class Engine:
         )
 
     def _growable_moe_bytes(self, cache_size: int) -> int:
-        """Exact GPU bytes for one growable mixed/uniform expert-cache geometry."""
+        """Exact GPU bytes for one growable mixed/uniform expert-cache geometry.
+
+        When ``moe`` exposes a VMM arena (``arena_layout`` / ``bank_row_bytes``, set by a
+        fixed-capacity-arena expert cache), byte counts are NOT linear in ``cache_size``:
+        shrinking releases whole 2 MiB granules per independent bank/layer allocation, and
+        each allocation's row size rounds up to a different granule remainder (see
+        ``freetoken.engine.cache_budget.arena_bytes_for_usable``). Legacy (non-arena) MoE
+        caches keep the old uniform/mixed-signature formula unchanged -- detected via
+        ``getattr(..., None)`` so callers without the attribute are unaffected.
+        """
         from freetoken.engine.cache_budget import (
+            arena_bytes_for_usable,
             expert_bytes_per_slot,
             expert_cache_bytes,
             expert_slot_signatures,
@@ -1270,6 +1280,13 @@ class Engine:
 
         moe = self.moe_offload_cache
         assert moe is not None, "growable KV requires the MoE offload cache"
+        bank_row_bytes = getattr(moe, "bank_row_bytes", None)
+        arena_layout = getattr(moe, "arena_layout", None)
+        if bank_row_bytes is not None and arena_layout is not None:
+            capacity, step_slots = arena_layout
+            return arena_bytes_for_usable(
+                cache_size, capacity, step_slots, bank_row_bytes
+            )
         sources = moe.bank_sources
         return expert_cache_bytes(
             cache_size,
