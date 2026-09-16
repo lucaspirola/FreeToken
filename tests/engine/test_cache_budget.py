@@ -6,11 +6,13 @@ import pytest
 import torch
 
 from freetoken.engine.cache_budget import (
+    arena_bytes_for_usable,
     expert_bytes_per_slot,
     expert_cache_bytes,
     expert_slot_signatures,
     plan_cache_budget,
     resolve_moe_cache_auto,
+    usable_for_target_free_bytes,
 )
 
 
@@ -626,8 +628,145 @@ def test_adjust_config_allows_override_at_rope_table_boundary():
     _adjust_config(_generic_rotary_cfg(max_position=1024, override=1024))  # must not raise
 
 
+# ---------------------------------------------------------------------------
+# arena_bytes_for_usable / usable_for_target_free_bytes: the granule-aware VMM-arena
+# byte model, and its inverse used by the shrink-to-fund-KV-growth planner.
+# ---------------------------------------------------------------------------
+
+_MiB = 1024 * 1024
+# capacity 10, step 4 -> chunks of [4, 4, 2] slots; three banks with very different row
+# sizes (a ~0.59 MiB scale row, a 3 MiB weight row, a 2 MiB weight row) so each chunk's
+# granule remainder differs per bank and the result is visibly non-linear in usable slots.
+_HAND_ROWS = (int(0.59 * _MiB), 3 * _MiB, 2 * _MiB)
+
+
+def test_arena_bytes_monotonic_nondecreasing():
+    capacity, step = 10, 4
+    values = [
+        arena_bytes_for_usable(u, capacity, step, _HAND_ROWS) for u in range(capacity + 1)
+    ]
+    assert values == sorted(values)
+    assert values[0] == 0
+    assert values[-1] > 0
+
+
+def test_arena_bytes_hand_computed_example_is_nonlinear():
+    capacity, step = 10, 4
+
+    # Chunk 0 (slots 0..4): per bank round_up(4*row, 2MiB).
+    def chunk_bytes(slots):
+        return sum(-(-(slots * row) // (2 * _MiB)) * 2 * _MiB for row in _HAND_ROWS)
+
+    chunk0 = chunk_bytes(4)  # first 4-slot chunk
+    chunk1 = chunk_bytes(4)  # second 4-slot chunk (same size, same bytes)
+    chunk2 = chunk_bytes(2)  # final partial chunk (10 - 8 = 2 slots)
+
+    # usable=1..4 all commit only chunk 0 (a chunk is committed whole).
+    assert arena_bytes_for_usable(1, capacity, step, _HAND_ROWS) == chunk0
+    assert arena_bytes_for_usable(4, capacity, step, _HAND_ROWS) == chunk0
+    # usable=5 forces chunk 1 to commit too, even though only one more slot is needed --
+    # this is the non-linearity: bytes jump by a whole chunk, not by one slot's worth.
+    assert arena_bytes_for_usable(5, capacity, step, _HAND_ROWS) == chunk0 + chunk1
+    assert arena_bytes_for_usable(8, capacity, step, _HAND_ROWS) == chunk0 + chunk1
+    # usable=9,10 commit the final partial (2-slot) chunk.
+    assert arena_bytes_for_usable(10, capacity, step, _HAND_ROWS) == chunk0 + chunk1 + chunk2
+    # And bytes-per-slot is NOT the naive uniform "cache_size * per_slot_bytes" product:
+    # doubling committed slots from 4 to 8 does not double the total (would be 2x, but the
+    # granule rounding + chunking makes it exactly 2x here only by coincidence of the hand
+    # example -- assert the general non-uniformity instead via a case that breaks it).
+    assert arena_bytes_for_usable(9, capacity, step, _HAND_ROWS) != 9 * (
+        arena_bytes_for_usable(1, capacity, step, _HAND_ROWS)
+    )
+
+
+def test_arena_bytes_zero_usable_is_zero():
+    assert arena_bytes_for_usable(0, 10, 4, _HAND_ROWS) == 0
+
+
+def test_usable_for_target_free_bytes_lands_on_chunk_boundary_and_frees_enough():
+    capacity, step = 10, 4
+    total = arena_bytes_for_usable(capacity, capacity, step, _HAND_ROWS)
+    for target in (1, _MiB, 5 * _MiB, 20 * _MiB):
+        usable = usable_for_target_free_bytes(target, capacity, step, _HAND_ROWS)
+        freed = total - arena_bytes_for_usable(usable, capacity, step, _HAND_ROWS)
+        assert freed >= target
+        # usable must be a real chunk boundary: shrinking to any single slot less would
+        # not be a valid uncommit (uncommit_ranges must match a whole prior commit chunk).
+        assert usable in (0, 4, 8, 10)
+
+
+def test_usable_for_target_free_bytes_returns_minimum_when_target_unreachable():
+    capacity, step = 10, 4
+    # No amount of shrinking can free more than the arena's total mapped bytes.
+    assert usable_for_target_free_bytes(10**12, capacity, step, _HAND_ROWS) == 0
+
+
+class _FakeRowTensor:
+    """Torch-free stand-in for a ``[num_experts, *row_shape]`` bank tensor: indexing
+    returns itself (so ``t[0][0]`` chains work) and it reports its own row numel/dtype
+    size, matching what ``expert_bytes_per_slot``/``expert_slot_signatures`` read off a
+    real tensor without needing torch at all."""
+
+    def __init__(self, row_numel: int, esize: int):
+        self._row_numel = row_numel
+        self._esize = esize
+
+    def __getitem__(self, _index):
+        return self
+
+    def numel(self):
+        return self._row_numel
+
+    def element_size(self):
+        return self._esize
+
+
+def test_growable_moe_bytes_unchanged_for_legacy_cache_without_arena_attrs():
+    """A legacy (non-arena) MoE offload cache has no ``bank_row_bytes``/``arena_layout``
+    attribute, so ``getattr(..., None)`` must fall through to the old uniform/mixed
+    formula unchanged."""
+    from freetoken.engine.engine import Engine
+
+    class LegacyMoeCache:
+        num_experts = 4
+        bank_sources = {"gate_up": [_FakeRowTensor(32 * 8, 2)]}  # row = 32*8*2 = 512 B
+        # No bank_row_bytes / arena_layout attributes at all.
+
+    engine = Engine.__new__(Engine)
+    engine.moe_offload_cache = LegacyMoeCache()
+    engine._growable_moe_prefill_overlap = False
+
+    # Cross-check against the pure legacy formula directly (uniform fallback path).
+    from freetoken.engine.cache_budget import expert_bytes_per_slot, expert_cache_bytes
+
+    sources = LegacyMoeCache.bank_sources
+    expected = expert_cache_bytes(
+        6,
+        slot_signatures=(),
+        num_experts=4,
+        prefill_overlap=False,
+        fallback_per_expert_bytes=expert_bytes_per_slot(sources),
+    )
+    assert engine._growable_moe_bytes(6) == expected
+    assert expected == 6 * 512
+
+
+def test_growable_moe_bytes_uses_arena_model_when_attrs_present():
+    from freetoken.engine.engine import Engine
+
+    class ArenaMoeCache:
+        num_experts = 4
+        bank_row_bytes = _HAND_ROWS
+        arena_layout = (10, 4)  # (capacity, step_slots)
+
+    engine = Engine.__new__(Engine)
+    engine.moe_offload_cache = ArenaMoeCache()
+    engine._growable_moe_prefill_overlap = False
+
+    assert engine._growable_moe_bytes(5) == arena_bytes_for_usable(5, 10, 4, _HAND_ROWS)
+
+
 def test_adjust_config_rope_gate_exempts_dsv4():
-    # DSV4 sizes its own rope table from the resolved max_seq_len (_adjust_dsv4_config),
     # so the generic gate must not fire even when the override dwarfs max_position.
     from types import SimpleNamespace
 
