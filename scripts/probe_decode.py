@@ -2,8 +2,8 @@
 """Measure prefill tok/s, TTFT and steady decode tok/s vs prompt size on one lane.
 
     scripts/probe_decode.py [SIZE ...]        default sizes 8000 32000 80000 128000 256000
-    FREETOKEN_URL (default http://127.0.0.1:1919) and FREETOKEN_MODEL_NAME
-    (default nemotron-3.5-lightning) select the server. One JSON line per size.
+    FREETOKEN_URL (default http://127.0.0.1:8080) and FREETOKEN_MODEL_NAME
+    (default ornith1.5-35b) select the server. One JSON line per size.
 """
 import json
 import os
@@ -11,8 +11,8 @@ import sys
 import time
 import urllib.request
 
-URL = os.environ.get("FREETOKEN_URL", "http://127.0.0.1:1919") + "/v1/chat/completions"
-MODEL = os.environ.get("FREETOKEN_MODEL_NAME", "nemotron-3.5-lightning")
+URL = os.environ.get("FREETOKEN_URL", "http://127.0.0.1:8080") + "/v1/chat/completions"
+MODEL = os.environ.get("FREETOKEN_MODEL_NAME", "ornith1.5-35b")
 SENT = "The quick brown fox jumps over the lazy dog near the riverbank while the miller counts his sacks of grain. "
 SIZES = [int(x) for x in (sys.argv[1:] or ["8000", "32000", "80000", "128000", "256000"])]
 GEN = int(os.environ.get("PROBE_GEN_TOKENS", "128"))

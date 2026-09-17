@@ -5,7 +5,7 @@
 # Installed into ~/.local/bin by scripts/systemd/install.sh. Companion: ft-down.
 set -u
 LOG=${FREETOKEN_LOG:-$HOME/.cache/freetoken/logs/ft_serve.log}
-PORT=${FREETOKEN_PORT:-1919}
+PORT=${FREETOKEN_PORT:-8080}
 UNIT=freetoken-serve
 if systemctl is-active --quiet "$UNIT" && curl -sf -m 3 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
   echo "freetoken-serve already up on :$PORT"; exit 0

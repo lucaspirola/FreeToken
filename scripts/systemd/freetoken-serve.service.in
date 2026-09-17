@@ -6,7 +6,7 @@
 # Not enabled at boot on purpose: other GPU services (e.g. the piro-board embedder) own the
 # GPU by default and this unit coexists with whatever is running.
 [Unit]
-Description=FreeToken Nemotron-3.5-Lightning server (scripts/serve-default.sh)
+Description=FreeToken server (scripts/serve-default.sh; default Ornith Q6_K / Ada)
 After=network.target
 # Never rate-limit starts: a crashed/stopped server must come back with a plain `start`
 # (ft-up), no `reset-failed` ritual.

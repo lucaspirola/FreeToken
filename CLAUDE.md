@@ -5,16 +5,16 @@ WSL2 box, the Ada box); per-host differences live in `$HOME/.config/freetoken/se
 
 ## The server and its ONE default configuration
 
-* Model served: NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 on `http://127.0.0.1:1919`
-  (`nemotron-3.5-lightning`, aliases `-judge`, `-collect`).
+* Default model: `~/ai/models/Ornith-1.5-35B-Q6_K.gguf` on `http://127.0.0.1:8080`
+  (`ornith1.5-35b`, aliases `-judge`, `-collect`), for the RTX 2000 Ada 16 GB.
 * The configuration is `scripts/serve-default.sh`. **Never hand-type `ft serve` flags** —
-  edit that file if the profile must change, and keep its comments truthful. Measured
-  numbers behind it: `benchmarks/results/nemotron35_lightning_5080_single_lane_2026-09-17.md`,
-  design notes in `docs/nemotron.md` ("Default profile").
+  edit that file if the profile must change, and keep its comments truthful.
+  Model-specific context guidance: `docs/models.md`. No host env file is needed for
+  the Ornith Ada defaults; other models require explicit host overrides.
 * What it is: single lane (one session decoding on the GPU, every other session checkpointed
-  to RAM/disk and swapped back), growable KV up to 1M tokens, expert VMM arena + overlap
-  scheduling (no CUDA-graph recaptures), **whole model in RAM** (`FREETOKEN_PIN_BUDGET_GB`
-  ≥ expert banks, all banks mlock'd), q8_0 KV, prefill chunk 8192.
+  to RAM/disk and swapped back), growable KV up to 524288 tokens (YaRN x2 over 262144),
+  expert VMM arena + overlap scheduling (no CUDA-graph recaptures), all ~24.61 GiB of
+  expert banks CUDA-pinned in RAM (32 GiB pin budget), q8_0 KV, prefill chunk 4096.
 * It runs as the **system** unit `freetoken-serve` (template
   `scripts/systemd/freetoken-serve.service.in`, installed by `sudo scripts/systemd/install.sh`).
   A system unit because only PID 1 grants `LimitMEMLOCK=infinity`; the user manager's cap
@@ -41,9 +41,9 @@ appends across starts; `/v1/stats` answers with nulls while loading). Startup ta
 Do not start the server from an agent shell: the harness can kill shells during the load
 and a server started there dies with them.
 
-Before starting, `free -g` must show MemAvailable ≥ expert banks + ~4 GiB (≈ 20 GiB for
-this model); with `--host-ram-reserve-gb 0` (the owner's choice) the server keeps only
-~6–7 GiB of headroom on a 28 GiB host, and it dies first in a host OOM (OOMScoreAdjust=1000).
+Before starting, allow the ~24.61 GiB expert banks, process overhead and a 4 GiB host
+reserve in MemAvailable. This profile was tested with `[wsl2] memory=64GB`; swap does
+not substitute for resident expert-bank RAM. The unit uses OOMScoreAdjust=1000.
 Never run torch-backed pytest beside the live model; stop the server first
 (`tests/scheduler` etc. need ~1 GiB, the OOM sweep of 2026-09-06 killed a server this way).
 
@@ -51,6 +51,9 @@ Never run torch-backed pytest beside the live model; stop the server first
 
 1. `git clone` the fork and `uv sync`; put the model under `~/ai/models/` (or set
    `FREETOKEN_MODEL` in `~/.config/freetoken/serve.env`).
+   Ornith Q6_K / Ada is the fallback without `serve.env`. The optional
+   `scripts/serve-env.examples/ornith-ada.env` records the same settings; copy it only
+   when you want host overrides. The installer does not download the checkpoint.
 2. `sudo scripts/systemd/install.sh` — renders the unit for this user/repo path and makes
    **memlock unlimited for this user, now and after every reboot**: `user@UID` drop-in,
    `system.conf.d`/`user.conf.d` `DefaultLimitMEMLOCK=infinity`, `limits.d` for shells/ssh,
@@ -61,7 +64,7 @@ Never run torch-backed pytest beside the live model; stop the server first
    Verify: `sudo systemctl show -p LimitMEMLOCK freetoken-serve` → `infinity`, and after a
    start the log must not contain "settled pageable" (`acceptance.sh R6`).
 3. Check `scripts/serve-default.sh` knobs for the host: `FREETOKEN_PIN_BUDGET_GB` must stay
-   ≥ 15.41 GiB (banks) so the whole model is in RAM — lower it only if the host cannot spare
+   ≥ 24.61 GiB (Ornith Q6_K banks; default budget 32) so the whole model is in RAM — lower it only if the host cannot spare
    the RAM, accepting CPU-decode layers. CUDA arch is auto-detected
    (`TVM_FFI_CUDA_ARCH_LIST`, 8.9 on Ada, 12.0 on Blackwell).
 4. Start as above, then verify with `benchmarks/switchyard_soak/checks/acceptance.sh R3`
@@ -74,9 +77,9 @@ Never run torch-backed pytest beside the live model; stop the server first
    `--memory-ratio 1.00`; the script tries 1.00 first and, only if the server fails to start,
    capture its graphs or serve 8K/80K/256K prompts, bisects downward between the last good
    and the last bad ratio (step 0.005). The winner is written to
-   `~/.config/freetoken/serve.env` as `FREETOKEN_MEMORY_RATIO` (the launcher's own 0.91 is
-   just the safe fallback until this has run) and the server is left running on it. Trials
-   are logged in `~/.cache/freetoken/logs/tune-memory-ratio.tsv`. Re-run after a driver,
+   `~/.config/freetoken/serve.env` as `FREETOKEN_MEMORY_RATIO`. The launcher defaults
+   to 1.00, but each new GPU/driver/model must pass tuning; this machine's result is not a guarantee.
+   Trials are logged in `~/.cache/freetoken/logs/tune-memory-ratio.tsv`. Re-run after a driver,
    VRAM or model change. Do not "leave 1 GB free for safety" by hand: the bisection already
    found the edge on this host.
 

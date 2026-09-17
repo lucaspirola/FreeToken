@@ -106,9 +106,9 @@ only, I=1856) plus one shared expert.
 
 ### Launch profiles
 
-**Default profile (2026-09-17) — `scripts/serve-default.sh`, served by the `freetoken-serve`
-system unit (`sudo scripts/systemd/install.sh`).** This is the configuration every host runs;
-P1/P2 below are kept for history. Single lane: `--max-running-requests 1
+**Historical Nemotron single-lane profile (2026-09-17).** The repository launcher now
+defaults to Ornith Q6_K on Ada (see `CLAUDE.md`); these Nemotron measurements are not
+the no-config launch settings. Single lane: `--max-running-requests 1
 --linear-state-slots 13`, growable KV `--kv-grow-step-tokens 65536` up to
 `--num-tokens 1048576 --max-seq-len-override 1048576`, `--kv-cache-dtype q8_0`,
 `--memory-ratio 0.91 --max-prefill-length 8192`, session spill 1 GiB RAM / 50 GiB disk,
@@ -125,7 +125,7 @@ the whole model in RAM (mlock'd; needs `LimitMEMLOCK=infinity`, hence the system
 free VRAM is expert slots not used, so it tries 1.00 first and bisects downward (0.005 steps)
 only when a trial fails to start, capture graphs or serve 8K/80K/256K prompts; the result
 goes to `~/.config/freetoken/serve.env` (`FREETOKEN_MEMORY_RATIO`), which the launcher
-sources — its literal 0.91 is only the untuned fallback. On the 5080 (16 GB) 1.00 itself
+sources. The historical Nemotron fallback was 0.91. On the 5080 (16 GB) 1.00 itself
 passed: 0.00 GiB free after graph capture, 2056 expert slots (vs ~1.3 GiB free / 1985 slots
 at 0.91), KV growth to 256K still funded from the arena, decode unchanged on the synthetic
 probe (167 tok/s at 80K, 148 tok/s at 256K); the extra slots only pay off as a higher expert

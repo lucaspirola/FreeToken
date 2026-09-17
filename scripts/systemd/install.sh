@@ -81,7 +81,7 @@ echo "     Free VRAM is wasted expert slots; another host's ratio does not trans
 # 4. WSL: the VM's RAM cap is set on the Windows side and must hold the pinned banks.
 if grep -qi microsoft /proc/version; then
   total_gib=$(( $(awk '/MemTotal/{print $2}' /proc/meminfo) / 1024 / 1024 ))
-  echo "WSL detected: this VM has ${total_gib} GiB RAM. Pinning needs ~expert banks + 4 GiB (>= 20 GiB"
-  echo "for Nemotron 3.5 Lightning) -> set [wsl2] memory=<N>GB in %USERPROFILE%\\.wslconfig on Windows"
+  echo "WSL detected: this VM has ${total_gib} GiB RAM. Ornith Q6_K needs ~24.61 GiB for expert banks"
+  echo "plus process overhead and a 4 GiB reserve; tested with [wsl2] memory=64GB in %USERPROFILE%\\.wslconfig."
   echo "if it is smaller, then 'wsl --shutdown'. /etc/wsl.conf must keep [boot] systemd=true."
 fi
