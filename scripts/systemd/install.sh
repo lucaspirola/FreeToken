@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
-# Install (or re-render) the freetoken-serve SYSTEM unit for this host, plus the
-# user-manager memlock drop-in that lets the whole model be pinned in RAM.
+# Install (or re-render) the freetoken-serve SYSTEM unit for this host and make the
+# "whole model in RAM" capability (unlimited RLIMIT_MEMLOCK for this user) effective NOW and
+# permanent across reboots.
 #
-#   sudo scripts/systemd/install.sh          install/update for the invoking (sudo) user
-#   scripts/systemd/install.sh --print       render the unit to stdout only (no root)
+#   sudo scripts/systemd/install.sh            install/update for the invoking (sudo) user
+#   sudo scripts/systemd/install.sh --enable   ...and start the server at boot (grabs the GPU)
+#   scripts/systemd/install.sh --print         render the unit to stdout only (no root)
+#
+# What it writes (all persistent, all idempotent):
+#   /etc/systemd/system/freetoken-serve.service            the server (LimitMEMLOCK=infinity)
+#   /etc/systemd/system/user@UID.service.d/memlock.conf    user manager: unlimited memlock
+#   /etc/systemd/system.conf.d/freetoken-memlock.conf      DefaultLimitMEMLOCK=infinity (services)
+#   /etc/systemd/user.conf.d/freetoken-memlock.conf        DefaultLimitMEMLOCK=infinity (user units)
+#   /etc/security/limits.d/90-freetoken-memlock.conf       shells / ssh / su for this user (PAM)
+# and raises the running user manager's memlock limit with prlimit so `systemd-run --user`
+# and new user units pin immediately, without waiting for a re-login or `wsl --shutdown`.
 #
 # After install:  sudo systemctl reset-failed freetoken-serve; sudo systemctl start freetoken-serve
-# The user@UID memlock drop-in takes effect for --user units after the user manager
-# restarts (WSL: `wsl --shutdown`); the system unit does not depend on it.
 set -euo pipefail
 HERE=$(dirname "$(readlink -f "$0")")
 REPO=$(cd "$HERE/../.." && pwd)
@@ -25,14 +34,43 @@ if [ "${1:-}" = "--print" ]; then
   exit 0
 fi
 if [ "$(id -u)" -ne 0 ]; then
-  echo "run as root: sudo $0   (or $0 --print to preview)" >&2
+  echo "run as root: sudo $0 [--enable]   (or $0 --print to preview)" >&2
   exit 1
 fi
 
+# 1. The server unit itself.
 render > /etc/systemd/system/freetoken-serve.service
-install -d "/etc/systemd/system/user@$UID_NUM.service.d"
+
+# 2. Permanent memlock limits: user manager drop-in, manager defaults, PAM limits.
+install -d "/etc/systemd/system/user@$UID_NUM.service.d" /etc/systemd/system.conf.d /etc/systemd/user.conf.d /etc/security/limits.d
 printf '[Service]\nLimitMEMLOCK=infinity\n' > "/etc/systemd/system/user@$UID_NUM.service.d/memlock.conf"
+printf '[Manager]\nDefaultLimitMEMLOCK=infinity\n' > /etc/systemd/system.conf.d/freetoken-memlock.conf
+printf '[Manager]\nDefaultLimitMEMLOCK=infinity\n' > /etc/systemd/user.conf.d/freetoken-memlock.conf
+printf '%s soft memlock unlimited\n%s hard memlock unlimited\n' "$USER_NAME" "$USER_NAME" > /etc/security/limits.d/90-freetoken-memlock.conf
+
 install -d -o "$USER_NAME" -g "$USER_NAME" "$HOME_DIR/.cache/freetoken/logs"
 systemctl daemon-reload
+
+# 3. Make it effective for the CURRENT session: raise the limit on the live user manager
+#    (children started from now on inherit it). Best effort; the system unit never needs it.
+mgr_pid=$(pgrep -u "$USER_NAME" -x systemd | head -1 || true)
+if [ -n "$mgr_pid" ]; then
+  prlimit --pid "$mgr_pid" --memlock=unlimited:unlimited && \
+    echo "raised memlock on the running user manager (pid $mgr_pid)"
+fi
+
+if [ "${1:-}" = "--enable" ]; then
+  systemctl enable freetoken-serve
+  echo "enabled at boot (it stops the embedder and takes the GPU when it starts)"
+fi
+
 echo "installed /etc/systemd/system/freetoken-serve.service for $USER_NAME ($REPO)"
-echo "installed /etc/systemd/system/user@$UID_NUM.service.d/memlock.conf"
+echo "installed memlock=unlimited for $USER_NAME: user@$UID_NUM drop-in, system/user manager defaults, limits.d"
+
+# 4. WSL: the VM's RAM cap is set on the Windows side and must hold the pinned banks.
+if grep -qi microsoft /proc/version; then
+  total_gib=$(( $(awk '/MemTotal/{print $2}' /proc/meminfo) / 1024 / 1024 ))
+  echo "WSL detected: this VM has ${total_gib} GiB RAM. Pinning needs ~expert banks + 4 GiB (>= 20 GiB"
+  echo "for Nemotron 3.5 Lightning) -> set [wsl2] memory=<N>GB in %USERPROFILE%\\.wslconfig on Windows"
+  echo "if it is smaller, then 'wsl --shutdown'. /etc/wsl.conf must keep [boot] systemd=true."
+fi

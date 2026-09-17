@@ -45,8 +45,15 @@ Never run torch-backed pytest beside the live model; stop the server first
 
 1. `git clone` the fork and `uv sync`; put the model under `~/ai/models/` (or set
    `FREETOKEN_MODEL` in `~/.config/freetoken/serve.env`).
-2. `sudo scripts/systemd/install.sh` — renders the unit for this user/repo path and installs
-   the `user@UID` memlock drop-in.
+2. `sudo scripts/systemd/install.sh` — renders the unit for this user/repo path and makes
+   **memlock unlimited for this user, now and after every reboot**: `user@UID` drop-in,
+   `system.conf.d`/`user.conf.d` `DefaultLimitMEMLOCK=infinity`, `limits.d` for shells/ssh,
+   plus `prlimit` on the running user manager so the current session already pins. Add
+   `--enable` only if the server should take the GPU at boot. On WSL it also reminds you
+   that the VM's RAM cap (`[wsl2] memory=` in `%USERPROFILE%\.wslconfig`) must hold the
+   banks + ~4 GiB, and that `/etc/wsl.conf` keeps `[boot] systemd=true`.
+   Verify: `sudo systemctl show -p LimitMEMLOCK freetoken-serve` → `infinity`, and after a
+   start the log must not contain "settled pageable" (`acceptance.sh R6`).
 3. Check `scripts/serve-default.sh` knobs for the host: `FREETOKEN_PIN_BUDGET_GB` must stay
    ≥ 15.41 GiB (banks) so the whole model is in RAM — lower it only if the host cannot spare
    the RAM, accepting CPU-decode layers; `FREETOKEN_MEMORY_RATIO` 0.91 is fine on 16–48 GB
