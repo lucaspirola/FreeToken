@@ -43,6 +43,25 @@ spills 1320 / 0 failed, restores 405 (56 failed with 6 GDN slots — "no GDN sna
 available for cold session restore", fixed by 13 slots: 164 restores / 0 failed). Host
 MemAvailable stayed 5.4–7.2 GB (reserve 0 by the owner's choice).
 
+## memory-ratio A/B: 1.00 (tuned) vs 0.91 (old default), same profile + `--moe-collect-stats`
+
+`scripts/tune-memory-ratio.sh` found 1.00 serviceable on this 16 GB card (0.00 GiB free after
+graph capture). Passthrough soak, 5 min, c=16, run `benchmarks/switchyard_soak/runs/ratio-ab-2cebc8f`
+(gitignored). Expert hit rate = 1 − Δmissing/Δactive from `/v1/stats scheduler.moe.decode`
+over the soak window.
+
+| ratio | expert slots | decode expert hit rate | misses / layer call | requests | errors | rps | p50 | p95 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1.00 | 2056 | **94.7 %** | 0.337 | 353 | 0 | 1.14 | 14.2 s | 19.6 s |
+| 0.91 | 1924 | 92.5 % | 0.478 | 323 | 0 | 1.03 | 15.1 s | 22.6 s |
+
+The hit rate is the clean signal: 30 % fewer expert fetches per decode step with the extra 132
+slots. The latency/throughput gap (+9 % requests, −13 % p95) points the same way but is one
+5-minute run per arm; an unrelated `julia` job held ~120 % CPU during both arms (equal in both,
+so it does not bias the comparison, but it may depress both absolute numbers: the earlier 0.91
+passthrough run without it did 353 requests / p95 20.8 s). Single-lane decode alone was
+unchanged on the repetitive probe (147–167 tok/s) at every ratio.
+
 ## Crash fixed on the way
 
 The 16-lane passthrough soak killed the scheduler after 12 clean minutes
