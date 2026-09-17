@@ -56,12 +56,21 @@ Never run torch-backed pytest beside the live model; stop the server first
    start the log must not contain "settled pageable" (`acceptance.sh R6`).
 3. Check `scripts/serve-default.sh` knobs for the host: `FREETOKEN_PIN_BUDGET_GB` must stay
    ≥ 15.41 GiB (banks) so the whole model is in RAM — lower it only if the host cannot spare
-   the RAM, accepting CPU-decode layers; `FREETOKEN_MEMORY_RATIO` 0.91 is fine on 16–48 GB
-   GPUs (more VRAM simply means more resident experts / KV). CUDA arch is auto-detected
+   the RAM, accepting CPU-decode layers. CUDA arch is auto-detected
    (`TVM_FFI_CUDA_ARCH_LIST`, 8.9 on Ada, 12.0 on Blackwell).
 4. Start as above, then verify with `benchmarks/switchyard_soak/checks/acceptance.sh R3`
    (one graph capture, KV growth, no tracebacks) after a couple of long requests, and
    `... R6` (banks pinned, memlock unlimited).
+5. **Fill the VRAM: `scripts/tune-memory-ratio.sh`** (part of the installation, ~20 min,
+   restarts the server several times). Free VRAM is wasted expert slots, so the target is
+   `--memory-ratio 1.00`; the script tries 1.00 first and, only if the server fails to start,
+   capture its graphs or serve 8K/80K/256K prompts, bisects downward between the last good
+   and the last bad ratio (step 0.005). The winner is written to
+   `~/.config/freetoken/serve.env` as `FREETOKEN_MEMORY_RATIO` (the launcher's own 0.91 is
+   just the safe fallback until this has run) and the server is left running on it. Trials
+   are logged in `~/.cache/freetoken/logs/tune-memory-ratio.tsv`. Re-run after a driver,
+   VRAM or model change. Do not "leave 1 GB free for safety" by hand: the bisection already
+   found the edge on this host.
 
 ## Working on the code
 

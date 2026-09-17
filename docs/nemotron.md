@@ -121,6 +121,15 @@ expert cache is a fixed-capacity VMM arena, so KV growth/shrink never rebuilds i
 CUDA graphs are captured once per process; overlap scheduling stays on with growable KV
 (`_drain_inflight` boundaries). `FREETOKEN_PIN_BUDGET_GB` ≥ the 15.41 GiB expert banks puts
 the whole model in RAM (mlock'd; needs `LimitMEMLOCK=infinity`, hence the system unit).
+`--memory-ratio` is per host and tuned at install time by `scripts/tune-memory-ratio.sh`:
+free VRAM is expert slots not used, so it tries 1.00 first and bisects downward (0.005 steps)
+only when a trial fails to start, capture graphs or serve 8K/80K/256K prompts; the result
+goes to `~/.config/freetoken/serve.env` (`FREETOKEN_MEMORY_RATIO`), which the launcher
+sources — its literal 0.91 is only the untuned fallback. On the 5080 (16 GB) 1.00 itself
+passed: 0.00 GiB free after graph capture, 2056 expert slots (vs ~1.3 GiB free / 1985 slots
+at 0.91), KV growth to 256K still funded from the arena, decode unchanged on the synthetic
+probe (167 tok/s at 80K, 148 tok/s at 256K); the extra slots only pay off as a higher expert
+hit rate on varied real traffic, which is not what the probe measures.
 Numbers: `benchmarks/results/nemotron35_lightning_5080_single_lane_2026-09-17.md`.
 Operations for agents: `CLAUDE.md`.
 
