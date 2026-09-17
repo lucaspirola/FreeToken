@@ -25,13 +25,13 @@ WSL2 box, the Ada box); per-host differences live in `$HOME/.config/freetoken/se
 ```
 ft-up      # = sudo systemctl start freetoken-serve + wait for readiness; starts are never
            #   rate-limited (no reset-failed ritual)
-ft-down    # = sudo systemctl stop freetoken-serve
+ft-down    # = sudo systemctl stop freetoken-serve, nothing more (it brings nothing back up)
 ```
 Both are symlinks in `~/.local/bin` to `scripts/ft-up` / `scripts/ft-down` (installed by
 `install.sh`). The piro-board embedder exists ONLY on the RTX 5080 box: there the unit stops
-it before starting and restarts it on stop (both steps are `-`-prefixed, so they are no-ops
-on hosts without it). If some other process holds VRAM, `nvidia-smi` names it: stop THAT
-service, don't kill blindly. Readiness, if you watch the log yourself: `API server is ready` AFTER
+it before starting (a `-`-prefixed step, a no-op on hosts without it). Restoring it, or
+anything else, after `ft-down` is someone else's responsibility, never this unit's. If some
+other process holds VRAM, `nvidia-smi` names it: stop THAT service, don't kill blindly. Readiness, if you watch the log yourself: `API server is ready` AFTER
 the last `ServerArgs(model_path` line in `~/.cache/freetoken/logs/ft_serve.log` (the log
 appends across starts; `/v1/stats` answers with nulls while loading). Startup takes 1–3 min
 (serial expert-bank build when free RAM is low); the first requests after a start are slow
