@@ -20,18 +20,20 @@ WSL2 box, the Ada box); per-host differences live in `$HOME/.config/freetoken/se
   A system unit because only PID 1 grants `LimitMEMLOCK=infinity`; the user manager's cap
   leaves the banks pageable.
 
-## "Clean the GPU and bring FreeToken up"
+## Bring FreeToken up / down
 
 ```
 ft-up      # = sudo systemctl start freetoken-serve + wait for readiness; starts are never
            #   rate-limited (no reset-failed ritual)
-ft-down    # = sudo systemctl stop freetoken-serve, nothing more (it brings nothing back up)
+ft-down    # = sudo systemctl stop freetoken-serve, nothing more
 ```
 Both are symlinks in `~/.local/bin` to `scripts/ft-up` / `scripts/ft-down` (installed by
-`install.sh`). The piro-board embedder exists ONLY on the RTX 5080 box: there the unit stops
-it before starting (a `-`-prefixed step, a no-op on hosts without it). Restoring it, or
-anything else, after `ft-down` is someone else's responsibility, never this unit's. If some
-other process holds VRAM, `nvidia-smi` names it: stop THAT service, don't kill blindly. Readiness, if you watch the log yourself: `API server is ready` AFTER
+`install.sh`). **Neither touches anything else on the GPU**: `ft-up` leaves whatever is
+running there running (the memory ratio is a fraction of the FREE VRAM, so the server sizes
+itself to what is left) and `ft-down` brings nothing back up. Stopping another GPU service
+(on the RTX 5080 box the piro-board embedder holds 3–10 GB) is the owner's decision, taken
+explicitly and separately; never do it as part of "bring FreeToken up". `nvidia-smi` shows
+who holds VRAM. Readiness, if you watch the log yourself: `API server is ready` AFTER
 the last `ServerArgs(model_path` line in `~/.cache/freetoken/logs/ft_serve.log` (the log
 appends across starts; `/v1/stats` answers with nulls while loading). Startup takes 1–3 min
 (serial expert-bank build when free RAM is low); the first requests after a start are slow

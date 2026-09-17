@@ -4,7 +4,7 @@
 # A SYSTEM unit (not --user) because only PID 1 can grant LimitMEMLOCK=infinity, which the
 # whole-model-in-RAM profile needs (the user manager's hard cap left MoE banks pageable).
 # Not enabled at boot on purpose: other GPU services (e.g. the piro-board embedder) own the
-# GPU by default; this unit takes it on start. It restores nothing on stop.
+# GPU by default and this unit coexists with whatever is running.
 [Unit]
 Description=FreeToken Nemotron-3.5-Lightning server (scripts/serve-default.sh)
 After=network.target
@@ -20,11 +20,10 @@ WorkingDirectory=@REPO@
 Environment=HOME=@HOME@
 Environment=PATH=@HOME@/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/wsl/lib
 Environment=XDG_RUNTIME_DIR=/run/user/@UID@
-# Free the GPU: stop known GPU-holding user services (ignored when absent on this host).
-ExecStartPre=-/usr/bin/systemctl --user stop piro-board-embedder.service
-ExecStartPre=/bin/sleep 2
+# Whatever else is on the GPU stays there: this unit stops nothing before starting (the
+# memory ratio is a fraction of the VRAM that is FREE, so the server sizes itself to what is
+# left) and brings nothing back up on stop. Freeing the GPU is someone else's decision.
 ExecStart=@REPO@/scripts/serve-default.sh
-# On stop nothing is brought back up: what owns the GPU afterwards is someone else's job.
 StandardOutput=append:@HOME@/.cache/freetoken/logs/ft_serve.log
 StandardError=append:@HOME@/.cache/freetoken/logs/ft_serve.log
 OOMScoreAdjust=1000

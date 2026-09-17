@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Bring FreeToken up in its ONE default profile and wait until it serves. No steps to remember:
-#   ft-up            start (clears any failed state, frees the GPU from the embedder) and wait
+#   ft-up            start (clears any failed state; touches NOTHING else on the GPU) and wait
 #   ft-up --no-wait  start and return immediately
 # Installed into ~/.local/bin by scripts/systemd/install.sh. Companion: ft-down.
 set -u

@@ -67,7 +67,7 @@ fi
 
 if [ "${1:-}" = "--enable" ]; then
   systemctl enable freetoken-serve
-  echo "enabled at boot (it stops the embedder and takes the GPU when it starts)"
+  echo "enabled at boot (it shares the GPU with whatever else is running there)"
 fi
 
 echo "installed /etc/systemd/system/freetoken-serve.service for $USER_NAME ($REPO)"
