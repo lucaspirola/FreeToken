@@ -26,6 +26,8 @@
 # Per-host knobs (environment, or $HOME/.config/freetoken/serve.env which is sourced):
 #   FREETOKEN_MODEL               model directory
 #   FREETOKEN_PORT                default 1919
+#   FREETOKEN_MODEL_NAME          served model name (default nemotron-3.5-lightning)
+#   FREETOKEN_REASONING_PARSER    default nemotron_v3
 #   FREETOKEN_PIN_BUDGET_GB       default 17 (>= expert banks; lower only if RAM is short)
 #   FREETOKEN_HOST_RAM_RESERVE_GB default 0 (RAM the preflight keeps free; owner's choice)
 #   FREETOKEN_MEMORY_RATIO        default 0.91 of VRAM (KV ceiling + expert cache)
@@ -56,7 +58,7 @@ export FREETOKEN_GROWABLE_OVERLAP="${FREETOKEN_GROWABLE_OVERLAP:-1}"
 
 mkdir -p "$CACHE"/{hidden-states,pooled-sink,spill,trace,logs}
 
-exec uv run ft serve \
+exec uv run --no-sync ft serve \
   --model "$MODEL" \
   --host 127.0.0.1 --port "${FREETOKEN_PORT:-1919}" \
   --max-running-requests 1 --linear-state-slots 13 --kv-grow-step-tokens 65536 \
@@ -67,10 +69,10 @@ exec uv run ft serve \
   --session-spill-ram-gb 1 --session-spill-disk-gb 50 --session-spill-limit-gb 50 \
   --session-spill-dir "$CACHE/spill" \
   --enable-cache-report \
-  --served-model-name nemotron-3.5-lightning \
-  --served-model-alias nemotron-3.5-lightning-judge \
-  --served-model-alias nemotron-3.5-lightning-collect \
-  --reasoning-parser nemotron_v3 --tool-call-parser qwen3_coder \
+  --served-model-name "${FREETOKEN_MODEL_NAME:-nemotron-3.5-lightning}" \
+  --served-model-alias "${FREETOKEN_MODEL_NAME:-nemotron-3.5-lightning}-judge" \
+  --served-model-alias "${FREETOKEN_MODEL_NAME:-nemotron-3.5-lightning}-collect" \
+  --reasoning-parser "${FREETOKEN_REASONING_PARSER:-nemotron_v3}" --tool-call-parser qwen3_coder \
   --force-nonempty-content --max-output-tokens 16384 \
   --trace-dir "$CACHE/trace" \
   --hidden-states-dir "$CACHE/hidden-states" --hidden-states-max-tokens 4096 \
