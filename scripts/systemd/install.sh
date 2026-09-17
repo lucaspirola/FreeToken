@@ -16,7 +16,7 @@
 # and raises the running user manager's memlock limit with prlimit so `systemd-run --user`
 # and new user units pin immediately, without waiting for a re-login or `wsl --shutdown`.
 #
-# After install:  sudo systemctl reset-failed freetoken-serve; sudo systemctl start freetoken-serve
+# After install:  ft-up   (and ft-down to hand the GPU back) -- both land in ~/.local/bin
 set -euo pipefail
 HERE=$(dirname "$(readlink -f "$0")")
 REPO=$(cd "$HERE/../.." && pwd)
@@ -51,6 +51,12 @@ printf '%s soft memlock unlimited\n%s hard memlock unlimited\n' "$USER_NAME" "$U
 install -d -o "$USER_NAME" -g "$USER_NAME" "$HOME_DIR/.cache/freetoken/logs"
 systemctl daemon-reload
 
+# 2b. The two commands anyone needs: ft-up / ft-down on the user's PATH (~/.local/bin).
+install -d -o "$USER_NAME" -g "$USER_NAME" "$HOME_DIR/.local/bin"
+for cmd in ft-up ft-down; do
+  ln -sfn "$REPO/scripts/$cmd" "$HOME_DIR/.local/bin/$cmd"
+done
+
 # 3. Make it effective for the CURRENT session: raise the limit on the live user manager
 #    (children started from now on inherit it). Best effort; the system unit never needs it.
 mgr_pid=$(pgrep -u "$USER_NAME" -x systemd | head -1 || true)
@@ -65,6 +71,7 @@ if [ "${1:-}" = "--enable" ]; then
 fi
 
 echo "installed /etc/systemd/system/freetoken-serve.service for $USER_NAME ($REPO)"
+echo "installed ft-up / ft-down in $HOME_DIR/.local/bin (bring the server up / hand the GPU back)"
 echo "installed memlock=unlimited for $USER_NAME: user@$UID_NUM drop-in, system/user manager defaults, limits.d"
 echo "NEXT (as $USER_NAME, after the first successful start): scripts/tune-memory-ratio.sh"
 echo "  -> binary-searches the largest --memory-ratio THIS GPU + model can serve (tries 1.00 first,"

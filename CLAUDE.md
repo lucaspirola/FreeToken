@@ -23,15 +23,19 @@ WSL2 box, the Ada box); per-host differences live in `$HOME/.config/freetoken/se
 ## "Clean the GPU and bring FreeToken up"
 
 ```
-nvidia-smi                                   # who holds VRAM? stop THEIR service, don't kill blindly
-systemctl --user stop piro-board-embedder     # the unit also does this itself (ExecStartPre)
-sudo systemctl reset-failed freetoken-serve   # always, a SIGTERM stop leaves it 'failed'
-sudo systemctl start freetoken-serve
+ft-up      # = sudo systemctl start freetoken-serve + wait for readiness; starts are never
+           #   rate-limited (no reset-failed ritual)
+ft-down    # = sudo systemctl stop freetoken-serve
 ```
-Readiness: wait for `API server is ready` AFTER the last `ServerArgs(model_path` line in
-`~/.cache/freetoken/logs/ft_serve.log` (the log appends across starts; `/v1/stats` answers
-with nulls while loading). Startup takes 1–3 min (serial expert-bank build when free RAM is
-low). Stop with `sudo systemctl stop freetoken-serve` (the embedder is restored on stop).
+Both are symlinks in `~/.local/bin` to `scripts/ft-up` / `scripts/ft-down` (installed by
+`install.sh`). The piro-board embedder exists ONLY on the RTX 5080 box: there the unit stops
+it before starting and restarts it on stop (both steps are `-`-prefixed, so they are no-ops
+on hosts without it). If some other process holds VRAM, `nvidia-smi` names it: stop THAT
+service, don't kill blindly. Readiness, if you watch the log yourself: `API server is ready` AFTER
+the last `ServerArgs(model_path` line in `~/.cache/freetoken/logs/ft_serve.log` (the log
+appends across starts; `/v1/stats` answers with nulls while loading). Startup takes 1–3 min
+(serial expert-bank build when free RAM is low); the first requests after a start are slow
+(prefill < 1K tok/s) until the bank build finishes, ~3 min.
 Do not start the server from an agent shell: the harness can kill shells during the load
 and a server started there dies with them.
 

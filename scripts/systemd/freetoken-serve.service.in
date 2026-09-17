@@ -8,6 +8,9 @@
 [Unit]
 Description=FreeToken Nemotron-3.5-Lightning server (scripts/serve-default.sh)
 After=network.target
+# Never rate-limit starts: a crashed/stopped server must come back with a plain `start`
+# (ft-up), no `reset-failed` ritual.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
