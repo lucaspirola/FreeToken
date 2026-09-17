@@ -116,6 +116,58 @@ def test_convert_list_input_with_tool_roundtrip_and_tools():
     assert spec.parse_tools
 
 
+def test_convert_codex_namespace_tool_to_flat_template_and_replay():
+    tools = [
+        {
+            "type": "namespace",
+            "name": "ornith",
+            "description": "Local workers",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "spawn_ornith1_5_35b",
+                    "description": "Spawn a worker",
+                    "parameters": {"type": "object", "properties": {"prompt": {"type": "string"}}},
+                }
+            ],
+        }
+    ]
+    req = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-x",
+            "input": [
+                {"type": "message", "role": "user", "content": "delegate"},
+                {
+                    "type": "function_call",
+                    "namespace": "ornith",
+                    "name": "spawn_ornith1_5_35b",
+                    "call_id": "call_1",
+                    "arguments": '{"prompt":"check"}',
+                },
+                {"type": "function_call_output", "call_id": "call_1", "output": "done"},
+            ],
+            "tools": tools,
+        }
+    )
+    spec = RP.convert_responses_to_genspec(req, {})
+    assert [t["function"]["name"] for t in spec.template_tools] == ["spawn_ornith1_5_35b"]
+    assert spec.messages[1]["tool_calls"][0]["function"]["name"] == "spawn_ornith1_5_35b"
+
+
+def test_namespace_member_name_collisions_are_qualified():
+    tools = [
+        {"type": "function", "name": "run", "parameters": {"type": "object"}},
+        {
+            "type": "namespace",
+            "name": "ornith",
+            "tools": [{"type": "function", "name": "run", "parameters": {"type": "object"}}],
+        },
+    ]
+    converted = RP._convert_tools(tools)
+    assert [t["function"]["name"] for t in converted] == ["functions__run", "ornith__run"]
+    assert RP._response_tool_name("ornith__run", tools) == ("ornith", "run")
+
+
 def test_convert_reasoning_item_merges_into_assistant_turn():
     # One turn's reasoning/message/function_call items fold into ONE assistant message.
     req = ResponsesRequest.model_validate(
@@ -265,6 +317,25 @@ def test_build_response_text_and_tool():
     assert body["output"][1]["name"] == "get_weather"
     assert body["output"][1]["arguments"] == '{"city": "SF"}'
     assert body["usage"]["input_tokens"] == 8 and body["usage"]["output_tokens"] == 4
+
+
+def test_build_response_restores_codex_tool_namespace():
+    tools = [
+        {
+            "type": "namespace",
+            "name": "ornith",
+            "tools": [{"type": "function", "name": "spawn_ornith1_5_35b", "parameters": {"type": "object"}}],
+        }
+    ]
+    result = GenResult(
+        reasoning="", content="",
+        tool_calls=[ToolCallItem(tool_index=0, name="spawn_ornith1_5_35b", parameters="{}")],
+        finish_reason="tool_calls", prompt_tokens=3, completion_tokens=2,
+    )
+    req = ResponsesRequest.model_validate({"model": "gpt-x", "input": "delegate", "tools": tools})
+    body = RP.build_responses_response(result, req, "resp_1", 0).model_dump(mode="json")
+    assert body["output"][0]["namespace"] == "ornith"
+    assert body["output"][0]["name"] == "spawn_ornith1_5_35b"
 
 
 # --------------------------------------------------------------------------- #

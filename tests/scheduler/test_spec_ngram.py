@@ -198,9 +198,10 @@ class _FakeCacheManager:
 class _FakeCapture:
     instances: List["_FakeCapture"] = []
 
-    def __init__(self, num_tokens: int, *, fused: bool = True) -> None:
+    def __init__(self, num_tokens: int, *, fused: bool = True, pool=None) -> None:
         self.num_tokens = num_tokens
         self.fused = fused
+        self.pool = pool
         self.commits: List[tuple] = []
         _FakeCapture.instances.append(self)
 
