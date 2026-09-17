@@ -61,8 +61,10 @@ Never run torch-backed pytest beside the live model; stop the server first
 4. Start as above, then verify with `benchmarks/switchyard_soak/checks/acceptance.sh R3`
    (one graph capture, KV growth, no tracebacks) after a couple of long requests, and
    `... R6` (banks pinned, memlock unlimited).
-5. **Fill the VRAM: `scripts/tune-memory-ratio.sh`** (part of the installation, ~20 min,
-   restarts the server several times). Free VRAM is wasted expert slots, so the target is
+5. **Fill the VRAM: `scripts/tune-memory-ratio.sh`** (part of the installation on EVERY
+   machine, for whatever GPU and model that host runs — the 5080 result does not transfer
+   to the Ada box or to another checkpoint; ~20 min, restarts the server several times).
+   Free VRAM is wasted expert slots, so the target is
    `--memory-ratio 1.00`; the script tries 1.00 first and, only if the server fails to start,
    capture its graphs or serve 8K/80K/256K prompts, bisects downward between the last good
    and the last bad ratio (step 0.005). The winner is written to
