@@ -1,0 +1,34 @@
+# Persistent FreeToken server. TEMPLATE: rendered + installed by scripts/systemd/install.sh
+# (sudo scripts/systemd/install.sh), which fills @USER@ @HOME@ @REPO@ @UID@ for this host.
+# Control: sudo systemctl {start,stop,restart,status} freetoken-serve ; log: ~/.cache/freetoken/logs/ft_serve.log
+# A SYSTEM unit (not --user) because only PID 1 can grant LimitMEMLOCK=infinity, which the
+# whole-model-in-RAM profile needs (the user manager's hard cap left MoE banks pageable).
+# Not enabled at boot on purpose: other GPU services (e.g. the piro-board embedder) own the
+# GPU by default; this unit takes it on start and hands it back on stop.
+[Unit]
+Description=FreeToken Nemotron-3.5-Lightning server (scripts/serve-default.sh)
+After=network.target
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+WorkingDirectory=@REPO@
+Environment=HOME=@HOME@
+Environment=PATH=@HOME@/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/wsl/lib
+Environment=XDG_RUNTIME_DIR=/run/user/@UID@
+# Free the GPU: stop known GPU-holding user services (ignored when absent on this host).
+ExecStartPre=-/usr/bin/systemctl --user stop piro-board-embedder.service
+ExecStartPre=/bin/sleep 2
+ExecStart=@REPO@/scripts/serve-default.sh
+ExecStopPost=-/usr/bin/systemctl --user start piro-board-embedder.service
+StandardOutput=append:@HOME@/.cache/freetoken/logs/ft_serve.log
+StandardError=append:@HOME@/.cache/freetoken/logs/ft_serve.log
+OOMScoreAdjust=1000
+LimitMEMLOCK=infinity
+TimeoutStopSec=90
+SuccessExitStatus=143
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

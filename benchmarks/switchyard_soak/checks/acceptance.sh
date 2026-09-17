@@ -22,9 +22,9 @@ case "${1:-}" in
     grep -q -- '--kv-grow-step-tokens 65536' scripts/serve-default.sh
     grep -q 'FREETOKEN_EXPERT_ARENA=.*:-1' scripts/serve-default.sh
     grep -q 'FREETOKEN_GROWABLE_OVERLAP=.*:-1' scripts/serve-default.sh
-    grep -q '^ExecStart=/home/lucas/ai/FreeToken/scripts/serve-default.sh$' scripts/systemd/freetoken-serve.service
-    cmp -s scripts/systemd/freetoken-serve.service /etc/systemd/system/freetoken-serve.service
-    grep -q 'sudo systemctl {start,stop,restart,status} freetoken-serve' scripts/systemd/freetoken-serve.service
+    grep -q '^ExecStart=@REPO@/scripts/serve-default.sh$' scripts/systemd/freetoken-serve.service.in
+    scripts/systemd/install.sh --print | cmp -s - /etc/systemd/system/freetoken-serve.service
+    grep -q 'sudo systemctl {start,stop,restart,status} freetoken-serve' scripts/systemd/freetoken-serve.service.in
     systemctl is-active --quiet freetoken-serve
     grep -q "max_running_req=1," <<<"$RUN_LOG"
     echo "R2 ok: launcher + installed unit + live single-lane server"
@@ -60,7 +60,7 @@ PY
   R6)
     ! grep -qi "settled pageable" <<<"$RUN_LOG"
     ! grep -qi "mlock.*fail" <<<"$RUN_LOG"
-    grep -q '^LimitMEMLOCK=infinity' scripts/systemd/freetoken-serve.service
+    grep -q '^LimitMEMLOCK=infinity' scripts/systemd/freetoken-serve.service.in
     pid=$(systemctl show -p MainPID --value freetoken-serve)
     grep -q "Max locked memory.*unlimited" "/proc/$pid/limits"
     test -f /etc/systemd/system/user@1000.service.d/memlock.conf

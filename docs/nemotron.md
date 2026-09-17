@@ -106,6 +106,24 @@ only, I=1856) plus one shared expert.
 
 ### Launch profiles
 
+**Default profile (2026-09-17) — `scripts/serve-default.sh`, served by the `freetoken-serve`
+system unit (`sudo scripts/systemd/install.sh`).** This is the configuration every host runs;
+P1/P2 below are kept for history. Single lane: `--max-running-requests 1
+--linear-state-slots 13`, growable KV `--kv-grow-step-tokens 65536` up to
+`--num-tokens 1048576 --max-seq-len-override 1048576`, `--kv-cache-dtype q8_0`,
+`--memory-ratio 0.91 --max-prefill-length 8192`, session spill 1 GiB RAM / 50 GiB disk,
+`FREETOKEN_EXPERT_ARENA=1 FREETOKEN_GROWABLE_OVERLAP=1 FREETOKEN_PIN_BUDGET_GB=17`.
+Why: one session resident on the GPU keeps ~1900 expert slots resident (vs ~1000 with 16
+lanes) and decodes at 150–170 tok/s at any prompt size 8K–256K (vs 16–41 tok/s per lane
+under 16-way contention); the other sessions are checkpointed to RAM/disk and swapped back
+(soak: 16 clients, 0 errors, passthrough p95 18.6 s vs 179 s on the 16-lane profile). The
+expert cache is a fixed-capacity VMM arena, so KV growth/shrink never rebuilds it and decode
+CUDA graphs are captured once per process; overlap scheduling stays on with growable KV
+(`_drain_inflight` boundaries). `FREETOKEN_PIN_BUDGET_GB` ≥ the 15.41 GiB expert banks puts
+the whole model in RAM (mlock'd; needs `LimitMEMLOCK=infinity`, hence the system unit).
+Numbers: `benchmarks/results/nemotron35_lightning_5080_single_lane_2026-09-17.md`.
+Operations for agents: `CLAUDE.md`.
+
 P1 — bring-up profile (single stream, no quantized KV):
 
 ```
