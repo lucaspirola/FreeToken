@@ -1836,6 +1836,56 @@ class OffloadMoeCache:
         logger.info_rank0("mirror restored coverage for %d experts", len(uncovered))
         return len(uncovered)
 
+    def _mirror_stage_layer(self, layer_id: int) -> int:
+        """Give every expert of ``layer_id`` a mirror row before a materialize.
+
+        ``materialize_layer`` copies the whole layer into slots, sourcing each
+        expert from the mirror. Experts already GPU-resident have no mirror row
+        (that is the point of the design), so they must be staged in first.
+        Rows are taken from the free stack, and from mirrored experts of OTHER
+        layers that are also GPU-resident -- those are duplicates, so dropping
+        them cannot break coverage.
+
+        Host-side and synchronous: this is the prefill path, never decode.
+        """
+        pool = self._mirror_pool
+        m = self._mirror
+        base = layer_id * self.num_experts
+        fwd = m["pool_row_of_id"].cpu().tolist()
+        inv = m["id_of_pool_row"].cpu().tolist()
+        missing = [base + e for e in range(self.num_experts)
+                   if fwd[base + e] < 0]
+        if not missing:
+            return 0
+        on_gpu = set(self.id_of_slot[: self.cache_size].cpu().tolist())
+        free = [r for r, owner in enumerate(inv) if owner < 0]
+        if len(free) < len(missing):
+            # Reclaim duplicate rows: an expert that is BOTH on the GPU and
+            # mirrored, and not part of this layer, still has its GPU copy.
+            spare = [r for r, owner in enumerate(inv)
+                     if owner >= 0 and owner in on_gpu
+                     and not (base <= owner < base + self.num_experts)]
+            free.extend(spare[: len(missing) - len(free)])
+        if len(free) < len(missing):
+            raise RuntimeError(
+                f"mirror cannot stage layer {layer_id}: {len(missing)} rows "
+                f"needed, {len(free)} available"
+            )
+        for flat, row in zip(missing, free):
+            old = inv[row]
+            if old >= 0:
+                fwd[old] = -1
+                pool.pool_row_of_id[old] = -1
+            pool._read_row(flat, row)
+            fwd[flat] = row
+            inv[row] = flat
+            pool.pool_row_of_id[flat] = row
+            pool.id_of_pool_row[row] = flat
+        m["pool_row_of_id"].copy_(torch.tensor(fwd, dtype=torch.int32))
+        m["id_of_pool_row"].copy_(torch.tensor(inv, dtype=torch.int32))
+        self._mirror_publish_free_rows()
+        return len(missing)
+
     def copy_missing_mirror(self) -> None:
         """Issue this step's writebacks and admissions, in that order.
 
@@ -1843,6 +1893,7 @@ class OffloadMoeCache:
 
           1. D2H  gpu[slot] -> pool[row]   reads the slot's *old* (victim) bytes
           2. H2D  pool[row] -> gpu[slot]   overwrites the slot with the admission
+
 
         Step 2 reads the same pool row step 1 wrote only in the swap case, where
         the row's new owner is the victim and the admission's source row is that
@@ -2226,19 +2277,35 @@ class OffloadMoeCache:
     def materialize_layer(self, layer_id: int) -> None:
         from freetoken.moe.offload_kernels import materialize_layer
 
+        if getattr(self, "_mirror", None) is not None:
+            # materialize schedules a copy for EVERY expert of the layer,
+            # including ones already GPU-resident -- and a GPU-resident expert
+            # normally has no mirror row, so the swap kernel would see it as a
+            # coverage fault. Stage the whole layer into the mirror first; this
+            # is the prefill path, a host boundary, so the disk reads are off
+            # the decode critical path.
+            self._mirror_stage_layer(layer_id)
+            self.victim_ids.fill_(-1)
         self._pending_src_layer = layer_id
         self._pending_whole_layer = True
-        if getattr(self, "_mirror", None) is not None:
-            self.victim_ids.fill_(-1)
         materialize_layer(self, layer_id)
 
     def reset(self) -> None:
         from freetoken.moe.offload_kernels import reset_cache
+
         if getattr(self, "_mirror", None) is not None:
-            # Dropping every GPU resident would strand any expert the mirror does
-            # not hold (coverage: on_gpu or in_pool). Refill those rows from the
-            # checkpoint first -- a host idle boundary, never a captured path.
-            self._mirror_refill_uncovered()
+            # A cold start, not data loss: reset_cache drops every GPU resident,
+            # which would strand the experts the mirror does not hold. Re-run the
+            # warm start instead -- it refills the GPU from the checkpoint and
+            # rebuilds the mirror's complement, restoring coverage by
+            # construction. Host idle boundary only (graph capture, engine
+            # teardown), never a decode step.
+            reset_cache(self)
+            self.expert_recency.fill_(-1)
+            self.expert_frequency.zero_()
+            self.policy_steps.zero_()
+            self.mirror_warm_start()
+            return
         reset_cache(self)
         # Per-expert recency is not cache_size-shaped, so reset_cache leaves it alone; wipe
         # it here so a new sequence starts with cold hybrid fetch priorities.

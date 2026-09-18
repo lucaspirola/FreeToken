@@ -90,9 +90,13 @@ def _pool(root, capacity):
 
 
 def test_capacity_covers_the_kv_ceiling():
-    # The mirror must hold everything the GPU cannot at its smallest.
-    assert plan_capacity(23, 128, 1552) == 2944 - 1552
-    # Never below one layer, even if the GPU could hold everything.
+    # Everything the GPU cannot hold at its smallest, plus one layer of reserve
+    # rows so a writeback always has a landing spot outside the row its own
+    # admission is uploading from.
+    assert plan_capacity(23, 128, 1552) == (2944 - 1552) + 128
+    # Reserve is configurable; without it the bound is pure coverage.
+    assert plan_capacity(23, 128, 1552, reserve=0) == 2944 - 1552
+    # Never more rows than the model has experts.
     assert plan_capacity(23, 128, 2944) == 128
 
 
@@ -162,14 +166,16 @@ def test_swap_is_a_permutation_preserving_coverage(checkpoint):
 def test_duplicates_make_evictions_free(checkpoint):
     root, _ = checkpoint
     total = LAYERS * EXPERTS
-    gpu_slots = 4
-    # Slack beyond the mandatory complement is spent on duplicates.
-    pool = _pool(root, total - gpu_slots + 3)
+    gpu_slots = 8
+    # Mandatory complement (16) + 3 duplicate rows + 2 held in reserve.
+    pool = _pool(root, total - gpu_slots + 3 + 2)
     try:
         on_gpu = list(range(gpu_slots))
         pool.load_initial(on_gpu)
-        seeded = pool.seed_duplicates(list(reversed(on_gpu)))
-        assert seeded == 3, "every spare row should mirror a GPU resident"
+        seeded = pool.seed_duplicates(list(reversed(on_gpu)), reserve=2)
+        assert seeded == 3, "spare rows beyond the reserve should mirror GPU residents"
+        free_left = sum(1 for f in pool.id_of_pool_row if f < 0)
+        assert free_left == 2, "the reserve must survive seeding"
         before = pool.free_evictions
         # Evicting a duplicated expert costs no writeback.
         duplicated = [f for f in on_gpu if pool.pool_row_of_id[f] >= 0]

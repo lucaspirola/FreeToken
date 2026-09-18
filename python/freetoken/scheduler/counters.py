@@ -320,6 +320,14 @@ def build_moe_counters(moe: Any, collect_decode_stats: bool = False) -> Dict[str
             doc["decode"] = totals()
         except Exception:  # noqa: BLE001 -- a diagnostic must never break the loop
             doc["decode"] = None
+    mirror = getattr(moe, "mirror_stats", None)
+    if mirror is not None:
+        try:
+            stats = mirror()
+            if stats:
+                doc["mirror"] = stats
+        except Exception:  # noqa: BLE001 -- a diagnostic must never break the loop
+            doc["mirror"] = None
     return doc or None
 
 

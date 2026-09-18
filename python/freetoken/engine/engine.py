@@ -789,10 +789,21 @@ class Engine:
                 or mc.nemotron_h_args is None or config.nvfp4_backend != "triton"
             ):
                 raise ValueError("mirror expert RAM requires native Nemotron NVFP4, triton, single-rank GPU offload")
-            # Deliberately NOT touching cuda_graph_bs or moe_prefill_overlap: the
-            # mirror serves every GPU miss from pinned host RAM exactly like the
-            # baseline, so the hot path stays capturable and this runs the
-            # baseline scheduler with a smaller host footprint.
+            # Decode CUDA graphs stay ON -- that is the whole point: a mirror
+            # miss is a plain H2D, exactly what the baseline captures.
+            #
+            # Prefill overlap is the one thing that must go. Its double buffer
+            # prefetches a whole layer straight from the host banks
+            # (prefetch_prefill_layer), which the mirror does not have: its
+            # sources are meta tensors and a layer's rows are scattered across
+            # pool rows. It also needs two swap plans in flight at once.
+            # Prefill is a small share of a long request, so this costs far less
+            # than losing graphs would.
+            object.__setattr__(config, "moe_prefill_overlap", False)
+            logger.info_rank0(
+                "Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode "
+                "graphs enabled, prefill overlap off"
+            )
         if cache_factory is not None and config.moe_cache_auto:
             raise ValueError(
                 "--moe-cache-auto is not supported for models with a custom "
@@ -1431,17 +1442,23 @@ class Engine:
             for name, (tail, dtype) in shapes.items()
         }
         per_slot = expert_bytes_per_slot(sources)
-        _cache_per_page, fixed, _tok, _res = self._pool_cls.kv_cost(config)
+        cache_per_page, fixed_cache_size, _tok, _res = self._pool_cls.kv_cost(config)
         budget = net_cache_budget_bytes(
-            self.init_free_memory
-            if getattr(self, "init_free_memory", None) is not None
-            else torch.cuda.mem_get_info(self.device)[1],
             config.memory_ratio,
-            fixed,
+            self._baseline_free,
+            self._weights_bytes,
+            fixed_cache_size,
         )
-        kv_ceiling = _cache_per_page * self.num_pages
+        # The mirror is built before the KV pool exists, so take the ceiling
+        # from config (--num-tokens / --num-pages, the growable KV target)
+        # rather than self.num_pages, which is set later.
+        ceiling_tokens = config.num_token_override or (
+            (config.num_page_override or 0) * config.page_size
+        )
+        kv_ceiling = cache_per_page * (ceiling_tokens // config.page_size)
         slots = int(max(budget - kv_ceiling, 0) // per_slot)
-        return max(min(slots, mc.num_moe_layers * mc.num_experts), mc.num_experts)
+        total = mc.num_moe_layers * mc.num_experts
+        return max(min(slots, total), mc.num_experts)
 
     def _plan_growable_kv(
         self,
