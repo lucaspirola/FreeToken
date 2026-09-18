@@ -3076,6 +3076,22 @@ class Scheduler(SchedulerIOMixin):
 
     def _forward(self, forward_input: ForwardInput) -> ForwardOutput:
         batch, sample_args, input_mapping, output_mapping = forward_input
+        # Bounded-mirror expert pool: a prefill sweep empties the mirror (each
+        # admission frees its source row) and clears every GPU resident except
+        # the last layer. Decode needs the coverage invariant back BEFORE the
+        # first decode step runs -- and a CUDA-graph replay never executes host
+        # code, so the cache's in-ensure_experts restore cannot fire inside
+        # forward_batch. This batch boundary is the host-visible point: run the
+        # restore eagerly here, then the replay reads a full pool. Cost: one
+        # checkpoint re-read (~4 s) per prefill->decode transition.
+        moe = self.engine.moe_offload_cache
+        if (
+            moe is not None
+            and not batch.is_prefill
+            and getattr(moe, "_mirror_needs_coverage", False)
+        ):
+            moe.mirror_warm_start()
+            moe._mirror_needs_coverage = False
         profile = self.config.moe_collect_stats
         if profile:
             batch._profile_host_started = time.perf_counter()

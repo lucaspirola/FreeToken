@@ -126,11 +126,11 @@ def main():
                 c.materialize_layer(lid)
                 c.copy_missing()
                 torch.cuda.synchronize()
-            # first decode step after prefill would run the boundary warm start
-            # eagerly (host code) -- the real scheduler runs it via ensure_experts
-            # before replay, so do the same:
-            c._mirror_needs_coverage = True
-            # boundary + replayed steps
+            # Scheduler._forward now consumes the boundary flag at the batch
+            # boundary -- host code, ALWAYS runs, before the replay:
+            if getattr(c, "_mirror_needs_coverage", False):
+                c.mirror_warm_start()
+                c._mirror_needs_coverage = False
             for step in range(20):
                 perm = torch.randperm(E, device=dev)[:6].to(torch.int32)
                 want = perm.tolist()

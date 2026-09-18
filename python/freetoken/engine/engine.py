@@ -800,14 +800,13 @@ class Engine:
             # Prefill is a small share of a long request, so this costs far less
             # than losing graphs would.
             object.__setattr__(config, "moe_prefill_overlap", False)
-            # Eager decode: with graphs ON the answer is wrong at long context
-            # with every counter clean (0 coverage faults, 0 starved) -- the
-            # eager swap copies and the replayed GEMM race on the bank rows.
-            # Same code eager is byte-correct at 21K tokens (SIERRA-7741 recall
-            # test). Measured cost: ~72 tok/s vs ~176 baseline. Fixing the race
-            # (copies captured into the replay, or an explicit dependency) is
-            # future work; correctness ships first.
-            object.__setattr__(config, "cuda_graph_bs", [])
+            # Graphs stay ON. The graphs-mode corruption is not a race: a
+            # pure replay never runs host code, so the prefill->decode boundary
+            # warm start (host + disk, in ensure_experts) could never fire
+            # after any post-capture prefill, leaving decode against an empty
+            # mirror. The restore is now driven by the scheduler's batch
+            # boundary (Scheduler._forward), which is always host-visible,
+            # before the replay is admitted.
             logger.info_rank0(
                 "Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode "
                 "graphs enabled, prefill overlap off"
