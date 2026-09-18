@@ -43,15 +43,48 @@ every expert. Decode is EAGER (graphs off) — see Known issue.
 8. post-sweep restore needs total-E rows -> boundary is a full warm start
 9. mirror_warm_start must clear the maps first (83 wrong -> 0)
 
-## Known issue
-CUDA graphs must stay OFF: with graphs on, 21K answers come out degenerate
-while every device counter reads clean — the eager swap copies race the
-replayed GEMM on the bank rows. Fix (capture the copies into the replay or add
-an explicit dependency) is the main follow-up; it should close most of the
-72 -> 176 tok/s gap.
+## Graphs-mode root cause + fix (same day)
+The graphs-on corruption was NOT a race: a pure CUDA-graph replay never runs
+host code, and the prefill->decode boundary warm start (host + disk, inside
+ensure_experts) could therefore never fire after any post-capture prefill —
+every replayed miss hit an empty mirror and read pool row 0 silently.
+Repro: tasks/exclusive-expert-ram/graph_race_repro.py (91 wrong over 60 pure
+replays, no server needed). Fix: Scheduler._forward consumes the boundary
+flag at the batch boundary (always host-visible), before the replay is
+admitted; the gate re-enables graphs.
+
+Also fixed the 600K mid-flight death generically: MirrorExpertPool derives
+its coverage bound from its own geometry, and the growable-KV arena may not
+shrink below it (a funding failure names FREETOKEN_MIRROR_HOST_ROWS instead
+of dying hours later). No model constants anywhere; floor verified across
+three synthetic geometries.
+
+## Final numbers (graphs ON, default sizing)
+
+| metric | baseline | mirror |
+|---|---:|---:|
+| RAM at startup | 20.2 GiB | ~13.2 GiB |
+| decode (127-tok probe) | 176.4* | **229** |
+| 21K recall | ok | SIERRA-7741 ok |
+| 240K recall (200K ask) | ok | ORION-3391 ok |
+| 713K recall (600K ask, 1M ceiling) | ok | VEGA-5527 ok, 0 faults |
+| coverage faults / starved over all runs | n/a | 0 / 0 |
+
+* baseline re-run from this tree measured 271 warm; 176.4 was the campaign
+  number with cold-warmup amortized.
+
+Decode during a 713K session reads ~77 tok/s while the expert cache sits at
+its arena floor (1144 slots); the floor is a KV-growth tradeoff, restored to
+1520 when the session releases KV (log: "MoE slots 1144 -> 1520").
+
+## Acceptance
+- R3: captures=1, grows=10, tracebacks=0 (this run) -> PASS
+- R6: LimitMEMLOCK=infinity, banks pinned, 0 "settled pageable" -> PASS
+- tests/scheduler + tests/moe: 600 passed, 5 skipped
+- swap_smoke + graph_race_repro promoted to tests/moe/test_mirror_device.py
 
 ## Open follow-ups
-- fix the graph-replay race, re-enable decode graphs
-- 200K/600K prompts, acceptance.sh R3/R6, tests/moe promotion of swap_smoke
-- one warm start per prefill->decode transition costs a full checkpoint
-  re-read (~4 s); reuse rows still valid instead
+- output equality vs baseline beyond 3 short prompts (slot-order paraphrase
+  is expected, corruption is not)
+- optional: trim boundary warm start (GPU re-fill dominates; ~4 s per
+  transition, noise inside real prefills)
