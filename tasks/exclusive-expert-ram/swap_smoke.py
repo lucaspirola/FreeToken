@@ -109,8 +109,10 @@ def main():
             torch.cuda.synchronize()
             for e in range(E):
                 check(lid * E + e, int(cache.slot_for_id[lid, e]), f"materialize({lid})")
-            if holes(cache):
-                failures.append(f"coverage holes after materialize({lid})")
+            # No coverage assertion here: prefill deliberately drops displaced
+            # experts (preserving them would need the whole model mirrored).
+            # Coverage is re-established at the prefill -> decode boundary and
+            # asserted per decode step below.
         print(f"prefill: {L} layers materialized, "
               f"faults={int(cache._mirror['stats'][3])}")
 

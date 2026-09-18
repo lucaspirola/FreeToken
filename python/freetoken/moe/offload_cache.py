@@ -1632,6 +1632,7 @@ class OffloadMoeCache:
                 or tuple(pool.schema_order) != tuple(self.bank_schema)):
             raise ValueError("mirror pool geometry/schema does not match cache")
         self._mirror_pool = pool
+        self._mirror_needs_coverage = False
         self.bank_sources = {name: list(pool.sources[name]) for name in self.bank_schema}
         self._variable_bank_rows.clear()
         self._size_class_enabled = False
@@ -1715,6 +1716,50 @@ class OffloadMoeCache:
             "feat_bytes": torch.tensor(feat_bytes, dtype=torch.int64, device=dev),
         }
         self._copy_fused_ok = False  # the mirror path drives the copies itself
+
+    def _mirror_restore_coverage(self) -> int:
+        """Re-mirror every expert the GPU does not hold (prefill -> decode).
+
+        Prefill trades coverage for a bounded pool; decode needs it back, or a
+        miss would have nowhere to read from. Rows come from the free stack and
+        from duplicates of GPU residents. Synchronous checkpoint reads, once per
+        transition, off the per-token path.
+        """
+        pool = self._mirror_pool
+        m = self._mirror
+        fwd = m["pool_row_of_id"].cpu().tolist()
+        inv = m["id_of_pool_row"].cpu().tolist()
+        live = set(f for f in self.id_of_slot[: self.cache_size].cpu().tolist()
+                   if f >= 0)
+        missing = [f for f in range(pool.total) if f not in live and fwd[f] < 0]
+        if not missing:
+            return 0
+        free = [r for r, owner in enumerate(inv) if owner < 0]
+        if len(free) < len(missing):
+            spare = [r for r, owner in enumerate(inv)
+                     if owner >= 0 and owner in live]
+            free.extend(spare[: len(missing) - len(free)])
+        if len(free) < len(missing):
+            raise RuntimeError(
+                f"mirror cannot restore decode coverage: {len(missing)} rows "
+                f"needed, {len(free)} available"
+            )
+        for flat, row in zip(missing, free):
+            old = inv[row]
+            if old >= 0:
+                fwd[old] = -1
+                pool.pool_row_of_id[old] = -1
+            pool._read_row(flat, row)
+            fwd[flat] = row
+            inv[row] = flat
+            pool.pool_row_of_id[flat] = row
+            pool.id_of_pool_row[row] = flat
+        m["pool_row_of_id"].copy_(torch.tensor(fwd, dtype=torch.int32))
+        m["id_of_pool_row"].copy_(torch.tensor(inv, dtype=torch.int32))
+        self._mirror_publish_free_rows()
+        logger.info_rank0("mirror re-established decode coverage: %d experts",
+                          len(missing))
+        return len(missing)
 
     def mirror_stats(self) -> dict:
         """Swap counters (swaps, free evictions, writebacks, coverage faults)."""
@@ -1865,21 +1910,27 @@ class OffloadMoeCache:
         return len(uncovered)
 
     def _mirror_stage_layer(self, layer_id: int) -> int:
-        """Mirror every expert a prefill materialize is about to overwrite.
+        """Make a prefill materialize's sources available, dropping what it evicts.
 
-        ``materialize_layer`` reinstalls the whole layer, writing expert ``e``
-        into slot ``begin + e``. Two facts drive this method:
+        ``materialize_layer`` reinstalls a whole layer into slots ``[begin,
+        begin+E)`` and invalidates every other resident -- the baseline behaves
+        the same way, so during prefill the GPU cache holds one layer, not the
+        full working set.
 
-        * the copy sources each expert from the mirror, so every expert of the
-          layer needs a mirror row -- including ones already GPU-resident, which
-          by design have none;
-        * whatever occupied those slots is overwritten, so a displaced expert
-          whose only copy was there would be lost.
+        That has a sharp consequence for a bounded mirror: insisting on the
+        decode coverage invariant (every expert on the GPU or mirrored) through
+        prefill would force ``L*E - E`` mirror rows -- 2816 rows, 14.74 GiB for
+        this model, i.e. the whole model minus one layer. The bound would buy
+        nothing.
 
-        Both groups are staged here, host-side, on the prefill path only. Rows
-        come from the free stack first, then from duplicates of experts that
-        keep a GPU copy after this materialize (dropping a duplicate cannot
-        break coverage).
+        So prefill does NOT preserve displaced experts. Their bytes are not lost:
+        the checkpoint is immutable, and a later layer that needs one gets it
+        re-read here, off the decode hot path. Coverage is re-established for
+        decode by ``mirror_warm_start`` / ``_mirror_refill_uncovered``.
+
+        Only the layer's own experts are staged, and only those neither mirrored
+        nor GPU-resident (a resident one is relocated slot -> slot by the swap
+        kernel, needing no row at all).
 
         Returns the number of rows read from the checkpoint.
         """
@@ -1888,35 +1939,26 @@ class OffloadMoeCache:
         base = layer_id * self.num_experts
         fwd = m["pool_row_of_id"].cpu().tolist()
         inv = m["id_of_pool_row"].cpu().tolist()
-        begin, _end = self.lru_slot_range(layer_id)
-        window = slice(begin, begin + self.num_experts)
-        target = self.id_of_slot[window].cpu().tolist()
-
-        # (a) this layer's experts that are neither mirrored nor GPU-resident.
-        # A resident one is relocated slot -> slot by the swap kernel, so it
-        # needs no mirror row -- staging it anyway is what exhausted the pool.
         slot_of = self.slot_for_id.view(-1).cpu().tolist()
         need = [base + e for e in range(self.num_experts)
                 if fwd[base + e] < 0 and slot_of[base + e] < 0]
-        # (b) experts about to be displaced whose only copy is that slot
-        displaced = [f for f in target
-                     if f >= 0 and not (base <= f < base + self.num_experts)]
-        need += [f for f in dict.fromkeys(displaced) if fwd[f] < 0]
-        need = list(dict.fromkeys(need))
         if not need:
             return 0
-
-        # Experts that still hold a GPU copy after this materialize: their
-        # mirror rows are duplicates and may be recycled. Exclude the displaced
-        # ones (losing their slot) and this layer's (being reinstalled).
-        survivors = set(
-            f for f in self.id_of_slot[: self.cache_size].cpu().tolist() if f >= 0
-        ) - set(displaced) - set(range(base, base + self.num_experts))
+        # Rows free, then rows whose owner keeps a GPU copy after this call
+        # (this layer's experts included: the materialize makes them resident,
+        # so their mirror rows become duplicates).
+        resident_after = set(range(base, base + self.num_experts))
         free = [r for r, owner in enumerate(inv) if owner < 0]
         if len(free) < len(need):
             spare = [r for r, owner in enumerate(inv)
-                     if owner >= 0 and owner in survivors]
+                     if owner >= 0 and owner in resident_after]
             free.extend(spare[: len(need) - len(free)])
+        if len(free) < len(need):
+            # Last resort: any row, since prefill does not owe coverage. Keep
+            # the mandatory complement (experts the GPU will not hold) last.
+            others = [r for r, owner in enumerate(inv)
+                      if owner >= 0 and owner not in resident_after]
+            free.extend(others[: len(need) - len(free)])
         if len(free) < len(need):
             raise RuntimeError(
                 f"mirror cannot stage layer {layer_id}: {len(need)} rows "
@@ -2295,6 +2337,13 @@ class OffloadMoeCache:
         self._pending_src_layer = layer_id
         self._pending_whole_layer = False
         if getattr(self, "_mirror", None) is not None:
+            # Prefill drops displaced experts (see _mirror_stage_layer), so the
+            # decode coverage invariant has to be re-established before the
+            # first routed step. Done once per prefill->decode transition, at a
+            # host boundary, never inside the per-token path.
+            if self._mirror_needs_coverage:
+                self._mirror_restore_coverage()
+                self._mirror_needs_coverage = False
             # Entries linger from a longer previous step; the LRU kernel only
             # writes one per miss, so clear before it runs.
             self.victim_ids.fill_(-1)
@@ -2340,6 +2389,7 @@ class OffloadMoeCache:
             # is the prefill path, a host boundary, so the disk reads are off
             # the decode critical path.
             self._mirror_stage_layer(layer_id)
+            self._mirror_needs_coverage = True
             self.victim_ids.fill_(-1)
             self.prior_ids.fill_(-1)
             self._mirror["prev_slot_of_id"].copy_(self.slot_for_id.view(-1))
