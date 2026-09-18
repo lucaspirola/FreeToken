@@ -1853,15 +1853,27 @@ class OffloadMoeCache:
         base = layer_id * self.num_experts
         fwd = m["pool_row_of_id"].cpu().tolist()
         inv = m["id_of_pool_row"].cpu().tolist()
+        # Two groups need a mirror row before the materialize runs:
+        #  (a) this layer's experts, which the copy sources from the mirror;
+        #  (b) the experts about to be displaced from the target slots, whose
+        #      only copy may be the GPU one the materialize is overwriting.
+        begin, _end = self.lru_slot_range(layer_id)
+        doomed = [f for f in
+                  self.id_of_slot[begin:begin + self.num_experts].cpu().tolist()
+                  if f >= 0 and not (base <= f < base + self.num_experts)]
         missing = [base + e for e in range(self.num_experts)
                    if fwd[base + e] < 0]
+        missing += [f for f in dict.fromkeys(doomed) if fwd[f] < 0]
         if not missing:
             return 0
-        on_gpu = set(self.id_of_slot[: self.cache_size].cpu().tolist())
+        # The displaced experts are not spare rows, even though they are on the
+        # GPU right now: the materialize is about to overwrite their slots.
+        on_gpu = set(self.id_of_slot[: self.cache_size].cpu().tolist()) - set(doomed)
         free = [r for r, owner in enumerate(inv) if owner < 0]
         if len(free) < len(missing):
-            # Reclaim duplicate rows: an expert that is BOTH on the GPU and
-            # mirrored, and not part of this layer, still has its GPU copy.
+            # Reclaim duplicate rows: an expert that is BOTH on the GPU (and
+            # staying there) and mirrored still has its GPU copy, so dropping
+            # its mirror row cannot break coverage.
             spare = [r for r, owner in enumerate(inv)
                      if owner >= 0 and owner in on_gpu
                      and not (base <= owner < base + self.num_experts)]

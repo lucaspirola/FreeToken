@@ -80,15 +80,16 @@ def plan_capacity(num_layers: int, num_experts: int, final_gpu_slots: int,
     growing a pinned pool later costs ~762 ms/GiB (measured), a stall no request
     should ever pay, and the rows are needed eventually anyway.
 
-    ``reserve`` rows on top of the coverage requirement stay permanently unowned
-    so a writeback always has somewhere to land that the same step's upload is
-    not reading (see mirror_kernels). One step can displace at most one full
-    layer (the prefill materialize), so a layer's worth is enough.
+    ``reserve`` rows on top of the coverage requirement stay available so a
+    writeback always has somewhere to land that the same step's upload is not
+    reading (see mirror_kernels), and so a prefill materialize can stage a whole
+    layer plus the experts it displaces. Both effects peak at one layer each, so
+    the default is ``2 * num_experts``.
     """
     if num_layers <= 0 or num_experts <= 0 or final_gpu_slots < 0:
         raise ValueError("mirror capacity needs positive geometry")
     if reserve is None:
-        reserve = num_experts
+        reserve = 2 * num_experts
     total = num_layers * num_experts
     return min(max(total - final_gpu_slots, 0) + reserve, total)
 
@@ -273,11 +274,12 @@ class MirrorExpertPool:
         displaced.
 
         ``reserve`` rows are left unowned so a writeback always has a landing
-        spot (see mirror_kernels); defaults to one layer. Returns the number
+        spot and a prefill materialize can stage a layer plus its victims;
+        defaults to two layers, matching ``plan_capacity``. Returns the number
         seeded.
         """
         if reserve is None:
-            reserve = self.num_experts
+            reserve = 2 * self.num_experts
         free_rows = [r for r in range(self.capacity) if self.id_of_pool_row[r] < 0]
         if reserve:
             free_rows = free_rows[:-reserve] if reserve < len(free_rows) else []
