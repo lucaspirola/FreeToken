@@ -94,11 +94,11 @@ def test_capacity_covers_the_kv_ceiling():
     # reserve: one supplies writeback landing rows (a victim must not overwrite
     # the row its own admission is uploading from), the other lets a prefill
     # materialize stage a whole layer plus the experts it displaces.
-    assert plan_capacity(23, 128, 1552) == (2944 - 1552) + 2 * 128
+    assert plan_capacity(23, 128, 1552) == (2944 - 1552) + 3 * 128
     # Reserve is configurable; without it the bound is pure coverage.
     assert plan_capacity(23, 128, 1552, reserve=0) == 2944 - 1552
     # GPU holds everything: only the reserve remains (still capped at total).
-    assert plan_capacity(23, 128, 2944) == 2 * 128
+    assert plan_capacity(23, 128, 2944) == 3 * 128
 
 
 def test_rows_match_the_checkpoint(checkpoint):

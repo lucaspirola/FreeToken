@@ -89,7 +89,11 @@ def plan_capacity(num_layers: int, num_experts: int, final_gpu_slots: int,
     if num_layers <= 0 or num_experts <= 0 or final_gpu_slots < 0:
         raise ValueError("mirror capacity needs positive geometry")
     if reserve is None:
-        reserve = 2 * num_experts
+        # One layer for writeback landing rows, one for a prefill materialize,
+        # plus one more so a decode burst cannot drain the stack between the
+        # per-step pushes (measured: 4401 starved writebacks with 2 layers on a
+        # 21K-token request).
+        reserve = 3 * num_experts
     total = num_layers * num_experts
     return min(max(total - final_gpu_slots, 0) + reserve, total)
 

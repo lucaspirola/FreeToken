@@ -1830,7 +1830,8 @@ class OffloadMoeCache:
         pool.pool_row_of_id = [-1] * pool.total
         pool.id_of_pool_row = [-1] * pool.capacity
         filled = pool.load_initial(gpu_plan)
-        seeded = pool.seed_duplicates(list(reversed(gpu_plan)))
+        seeded = pool.seed_duplicates(list(reversed(gpu_plan)),
+                                      reserve=3 * self.num_experts)
         m["pool_row_of_id"].copy_(
             torch.tensor(pool.pool_row_of_id, dtype=torch.int32)
         )
