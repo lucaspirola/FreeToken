@@ -927,6 +927,9 @@ class Engine:
                     intermediate_size=mc.moe_intermediate_size,
                     device=self.device,
                 )
+                # _grow_runtime_kv_arena consults the pool's coverage bound so
+                # the KV never grows past what the mirror can complement.
+                self._mirror_pool_ref = mirror_pool
                 banks = ExpertBanks("nvfp4", {
                     name: [torch.empty((mc.num_experts, *tail), dtype=dtype, device="meta")]
                     * mc.num_moe_layers
@@ -1465,7 +1468,23 @@ class Engine:
         kv_ceiling = cache_per_page * (ceiling_tokens // config.page_size)
         slots = int(max(budget - kv_ceiling, 0) // per_slot)
         total = mc.num_moe_layers * mc.num_experts
-        return max(min(slots, total), mc.num_experts)
+        # The arithmetic above priced the plan for the DEFAULT profile, where
+        # prefill overlap borrows two expert-layer buffers from the cache;
+        # with the mirror on, overlap is disabled and the budget shifts, so
+        # the arena's TRUE floor can land well BELOW the planned slot count --
+        # measured on this host: planned 1552, actual floor 1152 at the 1M
+        # ceiling; the mirror then could not cover the complement and the 600K
+        # request died mid-flight. Two model-generic terms re-price the floor:
+        #   * the two overlap buffers the plan assumed but mirror mode does
+        #     not grant (2 * num_experts), plus
+        #   * four arena chunks of release granularity (FREETOKEN_ARENA_STEP_
+        #     SLOTS, default 8) so chunk-boundary overshoot stays covered.
+        # A model that cannot fit complement + reserve in host RAM fails
+        # LOUDLY at startup (MirrorExpertPool.load_initial raises) instead of
+        # dying mid-request hours later.
+        step = _arena_step_slots()
+        conservative = max(slots - 2 * mc.num_experts - 4 * step, mc.num_experts)
+        return max(min(conservative, total), mc.num_experts)
 
     def _plan_growable_kv(
         self,

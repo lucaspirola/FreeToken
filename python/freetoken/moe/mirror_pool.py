@@ -153,6 +153,15 @@ class MirrorExpertPool:
             self.close()
             raise
 
+        # Highest complement this pool can cover: every expert the GPU cache
+        # drops must land in a row not held back as writeback/staging reserve
+        # (2 * num_experts by plan_capacity; FREETOKEN_MIRROR_HOST_ROWS may
+        # change capacity, so derive the bound here -- model-agnostic).
+        self.coverage_floor_complement = (
+            self.total - self.capacity + 2 * self.num_experts
+        )
+
+
     # ------------------------------------------------------------------
     # Checkpoint scan + startup fill (the only disk contact)
     # ------------------------------------------------------------------
