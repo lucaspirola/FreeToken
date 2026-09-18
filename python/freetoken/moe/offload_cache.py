@@ -1856,23 +1856,23 @@ class OffloadMoeCache:
         return len(uncovered)
 
     def _mirror_stage_layer(self, layer_id: int) -> int:
-        """Prepare a prefill materialize without pulling the layer through RAM.
+        """Mirror every expert a prefill materialize is about to overwrite.
 
-        ``materialize_layer`` reinstalls the whole layer into slots
-        ``[begin, begin+E)``. Two things can go wrong for a bounded mirror:
+        ``materialize_layer`` reinstalls the whole layer, writing expert ``e``
+        into slot ``begin + e``. Two facts drive this method:
 
-        * an expert of this layer that is GPU-resident has no mirror row (by
-          design), so the swap kernel would score it as a coverage fault; and
-        The first is solved without any host traffic: a GPU-resident expert is
-        moved slot -> slot on the device, and removed from the copy plan. Only
-        experts that are genuinely absent from the GPU are sourced from the
-        mirror, and those already have a row by the coverage invariant.
+        * the copy sources each expert from the mirror, so every expert of the
+          layer needs a mirror row -- including ones already GPU-resident, which
+          by design have none;
+        * whatever occupied those slots is overwritten, so a displaced expert
+          whose only copy was there would be lost.
 
-        The second still needs host rows, but only for the displaced experts
-        that are not mirrored -- at most the layer's slot count, which the
-        reserve covers.
+        Both groups are staged here, host-side, on the prefill path only. Rows
+        come from the free stack first, then from duplicates of experts that
+        keep a GPU copy after this materialize (dropping a duplicate cannot
+        break coverage).
 
-        Returns the number of rows read from the checkpoint (0 in steady state).
+        Returns the number of rows read from the checkpoint.
         """
         pool = self._mirror_pool
         m = self._mirror
@@ -1880,60 +1880,36 @@ class OffloadMoeCache:
         fwd = m["pool_row_of_id"].cpu().tolist()
         inv = m["id_of_pool_row"].cpu().tolist()
         begin, _end = self.lru_slot_range(layer_id)
-        target = self.id_of_slot[begin:begin + self.num_experts].cpu().tolist()
-        slot_of = self.slot_for_id.view(-1).cpu().tolist()
+        window = slice(begin, begin + self.num_experts)
+        target = self.id_of_slot[window].cpu().tolist()
 
-        # (1) Experts of this layer already on the GPU, sitting outside the
-        # target window: relocate them device-side so the materialize finds
-        # them in place and never asks the mirror for a row.
-        moves = []
-        for e in range(self.num_experts):
-            flat = base + e
-            src = slot_of[flat]
-            if src >= 0 and not (begin <= src < begin + self.num_experts):
-                moves.append((src, begin + e))
-        if moves:
-            self._mirror_relocate_slots(moves)
-
-        # (2) Experts of this layer that are neither on the GPU nor mirrored.
-        # The coverage invariant forbids this; assert rather than let the swap
-        # kernel silently source row 0.
-        absent = [base + e for e in range(self.num_experts)
-                  if slot_of[base + e] < 0 and fwd[base + e] < 0]
-        if absent:
-            raise RuntimeError(
-                f"coverage invariant broken before materialize: {len(absent)} "
-                f"experts of layer {layer_id} are neither on GPU nor mirrored"
-            )
-
-        # (3) Experts about to be displaced from the target window whose only
-        # copy is that GPU slot. resolve_swaps writes each back into a
-        # free-stack row, but a materialize displaces a WHOLE layer at once and
-        # the stack only carries the reserve, so mirror them here instead --
-        # host side, prefill only, and it keeps the stack for decode.
-        doomed = [f for f in target
-                  if f >= 0 and not (base <= f < base + self.num_experts)]
-        missing = [f for f in dict.fromkeys(doomed) if fwd[f] < 0]
-        if not missing:
+        # (a) this layer's experts, sourced from the mirror by the copy
+        need = [base + e for e in range(self.num_experts) if fwd[base + e] < 0]
+        # (b) experts about to be displaced whose only copy is that slot
+        displaced = [f for f in target
+                     if f >= 0 and not (base <= f < base + self.num_experts)]
+        need += [f for f in dict.fromkeys(displaced) if fwd[f] < 0]
+        need = list(dict.fromkeys(need))
+        if not need:
             return 0
-        # Rows that may be overwritten: unowned ones, plus duplicates of experts
-        # that keep a GPU copy AFTER this materialize (so not the doomed ones,
-        # and not this layer's, which the materialize is installing).
+
+        # Experts that still hold a GPU copy after this materialize: their
+        # mirror rows are duplicates and may be recycled. Exclude the displaced
+        # ones (losing their slot) and this layer's (being reinstalled).
         survivors = set(
             f for f in self.id_of_slot[: self.cache_size].cpu().tolist() if f >= 0
-        ) - set(doomed)
+        ) - set(displaced) - set(range(base, base + self.num_experts))
         free = [r for r, owner in enumerate(inv) if owner < 0]
-        if len(free) < len(missing):
+        if len(free) < len(need):
             spare = [r for r, owner in enumerate(inv)
-                     if owner >= 0 and owner in survivors
-                     and not (base <= owner < base + self.num_experts)]
-            free.extend(spare[: len(missing) - len(free)])
-        if len(free) < len(missing):
+                     if owner >= 0 and owner in survivors]
+            free.extend(spare[: len(need) - len(free)])
+        if len(free) < len(need):
             raise RuntimeError(
-                f"mirror cannot stage layer {layer_id}: {len(missing)} rows "
+                f"mirror cannot stage layer {layer_id}: {len(need)} rows "
                 f"needed, {len(free)} available"
             )
-        for flat, row in zip(missing, free):
+        for flat, row in zip(need, free):
             old = inv[row]
             if old >= 0:
                 fwd[old] = -1
@@ -1946,32 +1922,7 @@ class OffloadMoeCache:
         m["pool_row_of_id"].copy_(torch.tensor(fwd, dtype=torch.int32))
         m["id_of_pool_row"].copy_(torch.tensor(inv, dtype=torch.int32))
         self._mirror_publish_free_rows()
-        return len(missing)
-
-    def _mirror_relocate_slots(self, moves) -> None:
-        """Move experts between GPU slots (device-to-device), updating the maps.
-
-        Used before a prefill materialize so a layer's already-resident experts
-        land in the target window without a round trip through host RAM.
-        """
-        from freetoken.kernel.fast_index_copy import fast_index_copy_multi_jit
-
-        m = self._mirror
-        src = torch.tensor([s for s, _ in moves], dtype=torch.int32, device=self.device)
-        dst = torch.tensor([d for _, d in moves], dtype=torch.int32, device=self.device)
-        count = torch.tensor([len(moves)], dtype=torch.int64, device=self.device)
-        # Stage through spare rows would be needed for overlapping moves; the
-        # caller's moves are disjoint (each expert has one slot, each target
-        # index is distinct), so a direct D2D gather is safe.
-        fast_index_copy_multi_jit(
-            m["cache_ptrs"], m["cache_ptrs"], m["feat_bytes"], dst, src, count,
-        )
-        ids = self.id_of_slot[src.long()].clone()
-        self.id_of_slot[dst.long()] = ids
-        self.id_of_slot[src.long()] = -1
-        self.slot_for_id.view(-1)[ids.long()] = dst
-        self.usage[dst.long()] = self.usage[src.long()]
-        self.usage[src.long()] = 0
+        return len(need)
 
     def copy_missing_mirror(self) -> None:
         """Issue this step's writebacks and admissions, in that order.
