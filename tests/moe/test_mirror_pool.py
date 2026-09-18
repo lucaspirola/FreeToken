@@ -97,8 +97,8 @@ def test_capacity_covers_the_kv_ceiling():
     assert plan_capacity(23, 128, 1552) == (2944 - 1552) + 2 * 128
     # Reserve is configurable; without it the bound is pure coverage.
     assert plan_capacity(23, 128, 1552, reserve=0) == 2944 - 1552
-    # Never more rows than the model has experts.
-    assert plan_capacity(23, 128, 2944) == 128
+    # GPU holds everything: only the reserve remains (still capped at total).
+    assert plan_capacity(23, 128, 2944) == 2 * 128
 
 
 def test_rows_match_the_checkpoint(checkpoint):

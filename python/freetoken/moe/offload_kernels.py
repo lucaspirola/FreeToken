@@ -102,6 +102,7 @@ def _ensure_experts_sized_gpu(cache, layer_id, expert_ids, begin, end) -> None:
             cache.lru_slot_range_device(layer_id),
             cache.usable_slots,
             cache.victim_ids,
+            cache.prior_ids,
             cache.num_experts,
             cache.slot_capacity,
             BLOCK_E=block_e,
@@ -411,6 +412,8 @@ def _materialize_layer_gpu(cache, layer_id: int) -> None:
         cache.src_indices,
         cache.num_indices,
         layer_id,
+        cache.victim_ids,
+        cache.prior_ids,
         cache.num_experts,
         cache.cache_size,
         BLOCK=block,
@@ -431,6 +434,7 @@ def _materialize_layer_sized_gpu(cache, layer_id: int, begin: int, end: int) -> 
             layer_id,
             cache.lru_slot_range_device(layer_id),
             cache.victim_ids,
+            cache.prior_ids,
             cache.num_experts,
             cache.slot_capacity,
             BLOCK=block,
@@ -613,6 +617,7 @@ def _ensure_experts_sized_kernel_v2(
     bounds_ptr,  # [2] int32: (class_begin, class_end), device-resident (see lru_slot_range_device)
     usable_ptr,  # [1] int32: usable-slot bound, device-resident (see OffloadMoeCache.usable_slots)
     victim_ids_ptr,  # [plan] int32: expert id displaced by each admission, -1 if none
+    prior_ids_ptr,   # [plan] int32: slot's owner before this admission, -1 if empty
     num_experts: tl.constexpr,
     cache_size: tl.constexpr,  # == slot_capacity: fixed arena size, not the live usable count
     BLOCK_E: tl.constexpr,
@@ -714,6 +719,7 @@ def _ensure_experts_sized_kernel_v2(
             # -1 when the slot was never used. One store, device-side, so decode
             # stays CUDA-graph capturable.
             tl.store(victim_ids_ptr + i, old_id)
+            tl.store(prior_ids_ptr + i, old_id)
             if old_id >= 0:
                 tl.store(slot_for_id_ptr + old_id, -1)
             expert = tl.sum(tl.where((missing_rank == i) & is_missing, off_e, 0))
@@ -766,6 +772,8 @@ def _materialize_layer_kernel(
     src_indices_ptr,
     num_indices_ptr,
     layer_id: tl.constexpr,
+    victim_ids_ptr,  # [plan] int32: expert losing its GPU copy, -1 if none
+    prior_ids_ptr,   # [plan] int32: slot's owner before this call, -1 if empty
     num_experts: tl.constexpr,
     cache_size: tl.constexpr,
     BLOCK: tl.constexpr,
@@ -779,10 +787,15 @@ def _materialize_layer_kernel(
     old_id = tl.load(id_of_slot_ptr + slot, mask=slot_mask, other=-1)
     # Flat ids make "belongs to this layer" a range check instead of a field compare.
     same_layer = slot_mask & (old_id >= base) & (old_id < base + num_experts)
+    old_valid = expert_mask & (old_id >= 0) & (~same_layer)
+    # Publish BEFORE the invalidation below: the bounded host mirror needs both
+    # who sat in the slot (to skip a copy when it already holds the expert being
+    # installed) and who actually loses its GPU copy (-1 for same-layer owners,
+    # which land back in the cache, and for empty slots).
+    tl.store(prior_ids_ptr + off, old_id, mask=expert_mask)
+    tl.store(victim_ids_ptr + off, tl.where(old_valid, old_id, -1), mask=expert_mask)
     tl.store(id_of_slot_ptr + slot, -1, mask=same_layer)
     tl.store(usage_ptr + slot, 0, mask=same_layer)
-
-    old_valid = expert_mask & (old_id >= 0) & (~same_layer)
     tl.store(slot_for_id_ptr + old_id, -1, mask=old_valid)
 
     step = tl.load(step_ptr) + 1
@@ -845,8 +858,9 @@ def _materialize_layer_sized_kernel_v2(
     src_indices_ptr,
     num_indices_ptr,
     layer_id,
-    bounds_ptr,  # [2] int32: (class_begin, class_end), device-resident
-    victim_ids_ptr,  # [plan] int32: expert displaced by each row, -1 if none
+    bounds_ptr,      # [2] int32: (class_begin, class_end), device-resident
+    victim_ids_ptr,  # [plan] int32: expert losing its GPU copy, -1 if none
+    prior_ids_ptr,   # [plan] int32: slot's owner before this call, -1 if empty
     num_experts: tl.constexpr,
     cache_size: tl.constexpr,  # == slot_capacity
     BLOCK: tl.constexpr,
@@ -864,15 +878,20 @@ def _materialize_layer_sized_kernel_v2(
     base = layer_id * num_experts
     old_id = tl.load(id_of_slot_ptr + global_slot, mask=class_mask, other=-1)
 
+    # Publish the pre-materialize owner of every slot FIRST: the stores below
+    # invalidate id_of_slot, and the bounded host mirror needs two signals out
+    # of this call --
+    #  * prior_ids: who sat in the slot, whoever it was, so the mirror can skip
+    #    a copy when the slot already holds the expert being installed;
+    #  * victim_ids: who actually loses its GPU copy (-1 for same-layer owners,
+    #    which land back in the cache, and for empty slots).
     same_layer = class_mask & (old_id >= base) & (old_id < base + num_experts)
+    overwritten = expert_mask & (old_id >= 0) & (~same_layer)
+    tl.store(prior_ids_ptr + off, old_id, mask=expert_mask)
+    tl.store(victim_ids_ptr + off, tl.where(overwritten, old_id, -1), mask=expert_mask)
     tl.store(id_of_slot_ptr + global_slot, -1, mask=same_layer)
     tl.store(usage_ptr + global_slot, 0, mask=same_layer)
-    overwritten = expert_mask & (old_id >= 0) & (~same_layer)
     tl.store(slot_for_id_ptr + old_id, -1, mask=overwritten)
-    # Publish displaced owners for the bounded host mirror, before the stores
-    # below overwrite id_of_slot. Same-layer owners are not victims: the layer
-    # is being re-materialized, so those experts land back in the cache.
-    tl.store(victim_ids_ptr + off, tl.where(overwritten, old_id, -1), mask=expert_mask)
 
     step = tl.load(step_ptr) + 1
     tl.store(step_ptr, step)
