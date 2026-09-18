@@ -13,48 +13,33 @@
 - Numbers recorded: benchmarks/results/nemotron35_lightning_5080_exclusive_2026-09-18.md
 
 ## Known issue #1 (the only correctness blocker): graphs must stay off
-Root cause now PROVEN, not hypothesized. `Engine.forward_batch` decodes through
-`GraphRunner.replay` — a pure graph replay. Host code (`ensure_experts`) runs
-exactly once at CAPTURE. The captured LRU kernel rewrites `topk_ids` from
-expert ids to slot ids IN PLACE on every replay. So:
-  - token 1 (capture routing): correct
-  - token 2..N (replay): the buffer still holds token N-1's SLOT ids; the new
-    token's routing (written by GraphCaptureBuffer.copy_from into the static
-    buffer) is never consumed, because the reader expects EXPERT ids at entry.
-  91 wrong experts over 60 pure replays reproduced in
-  tasks/exclusive-expert-ram/graph_race_repro.py (no server needed).
+State of diagnosis (2026-09-18, end of round 2 -- supersedes earlier notes):
+- DISPROVEN: "replay reads the previous token's slot ids". The router is
+  INSIDE the captured region (model.forward is captured whole), so topk_ids
+  are recomputed as fresh EXPERT ids from the current token's hidden states on
+  every replay. There is no staleness at the LRU's entry.
+- PROVEN (tasks/exclusive-expert-ram/graph_race_repro.py, no server needed):
+  60 pure replays of a captured (ensure_experts + copy_missing) step produce
+  91 wrong expert bytes. Stats anomaly that points at the mechanism:
+  swaps=36, free_evictions=36, writebacks=0, coverage_faults=20. Over 36
+  admissions into a 17-slot cache, ~19 victims MUST have been unmirrored
+  GPU-residents (their mirror rows were freed at their own admission), so
+  writebacks=0 means the replayed kernel read pool_row_of_id[victim] >= 0 --
+  a stale/incorrect mirror map inside the captured chain. Not yet root-caused.
+- LANDMINE found on the way: a coverage violation inside a replay copies
+  POOL ROW 0 into the target slot and counts it on device; the host-side hard
+  error never runs in graph mode, so it is SILENT wrong bytes. Whatever the
+  primary fix is, the violation path must be made graph-safe (no row-0 copy).
+- REJECTED fix shapes (do not retry): priming topk_ids with slot ids (breaks
+  the LRU's expert-id entry contract; also solved a non-problem); a
+  capture_pos side-table (degenerates to exactly the miss set).
 
-Why the baseline does NOT have this problem: with whole-model host residency
-`copy_missing` sources row = expert id, and slot ids written by the LRU are
-consumed only within the same captured step. The mirror does not change this;
-the defect is that the buffer's CONTENT semantics differ between capture
-(expert ids) and steady-state replay (previous step's slot ids). The baseline
-is bit-correct here only because its GEMM... (to verify if re-enabling graphs:
-diff a baseline graph-mode run's topk_ids handling against the mirror's — the
-suspicion is the baseline hides it because its expert ids are ALSO valid
-source rows; the mirror's pool-row indirection makes it visible).
+Next diagnostic step: instrument the repro to dump, for one failing replay,
+the full device state the resolve kernel read (pool_row_of_id, free stack,
+id_of_slot, prior/victim) and compare against the same step run eagerly with
+identical routing -- the divergence point is the capture-safety defect.
 
-Fix attempts made and REJECTED (do not retry these shapes):
-1. Prime kernel writing slot ids for resident experts at replay start: breaks
-   the LRU contract (it reads EXPERT ids at entry to compute misses), and -1
-   for absent experts corrupts miss admission. The buffer cannot carry both
-   semantics.
-2. `capture_pos_of_expert` side table maintained by resolve_swaps: the
-   cleared-positions are exactly the misses, which the LRU must see.
-
-Promising directions (not attempted):
-- A second persistent buffer: `copy_from` writes raw expert ids into
-  `routing_buf`; the captured step starts with a small kernel
-  routing_buf -> topk_ids (pure copy, identity), then LRU consumes topk_ids as
-  at capture. Cost: one extra buffer copy per layer per replay (trivial).
-  Requires: hooking GraphCaptureBuffer.copy_from / the model's decode entry to
-  write routing_buf instead of topk_ids, and adding the copy kernel into the
-  captured region before the first MoE layer.
-- Or: make ensure_experts idempotent on already-slot ids (treat value as
-  expert id iff < num_experts? slot ids are >= 0 too... needs a tag bit).
-  Fragile; prefer the explicit second buffer.
-
-## Known issue #2 (perf, not correctness): warm start at the boundary
+## Known issue #2 (perf, not correctness): warm start at the boundary## Known issue #2 (perf, not correctness): warm start at the boundary
 One full checkpoint re-read (~4 s) per prefill->decode transition
 (`_mirror_needs_coverage`). Optimization: warm start currently re-reads ALL
 rows; it could keep rows whose (expert, bytes) are still valid — compare
