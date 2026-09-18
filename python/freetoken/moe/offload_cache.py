@@ -1691,6 +1691,15 @@ class OffloadMoeCache:
             "d2h_src": torch.zeros((plan,), dtype=torch.int32, device=dev),
             "d2h_dst": torch.zeros((plan,), dtype=torch.int32, device=dev),
             "n_d2h": torch.zeros((1,), dtype=torch.int64, device=dev),
+            # Slot -> slot moves for experts a materialize reinstalls that are
+            # already GPU-resident: no PCIe traffic, no mirror row required.
+            # Pre-step slot of every expert: the LRU/materialize kernels rewrite
+            # slot_for_id before the swap kernel runs, so a "where was it?"
+            # question must be asked of this snapshot.
+            "prev_slot_of_id": torch.zeros((pool.total,), dtype=torch.int32, device=dev),
+            "d2d_src": torch.zeros((plan,), dtype=torch.int32, device=dev),
+            "d2d_dst": torch.zeros((plan,), dtype=torch.int32, device=dev),
+            "n_d2d": torch.zeros((1,), dtype=torch.int64, device=dev),
             # Rows owned by nobody, usable as writeback targets. A swap pops at
             # most one and pushes exactly one, so the depth is stable; the
             # capacity plan keeps two layers in reserve so it never empties.
@@ -1883,8 +1892,12 @@ class OffloadMoeCache:
         window = slice(begin, begin + self.num_experts)
         target = self.id_of_slot[window].cpu().tolist()
 
-        # (a) this layer's experts, sourced from the mirror by the copy
-        need = [base + e for e in range(self.num_experts) if fwd[base + e] < 0]
+        # (a) this layer's experts that are neither mirrored nor GPU-resident.
+        # A resident one is relocated slot -> slot by the swap kernel, so it
+        # needs no mirror row -- staging it anyway is what exhausted the pool.
+        slot_of = self.slot_for_id.view(-1).cpu().tolist()
+        need = [base + e for e in range(self.num_experts)
+                if fwd[base + e] < 0 and slot_of[base + e] < 0]
         # (b) experts about to be displaced whose only copy is that slot
         displaced = [f for f in target
                      if f >= 0 and not (base <= f < base + self.num_experts)]
@@ -1957,7 +1970,12 @@ class OffloadMoeCache:
             m["cache_ptrs"], m["pool_ptrs"], m["feat_bytes"],
             m["h2d_dst"], m["h2d_src"], m["n_h2d"],
         )
-        # 3. only now may this step's vacated rows be reused
+        # 3. experts already resident elsewhere move slot -> slot on the device
+        fast_index_copy_multi_jit(
+            m["cache_ptrs"], m["cache_ptrs"], m["feat_bytes"],
+            m["d2d_dst"], m["d2d_src"], m["n_d2d"],
+        )
+        # 4. only now may this step's vacated rows be reused
         publish_freed_rows(self)
         self._pending_src_layer = None
         self._pending_whole_layer = False
@@ -2281,6 +2299,7 @@ class OffloadMoeCache:
             # writes one per miss, so clear before it runs.
             self.victim_ids.fill_(-1)
             self.prior_ids.fill_(-1)
+            self._mirror["prev_slot_of_id"].copy_(self.slot_for_id.view(-1))
         ensure_experts(self, layer_id, expert_ids)
 
     def ensure_experts_hybrid(self, layer_id: int, expert_ids: torch.Tensor) -> None:
@@ -2323,6 +2342,7 @@ class OffloadMoeCache:
             self._mirror_stage_layer(layer_id)
             self.victim_ids.fill_(-1)
             self.prior_ids.fill_(-1)
+            self._mirror["prev_slot_of_id"].copy_(self.slot_for_id.view(-1))
         self._pending_src_layer = layer_id
         self._pending_whole_layer = True
         materialize_layer(self, layer_id)

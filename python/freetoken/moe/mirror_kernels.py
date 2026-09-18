@@ -54,6 +54,7 @@ def resolve_swaps(cache, layer_id: int) -> None:
         cache.num_indices,
         cache.victim_ids,
         cache.prior_ids,
+        m["prev_slot_of_id"],
         m["pool_row_of_id"],
         m["id_of_pool_row"],
         m["free_rows"],
@@ -66,6 +67,9 @@ def resolve_swaps(cache, layer_id: int) -> None:
         m["d2h_src"],
         m["d2h_dst"],
         m["n_d2h"],
+        m["d2d_src"],
+        m["d2d_dst"],
+        m["n_d2d"],
         m["stats"],
         layer_id,
         cache.num_experts,
@@ -92,6 +96,7 @@ def _resolve_swaps_kernel(
     num_indices_ptr,      # int64 [1]     miss count
     victim_ids_ptr,       # int32 [plan]  expert losing its GPU copy, -1 if none
     prior_ids_ptr,        # int32 [plan]  slot's owner before this step, -1 if empty
+    prev_slot_ptr,        # int32 [L*E]   slot of each expert BEFORE this step
     pool_row_of_id_ptr,   # int32 [L*E]   pool row holding each expert, or -1
     id_of_pool_row_ptr,   # int32 [cap]   inverse of the above
     free_rows_ptr,        # int32 [cap]   stack of unowned pool rows
@@ -104,6 +109,9 @@ def _resolve_swaps_kernel(
     d2h_src_ptr,          # int32 [plan]  GPU slot of each victim needing writeback
     d2h_dst_ptr,          # int32 [plan]  pool row receiving it
     n_d2h_ptr,            # int64 [1]     writeback count
+    d2d_src_ptr,          # int32 [plan]  GPU slot holding an already-resident expert
+    d2d_dst_ptr,          # int32 [plan]  GPU slot it must appear in
+    n_d2d_ptr,            # int64 [1]     device-to-device relocation count
     stats_ptr,            # int64 [5]     swaps, free_evict, d2h, violations, starved
     layer_id,
     num_experts,
@@ -117,6 +125,7 @@ def _resolve_swaps_kernel(
     n = tl.load(num_indices_ptr)
     n_h2d = 0
     n_d2h = 0
+    n_d2d = 0
     n_freed = 0
     swaps = 0
     free_evict = 0
@@ -135,8 +144,20 @@ def _resolve_swaps_kernel(
         prior = tl.load(prior_ids_ptr + i)
         victim = tl.load(victim_ids_ptr + i)
         if prior != flat_new:
+            # A prefill materialize reinstalls a whole layer; experts of that
+            # layer are often already GPU-resident, just in a different slot.
+            # Copying them slot -> slot on the device costs no PCIe traffic and,
+            # crucially, needs no mirror row -- which is what made a full-layer
+            # staging exhaust the pool ("223 rows needed, 169 available").
+            here = tl.load(prev_slot_ptr + flat_new)
             src_row = tl.load(pool_row_of_id_ptr + flat_new)
-            if src_row < 0:
+            if here >= 0 and here != slot:
+                tl.store(d2d_src_ptr + n_d2d, here)
+                tl.store(d2d_dst_ptr + n_d2d, slot)
+                n_d2d += 1
+                swaps += 1
+                free_evict += 1
+            elif src_row < 0:
                 # Coverage invariant broken: not on the GPU, not mirrored.
                 violations += 1
             else:
@@ -176,6 +197,7 @@ def _resolve_swaps_kernel(
     tl.store(n_freed_ptr, n_freed)
     tl.store(n_h2d_ptr, n_h2d)
     tl.store(n_d2h_ptr, n_d2h)
+    tl.store(n_d2d_ptr, n_d2d)
     tl.store(stats_ptr + 0, tl.load(stats_ptr + 0) + swaps)
     tl.store(stats_ptr + 1, tl.load(stats_ptr + 1) + free_evict)
     tl.store(stats_ptr + 2, tl.load(stats_ptr + 2) + n_d2h)
