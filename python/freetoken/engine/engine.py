@@ -777,9 +777,9 @@ class Engine:
         # Otherwise load_expert_banks gives the model module a setup hook first, then
         # falls back to per-quant providers, and the engine wires the banks into cache.
         cache_factory = getattr(self.model, "make_offload_moe_cache", None)
-        exclusive = os.environ.get("FREETOKEN_EXCLUSIVE_EXPERT_RAM", "0") == "1"
-        exclusive_pool = None
-        if exclusive:
+        mirror = os.environ.get("FREETOKEN_MIRROR_EXPERT_RAM", "0") == "1"
+        mirror_pool = None
+        if mirror:
             mc = config.model_config
             if (
                 cache_factory is not None or config.moe_backend != "offload"
@@ -788,10 +788,11 @@ class Engine:
                 or mc.expert_quant != "nvfp4" or mc.expert_gated
                 or mc.nemotron_h_args is None or config.nvfp4_backend != "triton"
             ):
-                raise ValueError("exclusive expert RAM requires native Nemotron NVFP4, triton, single-rank GPU offload")
-            object.__setattr__(config, "cuda_graph_bs", [])
-            object.__setattr__(config, "moe_prefill_overlap", False)
-            logger.info_rank0("Exclusive expert RAM: eager decode, synchronous prefill, disk-backed bounded host pool")
+                raise ValueError("mirror expert RAM requires native Nemotron NVFP4, triton, single-rank GPU offload")
+            # Deliberately NOT touching cuda_graph_bs or moe_prefill_overlap: the
+            # mirror serves every GPU miss from pinned host RAM exactly like the
+            # baseline, so the hot path stays capturable and this runs the
+            # baseline scheduler with a smaller host footprint.
         if cache_factory is not None and config.moe_cache_auto:
             raise ValueError(
                 "--moe-cache-auto is not supported for models with a custom "
@@ -824,7 +825,7 @@ class Engine:
             and config.moe_cpu_layers is None
             and config.moe_backend in ("offload", "hybrid")
             and _pin_budget_bytes() is not None
-            and not exclusive
+            and not mirror
         ):
             cpu_layer_ids = _auto_cpu_layers(config, config.model_config.num_moe_layers)
         if config.moe_backend == "hybrid":
@@ -886,21 +887,32 @@ class Engine:
                         requested_residency.append(HostResidency.LOCKED.value)
                     else:
                         requested_residency.append(HostResidency.PINNED.value)
-            if exclusive:
-                from freetoken.moe.exclusive_pool import ExclusiveExpertPool
+            if mirror:
+                from freetoken.moe.mirror_pool import MirrorExpertPool, plan_capacity
                 from freetoken.moe.expert_banks import ExpertBanks
 
                 mc = config.model_config
-                exclusive_pool = ExclusiveExpertPool(
-                    config.model_path, mc.num_moe_layers, mc.num_experts,
-                    int(os.environ.get("FREETOKEN_EXCLUSIVE_HOST_SLOTS", "1392")),
+                # Size for the KV ceiling, where the GPU cache is smallest and
+                # the host side must be largest. Growing a pinned pool later
+                # costs ~762 ms/GiB (measured), a stall no request should pay.
+                override = os.environ.get("FREETOKEN_MIRROR_HOST_ROWS")
+                if override:
+                    capacity = int(override)
+                else:
+                    capacity = plan_capacity(
+                        mc.num_moe_layers, mc.num_experts,
+                        self._mirror_final_gpu_slots(config),
+                    )
+                mirror_pool = MirrorExpertPool(
+                    config.model_path, mc.num_moe_layers, mc.num_experts, capacity,
                     hidden_size=mc.expert_hidden_size or mc.hidden_size,
                     intermediate_size=mc.moe_intermediate_size,
+                    device=self.device,
                 )
                 banks = ExpertBanks("nvfp4", {
                     name: [torch.empty((mc.num_experts, *tail), dtype=dtype, device="meta")]
                     * mc.num_moe_layers
-                    for name, (tail, dtype) in exclusive_pool.shapes.items()
+                    for name, (tail, dtype) in mirror_pool.shapes.items()
                 })
             else:
                 banks = load_expert_banks(
@@ -1001,8 +1013,11 @@ class Engine:
             cache.direct_device_banks = bool(config.kv_grow_step_tokens)
             # before set_bank_sources: the residency validation and the copy plan's skip of non-pinned layers key on the CPU-layer set
             cache.cpu_layer_ids = cpu_layer_ids
-            if exclusive_pool is not None:
-                cache.attach_exclusive_pool(exclusive_pool)
+            if mirror_pool is not None:
+                cache.attach_mirror_pool(mirror_pool)
+                # Coverage must hold before the first forward: fill the GPU cache
+                # and give the mirror the complement.
+                cache.mirror_warm_start()
             else:
                 cache.set_bank_sources(banks.sources, layer_residency=banks.layer_residency)
                 cache.set_alphas(banks.gate_up_alpha, banks.down_alpha)
@@ -1392,6 +1407,41 @@ class Engine:
             ),
             fallback_per_expert_bytes=expert_bytes_per_slot(sources),
         )
+
+    def _mirror_final_gpu_slots(self, config) -> int:
+        """GPU slots left for experts once the KV arena reaches its ceiling.
+
+        ``_plan_growable_kv`` answers this exactly but needs the MoE cache to
+        exist, and the mirror must be sized before that. This reproduces the
+        same budget arithmetic from config alone: total budget minus the KV
+        ceiling, divided by the bytes one expert slot costs.
+        """
+        from freetoken.engine.cache_budget import (
+            expert_bytes_per_slot,
+            net_cache_budget_bytes,
+        )
+        from freetoken.moe.mirror_pool import nvfp4_bank_shapes
+
+        mc = config.model_config
+        shapes = nvfp4_bank_shapes(
+            mc.expert_hidden_size or mc.hidden_size, mc.moe_intermediate_size
+        )
+        sources = {
+            name: [torch.empty((mc.num_experts, *tail), dtype=dtype, device="meta")]
+            for name, (tail, dtype) in shapes.items()
+        }
+        per_slot = expert_bytes_per_slot(sources)
+        _cache_per_page, fixed, _tok, _res = self._pool_cls.kv_cost(config)
+        budget = net_cache_budget_bytes(
+            self.init_free_memory
+            if getattr(self, "init_free_memory", None) is not None
+            else torch.cuda.mem_get_info(self.device)[1],
+            config.memory_ratio,
+            fixed,
+        )
+        kv_ceiling = _cache_per_page * self.num_pages
+        slots = int(max(budget - kv_ceiling, 0) // per_slot)
+        return max(min(slots, mc.num_moe_layers * mc.num_experts), mc.num_experts)
 
     def _plan_growable_kv(
         self,

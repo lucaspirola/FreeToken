@@ -58,7 +58,7 @@ def ensure_experts(cache, layer_id: int, expert_ids: torch.Tensor) -> None:
     # Aging LFU uses our graph-safe kernel for both uniform and mixed-size
     # caches. flashlib currently exposes LRU only.
     if (cache._size_class_enabled or cache.cache_policy_id == 1
-            or getattr(cache, "_exclusive_pool", None) is not None):
+            or getattr(cache, "_mirror", None) is not None):
         begin, end = cache.lru_slot_range(layer_id)
         if expert_ids.is_cuda:
             _ensure_experts_sized_gpu(cache, layer_id, expert_ids, begin, end)
@@ -101,6 +101,7 @@ def _ensure_experts_sized_gpu(cache, layer_id, expert_ids, begin, end) -> None:
             expert_ids.numel(),
             cache.lru_slot_range_device(layer_id),
             cache.usable_slots,
+            cache.victim_ids,
             cache.num_experts,
             cache.slot_capacity,
             BLOCK_E=block_e,
@@ -429,6 +430,7 @@ def _materialize_layer_sized_gpu(cache, layer_id: int, begin: int, end: int) -> 
             cache.num_indices,
             layer_id,
             cache.lru_slot_range_device(layer_id),
+            cache.victim_ids,
             cache.num_experts,
             cache.slot_capacity,
             BLOCK=block,
@@ -610,6 +612,7 @@ def _ensure_experts_sized_kernel_v2(
     num_active,
     bounds_ptr,  # [2] int32: (class_begin, class_end), device-resident (see lru_slot_range_device)
     usable_ptr,  # [1] int32: usable-slot bound, device-resident (see OffloadMoeCache.usable_slots)
+    victim_ids_ptr,  # [plan] int32: expert id displaced by each admission, -1 if none
     num_experts: tl.constexpr,
     cache_size: tl.constexpr,  # == slot_capacity: fixed arena size, not the live usable count
     BLOCK_E: tl.constexpr,
@@ -705,6 +708,12 @@ def _ensure_experts_sized_kernel_v2(
             else:
                 victim = tl.argmin(usage, axis=0).to(tl.int32)
             old_id = tl.sum(tl.where(off_c == victim, oid, 0))
+            # Publish the displaced owner BEFORE id_of_slot is overwritten below.
+            # The bounded host mirror needs the victim's identity to decide
+            # whether that expert still exists anywhere (see mirror_kernels).
+            # -1 when the slot was never used. One store, device-side, so decode
+            # stays CUDA-graph capturable.
+            tl.store(victim_ids_ptr + i, old_id)
             if old_id >= 0:
                 tl.store(slot_for_id_ptr + old_id, -1)
             expert = tl.sum(tl.where((missing_rank == i) & is_missing, off_e, 0))
@@ -837,6 +846,7 @@ def _materialize_layer_sized_kernel_v2(
     num_indices_ptr,
     layer_id,
     bounds_ptr,  # [2] int32: (class_begin, class_end), device-resident
+    victim_ids_ptr,  # [plan] int32: expert displaced by each row, -1 if none
     num_experts: tl.constexpr,
     cache_size: tl.constexpr,  # == slot_capacity
     BLOCK: tl.constexpr,
@@ -859,6 +869,10 @@ def _materialize_layer_sized_kernel_v2(
     tl.store(usage_ptr + global_slot, 0, mask=same_layer)
     overwritten = expert_mask & (old_id >= 0) & (~same_layer)
     tl.store(slot_for_id_ptr + old_id, -1, mask=overwritten)
+    # Publish displaced owners for the bounded host mirror, before the stores
+    # below overwrite id_of_slot. Same-layer owners are not victims: the layer
+    # is being re-materialized, so those experts land back in the cache.
+    tl.store(victim_ids_ptr + off, tl.where(overwritten, old_id, -1), mask=expert_mask)
 
     step = tl.load(step_ptr) + 1
     tl.store(step_ptr, step)

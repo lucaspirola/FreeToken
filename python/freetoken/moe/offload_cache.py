@@ -342,6 +342,14 @@ class OffloadMoeCache:
             (plan_slots,), dtype=torch.int32, device=self.device
         )
         self.num_indices = torch.zeros((1,), dtype=torch.int64, device=self.device)
+        # Expert id displaced by each admission this step (-1 when the slot was
+        # free), published by the LRU kernel BEFORE it overwrites id_of_slot.
+        # Only the bounded host mirror reads it; it costs one int32 store per
+        # miss and keeps the victim's identity available device-side, which is
+        # what lets the mirror stay CUDA-graph capturable.
+        self.victim_ids = torch.full(
+            (plan_slots,), -1, dtype=torch.int32, device=self.device
+        )
         # hybrid only: full missing count BEFORE the per-step fetch cap (num_indices holds
         # the capped count that copy_missing actually fetches). The difference is what the
         # CPU computes this step. Written by the hybrid ensure kernel.
@@ -872,8 +880,8 @@ class OffloadMoeCache:
         self._gather_bank_ids: list[int] = []
         self._gather_dst_ptrs: torch.Tensor | None = None
         self._gather_feat_bytes: torch.Tensor | None = None
-        if getattr(self, "_exclusive_pool", None) is not None:
-            return  # bank_sources carries meta tensors, never host DMA addresses
+        if getattr(self, "_mirror", None) is not None:
+            return  # the mirror path builds its own descriptors in _build_mirror_plan
         if getattr(self, "_size_class_enabled", False):
             self._build_size_class_copy_plan()
             return
@@ -1035,8 +1043,8 @@ class OffloadMoeCache:
         cold-start after rebuild. Object identity is preserved so attached layers and
         ``ctx.moe_offload_cache`` stay valid.
         """
-        if getattr(self, "_exclusive_pool", None) is not None:
-            raise RuntimeError("exclusive residency uses set_usable_slots, not destructive rebuild")
+        if getattr(self, "_mirror", None) is not None:
+            raise RuntimeError("mirror residency uses set_usable_slots, not destructive rebuild")
         assert self.bank_sources, "set_bank_sources must run before rebuild"
         self.validate_rebuild(cache_size)
         size_class_sources = (
@@ -1107,6 +1115,9 @@ class OffloadMoeCache:
         )
         self.src_indices = torch.empty(
             (plan_slots,), dtype=torch.int32, device=self.device
+        )
+        self.victim_ids = torch.full(
+            (plan_slots,), -1, dtype=torch.int32, device=self.device
         )
         self.step.zero_()
         self.expert_frequency.zero_()
@@ -1234,8 +1245,10 @@ class OffloadMoeCache:
         return self._arena_grow(current, n)
 
     def _arena_shrink(self, n: int, current: int) -> int:
-        if getattr(self, "_exclusive_pool", None) is not None:
-            self._invalidate_exclusive_slots(n, current)
+        if getattr(self, "_mirror", None) is not None:
+            # Slots [n, current) go to the KV arena; any expert held only there
+            # must come back to the mirror or coverage breaks.
+            self._mirror_refill_uncovered(n, current)
         # (a) Invalidate every expert id whose slot falls in [n, current): the same
         # pattern _invalidate_prefill_buffer uses for the (fixed) double-buffer slots.
         old_ids = self.id_of_slot[n:current]
@@ -1578,28 +1591,33 @@ class OffloadMoeCache:
         return tuple(cache[:n] for _, cache in self.banks)
 
     # ------------------------------------------------------------------
-    # Exclusive host residency (experimental, FREETOKEN_EXCLUSIVE_EXPERT_RAM=1):
-    # the host side is a bounded disk-backed pool instead of one pinned row per
-    # expert. copy_missing refills pool rows (O_DIRECT) and copies them into the
-    # GPU slot cache; displaced GPU experts never travel back to the host.
-    # Eager-only: a host miss needs a synchronous disk read before the H2D, which
-    # a captured CUDA graph cannot inject. The engine forces --cuda-graph-max-bs 0
-    # and disables prefill overlap when the gate is on.
+    # Bounded host mirror (FREETOKEN_MIRROR_EXPERT_RAM=1)
+    #
+    # The host side holds `capacity` pinned rows instead of one per expert, and
+    # every expert is on the GPU, in the mirror, or both (the coverage
+    # invariant). A GPU miss is therefore still a plain host->device row copy --
+    # no disk on the hot path -- so CUDA graphs and prefill overlap stay on and
+    # this runs the baseline scheduler with a smaller host footprint.
+    #
+    # A miss admits expert `new` (mirror row r) into the slot of victim `v`.
+    # Since `new` becomes GPU-resident, r falls free and receives `v`: the swap
+    # is a permutation of mirror rows, never an allocation. When `v` already has
+    # a mirror row (a duplicate, which fits whenever capacity + gpu_slots > L*E)
+    # the writeback is skipped entirely.
     # ------------------------------------------------------------------
 
-    def attach_exclusive_pool(self, pool) -> None:
-        """Attach native NVFP4 disk backing; source tensors are metadata only."""
+    def attach_mirror_pool(self, pool) -> None:
+        """Attach a bounded host mirror; sources stay metadata-only."""
         if (self.quant_format != "nvfp4" or self.decode_target != "gpu"
-                or self.prefill_overlap or self.cpu_layer_ids or self.pageable_gpu):
-            raise ValueError("exclusive residency requires native NVFP4, GPU decode, "
-                             "and no CPU/pageable routing or prefill overlap")
-        if self.bank_caches or getattr(self, "_exclusive_pool", None) is not None:
-            raise RuntimeError("exclusive pool must attach to a fresh cache")
+                or self.cpu_layer_ids or self.pageable_gpu):
+            raise ValueError("mirror residency requires native NVFP4, GPU decode, "
+                             "and no CPU/pageable routing")
+        if self.bank_caches or getattr(self, "_mirror", None) is not None:
+            raise RuntimeError("mirror pool must attach to a fresh cache")
         if (pool.num_layers != self.num_layers or pool.num_experts != self.num_experts
                 or tuple(pool.schema_order) != tuple(self.bank_schema)):
-            raise ValueError("exclusive pool geometry/schema does not match cache")
-        self._exclusive_pool = pool
-        self._exclusive_old_ids = None
+            raise ValueError("mirror pool geometry/schema does not match cache")
+        self._mirror_pool = pool
         self.bank_sources = {name: list(pool.sources[name]) for name in self.bank_schema}
         self._variable_bank_rows.clear()
         self._size_class_enabled = False
@@ -1611,75 +1629,252 @@ class OffloadMoeCache:
                 (self.cache_size, *tail), dtype, name=name
             )
         self.banks = [(self.bank_sources[n], self.bank_caches[n]) for n in self.bank_schema]
-        self._build_copy_plan()
+        self._build_mirror_plan(pool)
         logger.info_rank0(
-            "exclusive expert pool attached: %d host slots, %.2f GiB pinned "
-            "(checkpoint-backed; whole-model host residency skipped)",
+            "mirror expert pool attached: %d host rows, %.2f GiB pinned "
+            "(whole-model host residency skipped; graphs/overlap unchanged)",
             pool.capacity, pool.pool_bytes / 2**30,
         )
 
-    def _begin_exclusive_plan(self) -> None:
-        if torch.cuda.is_current_stream_capturing():
-            raise RuntimeError("exclusive expert residency requires eager execution")
-        if self._exclusive_old_ids is not None:
-            raise RuntimeError("consume the previous exclusive plan before staging another")
-        # Only small ownership metadata travels D2H, before admission overwrites it.
-        self._exclusive_old_ids = self.id_of_slot[:self.cache_size].cpu().tolist()
+    def _build_mirror_plan(self, pool) -> None:
+        """Device-resident residency maps + the fused copy descriptors.
 
-    def _restore_exclusive_ids(self, ids) -> None:
-        pool = self._exclusive_pool
-        for flat in ids:
-            pool.refill(*divmod(flat, self.num_experts))
-
-    def _invalidate_exclusive_slots(self, begin: int, end: int) -> None:
-        if self._exclusive_old_ids is not None:
-            raise RuntimeError("cannot invalidate slots while an exclusive copy is pending")
-        old = self.id_of_slot[begin:end]
-        ids = [flat for flat in old.cpu().tolist() if flat >= 0]
-        valid = old >= 0
-        self.slot_for_id.view(-1)[old[valid].long()] = -1
-        old.fill_(-1)
-        self.usage[begin:end].zero_()
-        self._exclusive_pool.gpu_ids.difference_update(ids)
-        self._restore_exclusive_ids(ids)
-
-    def copy_missing_exclusive(self) -> None:
-        """Consume admission transactionally, returning each freed RAM slot to victims.
-
-        The admission kernels publish speculative maps. Withdraw those entries
-        before disk I/O, and publish each row only after all six uploads complete.
-        A failed read leaves that row missing, so a subsequent ensure can retry.
+        Both directions reuse ``fast_index_copy_multi_jit``: it copies row
+        ``src_indices[i]`` of each source bank into row ``dst_indices[i]`` of
+        each destination bank, and is agnostic to which side is host memory (the
+        mirror is pinned and device-visible, so its rows are addressable from
+        the GPU exactly like the baseline's whole-model banks).
         """
-        pool = self._exclusive_pool
-        layer = self._pending_src_layer
-        old = self._exclusive_old_ids
-        if old is None or layer is None:
-            raise RuntimeError("no exclusive admission plan to consume")
-        n = int(self.num_indices.item())
-        experts = self.src_indices[:n].cpu().tolist()
-        slots = self.evict_slots[:n].cpu().tolist()
-        planned = {layer * self.num_experts + expert for expert in experts}
-        current = self.id_of_slot[:self.cache_size].cpu().tolist()
-        final_ids = {flat for flat in current if flat >= 0}
-        victims = iter(sorted({flat for flat in old if flat >= 0} - final_ids))
-        # All materialize-layer relocations (including same-layer slots above E)
-        # are captured by the old/final set difference, not just the first E victims.
-        for expert, slot in zip(experts, slots):
-            self.slot_for_id[layer, expert] = -1
-            self.id_of_slot[slot] = -1
-        pool.gpu_ids = final_ids - planned
-        self._exclusive_old_ids = None
+        from freetoken.kernel.pinned import device_ptr
+
+        dev = self.device
+        plan = self.evict_slots.numel()
+        host_rows = [-1] * pool.capacity
+        fwd = [-1] * pool.total
+        for row, flat in enumerate(pool.id_of_pool_row):
+            host_rows[row] = flat
+        for flat, row in enumerate(pool.pool_row_of_id):
+            fwd[flat] = row
+        pool_ptrs, cache_ptrs, feat_bytes = [], [], []
+        for name in self.bank_schema:
+            host = pool.banks[name]
+            cache = self.bank_caches[name]
+            row_bytes = math.prod(host.shape[1:]) * host.element_size()
+            if row_bytes % 16 or device_ptr(host) % 16 or cache.data_ptr() % 16:
+                raise RuntimeError("mirror banks must be 16B aligned for the fused copy")
+            pool_ptrs.append(device_ptr(host))
+            cache_ptrs.append(cache.data_ptr())
+            feat_bytes.append(row_bytes)
+        self._mirror = {
+            "pool_row_of_id": torch.tensor(fwd, dtype=torch.int32, device=dev),
+            "id_of_pool_row": torch.tensor(host_rows, dtype=torch.int32, device=dev),
+            "h2d_src": torch.zeros((plan,), dtype=torch.int32, device=dev),
+            "d2h_src": torch.zeros((plan,), dtype=torch.int32, device=dev),
+            "d2h_dst": torch.zeros((plan,), dtype=torch.int32, device=dev),
+            "n_d2h": torch.zeros((1,), dtype=torch.int64, device=dev),
+            # Rows owned by nobody, usable as writeback targets. A swap pops at
+            # most one and pushes exactly one, so the depth is stable; the
+            # capacity plan keeps a full layer in reserve so it never empties.
+            "free_rows": torch.zeros((pool.capacity,), dtype=torch.int32, device=dev),
+            "free_count": torch.zeros((1,), dtype=torch.int32, device=dev),
+            # Rows freed this step, folded into the stack only after every copy
+            # is issued (recycling one mid-step would corrupt a pending upload).
+            "freed_rows": torch.zeros((plan,), dtype=torch.int32, device=dev),
+            "n_freed": torch.zeros((1,), dtype=torch.int32, device=dev),
+            "stats": torch.zeros((5,), dtype=torch.int64, device=dev),
+            "pool_ptrs": torch.tensor(pool_ptrs, dtype=torch.int64, device=dev),
+            "cache_ptrs": torch.tensor(cache_ptrs, dtype=torch.int64, device=dev),
+            "feat_bytes": torch.tensor(feat_bytes, dtype=torch.int64, device=dev),
+        }
+        self._copy_fused_ok = False  # the mirror path drives the copies itself
+
+    def mirror_stats(self) -> dict:
+        """Swap counters (swaps, free evictions, writebacks, coverage faults)."""
+        if getattr(self, "_mirror", None) is None:
+            return {}
+        swaps, free_evict, d2h, violations, starved = self._mirror["stats"].tolist()
+        return {
+            "swaps": swaps,
+            "free_evictions": free_evict,
+            "writebacks": d2h,
+            "coverage_faults": violations,
+            "starved_writebacks": starved,
+            "free_eviction_rate": (free_evict / swaps) if swaps else 0.0,
+        }
+
+    def mirror_warm_start(self) -> dict:
+        """Establish coverage at startup: fill the GPU, then mirror the rest.
+
+        A cold cache holds nothing, so coverage (on_gpu or in_pool) would demand
+        a mirror row for all ``L*E`` experts -- exactly the whole-model residency
+        this pool exists to avoid. Instead the GPU cache is warm-filled here and
+        the mirror takes the complement, which is what the bound
+        ``capacity >= L*E - gpu_slots`` was derived from.
+
+        Experts are spread evenly across layers rather than filled in flat id
+        order: every token routes through all ``L`` layers, so a GPU holding
+        layers 0..k entirely and nothing of the rest would miss constantly.
+        """
+        pool = self._mirror_pool
+        m = self._mirror
+        from freetoken.kernel.fast_index_copy import fast_index_copy_multi_jit
+
+        per_layer = self.cache_size // self.num_layers
+        extra = self.cache_size - per_layer * self.num_layers
+        gpu_plan: list[int] = []
+        for layer in range(self.num_layers):
+            count = per_layer + (1 if layer < extra else 0)
+            base = layer * self.num_experts
+            gpu_plan.extend(base + e for e in range(min(count, self.num_experts)))
+        gpu_plan = gpu_plan[: self.cache_size]
+        # Stage through the mirror's own pinned rows (overwritten below), a
+        # chunk at a time, so no extra host buffer is needed.
+        chunk = min(pool.capacity, len(gpu_plan))
+        dst_rows = torch.empty((chunk,), dtype=torch.int32, device=self.device)
+        src_rows = torch.arange(chunk, dtype=torch.int32, device=self.device)
+        count_t = torch.zeros((1,), dtype=torch.int64, device=self.device)
+        for begin in range(0, len(gpu_plan), chunk):
+            batch = gpu_plan[begin:begin + chunk]
+            for i, flat in enumerate(batch):
+                pool._read_row(flat, i)
+            dst_rows[: len(batch)].copy_(
+                torch.tensor([begin + i for i in range(len(batch))], dtype=torch.int32)
+            )
+            count_t.fill_(len(batch))
+            fast_index_copy_multi_jit(
+                m["cache_ptrs"], m["pool_ptrs"], m["feat_bytes"],
+                dst_rows[: len(batch)], src_rows[: len(batch)], count_t,
+            )
+            torch.cuda.synchronize(self.device)
+        ids = torch.tensor(gpu_plan, dtype=torch.int32, device=self.device)
+        self.id_of_slot[: len(gpu_plan)] = ids
+        self.slot_for_id.view(-1)[ids.long()] = torch.arange(
+            len(gpu_plan), dtype=torch.int32, device=self.device
+        )
+        # Now the mirror takes everything the GPU does not hold, then spends the
+        # slack on duplicates of the GPU's coldest rows -- the ones LFU evicts
+        # first, so their writeback is the one worth skipping.
+        pool.pool_row_of_id = [-1] * pool.total
+        pool.id_of_pool_row = [-1] * pool.capacity
+        filled = pool.load_initial(gpu_plan)
+        seeded = pool.seed_duplicates(list(reversed(gpu_plan)))
+        m["pool_row_of_id"].copy_(
+            torch.tensor(pool.pool_row_of_id, dtype=torch.int32)
+        )
+        m["id_of_pool_row"].copy_(
+            torch.tensor(pool.id_of_pool_row, dtype=torch.int32)
+        )
+        self._mirror_publish_free_rows()
+        logger.info_rank0(
+            "mirror warm start: %d experts on GPU, %d mirrored, %d duplicated, "
+            "%d rows in reserve (%.1f%% of evictions skip the writeback)",
+            len(gpu_plan), filled, seeded, int(m["free_count"].item()),
+            100.0 * seeded / max(len(gpu_plan), 1),
+        )
+        return {"gpu": len(gpu_plan), "mirrored": filled, "duplicates": seeded,
+                "reserve": int(m["free_count"].item())}
+
+    def _mirror_publish_free_rows(self) -> None:
+        """Rebuild the device free stack from the host ownership map."""
+        m = self._mirror
+        pool = self._mirror_pool
+        free = [row for row, owner in enumerate(pool.id_of_pool_row) if owner < 0]
+        if free:
+            m["free_rows"][: len(free)].copy_(
+                torch.tensor(free, dtype=torch.int32)
+            )
+        m["free_count"].fill_(len(free))
+
+    def _mirror_refill_uncovered(self, begin: int = 0, end: int | None = None) -> int:
+        """Restore coverage for GPU rows about to be dropped.
+
+        Invalidating GPU slots (``reset``, or an arena shrink handing slots to
+        the KV cache) destroys the only copy of any expert the mirror does not
+        already hold. Those rows are re-read from the checkpoint here. This runs
+        only at host idle boundaries -- never inside a captured graph or a decode
+        step -- so the disk contact is off the hot path.
+
+        Returns the number of rows re-read.
+        """
+        pool = self._mirror_pool
+        m = self._mirror
+        if end is None:
+            end = self.cache_size
+        doomed = self.id_of_slot[begin:end]
+        ids = [flat for flat in doomed.cpu().tolist() if flat >= 0]
+        if not ids:
+            return 0
+        fwd = m["pool_row_of_id"].cpu().tolist()
+        inv = m["id_of_pool_row"].cpu().tolist()
+        # Rows the mirror already covers need nothing; the rest must be read
+        # back into rows that are free (owned by nobody) or hold an expert that
+        # stays GPU-resident (a duplicate we can safely overwrite).
+        uncovered = [flat for flat in ids if fwd[flat] < 0]
+        if not uncovered:
+            return 0
+        survivors = set(self.id_of_slot.cpu().tolist()) - set(ids)
+        spare = [row for row, owner in enumerate(inv)
+                 if owner < 0 or (owner in survivors and fwd[owner] == row)]
+        if len(spare) < len(uncovered):
+            raise RuntimeError(
+                f"mirror cannot restore coverage for {len(uncovered)} experts: "
+                f"only {len(spare)} rows are free or duplicated"
+            )
+        for flat, row in zip(uncovered, spare):
+            old = inv[row]
+            if old >= 0:
+                fwd[old] = -1
+            pool._read_row(flat, row)
+            fwd[flat] = row
+            inv[row] = flat
+            pool.pool_row_of_id[flat] = row
+            pool.id_of_pool_row[row] = flat
+            if old >= 0:
+                pool.pool_row_of_id[old] = -1
+        m["pool_row_of_id"].copy_(torch.tensor(fwd, dtype=torch.int32))
+        m["id_of_pool_row"].copy_(torch.tensor(inv, dtype=torch.int32))
+        logger.info_rank0("mirror restored coverage for %d experts", len(uncovered))
+        return len(uncovered)
+
+    def copy_missing_mirror(self) -> None:
+        """Issue this step's writebacks and admissions, in that order.
+
+        Ordering is load-bearing and stream-ordered, not synchronized:
+
+          1. D2H  gpu[slot] -> pool[row]   reads the slot's *old* (victim) bytes
+          2. H2D  pool[row] -> gpu[slot]   overwrites the slot with the admission
+
+        Step 2 reads the same pool row step 1 wrote only in the swap case, where
+        the row's new owner is the victim and the admission's source row is that
+        very row -- so the H2D source must be sampled BEFORE the D2H lands. It
+        is: ``resolve_swaps`` recorded it in ``h2d_src`` while the maps still
+        described the pre-swap state, and the fused copy reads ``h2d_src``, not
+        the maps. Both copies are on the current stream, so the GPU slot's RAW
+        (step 2 after step 1) is ordered too.
+        """
+        from freetoken.kernel.fast_index_copy import fast_index_copy_multi_jit
+        from freetoken.moe.mirror_kernels import publish_freed_rows, resolve_swaps
+
+        layer_id = self._pending_src_layer
+        assert layer_id is not None, (
+            "no staged misses (ensure_experts/materialize_layer first)"
+        )
+        m = self._mirror
+        resolve_swaps(self, layer_id)
+        # 1. victims leave the GPU (empty when every victim is already mirrored)
+        fast_index_copy_multi_jit(
+            m["pool_ptrs"], m["cache_ptrs"], m["feat_bytes"],
+            m["d2h_dst"], m["d2h_src"], m["n_d2h"],
+        )
+        # 2. admissions enter the GPU
+        fast_index_copy_multi_jit(
+            m["cache_ptrs"], m["pool_ptrs"], m["feat_bytes"],
+            self.evict_slots, m["h2d_src"], self.num_indices,
+        )
+        # 3. only now may this step's vacated rows be reused
+        publish_freed_rows(self)
         self._pending_src_layer = None
-        self.num_indices.zero_()
-        for expert, slot in zip(experts, slots):
-            host = pool.upload_async(layer, expert, self.bank_caches, slot)
-            pool.wait_upload(host)  # host fence, not merely a GPU stream dependency
-            self.id_of_slot[slot] = layer * self.num_experts + expert
-            self.slot_for_id[layer, expert] = slot
-            victim = next(victims, None)
-            if victim is not None:
-                self._restore_exclusive_ids((victim,))
-        self._restore_exclusive_ids(victims)
+        self._pending_whole_layer = False
 
     def _init_prefill_overlap_buffers(self) -> None:
         assert self.banks or self._size_class_enabled, (
@@ -1987,8 +2182,6 @@ class OffloadMoeCache:
 
     def ensure_experts(self, layer_id: int, expert_ids: torch.Tensor) -> None:
         from freetoken.moe.offload_kernels import ensure_experts
-        if getattr(self, "_exclusive_pool", None) is not None:
-            self._begin_exclusive_plan()
 
         if self.collect_decode_freq:
             # ``expert_ids`` still holds raw expert ids here (the kernel rewrites them to
@@ -1997,6 +2190,10 @@ class OffloadMoeCache:
             self.decode_freq[layer_id].scatter_add_(0, ids, torch.ones_like(ids))
         self._pending_src_layer = layer_id
         self._pending_whole_layer = False
+        if getattr(self, "_mirror", None) is not None:
+            # Entries linger from a longer previous step; the LRU kernel only
+            # writes one per miss, so clear before it runs.
+            self.victim_ids.fill_(-1)
         ensure_experts(self, layer_id, expert_ids)
 
     def ensure_experts_hybrid(self, layer_id: int, expert_ids: torch.Tensor) -> None:
@@ -2010,8 +2207,8 @@ class OffloadMoeCache:
         the capped fetch count (for ``copy_missing``); ``num_missing_full`` the pre-cap
         miss count (for stats). All device-side / fixed-shape, so it is CUDA-graph safe."""
         from freetoken.moe.offload_kernels import ensure_experts_hybrid
-        if getattr(self, "_exclusive_pool", None) is not None:
-            raise RuntimeError("exclusive residency does not support hybrid CPU routing")
+        if getattr(self, "_mirror", None) is not None:
+            raise RuntimeError("mirror residency does not support hybrid CPU routing")
 
         if self.collect_decode_freq:
             ids = expert_ids.reshape(-1).long()
@@ -2028,18 +2225,20 @@ class OffloadMoeCache:
 
     def materialize_layer(self, layer_id: int) -> None:
         from freetoken.moe.offload_kernels import materialize_layer
-        if getattr(self, "_exclusive_pool", None) is not None:
-            self._begin_exclusive_plan()
 
         self._pending_src_layer = layer_id
         self._pending_whole_layer = True
+        if getattr(self, "_mirror", None) is not None:
+            self.victim_ids.fill_(-1)
         materialize_layer(self, layer_id)
 
     def reset(self) -> None:
         from freetoken.moe.offload_kernels import reset_cache
-        if getattr(self, "_exclusive_pool", None) is not None:
-            self._invalidate_exclusive_slots(0, self.cache_size)
-
+        if getattr(self, "_mirror", None) is not None:
+            # Dropping every GPU resident would strand any expert the mirror does
+            # not hold (coverage: on_gpu or in_pool). Refill those rows from the
+            # checkpoint first -- a host idle boundary, never a captured path.
+            self._mirror_refill_uncovered()
         reset_cache(self)
         # Per-expert recency is not cache_size-shaped, so reset_cache leaves it alone; wipe
         # it here so a new sequence starts with cold hybrid fetch priorities.
@@ -2359,8 +2558,8 @@ class OffloadMoeCache:
         )
 
     def copy_missing(self) -> None:
-        if getattr(self, "_exclusive_pool", None) is not None:
-            return self.copy_missing_exclusive()
+        if getattr(self, "_mirror", None) is not None:
+            return self.copy_missing_mirror()
         assert self.banks or self._size_class_enabled, (
             "set_bank_sources must register the banks first"
         )
