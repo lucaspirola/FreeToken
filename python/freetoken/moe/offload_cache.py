@@ -2006,16 +2006,20 @@ class OffloadMoeCache:
             m["pool_ptrs"], m["cache_ptrs"], m["feat_bytes"],
             m["d2h_dst"], m["d2h_src"], m["n_d2h"],
         )
-        # 2. admissions enter the GPU, from the compacted descriptor: an expert
+        # 2. experts already resident elsewhere move slot -> slot on the device.
+        # BEFORE the uploads: a D2D source is a slot that still holds its old
+        # expert, and step 3 is about to overwrite exactly such slots. Issuing
+        # the relocation afterwards read admitted bytes instead of the expert
+        # being relocated (21K-token completions came out as noise).
+        fast_index_copy_multi_jit(
+            m["cache_ptrs"], m["cache_ptrs"], m["feat_bytes"],
+            m["d2d_dst"], m["d2d_src"], m["n_d2d"],
+        )
+        # 3. admissions enter the GPU, from the compacted descriptor: an expert
         # already sitting in its target slot emitted nothing.
         fast_index_copy_multi_jit(
             m["cache_ptrs"], m["pool_ptrs"], m["feat_bytes"],
             m["h2d_dst"], m["h2d_src"], m["n_h2d"],
-        )
-        # 3. experts already resident elsewhere move slot -> slot on the device
-        fast_index_copy_multi_jit(
-            m["cache_ptrs"], m["cache_ptrs"], m["feat_bytes"],
-            m["d2d_dst"], m["d2d_src"], m["n_d2d"],
         )
         # 4. only now may this step's vacated rows be reused
         publish_freed_rows(self)
