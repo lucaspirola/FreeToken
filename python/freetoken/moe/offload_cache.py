@@ -1895,13 +1895,9 @@ class OffloadMoeCache:
         if moves:
             self._mirror_relocate_slots(moves)
 
-        # (2) Displaced experts that would lose their only copy.
-        doomed = [f for f in target
-                  if f >= 0 and not (base <= f < base + self.num_experts)]
-        missing = [f for f in dict.fromkeys(doomed) if fwd[f] < 0]
-        # (3) This layer's experts that are neither on the GPU nor mirrored:
-        # impossible under the coverage invariant, but assert rather than
-        # silently feed the GEMM row 0.
+        # (2) Experts of this layer that are neither on the GPU nor mirrored.
+        # The coverage invariant forbids this; assert rather than let the swap
+        # kernel silently source row 0.
         absent = [base + e for e in range(self.num_experts)
                   if slot_of[base + e] < 0 and fwd[base + e] < 0]
         if absent:
@@ -1909,14 +1905,28 @@ class OffloadMoeCache:
                 f"coverage invariant broken before materialize: {len(absent)} "
                 f"experts of layer {layer_id} are neither on GPU nor mirrored"
             )
+
+        # (3) Experts about to be displaced from the target window whose only
+        # copy is that GPU slot. resolve_swaps writes each back into a
+        # free-stack row, but a materialize displaces a WHOLE layer at once and
+        # the stack only carries the reserve, so mirror them here instead --
+        # host side, prefill only, and it keeps the stack for decode.
+        doomed = [f for f in target
+                  if f >= 0 and not (base <= f < base + self.num_experts)]
+        missing = [f for f in dict.fromkeys(doomed) if fwd[f] < 0]
         if not missing:
             return 0
-        on_gpu = set(f for f in self.id_of_slot[: self.cache_size].cpu().tolist()
-                     if f >= 0) - set(doomed)
+        # Rows that may be overwritten: unowned ones, plus duplicates of experts
+        # that keep a GPU copy AFTER this materialize (so not the doomed ones,
+        # and not this layer's, which the materialize is installing).
+        survivors = set(
+            f for f in self.id_of_slot[: self.cache_size].cpu().tolist() if f >= 0
+        ) - set(doomed)
         free = [r for r, owner in enumerate(inv) if owner < 0]
         if len(free) < len(missing):
             spare = [r for r, owner in enumerate(inv)
-                     if owner >= 0 and owner in on_gpu]
+                     if owner >= 0 and owner in survivors
+                     and not (base <= owner < base + self.num_experts)]
             free.extend(spare[: len(missing) - len(free)])
         if len(free) < len(missing):
             raise RuntimeError(
