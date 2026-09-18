@@ -45,12 +45,15 @@ Option (a) is boring and likely right: the scheduler knows when a decode
 phase follows a prefill phase; hook that transition in engine/scheduler, not
 inside the cache.
 
-## Known issue #2 (perf, not correctness): warm start at the boundary## Known issue #2 (perf, not correctness): warm start at the boundary## Known issue #2 (perf, not correctness): warm start at the boundary
-One full checkpoint re-read (~4 s) per prefill->decode transition
-(`_mirror_needs_coverage`). Optimization: warm start currently re-reads ALL
-rows; it could keep rows whose (expert, bytes) are still valid — compare
-against the device ownership map and skip re-reading experts whose row already
-holds them. Cuts the 4 s to well under 1 s in the steady case.
+## Known issue #2 (perf, not correctness): warm start at the boundary## Known issue #2 (perf, not correctness): warm start at the boundary## Issue #2 (perf, minor): warm start at the boundary -- ANALYZED, deprioritized
+One full checkpoint re-read (~4 s) per prefill->decode transition. Breakdown:
+~2175 rows re-fill the EMPTY GPU cache (a prefill sweep clears every resident
+except the last layer), ~770 fill the mirror complement. The GPU re-fill is
+irreducible without a design change (e.g. letting prefill materializes write
+victims back into free rows until the stack runs dry -- saves <= 25 % of reads,
+re-introduces drain-adjacent machinery). Within a 50 K-500 K prefill (tens of
+seconds to minutes), 4 s is noise. Revisit only if short-prefill workloads
+matter.
 
 ## Follow-up list (owner-approved, in order)
 1. Graph race: second-buffer design above; validate with graph_race_repro.py
