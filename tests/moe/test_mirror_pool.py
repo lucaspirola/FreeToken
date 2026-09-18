@@ -90,10 +90,11 @@ def _pool(root, capacity):
 
 
 def test_capacity_covers_the_kv_ceiling():
-    # Everything the GPU cannot hold at its smallest, plus one layer of reserve
-    # rows so a writeback always has a landing spot outside the row its own
-    # admission is uploading from.
-    assert plan_capacity(23, 128, 1552) == (2944 - 1552) + 128
+    # Everything the GPU cannot hold at its smallest, plus two layers of
+    # reserve: one supplies writeback landing rows (a victim must not overwrite
+    # the row its own admission is uploading from), the other lets a prefill
+    # materialize stage a whole layer plus the experts it displaces.
+    assert plan_capacity(23, 128, 1552) == (2944 - 1552) + 2 * 128
     # Reserve is configurable; without it the bound is pure coverage.
     assert plan_capacity(23, 128, 1552, reserve=0) == 2944 - 1552
     # Never more rows than the model has experts.
