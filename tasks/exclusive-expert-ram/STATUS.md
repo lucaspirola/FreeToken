@@ -1,62 +1,83 @@
-# Mirror expert pool — status 2026-09-18 (end of session)
+# Mirror expert pool — status 2026-09-18 (end of session, round 2)
 
-## Architecture (as designed with the owner)
-Bounded pinned host mirror; a GPU miss is served from RAM, the displaced expert
-is written back to RAM. No disk on the hot path, so CUDA graphs stay ON. Where
-`gpu_slots + mirror_rows > L*E` the slack holds duplicates, and evicting a
-duplicated expert costs no writeback.
+## What is DONE and verified (do not re-do)
+- Architecture works: bounded pinned mirror, GPU<->RAM swap, disk only at
+  load/boundaries. -8.3 GiB RAM (20.2 -> 11.9 GiB cgroup).
+- Eager decode CORRECT end-to-end: 21K recall = "SIERRA-7741", 74K recall
+  cites the planted code with KV-arena growth mid-request, 0 coverage faults,
+  0 starved writebacks. Same-seed greedy vs baseline: 2/3 byte-identical, 1
+  coherent paraphrase (slot-order float reduction; not corruption).
+- Tests: unit 3/3, tests/scheduler 380/380, swap_smoke PASS (prefill sweeps +
+  decode + arena shrinks, byte-exact), baseline re-run from this tree correct
+  at full speed with graphs (shared-path changes are harmless).
+- Numbers recorded: benchmarks/results/nemotron35_lightning_5080_exclusive_2026-09-18.md
 
-## Measured on the real model (port 1920, 21K-token prompt)
-- RAM: cgroup **11.9 GiB** vs 20.2 baseline -> **-8.3 GiB**
-- decode: 131-142 tok/s vs 176.4 baseline (disk-backed version was 19.9)
-- TTFT 0.15 s vs 0.36 baseline
-- free_eviction_rate 0.28-0.82 (duplicates work)
-- short prompts: correct ("42")
+## Known issue #1 (the only correctness blocker): graphs must stay off
+Root cause now PROVEN, not hypothesized. `Engine.forward_batch` decodes through
+`GraphRunner.replay` — a pure graph replay. Host code (`ensure_experts`) runs
+exactly once at CAPTURE. The captured LRU kernel rewrites `topk_ids` from
+expert ids to slot ids IN PLACE on every replay. So:
+  - token 1 (capture routing): correct
+  - token 2..N (replay): the buffer still holds token N-1's SLOT ids; the new
+    token's routing (written by GraphCaptureBuffer.copy_from into the static
+    buffer) is never consumed, because the reader expects EXPERT ids at entry.
+  91 wrong experts over 60 pure replays reproduced in
+  tasks/exclusive-expert-ram/graph_race_repro.py (no server needed).
 
-## Bugs found and fixed (all with repros)
-1. prefill materialize published neither victims nor prior owners -> the
-   non-size-class kernel needed the same instrumentation as the sized one.
-2. "already in place" cannot be read from id_of_slot (overwritten first);
-   prior_ids is now a separate signal from victim_ids.
-3. slot relocation corrupted slot_for_id of the overwritten owner -> removed;
-   the materialize reinstalls the layer anyway.
-4. D2D relocation issued AFTER the uploads read admitted bytes -> moved before.
-5. free stack was rebuilt from the HOST map while the kernel owns the DEVICE
-   map -> rows still in use were published free (236 wrong experts -> 0).
-6. `_mirror_refill_uncovered` had the same host/device divergence across an
-   arena shrink (0 -> 72 -> 237 wrong across three shrinks -> now 0).
-7. prefill cannot hold the decode coverage invariant (it would need L*E-E =
-   2816 rows, 14.7 GiB); it now drops evictions and coverage is re-established
-   once at the prefill->decode boundary.
+Why the baseline does NOT have this problem: with whole-model host residency
+`copy_missing` sources row = expert id, and slot ids written by the LRU are
+consumed only within the same captured step. The mirror does not change this;
+the defect is that the buffer's CONTENT semantics differ between capture
+(expert ids) and steady-state replay (previous step's slot ids). The baseline
+is bit-correct here only because its GEMM... (to verify if re-enabling graphs:
+diff a baseline graph-mode run's topk_ids handling against the mirror's — the
+suspicion is the baseline hides it because its expert ids are ALSO valid
+source rows; the mirror's pool-row indirection makes it visible).
 
-## Open defect
-`starved_writebacks = 4017` on a 21K-token request (16025 swaps). Raising the
-reserve from 2 to 3 layers barely moved it (4401 -> 4017), so the free stack is
-LEAKING in the real workload, not undersized. Every starved writeback loses an
-expert's only copy; the answer is now grammatical but still wrong
-("the user is asking for the access code" instead of SIERRA-7741).
+Fix attempts made and REJECTED (do not retry these shapes):
+1. Prime kernel writing slot ids for resident experts at replay start: breaks
+   the LRU contract (it reads EXPERT ids at entry to compute misses), and -1
+   for absent experts corrupts miss admission. The buffer cannot carry both
+   semantics.
+2. `capture_pos_of_expert` side table maintained by resolve_swaps: the
+   cleared-positions are exactly the misses, which the LRU must see.
 
-Not reproduced locally yet: stack depth stays exactly stable in every synthetic
-case tried (40-step decode, 23 layers/token, 64-token prefill batches, three
-arena shrinks). The real run differs in scale (2944 experts, top-6, 23 layers,
-21K-token prefill) and in having real KV growth.
+Promising directions (not attempted):
+- A second persistent buffer: `copy_from` writes raw expert ids into
+  `routing_buf`; the captured step starts with a small kernel
+  routing_buf -> topk_ids (pure copy, identity), then LRU consumes topk_ids as
+  at capture. Cost: one extra buffer copy per layer per replay (trivial).
+  Requires: hooking GraphCaptureBuffer.copy_from / the model's decode entry to
+  write routing_buf instead of topk_ids, and adding the copy kernel into the
+  captured region before the first MoE layer.
+- Or: make ensure_experts idempotent on already-slot ids (treat value as
+  expert id iff < num_experts? slot ids are >= 0 too... needs a tag bit).
+  Fragile; prefer the explicit second buffer.
 
-## Next step
-Instrument `free_count` per step on the live server (log it from
-copy_missing_mirror behind an env flag) and find where a pop is not matched by a
-push. Suspect: `publish_freed_rows` runs per copy_missing, but `resolve_swaps`
-pops from a stack that a concurrent prefill path may have rebuilt.
+## Known issue #2 (perf, not correctness): warm start at the boundary
+One full checkpoint re-read (~4 s) per prefill->decode transition
+(`_mirror_needs_coverage`). Optimization: warm start currently re-reads ALL
+rows; it could keep rows whose (expert, bytes) are still valid — compare
+against the device ownership map and skip re-reading experts whose row already
+holds them. Cuts the 4 s to well under 1 s in the steady case.
 
-## Running things
-- Worktree: `~/ai/FreeToken-wt/exclusive-expert-ram` (durable; /tmp one was lost
-  to the reboot, all commits survived). `main` untouched at eb21dc6.
-- The worktree has no built CUDA extensions; `.so` files are copied in from the
-  main checkout (build artifacts, not versioned).
-- Tests:
-    cd ~/ai/FreeToken-wt/exclusive-expert-ram && PYTHONPATH=python \
-      ~/ai/FreeToken/.venv/bin/python -m pytest tests/moe/test_mirror_pool.py -q
+## Follow-up list (owner-approved, in order)
+1. Graph race: second-buffer design above; validate with graph_race_repro.py
+   (must print PASS), then server + 21K recall + 127-tok decode probe.
+2. Warm start incremental reuse.
+3. 200K/600K prompts, acceptance.sh R3/R6, promote swap_smoke + repros into
+   tests/moe/, then merge decision.
+
+## Running things (unchanged from round 1)
+- Worktree: ~/ai/FreeToken-wt/exclusive-expert-ram (durable). main at eb21dc6.
+- Build extensions are copied .so files from the main checkout (not versioned).
+- Test commands:
     cd ~/ai/FreeToken && FREETOKEN_EXPERT_ARENA=1 .venv/bin/python \
       ~/ai/FreeToken-wt/exclusive-expert-ram/tasks/exclusive-expert-ram/swap_smoke.py
-- Server: unit `freetoken-swap-mirror`, port 1920, `FREETOKEN_MIRROR_EXPERT_RAM=1`.
-- GPU: the piro-board embedder (llama-server, 4.1 GiB) respawns when killed;
-  11.8 GiB free is enough.
+    .../graph_race_repro.py   (must print PASS == graphs-safe... see file doc)
+    pytest: PYTHONPATH=python ~/ai/FreeToken/.venv/bin/python -m pytest tests/moe/ -q
+    (run from the worktree)
+- Server: transient unit freetoken-swap-mirror, port 1920,
+  FREETOKEN_MIRROR_EXPERT_RAM=1. NEVER the production unit.
+- GPU: piro-board embedder (llama-server, ~4 GiB) respawns if killed; 11.8 GiB
+  free is enough.
