@@ -793,7 +793,8 @@ def _materialize_layer_kernel(
     # installed) and who actually loses its GPU copy (-1 for same-layer owners,
     # which land back in the cache, and for empty slots).
     tl.store(prior_ids_ptr + off, old_id, mask=expert_mask)
-    tl.store(victim_ids_ptr + off, tl.where(old_valid, old_id, -1), mask=expert_mask)
+    # Prefill drops displaced experts -- see the sized twin above for why.
+    tl.store(victim_ids_ptr + off, -1, mask=expert_mask)
     tl.store(id_of_slot_ptr + slot, -1, mask=same_layer)
     tl.store(usage_ptr + slot, 0, mask=same_layer)
     tl.store(slot_for_id_ptr + old_id, -1, mask=old_valid)
@@ -888,7 +889,14 @@ def _materialize_layer_sized_kernel_v2(
     same_layer = class_mask & (old_id >= base) & (old_id < base + num_experts)
     overwritten = expert_mask & (old_id >= 0) & (~same_layer)
     tl.store(prior_ids_ptr + off, old_id, mask=expert_mask)
-    tl.store(victim_ids_ptr + off, tl.where(overwritten, old_id, -1), mask=expert_mask)
+    # Prefill DROPS displaced experts (design: preserving them would need the
+    # whole model mirrored; the checkpoint is immutable so nothing is lost --
+    # _mirror_restore_coverage re-reads the complement at the prefill->decode
+    # boundary). Publishing them as victims would make the swap kernel write
+    # each one back into a free-stack row: a pop per victim with pushes only for
+    # mirror-sourced admissions, a net drain of ~90 rows per layer that ran the
+    # reserve dry mid-prefill (4017 starved writebacks on a 21K request).
+    tl.store(victim_ids_ptr + off, -1, mask=expert_mask)
     tl.store(id_of_slot_ptr + global_slot, -1, mask=same_layer)
     tl.store(usage_ptr + global_slot, 0, mask=same_layer)
     tl.store(slot_for_id_ptr + old_id, -1, mask=overwritten)

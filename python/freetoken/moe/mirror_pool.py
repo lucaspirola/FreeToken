@@ -135,9 +135,6 @@ class MirrorExpertPool:
         # device-side mirror used by the copy kernels is built by the cache.
         self.pool_row_of_id = [-1] * total
         self.id_of_pool_row = [-1] * capacity
-        self.swaps = 0
-        self.free_evictions = 0
-        self.d2h_rows = 0
         try:
             self._scan_checkpoint(model_path)
             scratch_bytes = max(sum(end - start for start, end in _regions_of(pieces))
@@ -300,38 +297,6 @@ class MirrorExpertPool:
     # ------------------------------------------------------------------
     # Hot path bookkeeping (no disk, no allocation)
     # ------------------------------------------------------------------
-
-    def plan_swap(self, new_id: int, victim_id: int) -> tuple[int, int]:
-        """Book a swap and return ``(src_row, d2h_row)``.
-
-        ``src_row`` is the pool row holding ``new_id`` (the H2D source).
-        ``d2h_row`` is where ``victim_id`` must be written back, or -1 when the
-        victim already has a pool row (the free case).
-
-        Ownership is updated here, so the caller must issue both copies.
-        """
-        src_row = self.pool_row_of_id[new_id]
-        if src_row < 0:
-            raise RuntimeError(
-                f"coverage violated: expert {new_id} is neither on GPU nor in the pool"
-            )
-        self.swaps += 1
-        if victim_id < 0:
-            # Admission into a never-used slot: nothing leaves the GPU. The row
-            # stays in the pool as a duplicate of the now-GPU-resident expert.
-            return src_row, -1
-        if self.pool_row_of_id[victim_id] >= 0:
-            self.free_evictions += 1
-            return src_row, -1
-        # The vacated row takes the victim: a permutation, never an allocation.
-        self.pool_row_of_id[new_id] = -1
-        self.pool_row_of_id[victim_id] = src_row
-        self.id_of_pool_row[src_row] = victim_id
-        self.d2h_rows += 1
-        return src_row, src_row
-
-    def covers(self, flat: int, on_gpu: bool) -> bool:
-        return on_gpu or self.pool_row_of_id[flat] >= 0
 
     def close(self) -> None:
         if getattr(self, "_closed", False):

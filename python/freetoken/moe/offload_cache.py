@@ -1792,6 +1792,14 @@ class OffloadMoeCache:
         m = self._mirror
         from freetoken.kernel.fast_index_copy import fast_index_copy_multi_jit
 
+        # Idempotent in any context: at startup the cache is fresh, but this also
+        # runs at the prefill->decode boundary, where stale slot_for_id/id_of_slot
+        # claims from before the sweep would otherwise point decode at slots
+        # that now hold someone else's bytes.
+        self.id_of_slot.fill_(-1)
+        self.slot_for_id.fill_(-1)
+        self.usage.zero_()
+
         per_layer = self.cache_size // self.num_layers
         extra = self.cache_size - per_layer * self.num_layers
         gpu_plan: list[int] = []
@@ -2356,12 +2364,17 @@ class OffloadMoeCache:
         self._pending_src_layer = layer_id
         self._pending_whole_layer = False
         if getattr(self, "_mirror", None) is not None:
-            # Prefill drops displaced experts (see _mirror_stage_layer), so the
-            # decode coverage invariant has to be re-established before the
-            # first routed step. Done once per prefill->decode transition, at a
-            # host boundary, never inside the per-token path.
+            # A prefill sweep clears every GPU resident except the last layer
+            # (the materialize kernel's same-layer invalidation spans the whole
+            # cache) and empties the mirror (each admission frees its source
+            # row). Incremental refilling cannot re-establish coverage then:
+            # it would need total - E mirror rows, more than the pool has. A
+            # full warm start is capacity-correct by construction -- it is the
+            # same arithmetic the pool was sized with -- at the cost of one
+            # checkpoint re-read (~4 s on this model) per prefill->decode
+            # transition, inside a prefill that takes tens of seconds.
             if self._mirror_needs_coverage:
-                self._mirror_restore_coverage()
+                self.mirror_warm_start()
                 self._mirror_needs_coverage = False
             # Entries linger from a longer previous step; the LRU kernel only
             # writes one per miss, so clear before it runs.
