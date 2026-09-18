@@ -13,33 +13,39 @@
 - Numbers recorded: benchmarks/results/nemotron35_lightning_5080_exclusive_2026-09-18.md
 
 ## Known issue #1 (the only correctness blocker): graphs must stay off
-State of diagnosis (2026-09-18, end of round 2 -- supersedes earlier notes):
-- DISPROVEN: "replay reads the previous token's slot ids". The router is
-  INSIDE the captured region (model.forward is captured whole), so topk_ids
-  are recomputed as fresh EXPERT ids from the current token's hidden states on
-  every replay. There is no staleness at the LRU's entry.
-- PROVEN (tasks/exclusive-expert-ram/graph_race_repro.py, no server needed):
-  60 pure replays of a captured (ensure_experts + copy_missing) step produce
-  91 wrong expert bytes. Stats anomaly that points at the mechanism:
-  swaps=36, free_evictions=36, writebacks=0, coverage_faults=20. Over 36
-  admissions into a 17-slot cache, ~19 victims MUST have been unmirrored
-  GPU-residents (their mirror rows were freed at their own admission), so
-  writebacks=0 means the replayed kernel read pool_row_of_id[victim] >= 0 --
-  a stale/incorrect mirror map inside the captured chain. Not yet root-caused.
-- LANDMINE found on the way: a coverage violation inside a replay copies
-  POOL ROW 0 into the target slot and counts it on device; the host-side hard
-  error never runs in graph mode, so it is SILENT wrong bytes. Whatever the
-  primary fix is, the violation path must be made graph-safe (no row-0 copy).
-- REJECTED fix shapes (do not retry): priming topk_ids with slot ids (breaks
-  the LRU's expert-id entry contract; also solved a non-problem); a
-  capture_pos side-table (degenerates to exactly the miss set).
+ROOT CAUSE FOUND (2026-09-18, round 2 -- final, proven by direct state dumps):
+- A prefill sweep leaves GPU = last layer only, mirror = 0 rows. In EAGER mode
+  the prefill->decode boundary flag (_mirror_needs_coverage) is consumed by
+  the first ensure_experts, which runs a full mirror_warm_start (host + disk),
+  restoring the pool. In GRAPH mode the decode step is a pure replay: host
+  code runs only at CAPTURE, so the boundary warm start NEVER runs after any
+  later prefill. The replay then miss-admits every routed expert with no
+  mirror row: coverage_faults grow 6 per replay and the GEMM reads pool row 0
+  (silent wrong bytes -- the host-side hard error cannot run in a replay).
+- Everything about the earlier "stale topk slot ids" theory is DISPROVEN:
+  the router is captured inside the graph and recomputes expert ids per
+  replay; the swap/priming machinery itself is replay-safe (verified: writeback
+  descriptors, free stack, ownership maps all correct across pure replays).
+- Independent landmine (fix regardless of mode): the resolve kernel copies
+  POOL ROW 0 on a coverage violation "to keep the descriptor well-formed".
+  Eager raises; a replay cannot. The row-0 copy must go -- leave the slot
+  holding stale bytes and let the violation counter trip a scheduler-level
+  check, or write a canary.
 
-Next diagnostic step: instrument the repro to dump, for one failing replay,
-the full device state the resolve kernel read (pool_row_of_id, free stack,
-id_of_slot, prior/victim) and compare against the same step run eagerly with
-identical routing -- the divergence point is the capture-safety defect.
+Fix shape (not yet implemented): the boundary restore must be host-visible
+BEFORE any replayed decode step can be admitted. Options:
+  a) scheduler-side: after a prefill batch completes, if mirror is on, run
+     cache.reset() / warm start eagerly at the batch boundary (host code runs
+     there -- forward_batch is called per batch). Cheapest, reuses existing
+     tested code, ~4 s once per prefill (see #2 to shrink that).
+  b) device-signalled: a device flag the scheduler polls (one .item() per
+     step) that forces one eager decode step (graphs skip for one token,
+     boundary code runs, replay resumes).
+Option (a) is boring and likely right: the scheduler knows when a decode
+phase follows a prefill phase; hook that transition in engine/scheduler, not
+inside the cache.
 
-## Known issue #2 (perf, not correctness): warm start at the boundary## Known issue #2 (perf, not correctness): warm start at the boundary
+## Known issue #2 (perf, not correctness): warm start at the boundary## Known issue #2 (perf, not correctness): warm start at the boundary## Known issue #2 (perf, not correctness): warm start at the boundary
 One full checkpoint re-read (~4 s) per prefill->decode transition
 (`_mirror_needs_coverage`). Optimization: warm start currently re-reads ALL
 rows; it could keep rows whose (expert, bytes) are still valid — compare
