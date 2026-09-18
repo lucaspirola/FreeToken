@@ -57,7 +57,8 @@ def ensure_experts(cache, layer_id: int, expert_ids: torch.Tensor) -> None:
     """
     # Aging LFU uses our graph-safe kernel for both uniform and mixed-size
     # caches. flashlib currently exposes LRU only.
-    if cache._size_class_enabled or cache.cache_policy_id == 1:
+    if (cache._size_class_enabled or cache.cache_policy_id == 1
+            or getattr(cache, "_exclusive_pool", None) is not None):
         begin, end = cache.lru_slot_range(layer_id)
         if expert_ids.is_cuda:
             _ensure_experts_sized_gpu(cache, layer_id, expert_ids, begin, end)

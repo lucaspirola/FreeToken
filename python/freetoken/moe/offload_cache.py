@@ -872,6 +872,8 @@ class OffloadMoeCache:
         self._gather_bank_ids: list[int] = []
         self._gather_dst_ptrs: torch.Tensor | None = None
         self._gather_feat_bytes: torch.Tensor | None = None
+        if getattr(self, "_exclusive_pool", None) is not None:
+            return  # bank_sources carries meta tensors, never host DMA addresses
         if getattr(self, "_size_class_enabled", False):
             self._build_size_class_copy_plan()
             return
@@ -1033,6 +1035,8 @@ class OffloadMoeCache:
         cold-start after rebuild. Object identity is preserved so attached layers and
         ``ctx.moe_offload_cache`` stay valid.
         """
+        if getattr(self, "_exclusive_pool", None) is not None:
+            raise RuntimeError("exclusive residency uses set_usable_slots, not destructive rebuild")
         assert self.bank_sources, "set_bank_sources must run before rebuild"
         self.validate_rebuild(cache_size)
         size_class_sources = (
@@ -1230,6 +1234,8 @@ class OffloadMoeCache:
         return self._arena_grow(current, n)
 
     def _arena_shrink(self, n: int, current: int) -> int:
+        if getattr(self, "_exclusive_pool", None) is not None:
+            self._invalidate_exclusive_slots(n, current)
         # (a) Invalidate every expert id whose slot falls in [n, current): the same
         # pattern _invalidate_prefill_buffer uses for the (fixed) double-buffer slots.
         old_ids = self.id_of_slot[n:current]
@@ -1571,6 +1577,110 @@ class OffloadMoeCache:
             return tuple(cache for _, cache in self.banks)
         return tuple(cache[:n] for _, cache in self.banks)
 
+    # ------------------------------------------------------------------
+    # Exclusive host residency (experimental, FREETOKEN_EXCLUSIVE_EXPERT_RAM=1):
+    # the host side is a bounded disk-backed pool instead of one pinned row per
+    # expert. copy_missing refills pool rows (O_DIRECT) and copies them into the
+    # GPU slot cache; displaced GPU experts never travel back to the host.
+    # Eager-only: a host miss needs a synchronous disk read before the H2D, which
+    # a captured CUDA graph cannot inject. The engine forces --cuda-graph-max-bs 0
+    # and disables prefill overlap when the gate is on.
+    # ------------------------------------------------------------------
+
+    def attach_exclusive_pool(self, pool) -> None:
+        """Attach native NVFP4 disk backing; source tensors are metadata only."""
+        if (self.quant_format != "nvfp4" or self.decode_target != "gpu"
+                or self.prefill_overlap or self.cpu_layer_ids or self.pageable_gpu):
+            raise ValueError("exclusive residency requires native NVFP4, GPU decode, "
+                             "and no CPU/pageable routing or prefill overlap")
+        if self.bank_caches or getattr(self, "_exclusive_pool", None) is not None:
+            raise RuntimeError("exclusive pool must attach to a fresh cache")
+        if (pool.num_layers != self.num_layers or pool.num_experts != self.num_experts
+                or tuple(pool.schema_order) != tuple(self.bank_schema)):
+            raise ValueError("exclusive pool geometry/schema does not match cache")
+        self._exclusive_pool = pool
+        self._exclusive_old_ids = None
+        self.bank_sources = {name: list(pool.sources[name]) for name in self.bank_schema}
+        self._variable_bank_rows.clear()
+        self._size_class_enabled = False
+        self.layer_residency = ["pinned"] * self.num_layers
+        for name in self.bank_schema:
+            tail, dtype = pool.shapes[name]
+            self._bank_cache_shapes[name] = tuple(tail)
+            self.bank_caches[name] = self._alloc_device_bank_cache(
+                (self.cache_size, *tail), dtype, name=name
+            )
+        self.banks = [(self.bank_sources[n], self.bank_caches[n]) for n in self.bank_schema]
+        self._build_copy_plan()
+        logger.info_rank0(
+            "exclusive expert pool attached: %d host slots, %.2f GiB pinned "
+            "(checkpoint-backed; whole-model host residency skipped)",
+            pool.capacity, pool.pool_bytes / 2**30,
+        )
+
+    def _begin_exclusive_plan(self) -> None:
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("exclusive expert residency requires eager execution")
+        if self._exclusive_old_ids is not None:
+            raise RuntimeError("consume the previous exclusive plan before staging another")
+        # Only small ownership metadata travels D2H, before admission overwrites it.
+        self._exclusive_old_ids = self.id_of_slot[:self.cache_size].cpu().tolist()
+
+    def _restore_exclusive_ids(self, ids) -> None:
+        pool = self._exclusive_pool
+        for flat in ids:
+            pool.refill(*divmod(flat, self.num_experts))
+
+    def _invalidate_exclusive_slots(self, begin: int, end: int) -> None:
+        if self._exclusive_old_ids is not None:
+            raise RuntimeError("cannot invalidate slots while an exclusive copy is pending")
+        old = self.id_of_slot[begin:end]
+        ids = [flat for flat in old.cpu().tolist() if flat >= 0]
+        valid = old >= 0
+        self.slot_for_id.view(-1)[old[valid].long()] = -1
+        old.fill_(-1)
+        self.usage[begin:end].zero_()
+        self._exclusive_pool.gpu_ids.difference_update(ids)
+        self._restore_exclusive_ids(ids)
+
+    def copy_missing_exclusive(self) -> None:
+        """Consume admission transactionally, returning each freed RAM slot to victims.
+
+        The admission kernels publish speculative maps. Withdraw those entries
+        before disk I/O, and publish each row only after all six uploads complete.
+        A failed read leaves that row missing, so a subsequent ensure can retry.
+        """
+        pool = self._exclusive_pool
+        layer = self._pending_src_layer
+        old = self._exclusive_old_ids
+        if old is None or layer is None:
+            raise RuntimeError("no exclusive admission plan to consume")
+        n = int(self.num_indices.item())
+        experts = self.src_indices[:n].cpu().tolist()
+        slots = self.evict_slots[:n].cpu().tolist()
+        planned = {layer * self.num_experts + expert for expert in experts}
+        current = self.id_of_slot[:self.cache_size].cpu().tolist()
+        final_ids = {flat for flat in current if flat >= 0}
+        victims = iter(sorted({flat for flat in old if flat >= 0} - final_ids))
+        # All materialize-layer relocations (including same-layer slots above E)
+        # are captured by the old/final set difference, not just the first E victims.
+        for expert, slot in zip(experts, slots):
+            self.slot_for_id[layer, expert] = -1
+            self.id_of_slot[slot] = -1
+        pool.gpu_ids = final_ids - planned
+        self._exclusive_old_ids = None
+        self._pending_src_layer = None
+        self.num_indices.zero_()
+        for expert, slot in zip(experts, slots):
+            host = pool.upload_async(layer, expert, self.bank_caches, slot)
+            pool.wait_upload(host)  # host fence, not merely a GPU stream dependency
+            self.id_of_slot[slot] = layer * self.num_experts + expert
+            self.slot_for_id[layer, expert] = slot
+            victim = next(victims, None)
+            if victim is not None:
+                self._restore_exclusive_ids((victim,))
+        self._restore_exclusive_ids(victims)
+
     def _init_prefill_overlap_buffers(self) -> None:
         assert self.banks or self._size_class_enabled, (
             "set_bank_sources must register the banks first"
@@ -1877,6 +1987,8 @@ class OffloadMoeCache:
 
     def ensure_experts(self, layer_id: int, expert_ids: torch.Tensor) -> None:
         from freetoken.moe.offload_kernels import ensure_experts
+        if getattr(self, "_exclusive_pool", None) is not None:
+            self._begin_exclusive_plan()
 
         if self.collect_decode_freq:
             # ``expert_ids`` still holds raw expert ids here (the kernel rewrites them to
@@ -1898,6 +2010,8 @@ class OffloadMoeCache:
         the capped fetch count (for ``copy_missing``); ``num_missing_full`` the pre-cap
         miss count (for stats). All device-side / fixed-shape, so it is CUDA-graph safe."""
         from freetoken.moe.offload_kernels import ensure_experts_hybrid
+        if getattr(self, "_exclusive_pool", None) is not None:
+            raise RuntimeError("exclusive residency does not support hybrid CPU routing")
 
         if self.collect_decode_freq:
             ids = expert_ids.reshape(-1).long()
@@ -1914,6 +2028,8 @@ class OffloadMoeCache:
 
     def materialize_layer(self, layer_id: int) -> None:
         from freetoken.moe.offload_kernels import materialize_layer
+        if getattr(self, "_exclusive_pool", None) is not None:
+            self._begin_exclusive_plan()
 
         self._pending_src_layer = layer_id
         self._pending_whole_layer = True
@@ -1921,6 +2037,8 @@ class OffloadMoeCache:
 
     def reset(self) -> None:
         from freetoken.moe.offload_kernels import reset_cache
+        if getattr(self, "_exclusive_pool", None) is not None:
+            self._invalidate_exclusive_slots(0, self.cache_size)
 
         reset_cache(self)
         # Per-expert recency is not cache_size-shaped, so reset_cache leaves it alone; wipe
@@ -2241,6 +2359,8 @@ class OffloadMoeCache:
         )
 
     def copy_missing(self) -> None:
+        if getattr(self, "_exclusive_pool", None) is not None:
+            return self.copy_missing_exclusive()
         assert self.banks or self._size_class_enabled, (
             "set_bank_sources must register the banks first"
         )

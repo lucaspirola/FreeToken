@@ -777,6 +777,21 @@ class Engine:
         # Otherwise load_expert_banks gives the model module a setup hook first, then
         # falls back to per-quant providers, and the engine wires the banks into cache.
         cache_factory = getattr(self.model, "make_offload_moe_cache", None)
+        exclusive = os.environ.get("FREETOKEN_EXCLUSIVE_EXPERT_RAM", "0") == "1"
+        exclusive_pool = None
+        if exclusive:
+            mc = config.model_config
+            if (
+                cache_factory is not None or config.moe_backend != "offload"
+                or config.moe_pageable_gpu or config.moe_cpu_layers is not None
+                or config.use_dummy_weight or config.tp_info.size != 1
+                or mc.expert_quant != "nvfp4" or mc.expert_gated
+                or mc.nemotron_h_args is None or config.nvfp4_backend != "triton"
+            ):
+                raise ValueError("exclusive expert RAM requires native Nemotron NVFP4, triton, single-rank GPU offload")
+            object.__setattr__(config, "cuda_graph_bs", [])
+            object.__setattr__(config, "moe_prefill_overlap", False)
+            logger.info_rank0("Exclusive expert RAM: eager decode, synchronous prefill, disk-backed bounded host pool")
         if cache_factory is not None and config.moe_cache_auto:
             raise ValueError(
                 "--moe-cache-auto is not supported for models with a custom "
@@ -809,6 +824,7 @@ class Engine:
             and config.moe_cpu_layers is None
             and config.moe_backend in ("offload", "hybrid")
             and _pin_budget_bytes() is not None
+            and not exclusive
         ):
             cpu_layer_ids = _auto_cpu_layers(config, config.model_config.num_moe_layers)
         if config.moe_backend == "hybrid":
@@ -870,17 +886,34 @@ class Engine:
                         requested_residency.append(HostResidency.LOCKED.value)
                     else:
                         requested_residency.append(HostResidency.PINNED.value)
-            banks = load_expert_banks(
-                config.model_path,
-                config.model_config,
-                device=self.device,
-                dtype=self.dtype,
-                dummy=config.use_dummy_weight,
-                parallel=expert_parallel,
-                decode_target=("cpu" if decode_target in ("cpu", "hybrid") else "gpu"),
-                layer_residency=requested_residency,
-                host_ram_reserve_bytes=int(config.host_ram_reserve_gb * 2**30),
-            )
+            if exclusive:
+                from freetoken.moe.exclusive_pool import ExclusiveExpertPool
+                from freetoken.moe.expert_banks import ExpertBanks
+
+                mc = config.model_config
+                exclusive_pool = ExclusiveExpertPool(
+                    config.model_path, mc.num_moe_layers, mc.num_experts,
+                    int(os.environ.get("FREETOKEN_EXCLUSIVE_HOST_SLOTS", "1392")),
+                    hidden_size=mc.expert_hidden_size or mc.hidden_size,
+                    intermediate_size=mc.moe_intermediate_size,
+                )
+                banks = ExpertBanks("nvfp4", {
+                    name: [torch.empty((mc.num_experts, *tail), dtype=dtype, device="meta")]
+                    * mc.num_moe_layers
+                    for name, (tail, dtype) in exclusive_pool.shapes.items()
+                })
+            else:
+                banks = load_expert_banks(
+                    config.model_path,
+                    config.model_config,
+                    device=self.device,
+                    dtype=self.dtype,
+                    dummy=config.use_dummy_weight,
+                    parallel=expert_parallel,
+                    decode_target=("cpu" if decode_target in ("cpu", "hybrid") else "gpu"),
+                    layer_residency=requested_residency,
+                    host_ram_reserve_bytes=int(config.host_ram_reserve_gb * 2**30),
+                )
             if config.moe_cache_auto:
                 size, pages, overlap = self._resolve_auto_moe_cache_size(config, banks)
                 object.__setattr__(config, "moe_cache_size", size)
@@ -968,8 +1001,11 @@ class Engine:
             cache.direct_device_banks = bool(config.kv_grow_step_tokens)
             # before set_bank_sources: the residency validation and the copy plan's skip of non-pinned layers key on the CPU-layer set
             cache.cpu_layer_ids = cpu_layer_ids
-            cache.set_bank_sources(banks.sources, layer_residency=banks.layer_residency)
-            cache.set_alphas(banks.gate_up_alpha, banks.down_alpha)
+            if exclusive_pool is not None:
+                cache.attach_exclusive_pool(exclusive_pool)
+            else:
+                cache.set_bank_sources(banks.sources, layer_residency=banks.layer_residency)
+                cache.set_alphas(banks.gate_up_alpha, banks.down_alpha)
             if cache.pageable_gpu:
                 cache.prepare_pageable_staging(
                     config.max_running_req * config.model_config.num_experts_per_tok
@@ -1534,6 +1570,11 @@ class Engine:
         floor = 2 * moe.num_experts if moe.prefill_overlap else moe.num_experts
         pending_before = self._pending_graph_bs
         target_moe = old_moe
+        # Assigned only by the shrink branch below; the ledger add at the
+        # pre-commit log must stay valid on the no-shrink path too (that path
+        # runs whenever free VRAM already covers the commit -- i.e. the whole-
+        # model-in-RAM profile, which never shrinks the arena).
+        released_bytes = 0
         try:
             commit_bytes = kv_bytes - pool.mapped_bytes_for_pages(old_pages)
             required_free = commit_bytes + 256 * 1024 * 1024
@@ -1566,13 +1607,28 @@ class Engine:
                         "growable KV live-memory guard could not fund the next "
                         "VMM commit from the expert arena"
                     )
-                moe.set_usable_slots(target_moe)
+                # Byte accounting, not the driver reading: on this WSL2 host
+                # cudaMemGetInfo can pin at 0 while the arena's VMM unmaps are
+                # real (EXCLUSIVE-DIAG showed set_usable_slots 2175->2056, i.e.
+                # 0.58 GiB actually uncommitted, with mem_get_info still 0.00
+                # in-process). set_usable_slots returns the EXACT bytes it
+                # uncommitted and commit_pages maps the exact KV suffix, so
+                # trust the ledger; keep mem_get_info as an advisory log line.
+                released_bytes = moe.set_usable_slots(target_moe)
                 object.__setattr__(self.config, "moe_cache_size", target_moe)
+                logger.info_rank0(
+                    "Growable-KV arena shrink: %d -> %d slots, %s uncommitted "
+                    "(driver-reported free %s)",
+                    old_moe, target_moe, mem_GB(released_bytes),
+                    mem_GB(torch.cuda.mem_get_info(self.device)[0]),
+                )
             live_free = self._sync_get_memory()[0]
+            live_free = max(live_free, live_free_before + released_bytes)
             logger.info_rank0(
-                "Growable-KV pre-commit (arena): %s free, %s commit, %s required "
-                "(allocator %s allocated / %s reserved)",
+                "Growable-KV pre-commit (arena): %s free (driver %s), %s commit, "
+                "%s required (allocator %s allocated / %s reserved)",
                 mem_GB(live_free),
+                mem_GB(torch.cuda.mem_get_info(self.device)[0]),
                 mem_GB(commit_bytes),
                 mem_GB(required_free),
                 mem_GB(torch.cuda.memory_allocated(self.device)),
