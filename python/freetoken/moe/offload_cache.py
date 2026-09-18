@@ -1890,6 +1890,8 @@ class OffloadMoeCache:
         ids = [flat for flat in doomed.cpu().tolist() if flat >= 0]
         if not ids:
             return 0
+        # Device maps are the source of truth; the pool's host lists lag behind
+        # whatever the swap kernel did since the last publish.
         fwd = m["pool_row_of_id"].cpu().tolist()
         inv = m["id_of_pool_row"].cpu().tolist()
         # Rows the mirror already covers need nothing; the rest must be read
@@ -1913,12 +1915,12 @@ class OffloadMoeCache:
             pool._read_row(flat, row)
             fwd[flat] = row
             inv[row] = flat
-            pool.pool_row_of_id[flat] = row
-            pool.id_of_pool_row[row] = flat
-            if old >= 0:
-                pool.pool_row_of_id[old] = -1
         m["pool_row_of_id"].copy_(torch.tensor(fwd, dtype=torch.int32))
         m["id_of_pool_row"].copy_(torch.tensor(inv, dtype=torch.int32))
+        # Refresh the host mirror of the maps and the free stack from the device
+        # (the kernel owns them between calls); writing pool.* directly above
+        # would have been overwritten by the next publish.
+        self._mirror_publish_free_rows()
         logger.info_rank0("mirror restored coverage for %d experts", len(uncovered))
         return len(uncovered)
 
