@@ -1848,10 +1848,22 @@ class OffloadMoeCache:
                 "reserve": int(m["free_count"].item())}
 
     def _mirror_publish_free_rows(self) -> None:
-        """Rebuild the device free stack from the host ownership map."""
+        """Rebuild the device free stack from the DEVICE ownership map.
+
+        The swap kernel owns ``id_of_pool_row`` and mutates it every step; the
+        host-side list in the pool is only the startup snapshot and goes stale
+        immediately. Reading the host copy here published rows that were in fact
+        owned, so a later swap handed an expert a row holding someone else's
+        weights -- decode then served wrong experts with coverage_faults at 0.
+        """
         m = self._mirror
         pool = self._mirror_pool
-        free = [row for row, owner in enumerate(pool.id_of_pool_row) if owner < 0]
+        inv = m["id_of_pool_row"].cpu().tolist()
+        # Keep the host mirror of the map in step, so every host-side path
+        # (staging, coverage restore) sees what the kernel actually did.
+        pool.id_of_pool_row = list(inv)
+        pool.pool_row_of_id = m["pool_row_of_id"].cpu().tolist()
+        free = [row for row, owner in enumerate(inv) if owner < 0]
         if free:
             m["free_rows"][: len(free)].copy_(
                 torch.tensor(free, dtype=torch.int32)
