@@ -1700,22 +1700,30 @@ class Engine:
                 # can complement. Derived from the pool's own geometry -- no
                 # model constants; the floor lifts with FREETOKEN_MIRROR_HOST_ROWS.
                 mirror_pool = getattr(self, "_mirror_pool_ref", None)
-                if mirror_pool is not None:
-                    # Pure coverage floor: the arena may not shrink past the
-                    # point where the mirror can still hold every expert the
-                    # GPU drops. NOTE: adding "headroom" here is backwards --
-                    # raising the floor REDUCES how much VRAM the arena can
-                    # release, which makes the KV commit fail sooner (measured:
-                    # three runs died earlier as the headroom grew). If a
-                    # commit cannot be funded, the pool is too small: the error
-                    # names FREETOKEN_MIRROR_HOST_ROWS.
-                    step = getattr(moe, "arena_step_slots", 1) or 1
-                    coverage_floor = (
-                        mirror_pool.total - mirror_pool.coverage_floor_complement
-                    )
-                    coverage_floor = -(-coverage_floor // step) * step
-                    if target_moe < coverage_floor:
-                        target_moe = coverage_floor
+                # The release estimate above rounds conservatively: three
+                # 600K-class runs died with "need 0.46 GiB, have 0.42/0.37/
+                # 0.17" where "have" was exactly what the estimate produced --
+                # while the arena still held releasable rows above the floor.
+                # Shrink FURTHER in chunk steps until the guard's demand is
+                # met or the floor stops us, instead of committing on whatever
+                # the estimate happened to round to.
+                while live_free < required_free:
+                    step_slots = getattr(moe, "arena_step_slots", 1) or 1
+                    harder = target_moe - step_slots
+                    if mirror_pool is not None:
+                        cov_floor = -(-(
+                            mirror_pool.total
+                            - mirror_pool.coverage_floor_complement
+                        ) // step_slots) * step_slots
+                        harder = max(harder, cov_floor)
+                    harder = max(harder, floor)
+                    if harder >= target_moe:
+                        break  # floor reached; the funding check decides
+                    target_moe = harder
+                    row_b = sum(moe.bank_row_bytes) if getattr(moe, "bank_row_bytes", None) else 0
+                    live_free += step_slots * row_b
+                    object.__setattr__(self.config, "moe_cache_size", target_moe)
+
                 if target_moe >= old_moe:
                     pool_rows = getattr(mirror_pool, "capacity", None)
                     hint = (
