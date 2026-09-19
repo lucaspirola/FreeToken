@@ -108,14 +108,16 @@ def test_clamp_stops_at_the_coverage_floor():
             below = floor - 4  # one chunk below the coverage floor
             cache.set_usable_slots(below)
             assert cache.usable_slots == below
-            # what _grow_runtime_kv_arena computes: the floor minus one chunk
-            # of commit slack (the last KV step must have somewhere to release
-            # from -- measured "need 0.46 GiB, have 0.42 GiB" at ~600K), then
-            # rounded UP to the chunk granularity.
+            # what _grow_runtime_kv_arena computes: the coverage floor PLUS one
+            # chunk of headroom (the last KV step died "need 0.46 GiB, have
+            # 0.42 GiB" at ~600K because the commit needed the release the
+            # floor itself was withholding), rounded UP to chunk granularity.
             step = 4  # arena_step_slots of this cache
-            clamped = -(-(floor - step) // step) * step
-            assert clamped >= floor - step
-            assert pool.total - clamped <= pool.coverage_floor_complement + step
+            clamped = -(-(floor + step) // step) * step
+            assert clamped > floor, "no headroom left for the commit below"
+            assert pool.total - clamped < pool.coverage_floor_complement, (
+                "the clamped state must leave the mirror room to spare"
+            )
             # Restore the arena to the clamped value and assert the coverage
             # invariant holds there (the raw 28-slot state above is exactly
             # the out-of-contract state the engine clamp exists to prevent).

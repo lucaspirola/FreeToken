@@ -1701,22 +1701,19 @@ class Engine:
                 # model constants; the floor lifts with FREETOKEN_MIRROR_HOST_ROWS.
                 mirror_pool = getattr(self, "_mirror_pool_ref", None)
                 if mirror_pool is not None:
-                    # Keep one arena chunk of release headroom per KV growth
-                    # step: with the arena clamped exactly at the coverage
-                    # floor, the LAST commit died with "need 0.46 GiB free,
-                    # have 0.42 GiB" (measured at ~600K tokens on this host) --
-                    # the floor must be reached one chunk EARLY so the next
-                    # step's commit still has somewhere to release from.
+                    # The arena must stop a chunk ABOVE the coverage floor:
+                    # with it clamped exactly at the floor, the LAST KV growth
+                    # step died with "need 0.46 GiB free, have 0.42 GiB"
+                    # (measured at ~600K tokens on this host) because the
+                    # commit needed the release that the floor itself was
+                    # withholding. Chunk-above keeps one release's worth of
+                    # headroom for the commit that crosses the floor.
                     step = getattr(moe, "arena_step_slots", 1) or 1
-                    slack_chunks = 1
                     coverage_floor = (
                         mirror_pool.total
                         - mirror_pool.coverage_floor_complement
-                        - slack_chunks * step
+                        + step
                     )
-                    # Round UP to the arena's chunk granularity: a floor
-                    # between chunks would be refused by set_usable_slots
-                    # (ValueError, chunk boundary) with no clamp applied.
                     coverage_floor = -(-coverage_floor // step) * step
                     if target_moe < coverage_floor:
                         target_moe = coverage_floor
