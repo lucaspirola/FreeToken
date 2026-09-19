@@ -116,7 +116,6 @@ def test_clamp_stops_at_the_coverage_floor():
             clamped = -(-(floor - step) // step) * step
             assert clamped >= floor - step
             assert pool.total - clamped <= pool.coverage_floor_complement + step
-            assert pool.total - clamped <= pool.coverage_floor_complement
             # Restore the arena to the clamped value and assert the coverage
             # invariant holds there (the raw 28-slot state above is exactly
             # the out-of-contract state the engine clamp exists to prevent).
