@@ -1700,30 +1700,6 @@ class Engine:
                 # can complement. Derived from the pool's own geometry -- no
                 # model constants; the floor lifts with FREETOKEN_MIRROR_HOST_ROWS.
                 mirror_pool = getattr(self, "_mirror_pool_ref", None)
-                # The release estimate above rounds conservatively: three
-                # 600K-class runs died with "need 0.46 GiB, have 0.42/0.37/
-                # 0.17" where "have" was exactly what the estimate produced --
-                # while the arena still held releasable rows above the floor.
-                # Shrink FURTHER in chunk steps until the guard's demand is
-                # met or the floor stops us, instead of committing on whatever
-                # the estimate happened to round to.
-                while live_free < required_free:
-                    step_slots = getattr(moe, "arena_step_slots", 1) or 1
-                    harder = target_moe - step_slots
-                    if mirror_pool is not None:
-                        cov_floor = -(-(
-                            mirror_pool.total
-                            - mirror_pool.coverage_floor_complement
-                        ) // step_slots) * step_slots
-                        harder = max(harder, cov_floor)
-                    harder = max(harder, floor)
-                    if harder >= target_moe:
-                        break  # floor reached; the funding check decides
-                    target_moe = harder
-                    row_b = sum(moe.bank_row_bytes) if getattr(moe, "bank_row_bytes", None) else 0
-                    live_free += step_slots * row_b
-                    object.__setattr__(self.config, "moe_cache_size", target_moe)
-
                 if target_moe >= old_moe:
                     pool_rows = getattr(mirror_pool, "capacity", None)
                     hint = (
@@ -1763,10 +1739,38 @@ class Engine:
                 mem_GB(torch.cuda.memory_reserved(self.device)),
             )
             if live_free < required_free:
-                raise RuntimeError(
-                    "growable KV refused an unsafe VMM commit: "
-                    f"need {mem_GB(required_free)} free, have {mem_GB(live_free)}"
-                )
+                # The release estimate rounds conservatively: four 600K-class
+                # runs died with "need 0.46 GiB, have 0.42/0.37/0.17/0.08"
+                # where "have" was exactly what the estimate produced, while
+                # the arena still held releasable rows above the coverage
+                # floor. Top up: shrink a chunk further (mirroring the real
+                # release into the ledger), re-sync, and re-check -- instead
+                # of refusing the commit with releasable rows still sitting
+                # above the floor.
+                mirror_pool = getattr(self, "_mirror_pool_ref", None)
+                step_slots = getattr(moe, "arena_step_slots", 1) or 1
+                row_b = sum(moe.bank_row_bytes) if getattr(moe, "bank_row_bytes", None) else 0
+                cov_floor = 0
+                if mirror_pool is not None:
+                    cov_floor = -(-(
+                        mirror_pool.total - mirror_pool.coverage_floor_complement
+                    ) // step_slots) * step_slots
+                while live_free < required_free and target_moe > max(cov_floor, floor):
+                    target_moe = max(target_moe - step_slots, cov_floor, floor)
+                    released_bytes += moe.set_usable_slots(target_moe)
+                    object.__setattr__(self.config, "moe_cache_size", target_moe)
+                    live_free = max(live_free, live_free_before + released_bytes)
+                    logger.info_rank0(
+                        "Growable-KV arena top-up: %d slots, %s released total "
+                        "(need %s, have %s)",
+                        target_moe, mem_GB(released_bytes),
+                        mem_GB(required_free), mem_GB(live_free),
+                    )
+                if live_free < required_free:
+                    raise RuntimeError(
+                        "growable KV refused an unsafe VMM commit: "
+                        f"need {mem_GB(required_free)} free, have {mem_GB(live_free)}"
+                    )
             pool.commit_pages(target_pages)
             if self.config.tp_info.size > 1:
                 self.sync_all_ranks()
