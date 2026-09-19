@@ -1701,18 +1701,17 @@ class Engine:
                 # model constants; the floor lifts with FREETOKEN_MIRROR_HOST_ROWS.
                 mirror_pool = getattr(self, "_mirror_pool_ref", None)
                 if mirror_pool is not None:
-                    # The arena must leave VRAM for the KV commit that
-                    # crosses the coverage floor: with it clamped exactly at
-                    # the floor, the commit died with "need 0.46 GiB free,
-                    # have 0.37-0.42 GiB" (measured twice at ~600K on this
-                    # host). One chunk's release (~0.04 GiB) is nowhere near
-                    # the commit -- price the headroom in GiB instead, at
-                    # half the largest observed commit (0.46/2), and keep the
-                    # chunk rounding on top.
+                    # The arena must leave VRAM for the KV commits that
+                    # cross the coverage floor. Measured on this host: each
+                    # commit needs ~0.46 GiB and the guard only re-reads free
+                    # memory once per step, so a single release is not
+                    # credited before the next commit -- headroom = 2 commits
+                    # (~0.92 GiB, measured twice at ~600K) plus one chunk of
+                    # rounding.
                     step = getattr(moe, "arena_step_slots", 1) or 1
                     row_bytes = sum(moe.bank_row_bytes) if getattr(moe, "bank_row_bytes", None) else 0
                     headroom_rows = (
-                        int(0.25 * 2**30 // row_bytes) if row_bytes > 0 else 0
+                        int(0.92 * 2**30 // row_bytes) if row_bytes > 0 else 0
                     )
                     coverage_floor = max(
                         mirror_pool.total
