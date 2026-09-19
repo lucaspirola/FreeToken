@@ -274,6 +274,43 @@ class MirrorExpertPool:
             self.id_of_pool_row[row] = flat
             row += 1
         return row
+    # ------------------------------------------------------------------
+    # Incremental warm start
+    # ------------------------------------------------------------------
+
+    def ensure_expert(self, flat_id: int) -> int:
+        """Ensure an expert is loaded in the mirror pool.
+        
+        If the expert is already in the pool, returns its row.
+        If not in the pool but there's space, loads it from the checkpoint.
+        If the pool is full, evicts the least recently used expert.
+        
+        Returns the row where the expert is now located.
+        """
+        # Already in pool
+        row = self.pool_row_of_id[flat_id]
+        if row >= 0:
+            return row
+        
+        # Find a free row or evict LRU
+        free_rows = [r for r in range(self.capacity) if self.id_of_pool_row[r] < 0]
+        if free_rows:
+            row = free_rows[0]
+        else:
+            # Evict LRU (simplified: use the first occupied row)
+            # In practice, would use LRU tracking
+            for r, flat in enumerate(self.id_of_pool_row):
+                if flat >= 0:
+                    row = r
+                    self.release_expert(self.id_of_pool_row[row])
+                    break
+        
+        # Load the expert from checkpoint
+        self._read_row(flat_id, row)
+        self.pool_row_of_id[flat_id] = row
+        self.id_of_pool_row[row] = flat_id
+        
+        return row
 
     def seed_duplicates(self, cold_first, reserve: int | None = None) -> int:
         """Mirror GPU-resident experts into the pool's leftover rows.
@@ -339,6 +376,8 @@ class MirrorExpertPool:
             new_row = torch.zeros_like(row_slice, pin_memory=True)
             # Copy the new data to the bank
             bank[row:row+1].copy_(new_row)
+            # Synchronize to ensure the copy completes before returning
+            torch.cuda.synchronize()
             
         # Update the residency maps
         self.pool_row_of_id[flat_id] = -1

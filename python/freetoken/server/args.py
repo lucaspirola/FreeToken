@@ -50,7 +50,7 @@ class ServerArgs(SchedulerConfig):
     # Answer with the model's own reasoning when a turn produces reasoning but no visible
     # Bound host expert RAM to N mirror rows (0 = off, -1 = auto-size from
     # model geometry + KV ceiling). Native NVFP4 experts only.
-    moe_mirror_host_rows: int = 0
+    moe_mirror_host_rows: int = 0  # 0 = off (default), -1 = auto-size from model geometry + KV ceiling
 
     # content and no tool call (--force-nonempty-content). Per request, a chat template
     # kwarg of the same name overrides it; thinking-off turns default to on.
