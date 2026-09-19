@@ -1695,10 +1695,31 @@ class Engine:
                     bank_row_bytes,
                 )
                 target_moe = max(target_moe, floor)
+                # Bounded host mirror: every expert the arena drops must land
+                # in a pool row, so the KV may not grow past what the mirror
+                # can complement. Derived from the pool's own geometry -- no
+                # model constants; the floor lifts with FREETOKEN_MIRROR_HOST_ROWS.
+                mirror_pool = getattr(self, "_mirror_pool_ref", None)
+                if mirror_pool is not None:
+                    coverage_floor = (
+                        mirror_pool.total - mirror_pool.coverage_floor_complement
+                    )
+                    if target_moe < coverage_floor:
+                        # Round UP to the arena's chunk granularity: a floor
+                        # between chunks would be refused by set_usable_slots
+                        # (ValueError, chunk boundary) with no clamp applied.
+                        step = getattr(moe, "arena_step_slots", 1) or 1
+                        target_moe = -(-coverage_floor // step) * step
                 if target_moe >= old_moe:
+                    pool_rows = getattr(mirror_pool, "capacity", None)
+                    hint = (
+                        " (bounded expert mirror cannot cover the complement: "
+                        f"raise FREETOKEN_MIRROR_HOST_ROWS above {pool_rows})"
+                        if mirror_pool is not None else ""
+                    )
                     raise RuntimeError(
                         "growable KV live-memory guard could not fund the next "
-                        "VMM commit from the expert arena"
+                        f"VMM commit from the expert arena{hint}"
                     )
                 # Byte accounting, not the driver reading: on this WSL2 host
                 # cudaMemGetInfo can pin at 0 while the arena's VMM unmaps are
