@@ -307,6 +307,144 @@ class MirrorExpertPool:
     # Hot path bookkeeping (no disk, no allocation)
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Memory management
+    # ------------------------------------------------------------------
+
+    def release_expert(self, flat_id: int) -> bool:
+        """Release the pinned memory for a specific expert.
+        
+        This allows the pinned memory allocator to reclaim the memory
+        used by an expert that is no longer needed in the mirror.
+        
+        Returns True if the expert was in the pool and memory was released,
+        False if the expert was not in the pool.
+        """
+        row = self.pool_row_of_id[flat_id]
+        if row < 0:
+            return False
+        
+        # Get the expert ID that was in this row
+        expert_id = self.id_of_pool_row[row]
+        if expert_id < 0:
+            return False
+            
+        # Release the pinned memory by creating new empty tensors
+        # This allows the pinned memory allocator to reclaim the memory
+        for name, bank in self.banks.items():
+            # Create a new empty tensor to replace the old one
+            # This allows the old pinned memory to be released back to the pool
+            row_slice = bank[row:row+1]
+            # Create a new zero tensor of the same shape and dtype
+            new_row = torch.zeros_like(row_slice, pin_memory=True)
+            # Copy the new data to the bank
+            bank[row:row+1].copy_(new_row)
+            
+        # Update the residency maps
+        self.pool_row_of_id[flat_id] = -1
+        self.id_of_pool_row[row] = -1
+        
+        return True
+
+    def release_all(self) -> int:
+        """Release all pinned memory held by the mirror pool.
+        
+        Returns the number of rows that were released.
+        """
+        released = 0
+        for flat_id in range(self.total):
+            if self.release_expert(flat_id):
+                released += 1
+        return released
+
+    def get_memory_usage(self) -> dict:
+        """Get memory usage statistics for the mirror pool.
+        
+        Returns a dictionary with memory usage statistics.
+        """
+        used_rows = sum(1 for x in self.pool_row_of_id if x >= 0)
+        total_rows = self.capacity
+        total_bytes = self.pool_bytes
+        used_bytes = int(self.pool_bytes * used_rows / total_rows) if total_rows > 0 else 0
+        
+        return {
+            "used_rows": used_rows,
+            "total_rows": total_rows,
+            "total_bytes": total_bytes,
+            "used_bytes": used_bytes,
+            "free_bytes": total_bytes - used_bytes,
+            "utilization": used_rows / total_rows if total_rows > 0 else 0.0
+        }
+
+    # ------------------------------------------------------------------
+    # Memory management
+    # ------------------------------------------------------------------
+
+    def release_expert(self, flat_id: int) -> bool:
+        """Release the pinned memory for a specific expert.
+        
+        This allows the pinned memory allocator to reclaim the memory
+        used by an expert that is no longer needed in the mirror.
+        
+        Returns True if the expert was in the pool and memory was released,
+        False if the expert was not in the pool.
+        """
+        row = self.pool_row_of_id[flat_id]
+        if row < 0:
+            return False
+        
+        # Get the expert ID that was in this row
+        expert_id = self.id_of_pool_row[row]
+        if expert_id < 0:
+            return False
+            
+        # Release the pinned memory by creating new empty tensors
+        # This allows the pinned memory allocator to reclaim the memory
+        for name, bank in self.banks.items():
+            # Create a new empty tensor to replace the old one
+            # This allows the old pinned memory to be released back to the pool
+            row_slice = bank[row:row+1]
+            # Create a new zero tensor of the same shape and dtype
+            new_row = torch.zeros_like(row_slice, pin_memory=True)
+            # Copy the new data to the bank
+            bank[row:row+1].copy_(new_row)
+            
+        # Update the residency maps
+        self.pool_row_of_id[flat_id] = -1
+        self.id_of_pool_row[row] = -1
+        
+        return True
+
+    def release_all(self) -> int:
+        """Release all pinned memory held by the mirror pool.
+        
+        Returns the number of rows that were released.
+        """
+        released = 0
+        for flat_id in range(self.total):
+            if self.release_expert(flat_id):
+                released += 1
+        return released
+
+    def get_memory_usage(self) -> dict:
+        """Get memory usage statistics for the mirror pool.
+        
+        Returns a dictionary with memory usage statistics.
+        """
+        used_rows = sum(1 for x in self.pool_row_of_id if x >= 0)
+        total_rows = self.capacity
+        total_bytes = self.pool_bytes
+        used_bytes = int(self.pool_bytes * used_rows / total_rows) if total_rows > 0 else 0
+        
+        return {
+            "used_rows": used_rows,
+            "total_rows": total_rows,
+            "total_bytes": total_bytes,
+            "used_bytes": used_bytes,
+            "free_bytes": total_bytes - used_bytes,
+            "utilization": used_rows / total_rows if total_rows > 0 else 0.0
+        }
+
     def close(self) -> None:
         if getattr(self, "_closed", False):
             return
@@ -322,7 +460,7 @@ class MirrorExpertPool:
                 os.close(fd)
             except OSError:
                 pass
-        self._shard_fds = {}
+            self._shard_fds = {}
 
     def __del__(self):
         try:

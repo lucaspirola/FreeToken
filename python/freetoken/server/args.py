@@ -48,6 +48,10 @@ class ServerArgs(SchedulerConfig):
     # peak reset; see engine.cuda_memory for the allocator-counter scope.
     cuda_memory_telemetry: bool = False
     # Answer with the model's own reasoning when a turn produces reasoning but no visible
+    # Bound host expert RAM to N mirror rows (0 = off, -1 = auto-size from
+    # model geometry + KV ceiling). Native NVFP4 experts only.
+    moe_mirror_host_rows: int = 0
+
     # content and no tool call (--force-nonempty-content). Per request, a chat template
     # kwarg of the same name overrides it; thinking-off turns default to on.
     force_nonempty_content: bool = False
@@ -834,6 +838,21 @@ def parse_args(
         help=(
             "Auto-pick --moe-cache-size from free VRAM and expert size, MoE-priority "
             "(KV gets --kv-reserve-tokens as a floor). Not supported for owned-KV models."
+        ),
+    )
+
+    parser.add_argument(
+        "--moe-mirror-host-rows",
+        type=int,
+        default=ServerArgs.moe_mirror_host_rows,
+        help=(
+            "Bound host expert RAM to N mirror rows instead of keeping every expert "
+            "resident (default 0 = off: full host residency, unchanged behaviour). "
+            "A GPU miss is served from the mirror and the displaced expert is written "
+            "back to it, so no disk sits on the decode path. Use -1 to auto-size from "
+            "the model geometry and the growable-KV ceiling. The pool must cover the "
+            "experts the GPU cannot hold at that ceiling; if it cannot, KV growth "
+            "stops with an error naming this flag. Native NVFP4 experts only."
         ),
     )
 

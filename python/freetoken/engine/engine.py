@@ -913,14 +913,19 @@ class Engine:
                 # Size for the KV ceiling, where the GPU cache is smallest and
                 # the host side must be largest. Growing a pinned pool later
                 # costs ~762 ms/GiB (measured), a stall no request should pay.
-                override = os.environ.get("FREETOKEN_MIRROR_HOST_ROWS")
-                if override:
-                    capacity = int(override)
-                else:
+                if config.moe_mirror_host_rows > 0:
+                    capacity = config.moe_mirror_host_rows
+                elif config.moe_mirror_host_rows < 0:
                     capacity = plan_capacity(
                         mc.num_moe_layers, mc.num_experts,
                         self._mirror_final_gpu_slots(config),
                     )
+                else:
+                    mirror = False
+                    mirror_pool = None
+            else:
+                mirror_pool = None
+            if mirror:
                 mirror_pool = MirrorExpertPool(
                     config.model_path, mc.num_moe_layers, mc.num_experts, capacity,
                     hidden_size=mc.expert_hidden_size or mc.hidden_size,
