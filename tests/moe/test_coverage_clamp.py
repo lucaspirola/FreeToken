@@ -108,12 +108,14 @@ def test_clamp_stops_at_the_coverage_floor():
             below = floor - 4  # one chunk below the coverage floor
             cache.set_usable_slots(below)
             assert cache.usable_slots == below
-            # what _grow_runtime_kv_arena computes: the floor, rounded UP to
-            # the arena's chunk granularity (a floor between chunks would be
-            # refused by set_usable_slots with no clamp applied).
+            # what _grow_runtime_kv_arena computes: the floor minus one chunk
+            # of commit slack (the last KV step must have somewhere to release
+            # from -- measured "need 0.46 GiB, have 0.42 GiB" at ~600K), then
+            # rounded UP to the chunk granularity.
             step = 4  # arena_step_slots of this cache
-            clamped = -(-floor // step) * step
-            assert clamped >= floor
+            clamped = -(-(floor - step) // step) * step
+            assert clamped >= floor - step
+            assert pool.total - clamped <= pool.coverage_floor_complement + step
             assert pool.total - clamped <= pool.coverage_floor_complement
             # Restore the arena to the clamped value and assert the coverage
             # invariant holds there (the raw 28-slot state above is exactly
