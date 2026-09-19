@@ -1701,23 +1701,17 @@ class Engine:
                 # model constants; the floor lifts with FREETOKEN_MIRROR_HOST_ROWS.
                 mirror_pool = getattr(self, "_mirror_pool_ref", None)
                 if mirror_pool is not None:
-                    # The arena must leave VRAM for the KV commits that
-                    # cross the coverage floor. Measured on this host: each
-                    # commit needs ~0.46 GiB and the guard only re-reads free
-                    # memory once per step, so a single release is not
-                    # credited before the next commit -- headroom = 2 commits
-                    # (~0.92 GiB, measured twice at ~600K) plus one chunk of
-                    # rounding.
+                    # Pure coverage floor: the arena may not shrink past the
+                    # point where the mirror can still hold every expert the
+                    # GPU drops. NOTE: adding "headroom" here is backwards --
+                    # raising the floor REDUCES how much VRAM the arena can
+                    # release, which makes the KV commit fail sooner (measured:
+                    # three runs died earlier as the headroom grew). If a
+                    # commit cannot be funded, the pool is too small: the error
+                    # names FREETOKEN_MIRROR_HOST_ROWS.
                     step = getattr(moe, "arena_step_slots", 1) or 1
-                    row_bytes = sum(moe.bank_row_bytes) if getattr(moe, "bank_row_bytes", None) else 0
-                    headroom_rows = (
-                        int(0.92 * 2**30 // row_bytes) if row_bytes > 0 else 0
-                    )
-                    coverage_floor = max(
-                        mirror_pool.total
-                        - mirror_pool.coverage_floor_complement
-                        + headroom_rows,
-                        step,
+                    coverage_floor = (
+                        mirror_pool.total - mirror_pool.coverage_floor_complement
                     )
                     coverage_floor = -(-coverage_floor // step) * step
                     if target_moe < coverage_floor:
