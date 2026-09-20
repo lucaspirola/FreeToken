@@ -3092,6 +3092,13 @@ class Scheduler(SchedulerIOMixin):
         ):
             moe.mirror_warm_start()
             moe._mirror_needs_coverage = False
+        # Same boundary, second job: surface a lost-coverage fault. The counters
+        # are written by a kernel that cannot raise, and a fault means the
+        # experts being multiplied are the wrong ones -- a loud failure here
+        # beats a quietly wrong completion.
+        check = getattr(moe, "mirror_fault_check", None)
+        if check is not None:
+            check()
         profile = self.config.moe_collect_stats
         if profile:
             batch._profile_host_started = time.perf_counter()

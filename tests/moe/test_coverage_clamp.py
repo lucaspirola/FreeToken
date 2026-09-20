@@ -182,3 +182,51 @@ def test_coverage_holds_at_the_floor_and_breaks_below_it():
             assert pool.total - (floor - _STEP) > coverable
         finally:
             pool.close()
+
+
+def test_a_lost_copy_is_a_hard_error_not_a_counter():
+    """The fault counters must stop a request, not decorate /v1/stats.
+
+    resolve_swaps cannot raise from inside a Triton kernel, so it counts. Until
+    this check existed, nothing in the server ever compared those counts to
+    zero: a request that lost coverage kept decoding with the wrong experts and
+    the evidence sat inert in a diagnostic document.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        _write_checkpoint(root)
+        cap = plan_capacity(LAYERS, EXPERTS, _GPU)
+        cache, pool = _cache_and_pool(root, cap)
+        try:
+            # Clean state: the check is silent.
+            cache._mirror["stats_host"].zero_()
+            cache.mirror_fault_check()
+            # An admission with no host copy (violations).
+            cache._mirror["stats_host"][3] = 1
+            with pytest.raises(RuntimeError, match=r"--moe-mirror-host-rows"):
+                cache.mirror_fault_check()
+            # A dropped writeback (starved) is equally fatal.
+            cache._mirror["stats_host"].zero_()
+            cache._mirror["stats_host"][4] = 7
+            with pytest.raises(RuntimeError, match=r"7 dropped writebacks"):
+                cache.mirror_fault_check()
+        finally:
+            pool.close()
+
+
+def test_fault_counters_reach_the_host_without_a_sync():
+    """The pinned snapshot must be wired to the device counters."""
+    with tempfile.TemporaryDirectory() as root:
+        _write_checkpoint(root)
+        cap = plan_capacity(LAYERS, EXPERTS, _GPU)
+        cache, pool = _cache_and_pool(root, cap)
+        try:
+            host = cache._mirror["stats_host"]
+            assert host.is_pinned(), "an unpinned buffer would sync on every copy"
+            assert host.shape == cache._mirror["stats"].shape
+            cache._mirror["stats"][3] = 5
+            host.copy_(cache._mirror["stats"], non_blocking=True)
+            torch.cuda.synchronize()
+            assert host[3].item() == 5
+        finally:
+            cache._mirror["stats"].zero_()
+            pool.close()

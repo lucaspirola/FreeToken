@@ -157,6 +157,17 @@ def _resolve_swaps_kernel(
                 n_d2d += 1
                 swaps += 1
                 free_evict += 1
+                if victim >= 0:
+                    if tl.load(pool_row_of_id_ptr + victim) < 0:
+                        # The relocation overwrites `slot`, whose occupant has
+                        # no mirror row -- its only copy dies here, and unlike
+                        # the else-branch below this path emits no writeback.
+                        # Unreachable from today's callers (materialize forces
+                        # victim = -1, and a decode miss implies here < 0), but
+                        # that is an invariant held by omission in two other
+                        # files. Count it so the host check turns a future
+                        # caller's mistake into a failure instead of silence.
+                        starved += 1
             elif src_row < 0:
                 # Coverage invariant broken: not on the GPU, not mirrored.
                 violations += 1

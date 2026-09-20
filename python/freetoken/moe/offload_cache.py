@@ -1711,6 +1711,12 @@ class OffloadMoeCache:
             "freed_rows": torch.zeros((plan,), dtype=torch.int32, device=dev),
             "n_freed": torch.zeros((1,), dtype=torch.int32, device=dev),
             "stats": torch.zeros((5,), dtype=torch.int64, device=dev),
+            # Host-visible copy of the same counters, refreshed by a
+            # non-blocking D2H after every swap. Reading `stats` directly costs
+            # a device sync per step, which is why nothing read it and the
+            # faults stayed silent; a pinned buffer costs nothing and may lag a
+            # few steps, which is harmless for monotone counters.
+            "stats_host": torch.zeros((5,), dtype=torch.int64, pin_memory=True),
             "pool_ptrs": torch.tensor(pool_ptrs, dtype=torch.int64, device=dev),
             "cache_ptrs": torch.tensor(cache_ptrs, dtype=torch.int64, device=dev),
             "feat_bytes": torch.tensor(feat_bytes, dtype=torch.int64, device=dev),
@@ -1855,6 +1861,40 @@ class OffloadMoeCache:
         )
         return {"gpu": len(gpu_plan), "mirrored": filled, "duplicates": seeded,
                 "reserve": int(m["free_count"].item())}
+
+    def mirror_fault_check(self) -> None:
+        """Raise if the swap kernel ever lost an expert's only copy.
+
+        ``resolve_swaps`` cannot raise from inside a Triton kernel, so it counts
+        two fatal conditions instead: ``violations`` (an admission whose expert
+        was in neither the GPU nor the pool -- the slot keeps whatever bytes it
+        held, so the GEMM computes with an unrelated expert) and ``starved`` (no
+        free row for a writeback, so a GPU-only victim was dropped). Both mean
+        the coverage invariant is gone and every later token in the request is
+        suspect.
+
+        This used to be checked nowhere in the server: ``mirror_stats()`` fed
+        the /v1/stats document inside a ``try/except`` that swallowed
+        everything, and only the offline swap_smoke script compared the counts
+        against zero. The kernel comment claiming "the host treats a nonzero
+        count as a hard error" was aspirational.
+
+        Not a complete detector -- a stale free-row publish once served wrong
+        experts with ``violations`` still at 0 (see _mirror_publish_free_rows) --
+        so it is a backstop for the sizing, not a substitute for it.
+        """
+        m = getattr(self, "_mirror", None)
+        if m is None:
+            return
+        _swaps, _free, _d2h, violations, starved = m["stats_host"].tolist()
+        if violations or starved:
+            raise RuntimeError(
+                f"bounded expert mirror lost coverage: {violations} admissions "
+                f"with no host copy, {starved} dropped writebacks. Output from "
+                f"this point is wrong, not merely slow. The pool is too small "
+                f"for this KV ceiling: raise --moe-mirror-host-rows (or leave "
+                f"it at -1 to auto-size)."
+            )
 
     def _mirror_publish_free_rows(self) -> None:
         """Rebuild the device free stack from the DEVICE ownership map.
@@ -2046,6 +2086,9 @@ class OffloadMoeCache:
         )
         # 4. only now may this step's vacated rows be reused
         publish_freed_rows(self)
+        # 5. stream-ordered snapshot of the fault counters for the host check at
+        # the next batch boundary (no sync: the copy rides this step's stream).
+        m["stats_host"].copy_(m["stats"], non_blocking=True)
         self._pending_src_layer = None
         self._pending_whole_layer = False
 
