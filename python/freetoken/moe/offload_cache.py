@@ -1539,7 +1539,7 @@ class OffloadMoeCache:
         return 0, self.cache_size
 
     def lru_slot_range_device(self, layer_id: int) -> torch.Tensor:
-        """Device-resident ``[class_begin, class_end)`` pair for ``layer_id``.
+        """Device-resident ``(class_begin, class_end, victim_floor)`` for ``layer_id``.
 
         A view (no copy) into ``self._layer_slot_bounds``, kept in sync with
         :meth:`lru_slot_range` by :meth:`_sync_layer_slot_bounds`. The gated
@@ -1562,11 +1562,18 @@ class OffloadMoeCache:
         place when the shape is unchanged, so an already-captured CUDA graph
         that references this tensor's storage keeps seeing it.
         """
-        bounds = torch.empty((self.num_layers, 2), dtype=torch.int32)
+        # Third column: the lowest slot the victim search may take. Zero
+        # everywhere except under the bounded mirror, where the head of the
+        # cache is the prefill double buffer's and admitting a decode expert
+        # there would destroy coverage (see _mirror_prefill_base and the
+        # candidate mask in offload_kernels).
+        floor = self._mirror_prefill_base()
+        bounds = torch.empty((self.num_layers, 3), dtype=torch.int32)
         for layer_id in range(self.num_layers):
             begin, end = self.lru_slot_range(layer_id)
             bounds[layer_id, 0] = begin
             bounds[layer_id, 1] = end
+            bounds[layer_id, 2] = max(begin, floor)
         bounds = bounds.to(self.device)
         if (
             self._layer_slot_bounds is None
@@ -1641,6 +1648,19 @@ class OffloadMoeCache:
                 or self.cpu_layer_ids or self.pageable_gpu):
             raise ValueError("mirror residency requires native NVFP4, GPU decode, "
                              "and no CPU/pageable routing")
+        if not self._expert_arena_enabled:
+            # Not a preference: only the gated ``_v2`` admission kernel
+            # publishes victim_ids/prior_ids, and the swap kernel needs the
+            # displaced expert's identity to decide whether its bytes still
+            # exist anywhere. On the ungated kernel those stay -1, every
+            # writeback is skipped, and coverage is lost with the fault
+            # counters still reading zero -- silent wrong experts, which is
+            # the one failure mode this design exists to make impossible.
+            raise ValueError(
+                "mirror residency requires FREETOKEN_EXPERT_ARENA=1 (the "
+                "gated admission kernel is the only one that publishes the "
+                "evicted expert's identity the swap kernel needs)"
+            )
         if self.bank_caches or getattr(self, "_mirror", None) is not None:
             raise RuntimeError("mirror pool must attach to a fresh cache")
         if (pool.num_layers != self.num_layers or pool.num_experts != self.num_experts
@@ -1660,6 +1680,9 @@ class OffloadMoeCache:
             )
         self.banks = [(self.bank_sources[n], self.bank_caches[n]) for n in self.bank_schema]
         self._build_mirror_plan(pool)
+        # The victim floor is a function of the mirror, which only exists now:
+        # every earlier sync (__post_init__, set_bank_sources) computed it as 0.
+        self._sync_layer_slot_bounds()
         if self.prefill_overlap:
             # The mirror's prefill path needs its own index/snapshot buffers,
             # and _build_mirror_plan has just made self._mirror available to
@@ -1896,8 +1919,11 @@ class OffloadMoeCache:
         pool.pool_row_of_id = [-1] * pool.total
         pool.id_of_pool_row = [-1] * pool.capacity
         filled = pool.load_initial(gpu_plan)
-        seeded = pool.seed_duplicates(list(reversed(gpu_plan)),
-                                      reserve=3 * self.num_experts)
+        # No literal here: seed_duplicates defaults to the pool's own
+        # reserve_rows, which is the number the arena floor was priced
+        # against. Passing 3 * num_experts re-stated that constant in a second
+        # place, free to drift from the one min_gpu_slots is derived from.
+        seeded = pool.seed_duplicates(list(reversed(gpu_plan)))
         m["pool_row_of_id"].copy_(
             torch.tensor(pool.pool_row_of_id, dtype=torch.int32)
         )

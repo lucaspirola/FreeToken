@@ -15,8 +15,6 @@ leaves coverage standing.
 """
 from __future__ import annotations
 
-import os
-os.environ.setdefault("FREETOKEN_EXPERT_ARENA", "1")
 import tempfile
 import types
 
@@ -26,6 +24,29 @@ import torch
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="mirrored prefill needs CUDA"
 )
+
+
+@pytest.fixture(autouse=True)
+def _expert_arena():
+    """Turn the expert arena on for these tests, and put it back after.
+
+    The mirror is an arena-path feature (see attach_mirror_pool). A module
+    level ``os.environ.setdefault`` does not survive here: sibling modules flip
+    the module attribute directly (test_expert_arena_vmm,
+    test_offload_usable_slots_gpu), so whether the gate is on depends on test
+    order -- and mutating the environment instead leaks the gate into tests
+    that must run ungated, which is how this file first broke test_offload.
+    """
+    from freetoken.moe import offload_cache as oc
+    from freetoken.moe import offload_kernels as ok
+
+    prev = (oc.FREETOKEN_EXPERT_ARENA, ok.FREETOKEN_EXPERT_ARENA)
+    oc.FREETOKEN_EXPERT_ARENA = True
+    ok.FREETOKEN_EXPERT_ARENA = True
+    try:
+        yield
+    finally:
+        oc.FREETOKEN_EXPERT_ARENA, ok.FREETOKEN_EXPERT_ARENA = prev
 
 from freetoken.models.nemotron_h.weight import (
     NVFP4_EXPERT_SOURCE_SPEC as NEMOTRON_SPEC,
@@ -195,5 +216,90 @@ def test_a_prefill_sweep_leaves_coverage_standing():
                 f"after the sweep, e.g. {orphans[:8]}"
             )
             cache.mirror_fault_check()
+        finally:
+            pool.close()
+
+
+def test_decode_never_admits_into_the_prefill_buffer():
+    """The exact hole that crashed the first run of this design.
+
+    Reserving the region is not enough on its own: under LFU the victim
+    search ranks by owner frequency FIRST, and an empty slot loads
+    ``other=-1`` -- the minimum possible frequency -- so the permanently
+    empty buffer region won every admission outright. The expert landed
+    there, its pool row was freed as the source of the upload, and the next
+    prefill layer overwrote the bytes. The server died at the first real
+    request with "expert 73 (layer 0) is neither a GPU resident nor in the
+    pool". A usage sentinel cannot express this, because usage only breaks
+    ties inside the minimum-frequency group; the victim candidate mask can.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        write_nvfp4_checkpoint(root, LAYERS, EXPERTS, H, ISZ)
+        cache, pool = _cache(root)
+        try:
+            base = cache._mirror_prefill_base()
+            torch.manual_seed(0)
+            for step in range(60):
+                layer = step % LAYERS
+                ids = torch.randperm(EXPERTS, device="cuda")[:4]
+                ids = ids.to(torch.int32).reshape(1, 4)
+                cache.ensure_experts(layer, ids)   # rewrites ids to slot ids
+                cache.copy_missing()
+                torch.cuda.synchronize()
+                assert int(ids.min()) >= base, (
+                    f"step {step}: an admission took slot {int(ids.min())}, "
+                    f"inside the prefill buffer region [0, {base})"
+                )
+                assert (cache.id_of_slot[:base] == -1).all(), (
+                    f"step {step}: the buffer region acquired an owner"
+                )
+                cache.mirror_fault_check()
+            # And the prefill path still works on the cache decode left behind.
+            _sweep(cache)
+            cache.mirror_fault_check()
+            slots = cache.slot_for_id.view(-1).cpu().tolist()
+            rows = cache._mirror["pool_row_of_id"].cpu().tolist()
+            assert [f for f in range(TOTAL)
+                    if slots[f] < base and rows[f] < 0] == []
+        finally:
+            pool.close()
+
+
+def test_the_mirror_refuses_the_ungated_admission_kernel():
+    """Attaching without the arena must fail loudly, not serve wrong experts.
+
+    Only the gated ``_v2`` kernel publishes victim_ids/prior_ids. On the
+    ungated one they stay -1, so ``resolve_swaps`` believes no eviction ever
+    displaces anybody, skips every writeback, and decode reads experts whose
+    only copy is gone -- with coverage_faults still at 0, because the kernel
+    was never told there was a victim to account for. This was silent until
+    the gate flipped underneath these tests and a decode run lost an expert.
+    """
+    from freetoken.moe import offload_cache as oc
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    with tempfile.TemporaryDirectory() as root:
+        write_nvfp4_checkpoint(root, LAYERS, EXPERTS, H, ISZ)
+        pool = MirrorExpertPool(
+            root, LAYERS, EXPERTS, _CAP, hidden_size=H, intermediate_size=ISZ,
+            spec=NEMOTRON_SPEC,
+            config=types.SimpleNamespace(moe_layer_ids=list(range(LAYERS))),
+            reserve_rows=_RESERVE, device=torch.device("cuda"),
+        )
+        try:
+            prev = oc.FREETOKEN_EXPERT_ARENA
+            oc.FREETOKEN_EXPERT_ARENA = False
+            try:
+                cache = OffloadMoeCache(
+                    num_layers=LAYERS, num_experts=EXPERTS, cache_size=_GPU,
+                    slot_capacity=_GPU, arena_step_slots=_STEP,
+                    device=torch.device("cuda"), quant_format="nvfp4",
+                    cache_policy="lfu", prefill_overlap=True,
+                )
+                cache.direct_device_banks = True
+                with pytest.raises(ValueError, match="FREETOKEN_EXPERT_ARENA"):
+                    cache.attach_mirror_pool(pool)
+            finally:
+                oc.FREETOKEN_EXPERT_ARENA = prev
         finally:
             pool.close()

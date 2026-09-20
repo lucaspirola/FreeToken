@@ -128,9 +128,10 @@ def plan_capacity(num_layers: int, num_experts: int, final_gpu_slots: int,
 
     ``reserve`` rows on top of the coverage requirement stay available so a
     writeback always has somewhere to land that the same step's upload is not
-    reading (see mirror_kernels), and so a prefill materialize can stage a whole
-    layer plus the experts it displaces. Both effects peak at one layer each, so
-    the default is ``2 * num_experts``.
+    reading (see mirror_kernels). The default is ``default_reserve_rows`` --
+    THREE layers, not the two this docstring used to claim; the third is decode
+    burst slack, and the planner and the pool must agree on the number or the
+    arena floor is priced against a reserve the pool does not withhold.
     """
     if num_layers <= 0 or num_experts <= 0 or final_gpu_slots < 0:
         raise ValueError("mirror capacity needs positive geometry")
