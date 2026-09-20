@@ -552,6 +552,12 @@ class FrontendManager:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    global _GLOBAL_STATE
+    # Start the listener task immediately so it can receive scheduler counters
+    # published before the first request arrives (the scheduler starts sending
+    # as soon as the loop runs).
+    if _GLOBAL_STATE is not None:
+        _GLOBAL_STATE._create_listener_once()
     yield
     # Orderly shutdown (uvicorn traps SIGINT/SIGTERM and runs this on the way out). Flag it
     # BEFORE tearing anything down so the backend supervisor treats the workers' ensuing
@@ -561,7 +567,6 @@ async def lifespan(_: FastAPI):
     # worker reap that overruns its timeout must not cost us the tail of the trace.
     # (request_trace also registers an atexit hook; this is the reliable one.)
     request_trace.close()
-    global _GLOBAL_STATE
     if _GLOBAL_STATE is not None:
         _GLOBAL_STATE.shutdown()
 
