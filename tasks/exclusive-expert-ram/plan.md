@@ -69,6 +69,35 @@ it, and every failure mode is a way of breaking it.
 * `prefill_buffer_slots(E)` = `2 * E`: the head of the cache, which the prefill
   double buffer owns outright under the mirror. See below.
 
+## What capacity buys: duplicates
+
+Coverage only requires `capacity >= complement + reserve`. Everything above
+that floor is spare, and what the spare rows do decides whether host RAM is
+worth anything here at all.
+
+A row is a **duplicate** when its expert is also on the GPU. Coverage does not
+need it — the GPU copy already satisfies the invariant — but it makes that
+expert's eviction **free**: the victim already has a host copy, so the swap is
+a pure H2D admission with no D2H writeback behind it. The free-eviction rate is
+therefore the decode cost of the mirror, and duplicates are the only lever on
+it.
+
+The kernel keeps duplicates by *retaining* the row an admission read from
+instead of freeing it (`mirror_kernels._resolve_swaps_kernel`). Expert weights
+are read-only on the GPU, so a retained row stays a valid copy for as long as
+its expert is resident, and an expert that just arrived from the pool is the
+likeliest to go back out. Retention consumes free rows and nothing returns
+them, so it stops at `retain_floor` — the pool's own reserve, which bounds one
+launch's writebacks by construction. Steady state is then
+
+    owned = complement + duplicates,  duplicates = capacity - complement - reserve
+
+which is the line the RAM x decode curve is measured along. Freeing the row
+unconditionally, which is what shipped, pins `duplicates` at whatever warm
+start seeded and lets admissions consume even that: measured 1.4% free
+evictions at 1800 rows and 16.9% with the whole model mirrored, i.e. no curve
+at all.
+
 ## Slot regions under the mirror
 
     [0, 2E)            prefill double buffer -- prefill's alone

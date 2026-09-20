@@ -114,6 +114,41 @@ until [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
 done
 echo "[$ARM] ready after $(( $(date +%s) - started ))s"
 
+# Host RAM has to be sampled at a DEFINED point, or arms are not comparable:
+# a sample taken after an 80K request includes whatever the KV arena grew into,
+# and on WSL2 that can be host-backed. Two points are recorded -- here, with
+# the model resident and nothing served yet (this is the model's residency,
+# the number the RAM knob is supposed to move), and again after the probe.
+avail_ready=$(awk '/MemAvailable/ {print $2 * 1024}' /proc/meminfo)
+CG_EARLY=$(systemctl --user show -p ControlGroup --value "$UNIT")
+# RSS at readiness, plus the /dev/zero slice of it. Both are needed: pinned
+# memory obtained through torch maps from /dev/zero (which is also why the
+# cgroup charges it to `file` and `free` calls it `shared`), while memory
+# pinned with cudaHostRegister over an ordinary allocation stays anonymous.
+# A metric that only counted /dev/zero would read a profile as free the moment
+# it stopped using torch's allocator.
+read -r rss_ready pinned_ready <<<"$(python3 - "/sys/fs/cgroup$CG_EARLY/cgroup.procs" <<'PYREADY'
+import collections, sys
+tot = collections.Counter(); path = None
+for line in open(sys.argv[1]):
+    if not line.strip():
+        continue
+    try:
+        smaps = open(f"/proc/{int(line)}/smaps").read().splitlines()
+    except Exception:
+        continue
+    for ln in smaps:
+        head = ln.split()
+        if head and "-" in head[0] and ":" not in head[0]:
+            path = head[5] if len(head) > 5 else "[anon]"
+        elif ln.startswith("Rss:"):
+            kb = int(ln.split()[1])
+            if kb:
+                tot[path or "[anon]"] += kb
+print(sum(tot.values()) * 1024, tot.get("/dev/zero", 0) * 1024)
+PYREADY
+)"
+
 # What the arm actually built. Without this the pool geometry behind a row of
 # the table is a guess, and the RAM column is the whole point of the table.
 journalctl --user -u "$UNIT" --no-pager 2>/dev/null \
@@ -139,14 +174,16 @@ cat "$OUT/$ARM-probe.jsonl"
 
 curl -fsS --max-time 10 "http://127.0.0.1:$PORT/v1/stats" > "$OUT/$ARM-stats.json" 2>/dev/null || true
 
-# memory.current is NOT the number this sweep is about: it counts page cache,
-# and the arms do not populate it the same way -- the baseline loads its expert
-# banks through ordinary reads while the mirror pool reads with O_DIRECT. Two
-# identical baseline arms measured 23.77 and 20.93 GiB that way, and the mirror
-# arms came out LOWER the BIGGER the pinned pool got. The number that answers
-# "how much host RAM does this profile hold" is anonymous memory: the pinned
-# banks are page-locked anonymous pages, so they land in anon/unevictable and
-# page cache does not.
+# Neither cgroup number answers this sweep on its own, and both were tried:
+#   memory.current counts page cache, which the arms do not populate the same
+#   way (the baseline reads its banks normally, the pool reads O_DIRECT). Two
+#   identical baselines read 23.77 and 20.93 GiB and bigger pools read SMALLER.
+#   memory.stat's anon misses the banks entirely: CUDA pinned host memory maps
+#   from /dev/zero, so the kernel charges it to file, not anon (a baseline
+#   measured anon 3.02 GiB against file 19.02 GiB).
+# The metric is the MemAvailable delta at readiness, taken above; these are kept
+# only as attribution, so a surprising delta can be explained. See
+# results/README.md for the full account of the three definitions.
 sync
 sleep 5
 avail_after=$(awk '/MemAvailable/ {print $2 * 1024}' /proc/meminfo)
@@ -156,6 +193,7 @@ CGDIR="/sys/fs/cgroup$CG"
 mem_now=$(awk '/^anon /{print $2}' "$CGDIR/memory.stat" 2>/dev/null || echo 0)
 mem_file=$(awk '/^file /{print $2}' "$CGDIR/memory.stat" 2>/dev/null || echo 0)
 mem_unevict=$(awk '/^unevictable /{print $2}' "$CGDIR/memory.stat" 2>/dev/null || echo 0)
+mem_shmem=$(awk '/^shmem /{print $2}' "$CGDIR/memory.stat" 2>/dev/null || echo 0)
 mem_peak=$(cat "$CGDIR/memory.peak" 2>/dev/null || echo 0)
 mem_cur=$(cat "$CGDIR/memory.current" 2>/dev/null || echo 0)
 # Attribution for the MemAvailable delta: summed over every process of the arm,
@@ -169,23 +207,32 @@ done
 gpu_used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)
 
 RATIO_USED="$RATIO" python3 - "$ARM" "$MODEL" "$ROWS" "$mem_now" "$mem_peak" "$gpu_used" \
-  "$OUT/$ARM-probe.jsonl" "$OUT/$ARM-stats.json" "$OUT/sweep.tsv" \
+  "$OUT/$ARM-probe.jsonl" "$OUT/$ARM-stats.json" "$OUT/$ARM-record.json" \
   "$mem_file" "$mem_unevict" "$mem_cur" "$avail_before" "$avail_after" \
-  "$rss_kb" "$lck_kb" <<'PY'
+  "$rss_kb" "$lck_kb" "$avail_ready" "$pinned_ready" "$rss_ready" "$mem_shmem" <<'PY'
 import json, os, sys
-arm, model, rows, anon, peak, gpu, probe, stats, tsv = sys.argv[1:10]
+arm, model, rows, anon, peak, gpu, probe, stats, out = sys.argv[1:10]
 mfile, unevict, cur, av_before, av_after, rss_kb, lck_kb = sys.argv[10:17]
+av_ready, pinned_ready, rss_ready, shmem = sys.argv[17:21]
 gib = lambda b: round(int(b) / 2**30, 2)
 rec = {"arm": arm, "model": os.path.basename(model), "rows": rows,
        "ratio": os.environ.get("RATIO_USED", ""),
-       # THE metric: host RAM this profile takes away from everything else.
-       "ram_gib": gib(int(av_before) - int(av_after)),
+       # THE metric: host RAM the MODEL holds, sampled with the server ready
+       # and nothing served yet. This is what the mirror's capacity knob moves.
+       "ram_gib": gib(int(av_before) - int(av_ready)),
+       # The pinned region itself at that same point (CUDA pinned host memory
+       # maps from /dev/zero on WSL2), which for the baseline is the expert
+       # banks and for the mirror should be the pool.
+       "rss_ready_gib": gib(rss_ready), "devzero_gib": gib(pinned_ready),
+       # And after the probe, so KV growth is visible rather than folded in.
+       "ram_after_80k_gib": gib(int(av_before) - int(av_after)),
        # Attribution, so a surprising ram_gib can be explained rather than
        # guessed at. rss/locked are summed over the arm's processes; anon/file
        # are the cgroup's split (the baseline's banks are file-backed mmap).
        "rss_gib": gib(int(rss_kb) * 1024), "locked_gib": gib(int(lck_kb) * 1024),
        "anon_gib": gib(anon), "file_gib": gib(mfile),
-       "unevict_gib": gib(unevict), "current_gib": gib(cur),
+       "unevict_gib": gib(unevict), "shmem_gib": gib(shmem),
+       "current_gib": gib(cur),
        "peak_current_gib": gib(peak), "gpu_mib": gpu}
 try:
     for line in open(probe):
@@ -199,17 +246,20 @@ try:
     if m:
         rec["coverage_faults"] = m.get("coverage_faults")
         rec["starved"] = m.get("starved_writebacks")
+        rec["swaps"] = m.get("swaps")
+        rec["retained_rows"] = m.get("retained_rows")
         rec["free_evict_rate"] = round(m.get("free_eviction_rate", 0), 3)
 except Exception:
     pass
-new = not os.path.exists(tsv)
-keys = list(rec)
-with open(tsv, "a") as f:
-    if new:
-        f.write("\t".join(keys) + "\n")
-    f.write("\t".join(str(rec[k]) for k in keys) + "\n")
+# One file per arm, and table.py builds the TSV from all of them. Appending
+# straight to the TSV wrote the header from the first arm's keys and each row
+# from its own, so baseline rows (no mirror counters) sat under mirror headers.
+with open(out, "w") as f:
+    json.dump(rec, f, indent=2)
 print(json.dumps(rec, indent=2))
 PY
+
+python3 "$(dirname "${BASH_SOURCE[0]}")/table.py" "$OUT" || true
 
 echo "[$ARM] stopping"
 systemctl --user stop "$UNIT" || true

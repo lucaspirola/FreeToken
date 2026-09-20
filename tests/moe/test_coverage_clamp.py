@@ -15,8 +15,6 @@ disagree, which is the whole point.
 """
 from __future__ import annotations
 
-import os
-os.environ.setdefault("FREETOKEN_EXPERT_ARENA", "1")
 import tempfile
 import types
 
@@ -26,6 +24,29 @@ import torch
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="coverage clamp needs CUDA"
 )
+
+
+@pytest.fixture(autouse=True)
+def _expert_arena():
+    """Flip the gate where it is actually read: a module attribute.
+
+    This file used to set FREETOKEN_EXPERT_ARENA in os.environ at import time,
+    which only worked while it happened to be the first module importing
+    ``offload_cache`` -- that module snapshots the variable into a module-level
+    flag on ITS import. Run after any suite that imports it first (tests/kernels
+    does), the setdefault was a no-op and every mirror test here died on
+    ``attach_mirror_pool``. Patch the flags, like test_mirror_prefill.
+    """
+    from freetoken.moe import offload_cache as oc
+    from freetoken.moe import offload_kernels as ok
+
+    prev = (oc.FREETOKEN_EXPERT_ARENA, ok.FREETOKEN_EXPERT_ARENA)
+    oc.FREETOKEN_EXPERT_ARENA = True
+    ok.FREETOKEN_EXPERT_ARENA = True
+    try:
+        yield
+    finally:
+        oc.FREETOKEN_EXPERT_ARENA, ok.FREETOKEN_EXPERT_ARENA = prev
 
 from freetoken.models.nemotron_h.weight import (
     NVFP4_EXPERT_SOURCE_SPEC as NEMOTRON_SPEC,

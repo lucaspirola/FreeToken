@@ -27,9 +27,12 @@ run() {
   sleep 15
 }
 
-run nemotron-r-baseline 0
-run nemotron-r-1700     1700
-run nemotron-r-2100     2100
-run nemotron-r-2500     2500
-run nemotron-r-2944     2944
+# Two baselines, first and last: the sweep takes ~15 minutes and a baseline
+# that only appears at one end cannot show whether the host drifted under it.
+for arg in "$@"; do
+  case "$arg" in
+    baseline*) run "nemotron-$arg" 0 ;;
+    *)         run "nemotron-$arg" "$arg" ;;
+  esac
+done
 echo "=============== nemotron sweep done $(date +%H:%M:%S)"
