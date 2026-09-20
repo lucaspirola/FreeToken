@@ -1765,22 +1765,23 @@ class OffloadMoeCache:
             "d2d_src": torch.zeros((plan,), dtype=torch.int32, device=dev),
             "d2d_dst": torch.zeros((plan,), dtype=torch.int32, device=dev),
             "n_d2d": torch.zeros((1,), dtype=torch.int64, device=dev),
-            # Rows owned by nobody, usable as writeback targets. A swap pops at
-            # most one and pushes exactly one, so the depth is stable; the
-            # capacity plan keeps two layers in reserve so it never empties.
+            # Rows owned by nobody, usable as writeback targets. A swap pops
+            # at most one per miss; it pushes one back only once retention has
+            # filled the pool down to the reserve (see mirror_kernels), so the
+            # depth falls to that floor and then oscillates around it.
             "free_rows": torch.zeros((pool.capacity,), dtype=torch.int32, device=dev),
             "free_count": torch.zeros((1,), dtype=torch.int32, device=dev),
             # Rows freed this step, folded into the stack only after every copy
             # is issued (recycling one mid-step would corrupt a pending upload).
             "freed_rows": torch.zeros((plan,), dtype=torch.int32, device=dev),
             "n_freed": torch.zeros((1,), dtype=torch.int32, device=dev),
-            "stats": torch.zeros((5,), dtype=torch.int64, device=dev),
+            "stats": torch.zeros((6,), dtype=torch.int64, device=dev),
             # Host-visible copy of the same counters, refreshed by a
             # non-blocking D2H after every swap. Reading `stats` directly costs
             # a device sync per step, which is why nothing read it and the
             # faults stayed silent; a pinned buffer costs nothing and may lag a
             # few steps, which is harmless for monotone counters.
-            "stats_host": torch.zeros((5,), dtype=torch.int64, pin_memory=True),
+            "stats_host": torch.zeros((6,), dtype=torch.int64, pin_memory=True),
             "pool_ptrs": torch.tensor(pool_ptrs, dtype=torch.int64, device=dev),
             "cache_ptrs": torch.tensor(cache_ptrs, dtype=torch.int64, device=dev),
             "feat_bytes": torch.tensor(feat_bytes, dtype=torch.int64, device=dev),
@@ -1835,7 +1836,8 @@ class OffloadMoeCache:
         """Swap counters (swaps, free evictions, writebacks, coverage faults)."""
         if getattr(self, "_mirror", None) is None:
             return {}
-        swaps, free_evict, d2h, violations, starved = self._mirror["stats"].tolist()
+        (swaps, free_evict, d2h, violations, starved,
+         retained) = self._mirror["stats"].tolist()
         return {
             "swaps": swaps,
             "free_evictions": free_evict,
@@ -1843,6 +1845,10 @@ class OffloadMoeCache:
             "coverage_faults": violations,
             "starved_writebacks": starved,
             "free_eviction_rate": (free_evict / swaps) if swaps else 0.0,
+            # Admissions that kept their pool row as a duplicate. This is the
+            # mechanism that makes pool capacity worth host RAM: without it the
+            # free-eviction rate stays near zero at every capacity.
+            "retained_rows": retained,
         }
 
     def mirror_warm_start(self) -> dict:
@@ -1966,7 +1972,8 @@ class OffloadMoeCache:
         m = getattr(self, "_mirror", None)
         if m is None:
             return
-        _swaps, _free, _d2h, violations, starved = m["stats_host"].tolist()
+        (_swaps, _free, _d2h, violations, starved,
+         _retained) = m["stats_host"].tolist()
         if violations or starved:
             raise RuntimeError(
                 f"bounded expert mirror lost coverage: {violations} admissions "

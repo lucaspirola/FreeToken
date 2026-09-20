@@ -48,6 +48,9 @@ def resolve_swaps(cache, layer_id: int) -> None:
     """Translate this step's misses into mirror copy descriptors (device-side)."""
     m = cache._mirror
     plan = m["h2d_src"].numel()
+    # Rows the free stack must keep for this launch's writebacks; retention
+    # stops above it. See the kernel's `retain_floor`.
+    retain_floor = cache._mirror_pool.reserve_rows
     _resolve_swaps_kernel[(1,)](
         cache.src_indices,
         cache.evict_slots,
@@ -73,6 +76,7 @@ def resolve_swaps(cache, layer_id: int) -> None:
         m["stats"],
         layer_id,
         cache.num_experts,
+        retain_floor,
         BLOCK=triton.next_power_of_2(max(plan, 1)),
     )
 
@@ -89,7 +93,7 @@ def publish_freed_rows(cache) -> None:
     )
 
 
-@triton.jit(do_not_specialize=["layer_id", "num_experts"])
+@triton.jit(do_not_specialize=["layer_id", "num_experts", "retain_floor"])
 def _resolve_swaps_kernel(
     src_indices_ptr,      # int32 [plan]  layer-local expert id of each miss
     evict_slots_ptr,      # int32 [plan]  GPU slot each miss lands in
@@ -112,9 +116,11 @@ def _resolve_swaps_kernel(
     d2d_src_ptr,          # int32 [plan]  GPU slot holding an already-resident expert
     d2d_dst_ptr,          # int32 [plan]  GPU slot it must appear in
     n_d2d_ptr,            # int64 [1]     device-to-device relocation count
-    stats_ptr,            # int64 [5]     swaps, free_evict, d2h, violations, starved
+    stats_ptr,            # int64 [6]     swaps, free_evict, d2h, violations,
+                          #               starved, retained
     layer_id,
     num_experts,
+    retain_floor,         # keep this many rows free; retain duplicates above it
     BLOCK: tl.constexpr,
 ):
     """One program: the miss count is <= top_k * batch (decode) or num_experts
@@ -131,6 +137,7 @@ def _resolve_swaps_kernel(
     free_evict = 0
     violations = 0
     starved = 0
+    retained = 0
     free_top = tl.load(free_count_ptr)
 
     for i in range(0, n):
@@ -197,12 +204,38 @@ def _resolve_swaps_kernel(
                 else:
                     # Victim mirrored already (duplicate) or slot never used.
                     free_evict += 1
-                # The admission's old row falls free -- staged, not pushed
-                # (hazard 2).
-                tl.store(pool_row_of_id_ptr + flat_new, -1)
-                tl.store(id_of_pool_row_ptr + src_row, -1)
-                tl.store(freed_rows_ptr + n_freed, src_row)
-                n_freed += 1
+                # What happens to the row this admission read from decides
+                # whether pool capacity buys anything at all.
+                #
+                # Freeing it unconditionally (what shipped) means every expert
+                # that reaches the GPU immediately loses its host copy, so its
+                # next eviction must pay a D2H -- forever. Only the duplicates
+                # seeded at warm start are ever free to evict, and they are
+                # consumed once. Measured on Nemotron: free evictions were
+                # 1.4% of swaps at 1800 rows and 16.9% with the WHOLE model
+                # mirrored (2944 rows), i.e. host RAM bought nothing, which is
+                # why the first capacity sweep came out flat.
+                #
+                # The row's contents are expert weights: read-only, never
+                # written on the GPU. Keeping it therefore stays valid for as
+                # long as the expert is resident, and turns that expert's next
+                # eviction into a free one. An expert that just arrived from
+                # the pool is also the likeliest to go back out, so it is the
+                # right row to hold.
+                #
+                # Retention consumes free rows and nothing returns them, so it
+                # must stop while the stack can still absorb this launch's
+                # writebacks: `retain_floor` is the pool's reserve, which is
+                # three layers' worth and bounds `plan` by construction.
+                if free_top > retain_floor:
+                    retained += 1
+                else:
+                    # At the floor: the admission's old row falls free --
+                    # staged, not pushed (hazard 2).
+                    tl.store(pool_row_of_id_ptr + flat_new, -1)
+                    tl.store(id_of_pool_row_ptr + src_row, -1)
+                    tl.store(freed_rows_ptr + n_freed, src_row)
+                    n_freed += 1
 
     tl.store(free_count_ptr, free_top)
     tl.store(n_freed_ptr, n_freed)
@@ -214,6 +247,7 @@ def _resolve_swaps_kernel(
     tl.store(stats_ptr + 2, tl.load(stats_ptr + 2) + n_d2h)
     tl.store(stats_ptr + 3, tl.load(stats_ptr + 3) + violations)
     tl.store(stats_ptr + 4, tl.load(stats_ptr + 4) + starved)
+    tl.store(stats_ptr + 5, tl.load(stats_ptr + 5) + retained)
 
 
 @triton.jit
