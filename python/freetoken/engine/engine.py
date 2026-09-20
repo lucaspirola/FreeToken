@@ -777,8 +777,16 @@ class Engine:
         # Otherwise load_expert_banks gives the model module a setup hook first, then
         # falls back to per-quant providers, and the engine wires the banks into cache.
         cache_factory = getattr(self.model, "make_offload_moe_cache", None)
-        mirror = os.environ.get("FREETOKEN_MIRROR_EXPERT_RAM", "0") == "1"
-        mirror_pool = None
+        # Bounded host mirror. --moe-mirror-host-rows is the flag (0 off,
+        # -1 auto-size, >0 explicit rows); FREETOKEN_MIRROR_HOST_ROWS is the
+        # same knob spelled for serve.env, and FREETOKEN_MIRROR_EXPERT_RAM=1
+        # is the plain on switch that auto-sizes. Either one turns it on: the
+        # flag alone used to be silently inert, which is worse than both.
+        mirror_rows = config.moe_mirror_host_rows or 0
+        if mirror_rows == 0:
+            mirror_rows = int(os.environ.get("FREETOKEN_MIRROR_HOST_ROWS", "0"))
+        mirror = (mirror_rows != 0
+                  or os.environ.get("FREETOKEN_MIRROR_EXPERT_RAM", "0") == "1")
         if mirror:
             mc = config.model_config
             if (
@@ -908,21 +916,13 @@ class Engine:
             if mirror:
                 from freetoken.moe.mirror_pool import MirrorExpertPool, plan_capacity
                 from freetoken.moe.expert_banks import ExpertBanks
-
-                mc = config.model_config
                 # Size for the KV ceiling, where the GPU cache is smallest and
                 # the host side must be largest. Growing a pinned pool later
                 # costs ~762 ms/GiB (measured), a stall no request should pay.
-                if config.moe_mirror_host_rows > 0:
-                    capacity = config.moe_mirror_host_rows
-                elif config.moe_mirror_host_rows < 0:
-                    capacity = plan_capacity(
-                        mc.num_moe_layers, mc.num_experts,
-                        self._mirror_final_gpu_slots(config),
-                    )
-                else:
-                    mirror = False
-                    mirror_pool = None
+                capacity = mirror_rows if mirror_rows > 0 else plan_capacity(
+                    mc.num_moe_layers, mc.num_experts,
+                    self._mirror_final_gpu_slots(config),
+                )
             else:
                 mirror_pool = None
             if mirror:
@@ -1666,6 +1666,17 @@ class Engine:
         bank_row_bytes = moe.bank_row_bytes
         assert bank_row_bytes is not None
         floor = 2 * moe.num_experts if moe.prefill_overlap else moe.num_experts
+        # A bounded host mirror puts a second, higher floor under the arena:
+        # every expert the GPU drops must have a pool row outside the pool's
+        # writeback/staging reserve. The pool derives that slot count itself
+        # (min_gpu_slots); round it UP to chunk granularity, because a partial
+        # chunk is not releasable and a floor below a chunk boundary would let
+        # the shrink land under it.
+        mirror_pool = getattr(self, "_mirror_pool_ref", None)
+        cov_floor = 0
+        if mirror_pool is not None:
+            cov_floor = -(-mirror_pool.min_gpu_slots // step_slots) * step_slots
+        floor = max(floor, cov_floor)
         pending_before = self._pending_graph_bs
         target_moe = old_moe
         # Assigned only by the shrink branch below; the ledger add at the
@@ -1700,16 +1711,11 @@ class Engine:
                     bank_row_bytes,
                 )
                 target_moe = max(target_moe, floor)
-                # Bounded host mirror: every expert the arena drops must land
-                # in a pool row, so the KV may not grow past what the mirror
-                # can complement. Derived from the pool's own geometry -- no
-                # model constants; the floor lifts with FREETOKEN_MIRROR_HOST_ROWS.
-                mirror_pool = getattr(self, "_mirror_pool_ref", None)
                 if target_moe >= old_moe:
                     pool_rows = getattr(mirror_pool, "capacity", None)
                     hint = (
                         " (bounded expert mirror cannot cover the complement: "
-                        f"raise FREETOKEN_MIRROR_HOST_ROWS above {pool_rows})"
+                        f"raise --moe-mirror-host-rows above {pool_rows})"
                         if mirror_pool is not None else ""
                     )
                     raise RuntimeError(
@@ -1752,16 +1758,8 @@ class Engine:
                 # release into the ledger), re-sync, and re-check -- instead
                 # of refusing the commit with releasable rows still sitting
                 # above the floor.
-                mirror_pool = getattr(self, "_mirror_pool_ref", None)
-                step_slots = getattr(moe, "arena_step_slots", 1) or 1
-                row_b = sum(moe.bank_row_bytes) if getattr(moe, "bank_row_bytes", None) else 0
-                cov_floor = 0
-                if mirror_pool is not None:
-                    cov_floor = -(-(
-                        mirror_pool.total - mirror_pool.coverage_floor_complement
-                    ) // step_slots) * step_slots
-                while live_free < required_free and target_moe > max(cov_floor, floor):
-                    target_moe = max(target_moe - step_slots, cov_floor, floor)
+                while live_free < required_free and target_moe > floor:
+                    target_moe = max(target_moe - step_slots, floor)
                     released_bytes += moe.set_usable_slots(target_moe)
                     object.__setattr__(self.config, "moe_cache_size", target_moe)
                     live_free = max(live_free, live_free_before + released_bytes)

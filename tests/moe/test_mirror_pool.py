@@ -83,9 +83,17 @@ def checkpoint(tmp_path):
     return str(tmp_path), expected
 
 
-def _pool(root, capacity):
+def _pool(root, capacity, reserve_rows=0):
+    """A pool for the row-level tests below.
+
+    ``reserve_rows=0`` by default: this toy geometry (16 rows) is smaller than
+    the three-layer writeback/staging reserve a real pool holds back, and these
+    tests exercise checkpoint I/O and the coverage refusal, not runtime sizing.
+    The reserve's own arithmetic is covered in test_coverage_clamp.py.
+    """
     return MirrorExpertPool(
-        root, LAYERS, EXPERTS, capacity, hidden_size=H, intermediate_size=I
+        root, LAYERS, EXPERTS, capacity, hidden_size=H, intermediate_size=I,
+        reserve_rows=reserve_rows,
     )
 
 

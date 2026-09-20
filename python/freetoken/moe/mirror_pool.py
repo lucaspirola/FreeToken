@@ -70,6 +70,20 @@ def nvfp4_bank_shapes(hidden_size: int, intermediate_size: int) -> dict:
     }
 
 
+def default_reserve_rows(num_experts: int) -> int:
+    """Rows the pool always holds back, never counted towards coverage.
+
+    One layer for writeback landing rows, one for a prefill materialize, and
+    one so a decode burst cannot drain the stack between the per-step pushes
+    (measured: 4401 starved writebacks with only two layers on a 21K-token
+    request). The planner and the pool must agree on this number: the pool's
+    arena floor is derived from it, and a floor computed against a smaller
+    reserve than the pool actually withholds starves writebacks instead of
+    breaking coverage outright, which is far harder to see.
+    """
+    return 3 * num_experts
+
+
 def plan_capacity(num_layers: int, num_experts: int, final_gpu_slots: int,
                   reserve: int | None = None) -> int:
     """Rows the mirror must hold so coverage survives the KV ceiling.
@@ -89,11 +103,7 @@ def plan_capacity(num_layers: int, num_experts: int, final_gpu_slots: int,
     if num_layers <= 0 or num_experts <= 0 or final_gpu_slots < 0:
         raise ValueError("mirror capacity needs positive geometry")
     if reserve is None:
-        # One layer for writeback landing rows, one for a prefill materialize,
-        # plus one more so a decode burst cannot drain the stack between the
-        # per-step pushes (measured: 4401 starved writebacks with 2 layers on a
-        # 21K-token request).
-        reserve = 3 * num_experts
+        reserve = default_reserve_rows(num_experts)
     total = num_layers * num_experts
     return min(max(total - final_gpu_slots, 0) + reserve, total)
 
@@ -103,7 +113,8 @@ class MirrorExpertPool:
 
     def __init__(self, model_path: str, num_layers: int, num_experts: int,
                  capacity: int, *, hidden_size: int, intermediate_size: int,
-                 device: torch.device | None = None):
+                 device: torch.device | None = None,
+                 reserve_rows: int | None = None):
         total = num_layers * num_experts
         if capacity <= 0 or num_layers <= 0 or num_experts <= 0:
             raise ValueError("mirror pool capacity and model dimensions must be positive")
@@ -113,6 +124,14 @@ class MirrorExpertPool:
         self.num_experts = num_experts
         self.capacity = capacity
         self.total = total
+        self.reserve_rows = (default_reserve_rows(num_experts)
+                             if reserve_rows is None else reserve_rows)
+        if capacity < total and capacity <= self.reserve_rows:
+            raise ValueError(
+                f"mirror capacity {capacity} does not exceed the "
+                f"{self.reserve_rows}-row writeback/staging reserve: the pool "
+                f"could cover no expert at all (raise --moe-mirror-host-rows)"
+            )
         self.device = device
         self.shapes = nvfp4_bank_shapes(hidden_size, intermediate_size)
         self.schema_order = tuple(self.shapes)
@@ -153,12 +172,26 @@ class MirrorExpertPool:
             self.close()
             raise
 
-        # Highest complement this pool can cover: every expert the GPU cache
-        # drops must land in a row not held back as writeback/staging reserve
-        # (2 * num_experts by plan_capacity; FREETOKEN_MIRROR_HOST_ROWS may
-        # change capacity, so derive the bound here -- model-agnostic).
-        self.coverage_floor_complement = (
-            self.total - self.capacity + 2 * self.num_experts
+        # The expert-arena floor this pool implies. Coverage needs every
+        # expert the GPU does not hold to own a pool row outside the reserve:
+        #
+        #     total - gpu_slots <= capacity - reserve_rows
+        #     =>  gpu_slots >= total - capacity + reserve_rows
+        #
+        # so a BIGGER pool LOWERS the floor and leaves more room for KV, which
+        # is the entire point of the RAM knob. Derived from this pool's own
+        # geometry: no model constant, and --moe-mirror-host-rows moves it.
+        #
+        # A saturated pool (capacity == total) is exempt, and not by rounding:
+        # every expert is mirrored at all times, so an eviction never writes
+        # back and a materialize never stages -- the reserve those rows exist
+        # for is unreachable. Folding the additive reserve in anyway would
+        # demand gpu_slots >= reserve_rows from a pool that already holds a
+        # copy of everything, which is how the toy geometries in the repro
+        # scripts (total == 3 * num_experts) end up "impossible".
+        self.min_gpu_slots = (
+            0 if self.capacity >= self.total
+            else max(self.total - self.capacity + self.reserve_rows, 0)
         )
 
 
@@ -274,43 +307,6 @@ class MirrorExpertPool:
             self.id_of_pool_row[row] = flat
             row += 1
         return row
-    # ------------------------------------------------------------------
-    # Incremental warm start
-    # ------------------------------------------------------------------
-
-    def ensure_expert(self, flat_id: int) -> int:
-        """Ensure an expert is loaded in the mirror pool.
-        
-        If the expert is already in the pool, returns its row.
-        If not in the pool but there's space, loads it from the checkpoint.
-        If the pool is full, evicts the least recently used expert.
-        
-        Returns the row where the expert is now located.
-        """
-        # Already in pool
-        row = self.pool_row_of_id[flat_id]
-        if row >= 0:
-            return row
-        
-        # Find a free row or evict LRU
-        free_rows = [r for r in range(self.capacity) if self.id_of_pool_row[r] < 0]
-        if free_rows:
-            row = free_rows[0]
-        else:
-            # Evict LRU (simplified: use the first occupied row)
-            # In practice, would use LRU tracking
-            for r, flat in enumerate(self.id_of_pool_row):
-                if flat >= 0:
-                    row = r
-                    self.release_expert(self.id_of_pool_row[row])
-                    break
-        
-        # Load the expert from checkpoint
-        self._read_row(flat_id, row)
-        self.pool_row_of_id[flat_id] = row
-        self.id_of_pool_row[row] = flat_id
-        
-        return row
 
     def seed_duplicates(self, cold_first, reserve: int | None = None) -> int:
         """Mirror GPU-resident experts into the pool's leftover rows.
@@ -322,11 +318,11 @@ class MirrorExpertPool:
 
         ``reserve`` rows are left unowned so a writeback always has a landing
         spot and a prefill materialize can stage a layer plus its victims;
-        defaults to two layers, matching ``plan_capacity``. Returns the number
-        seeded.
+        defaults to this pool's own ``reserve_rows``, which is what the arena
+        floor was priced against. Returns the number seeded.
         """
         if reserve is None:
-            reserve = 2 * self.num_experts
+            reserve = self.reserve_rows
         free_rows = [r for r in range(self.capacity) if self.id_of_pool_row[r] < 0]
         if reserve:
             free_rows = free_rows[:-reserve] if reserve < len(free_rows) else []
@@ -339,150 +335,6 @@ class MirrorExpertPool:
             self.id_of_pool_row[row] = flat
             seeded += 1
         return seeded
-
-    # ------------------------------------------------------------------
-    # Hot path bookkeeping (no disk, no allocation)
-    # ------------------------------------------------------------------
-
-    # ------------------------------------------------------------------
-    # Memory management
-    # ------------------------------------------------------------------
-
-    def release_expert(self, flat_id: int) -> bool:
-        """Release the pinned memory for a specific expert.
-        
-        This allows the pinned memory allocator to reclaim the memory
-        used by an expert that is no longer needed in the mirror.
-        
-        Returns True if the expert was in the pool and memory was released,
-        False if the expert was not in the pool.
-        """
-        row = self.pool_row_of_id[flat_id]
-        if row < 0:
-            return False
-        
-        # Get the expert ID that was in this row
-        expert_id = self.id_of_pool_row[row]
-        if expert_id < 0:
-            return False
-            
-        # Release the pinned memory by creating new empty tensors
-        # This allows the pinned memory allocator to reclaim the memory
-        for name, bank in self.banks.items():
-            # Create a new empty tensor to replace the old one
-            # This allows the old pinned memory to be released back to the pool
-            row_slice = bank[row:row+1]
-            # Create a new zero tensor of the same shape and dtype
-            new_row = torch.zeros_like(row_slice, pin_memory=True)
-            # Copy the new data to the bank
-            bank[row:row+1].copy_(new_row)
-            # Synchronize to ensure the copy completes before returning
-            torch.cuda.synchronize()
-            
-        # Update the residency maps
-        self.pool_row_of_id[flat_id] = -1
-        self.id_of_pool_row[row] = -1
-        
-        return True
-
-    def release_all(self) -> int:
-        """Release all pinned memory held by the mirror pool.
-        
-        Returns the number of rows that were released.
-        """
-        released = 0
-        for flat_id in range(self.total):
-            if self.release_expert(flat_id):
-                released += 1
-        return released
-
-    def get_memory_usage(self) -> dict:
-        """Get memory usage statistics for the mirror pool.
-        
-        Returns a dictionary with memory usage statistics.
-        """
-        used_rows = sum(1 for x in self.pool_row_of_id if x >= 0)
-        total_rows = self.capacity
-        total_bytes = self.pool_bytes
-        used_bytes = int(self.pool_bytes * used_rows / total_rows) if total_rows > 0 else 0
-        
-        return {
-            "used_rows": used_rows,
-            "total_rows": total_rows,
-            "total_bytes": total_bytes,
-            "used_bytes": used_bytes,
-            "free_bytes": total_bytes - used_bytes,
-            "utilization": used_rows / total_rows if total_rows > 0 else 0.0
-        }
-
-    # ------------------------------------------------------------------
-    # Memory management
-    # ------------------------------------------------------------------
-
-    def release_expert(self, flat_id: int) -> bool:
-        """Release the pinned memory for a specific expert.
-        
-        This allows the pinned memory allocator to reclaim the memory
-        used by an expert that is no longer needed in the mirror.
-        
-        Returns True if the expert was in the pool and memory was released,
-        False if the expert was not in the pool.
-        """
-        row = self.pool_row_of_id[flat_id]
-        if row < 0:
-            return False
-        
-        # Get the expert ID that was in this row
-        expert_id = self.id_of_pool_row[row]
-        if expert_id < 0:
-            return False
-            
-        # Release the pinned memory by creating new empty tensors
-        # This allows the pinned memory allocator to reclaim the memory
-        for name, bank in self.banks.items():
-            # Create a new empty tensor to replace the old one
-            # This allows the old pinned memory to be released back to the pool
-            row_slice = bank[row:row+1]
-            # Create a new zero tensor of the same shape and dtype
-            new_row = torch.zeros_like(row_slice, pin_memory=True)
-            # Copy the new data to the bank
-            bank[row:row+1].copy_(new_row)
-            
-        # Update the residency maps
-        self.pool_row_of_id[flat_id] = -1
-        self.id_of_pool_row[row] = -1
-        
-        return True
-
-    def release_all(self) -> int:
-        """Release all pinned memory held by the mirror pool.
-        
-        Returns the number of rows that were released.
-        """
-        released = 0
-        for flat_id in range(self.total):
-            if self.release_expert(flat_id):
-                released += 1
-        return released
-
-    def get_memory_usage(self) -> dict:
-        """Get memory usage statistics for the mirror pool.
-        
-        Returns a dictionary with memory usage statistics.
-        """
-        used_rows = sum(1 for x in self.pool_row_of_id if x >= 0)
-        total_rows = self.capacity
-        total_bytes = self.pool_bytes
-        used_bytes = int(self.pool_bytes * used_rows / total_rows) if total_rows > 0 else 0
-        
-        return {
-            "used_rows": used_rows,
-            "total_rows": total_rows,
-            "total_bytes": total_bytes,
-            "used_bytes": used_bytes,
-            "free_bytes": total_bytes - used_bytes,
-            "utilization": used_rows / total_rows if total_rows > 0 else 0.0
-        }
 
     def close(self) -> None:
         if getattr(self, "_closed", False):
@@ -499,7 +351,7 @@ class MirrorExpertPool:
                 os.close(fd)
             except OSError:
                 pass
-            self._shard_fds = {}
+        self._shard_fds = {}
 
     def __del__(self):
         try:

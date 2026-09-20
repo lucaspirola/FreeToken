@@ -2,9 +2,16 @@
 bounded mirror can complement.
 
 This is the mechanism that kept the 713K-token ceiling correct (the 600K run
-died mid-request before it existed), so it gets a regression test of its own:
-the arena must stop at the pool's floor no matter how much the KV guard asks
-to release, and the failure message must name the knob that fixes it.
+died mid-request before it existed), so it gets a regression test of its own.
+
+The geometry below is chosen to be NON-degenerate, which the first version of
+this test was not: it used L=4, E=16, where ``plan_capacity`` clamps capacity to
+the full 64 rows (a pool holding the whole model -- the one configuration that
+saves no RAM and makes the bound trivial) and where ``total`` happens to equal
+``2 * 2 * num_experts``. In that geometry the correct floor and an inverted one
+(``capacity - 2E``) both evaluate to 32, so the test could not tell them apart
+and locked in the inversion. Here ``capacity < total`` and the two formulas
+disagree, which is the whole point.
 """
 from __future__ import annotations
 
@@ -21,10 +28,17 @@ pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="coverage clamp needs CUDA"
 )
 
-from freetoken.moe.mirror_pool import MirrorExpertPool, nvfp4_bank_shapes, plan_capacity
+from freetoken.moe.mirror_pool import (
+    MirrorExpertPool,
+    default_reserve_rows,
+    nvfp4_bank_shapes,
+    plan_capacity,
+)
 
-LAYERS, EXPERTS, H, ISZ = 4, 16, 32, 32
-_GPU = int(LAYERS * EXPERTS * 0.74)   # 47 of 64 slots on the GPU
+LAYERS, EXPERTS, H, ISZ = 6, 8, 32, 32
+TOTAL = LAYERS * EXPERTS          # 48 rows
+_GPU = 30                         # GPU holds 30, so 18 rows must live in the pool
+_STEP = 4                         # arena chunk granularity
 
 
 def _write_checkpoint(root):
@@ -57,7 +71,7 @@ def _write_checkpoint(root):
                                "data_offsets": [off, off + len(payload)]}
                 blob += payload
                 off += len(payload)
-        head = json.dumps(header).encode()
+    head = json.dumps(header).encode()
     with open(os.path.join(root, "model.safetensors"), "wb") as f:
         f.write(struct.pack("<Q", len(head)))
         f.write(head)
@@ -68,15 +82,19 @@ def _write_checkpoint(root):
         json.dump({"layers_block_type": ["moe"] * LAYERS}, f)
 
 
+def _pool(root, capacity):
+    return MirrorExpertPool(root, LAYERS, EXPERTS, capacity,
+                            hidden_size=H, intermediate_size=ISZ,
+                            device=torch.device("cuda"))
+
+
 def _cache_and_pool(root, capacity):
     from freetoken.moe.offload_cache import OffloadMoeCache
 
-    pool = MirrorExpertPool(root, LAYERS, EXPERTS, capacity,
-                            hidden_size=H, intermediate_size=ISZ,
-                            device=torch.device("cuda"))
+    pool = _pool(root, capacity)
     cache = OffloadMoeCache(
         num_layers=LAYERS, num_experts=EXPERTS, cache_size=_GPU,
-        slot_capacity=_GPU, arena_step_slots=4,
+        slot_capacity=_GPU, arena_step_slots=_STEP,
         device=torch.device("cuda"), quant_format="nvfp4", cache_policy="lfu",
     )
     cache.direct_device_banks = True
@@ -85,60 +103,82 @@ def _cache_and_pool(root, capacity):
     return cache, pool
 
 
-def test_clamp_stops_at_the_coverage_floor():
-    """Shrink requests below the pool's floor land ON the floor, not past it."""
+def test_geometry_is_not_degenerate():
+    """Guard the guard: this file is worthless if the numbers collapse again."""
+    cap = plan_capacity(LAYERS, EXPERTS, _GPU)
+    reserve = default_reserve_rows(EXPERTS)
+    assert cap < TOTAL, "capacity must be below the model size or the bound is trivial"
+    correct = TOTAL - cap + reserve
+    inverted = cap - 2 * EXPERTS          # the formula this test failed to catch
+    assert correct != inverted, "geometry must distinguish the two formulas"
+
+
+def test_floor_is_the_gpu_slot_count_coverage_needs():
+    """min_gpu_slots = total - capacity + reserve, derived from the pool alone."""
     with tempfile.TemporaryDirectory() as root:
         _write_checkpoint(root)
         cap = plan_capacity(LAYERS, EXPERTS, _GPU)
-        cache, pool = _cache_and_pool(root, cap)
+        pool = _pool(root, cap)
         try:
-            floor = pool.total - pool.coverage_floor_complement
-            assert EXPERTS <= floor < cache.cache_size, "test needs room below the start"
-            # Ask for less than the floor (still above the kernel's own
-            # num_experts floor so the request itself is legal): the coverage
-            # clamp must hold the arena at the pool's floor.
-            # The kernel's own floor: chunk-aligned requests below
-            # num_experts are refused BEFORE any coverage logic.
-            with pytest.raises(ValueError, match=r"below the floor 16"):
-                cache.set_usable_slots(12)
-            # set_usable_slots itself does NOT clamp (the engine does, in
-            # _grow_runtime_kv_arena): a legal request below the coverage
-            # floor passes through, so the coverage invariant is broken --
-            # assert that the ENGINE's clamp arithmetic restores it.
-            below = floor - 4  # one chunk below the coverage floor
-            cache.set_usable_slots(below)
-            assert cache.usable_slots == below
-            # what _grow_runtime_kv_arena computes: the coverage floor PLUS one
-            # chunk of headroom (the last KV step died "need 0.46 GiB, have
-            # 0.42 GiB" at ~600K because the commit needed the release the
-            # floor itself was withholding), rounded UP to chunk granularity.
-            step = 4  # arena_step_slots of this cache
-            clamped = -(-(floor + step) // step) * step
-            assert clamped > floor, "no headroom left for the commit below"
-            assert pool.total - clamped < pool.coverage_floor_complement, (
-                "the clamped state must leave the mirror room to spare"
-            )
-            # Restore the arena to the clamped value and assert the coverage
-            # invariant holds there (the raw 28-slot state above is exactly
-            # the out-of-contract state the engine clamp exists to prevent).
-            cache.set_usable_slots(clamped)
-            assert pool.total - cache.usable_slots <= pool.coverage_floor_complement
+            reserve = default_reserve_rows(EXPERTS)
+            assert pool.reserve_rows == reserve
+            assert pool.min_gpu_slots == TOTAL - cap + reserve
+            # Auto-sizing is self-consistent: a pool planned for _GPU slots puts
+            # its floor exactly at _GPU, never above it.
+            assert pool.min_gpu_slots == _GPU
+            # And it is NOT the inverted value that shipped.
+            assert pool.min_gpu_slots != cap - 2 * EXPERTS
         finally:
             pool.close()
 
 
-def test_coverage_floor_math_is_the_pools_own_geometry():
-    """The bound derives from the pool, not from a model constant."""
+def test_a_bigger_pool_lowers_the_floor():
+    """More host RAM must buy MORE room for KV, never less.
+
+    The shipped arithmetic had this backwards (floor = capacity - 2E rises with
+    capacity), which silently turned the RAM knob into a KV-ceiling knob.
+    """
     with tempfile.TemporaryDirectory() as root:
         _write_checkpoint(root)
-        total = LAYERS * EXPERTS
+        floors = []
+        for cap in (TOTAL - 12, TOTAL - 6, TOTAL):
+            pool = _pool(root, cap)
+            try:
+                floors.append(pool.min_gpu_slots)
+            finally:
+                pool.close()
+        assert floors == sorted(floors, reverse=True), (
+            f"floor must fall as the pool grows, got {floors}"
+        )
+        assert floors[0] > floors[-1], "a full-model pool must free the arena most"
+
+
+def test_capacity_below_the_reserve_is_refused():
+    """A pool that is all reserve covers nothing; say so at construction."""
+    with tempfile.TemporaryDirectory() as root:
+        _write_checkpoint(root)
+        with pytest.raises(ValueError, match=r"--moe-mirror-host-rows"):
+            _pool(root, default_reserve_rows(EXPERTS))
+
+
+def test_coverage_holds_at_the_floor_and_breaks_below_it():
+    """The floor is tight: coverage survives exactly at it, not one chunk under."""
+    with tempfile.TemporaryDirectory() as root:
+        _write_checkpoint(root)
         cap = plan_capacity(LAYERS, EXPERTS, _GPU)
         cache, pool = _cache_and_pool(root, cap)
         try:
-            assert pool.coverage_floor_complement == total - cap + 2 * EXPERTS
-            floor = total - pool.coverage_floor_complement
-            assert floor == cap - 2 * EXPERTS
-            # A bigger pool lifts the floor (less complement to cover).
-            assert floor >= 0
+            floor = -(-pool.min_gpu_slots // _STEP) * _STEP
+            coverable = pool.capacity - pool.reserve_rows
+            # At the floor the complement still fits outside the reserve.
+            assert pool.total - floor <= coverable
+            # The kernel's own hard floor is unrelated and lower; a request
+            # under it is refused before any coverage logic runs.
+            with pytest.raises(ValueError, match=rf"below the floor {EXPERTS}"):
+                cache.set_usable_slots(EXPERTS - _STEP)
+            # set_usable_slots does not clamp -- _grow_runtime_kv_arena does,
+            # by folding min_gpu_slots into its `floor`. Show what that clamp
+            # is protecting: one chunk below, the complement no longer fits.
+            assert pool.total - (floor - _STEP) > coverable
         finally:
             pool.close()
