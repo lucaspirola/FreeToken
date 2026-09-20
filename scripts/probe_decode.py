@@ -16,11 +16,21 @@ MODEL = os.environ.get("FREETOKEN_MODEL_NAME", "nemotron-3.5-lightning")
 SENT = "The quick brown fox jumps over the lazy dog near the riverbank while the miller counts his sacks of grain. "
 SIZES = [int(x) for x in (sys.argv[1:] or ["8000", "32000", "80000", "128000", "256000"])]
 GEN = int(os.environ.get("PROBE_GEN_TOKENS", "128"))
+# PROBE_PASSES=2 runs every size twice, each pass with its own prompt prefix so
+# the second is not a radix-cache hit on the first. The point is the growable KV:
+# the FIRST request that needs a bigger arena pays one commit plus a decode-graph
+# recapture, and where that stall lands decides which number it lands in. On an
+# 80K prompt it showed up as ttft 11.94 / decode 127.7 in one arm and ttft 9.90 /
+# decode 46.4 in the next, for the same 12.6-12.9 s of total wall clock -- the
+# arms differed in whether the stall fell before or after the first token, not in
+# how fast they decode. Pass 2 needs no growth, so its decode is the steady one.
+PASSES = max(1, int(os.environ.get("PROBE_PASSES", "1")))
 
 
-def run(target_tokens: int) -> dict:
+def run(target_tokens: int, tag: str = "") -> dict:
     reps = max(1, int(target_tokens / 23))  # ~23 tokens per sentence
-    prompt = f"Run {target_tokens}. " + SENT * reps + "\n\nWrite a long story about the fox."
+    prompt = (f"Run {tag}{target_tokens}. " + SENT * reps
+              + "\n\nWrite a long story about the fox.")
     body = json.dumps({
         "model": MODEL,
         "messages": [{"role": "user", "content": prompt}],
@@ -57,5 +67,8 @@ def run(target_tokens: int) -> dict:
             "total_s": round(t1 - t0, 1)}
 
 
-for s in SIZES:
-    print(json.dumps({"target": s, **run(s)}), flush=True)
+for p in range(1, PASSES + 1):
+    for s in SIZES:
+        # The tag is the prefix, so pass 2 misses the prefix cache pass 1 left.
+        print(json.dumps({"target": s, "pass": p, **run(s, f"p{p} " if p > 1 else "")}),
+              flush=True)

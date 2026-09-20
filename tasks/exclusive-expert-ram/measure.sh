@@ -168,7 +168,8 @@ FREETOKEN_URL="http://127.0.0.1:$PORT" FREETOKEN_MODEL_NAME="$NAME" \
 
 echo "[$ARM] measuring"
 if ! FREETOKEN_URL="http://127.0.0.1:$PORT" FREETOKEN_MODEL_NAME="$NAME" \
-     PROBE_GEN_TOKENS=128 "$REPO/scripts/probe_decode.py" $SIZES > "$OUT/$ARM-probe.jsonl"; then
+     PROBE_GEN_TOKENS=128 PROBE_PASSES=2 \
+     "$REPO/scripts/probe_decode.py" $SIZES > "$OUT/$ARM-probe.jsonl"; then
   echo "[$ARM] probe failed; recording the arm anyway" >&2
 fi
 cat "$OUT/$ARM-probe.jsonl"
@@ -236,10 +237,19 @@ rec = {"arm": arm, "model": os.path.basename(model), "rows": rows,
        "current_gib": gib(cur),
        "peak_current_gib": gib(peak), "gpu_mib": gpu}
 try:
+    # Two passes per size. Pass 1 pays the one-off growable-KV commit and the
+    # decode-graph recapture that follows it; whether that stall lands before or
+    # after the first token decides whether it is charged to TTFT or to decode,
+    # which is how one arm read 127.7 tok/s and the next 46.4 for the same total
+    # wall clock. Pass 2 needs no growth, so it is the steady number; pass 1 is
+    # kept beside it as _p1 rather than discarded.
     for line in open(probe):
         d = json.loads(line)
-        rec[f"decode_{d['prompt_tokens'] // 1000}k"] = round(d.get("decode_tok_s") or 0, 1)
-        rec[f"ttft_{d['prompt_tokens'] // 1000}k"] = round(d.get("ttft_s") or 0, 2)
+        k = d["prompt_tokens"] // 1000
+        sfx = "" if d.get("pass", 1) == 2 else "_p1"
+        rec[f"decode_{k}k{sfx}"] = round(d.get("decode_tok_s") or 0, 1)
+        rec[f"ttft_{k}k{sfx}"] = round(d.get("ttft_s") or 0, 2)
+        rec[f"total_{k}k{sfx}"] = round(d.get("total_s") or 0, 1)
 except Exception as exc:                      # a failed probe must not erase the arm
     rec["probe_error"] = str(exc)
 try:

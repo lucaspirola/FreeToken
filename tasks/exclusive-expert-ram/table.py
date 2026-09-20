@@ -20,7 +20,15 @@ COLUMNS = [
     # The RAM answer, then its attribution (results/README.md).
     "ram_gib", "rss_ready_gib", "devzero_gib", "ram_after_80k_gib", "rss_gib", "locked_gib", "anon_gib", "file_gib", "shmem_gib",
     "unevict_gib", "current_gib", "peak_current_gib", "gpu_mib",
+    # Pass 2 (steady: no growable-KV commit, no graph recapture) is the number
+    # of record; pass 1 is kept beside it because the difference between them IS
+    # the cost of the one-off growth, and hiding it would repeat the mistake
+    # that made one arm look like it decoded at a third of its neighbours'.
     "decode_8k", "ttft_8k", "decode_32k", "ttft_32k", "decode_80k", "ttft_80k",
+    "decode_8k_p1", "ttft_8k_p1", "total_8k_p1",
+    "decode_32k_p1", "ttft_32k_p1", "total_32k_p1",
+    "decode_80k_p1", "ttft_80k_p1", "total_80k_p1",
+    "total_8k", "total_32k", "total_80k",
     "swaps", "free_evict_rate", "retained_rows", "coverage_faults", "starved",
     "probe_error",
 ]

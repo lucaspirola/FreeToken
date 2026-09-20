@@ -1,0 +1,2 @@
+Sep 21 02:31:45 TESSERACT serve-default.sh[1629652]: [2026-09-21|02:31:45|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+Sep 21 03:24:34 TESSERACT serve-default.sh[1713272]: [2026-09-21|03:24:34|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
