@@ -42,6 +42,11 @@ _SOURCE_SPEC = Nvfp4ExpertSourceSpec(
     hidden_size_attr="expert_hidden_size",
 )
 
+# Public handle for consumers that must read expert rows straight from the
+# checkpoint without knowing this model's key layout (the bounded host mirror
+# in moe/mirror_pool.py). Resolved by models.nvfp4_banks.expert_source_spec.
+NVFP4_EXPERT_SOURCE_SPEC = _SOURCE_SPEC
+
 
 def _dequant_nvfp4(weight, scale, global_scale):
     from freetoken.models.qwen3_5_moe.weight import _dequant_nvfp4_weight

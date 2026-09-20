@@ -45,25 +45,39 @@ import ctypes
 import torch
 
 _BLK = 4096
-_TENSOR_MAP = (
-    ("up_proj.weight", "gate_up_packed", False),
-    ("up_proj.weight_scale", "gate_up_scale", False),
-    ("up_proj.weight_scale_2", "gate_up_global", True),
-    ("down_proj.weight", "down_packed", False),
-    ("down_proj.weight_scale", "down_scale", False),
-    ("down_proj.weight_scale_2", "down_global", True),
-)
+
+# Which bank each expert projection feeds, and the safetensors dtype string each
+# tensor kind must carry. Roles come from the model's Nvfp4ExpertSourceSpec
+# (proj_to_role), so nothing here names a projection: Nemotron-H calls its
+# ungated projection up_proj, Qwen3.5/Ornith has gate_proj + up_proj, MiniMax
+# calls them w1/w3/w2, and all three land in the same six banks.
+_ROLE_BANKS = {
+    "gate": ("gate_up_packed", "gate_up_scale", "gate_up_global"),
+    "up": ("gate_up_packed", "gate_up_scale", "gate_up_global"),
+    "down": ("down_packed", "down_scale", "down_global"),
+}
+_KIND_BANK_INDEX = {"weight": 0, "weight_scale": 1, "weight_scale_2": 2}
+_KIND_DTYPE = {"weight": "U8", "weight_scale": "F8_E4M3", "weight_scale_2": "F32"}
 
 
-def nvfp4_bank_shapes(hidden_size: int, intermediate_size: int) -> dict:
-    """Runtime bank shapes for one native, non-gated NVFP4 expert row."""
+def nvfp4_bank_shapes(hidden_size: int, intermediate_size: int,
+                      *, gated: bool = False) -> dict:
+    """Runtime bank shapes for one native NVFP4 expert row.
+
+    Mirrors ``models.nvfp4_banks._alloc_nvfp4_host_banks`` exactly, including its
+    gate|up fusion on the output-row axis: a gated expert's gate_up banks hold
+    ``2 * intermediate_size`` rows (gate first, then up), an ungated one holds
+    ``intermediate_size``. The mirror's rows must be byte-identical to what the
+    regular loader produces, because a GPU miss is served from either.
+    """
     h, i = hidden_size, intermediate_size
+    g = 2 if gated else 1
     if h <= 0 or i <= 0 or h % 16 or i % 16:
         raise ValueError("native NVFP4 dimensions must be positive multiples of 16")
     return {
-        "gate_up_packed": ((i, h // 2), torch.uint8),
-        "gate_up_scale": ((i, h // 16), torch.float8_e4m3fn),
-        "gate_up_global": ((i,), torch.float16),
+        "gate_up_packed": ((g * i, h // 2), torch.uint8),
+        "gate_up_scale": ((g * i, h // 16), torch.float8_e4m3fn),
+        "gate_up_global": ((g * i,), torch.float16),
         "down_packed": ((h, i // 2), torch.uint8),
         "down_scale": ((h, i // 16), torch.float8_e4m3fn),
         "down_global": ((h,), torch.float16),
@@ -113,6 +127,7 @@ class MirrorExpertPool:
 
     def __init__(self, model_path: str, num_layers: int, num_experts: int,
                  capacity: int, *, hidden_size: int, intermediate_size: int,
+                 spec=None, config=None,
                  device: torch.device | None = None,
                  reserve_rows: int | None = None):
         total = num_layers * num_experts
@@ -133,7 +148,13 @@ class MirrorExpertPool:
                 f"could cover no expert at all (raise --moe-mirror-host-rows)"
             )
         self.device = device
-        self.shapes = nvfp4_bank_shapes(hidden_size, intermediate_size)
+        self._spec = spec
+        self._config = config
+        self.gated = bool(getattr(spec, "gated", False))
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.shapes = nvfp4_bank_shapes(hidden_size, intermediate_size,
+                                        gated=self.gated)
         self.schema_order = tuple(self.shapes)
         # Meta sources keep the engine's bank-shape budgeting working without
         # ever holding a byte; the real rows live in `banks`.
@@ -156,8 +177,11 @@ class MirrorExpertPool:
         self.id_of_pool_row = [-1] * capacity
         try:
             self._scan_checkpoint(model_path)
-            scratch_bytes = max(sum(end - start for start, end in _regions_of(pieces))
-                                for _fd, pieces in self._records.values())
+            scratch_bytes = max(
+                sum(end - start for start, end in
+                    _regions_of([(off, length) for off, length, *_rest in pieces]))
+                for _fd, pieces in self._records.values()
+            )
             self._scratch = mmap.mmap(-1, scratch_bytes)
             self._sview = memoryview(self._scratch)
             for name, (tail, dtype) in self.shapes.items():
@@ -199,52 +223,134 @@ class MirrorExpertPool:
     # Checkpoint scan + startup fill (the only disk contact)
     # ------------------------------------------------------------------
 
+    def _row_layout(self, role: str, kind: str):
+        """Where one checkpoint tensor lands inside this pool's row, and its shape.
+
+        Returns ``(bank, dst_byte_offset, broadcast_entries, expected_shape)``.
+        ``broadcast_entries`` is nonzero only for the per-tensor global scale,
+        which the banks hold expanded to one FP16 per output row (matching the
+        loader, which fills ``gate_up_global[expert, :I]`` from a scalar).
+        """
+        h, i = self.hidden_size, self.intermediate_size
+        bank = _ROLE_BANKS[role][_KIND_BANK_INDEX[kind]]
+        # gate occupies the first I output rows, up the next I -- but only when
+        # the model is gated; an ungated model's single projection starts at 0.
+        row_off = i if (role == "up" and self.gated) else 0
+        if role == "down":
+            row_off = 0
+        if kind == "weight":
+            width = (h // 2) if role != "down" else (i // 2)
+            rows = i if role != "down" else h
+            return bank, row_off * width, 0, [rows, width]
+        if kind == "weight_scale":
+            width = (h // 16) if role != "down" else (i // 16)
+            rows = i if role != "down" else h
+            return bank, row_off * width, 0, [rows, width]
+        entries = i if role != "down" else h
+        return bank, row_off * 2, entries, []
+
     def _scan_checkpoint(self, model_path: str) -> None:
-        with open(os.path.join(model_path, "config.json")) as f:
-            layer_types = json.load(f)["layers_block_type"]
-        layer_ids = [i for i, kind in enumerate(layer_types) if kind == "moe"]
-        if len(layer_ids) != self.num_layers:
-            raise ValueError("checkpoint MoE layer count does not match mirror pool")
+        """Index every expert row's bytes in the checkpoint, via the model's spec.
+
+        No key format, layer-type list or projection name appears here: the
+        model's ``Nvfp4ExpertSourceSpec`` supplies the key pattern, the
+        projection->role map and the layer->bank mapping, so Nemotron-H
+        (ungated, ``backbone.layers.N.mixer``) and Qwen3.5/Ornith (gated,
+        ``model.language_model.layers.N.mlp``) index through the same code.
+        """
+        spec = self._spec
+        if spec is None:
+            raise ValueError(
+                "the bounded expert mirror needs this model's NVFP4 expert "
+                "source spec; models.nvfp4_banks.expert_source_spec returned "
+                "None, so its checkpoint layout has never been verified here"
+            )
         with open(os.path.join(model_path, "model.safetensors.index.json")) as f:
             weight_map = json.load(f)["weight_map"]
+
+        # (bank_layer, expert) -> [(key, role, kind)], filtered to MoE layers.
+        wanted: dict[tuple[int, int], list[tuple[str, str, str]]] = {}
+        for key in weight_map:
+            match = spec.key_pattern.match(key)
+            if match is None:
+                continue
+            layer = int(match.group("layer"))
+            bank_layer = spec.layer_to_bank(layer, self._config)
+            if bank_layer is None:
+                continue
+            if not 0 <= bank_layer < self.num_layers:
+                raise ValueError(
+                    f"{spec.desc}: bank layer {bank_layer} outside "
+                    f"[0, {self.num_layers})"
+                )
+            expert = int(match.group("expert"))
+            if not 0 <= expert < self.num_experts:
+                raise ValueError(f"{spec.desc}: expert {expert} outside the layer")
+            role = spec.proj_to_role.get(match.group("proj"))
+            if role is None:
+                raise ValueError(
+                    f"{spec.desc}: unknown projection {match.group('proj')!r}"
+                )
+            kind = match.group("kind")
+            if kind not in _KIND_BANK_INDEX:
+                raise ValueError(f"{spec.desc}: unknown tensor kind {kind!r}")
+            wanted.setdefault((bank_layer, expert), []).append((key, role, kind))
+
+        expected_roles = ({"gate", "up", "down"} if self.gated else {"up", "down"})
+        expected_tensors = 3 * len(expected_roles)
+        if len(wanted) != self.total:
+            raise ValueError(
+                f"{spec.desc}: checkpoint has {len(wanted)} expert rows, "
+                f"the pool was sized for {self.total}"
+            )
+
         headers: dict[str, tuple[int, dict]] = {}
-        for layer, backbone_layer in enumerate(layer_ids):
-            for expert in range(self.num_experts):
-                keys = [f"backbone.layers.{backbone_layer}.mixer.experts.{expert}.{suffix}"
-                        for suffix, _, _ in _TENSOR_MAP]
-                shards = {weight_map[key] for key in keys}
-                if len(shards) != 1:
-                    raise ValueError("mirror pool requires each expert's tensors in one shard")
-                shard = next(iter(shards))
-                if shard not in headers:
-                    path = os.path.join(model_path, shard)
-                    with open(path, "rb") as f:
-                        n = struct.unpack("<Q", f.read(8))[0]
-                        header = json.loads(f.read(n))
-                    fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
-                    self._shard_fds[shard] = fd
-                    self._fd_size[fd] = os.fstat(fd).st_size
-                    headers[shard] = (8 + n, header)
-                data_start, header = headers[shard]
-                fd = self._shard_fds[shard]
-                pieces = []
-                for key, (_, name, scalar) in zip(keys, _TENSOR_MAP):
-                    entry = header[key]
-                    off, end = entry["data_offsets"]
-                    expected = 4 if scalar else _row_bytes(*self.shapes[name])
-                    dtype = "F32" if scalar else ("U8" if name.endswith("packed") else "F8_E4M3")
-                    expected_shape = list(self.shapes[name][0])
-                    if (entry["dtype"] != dtype or end - off != expected or off < 0
-                            or data_start + end > self._fd_size[fd]
-                            or (not scalar and entry["shape"] != expected_shape)):
-                        raise ValueError(f"unsupported or corrupt native NVFP4 tensor: {key}")
-                    pieces.append((data_start + off, end - off))
-                self._records[layer * self.num_experts + expert] = (fd, pieces)
+        for (bank_layer, expert), entries in wanted.items():
+            if len(entries) != expected_tensors:
+                raise ValueError(
+                    f"{spec.desc}: layer {bank_layer} expert {expert} has "
+                    f"{len(entries)} tensors, expected {expected_tensors}"
+                )
+            if {role for _k, role, _kind in entries} != expected_roles:
+                raise ValueError(
+                    f"{spec.desc}: layer {bank_layer} expert {expert} does not "
+                    f"carry exactly {sorted(expected_roles)}"
+                )
+            shards = {weight_map[key] for key, _r, _k in entries}
+            if len(shards) != 1:
+                raise ValueError("mirror pool requires each expert's tensors in one shard")
+            shard = next(iter(shards))
+            if shard not in headers:
+                path = os.path.join(model_path, shard)
+                with open(path, "rb") as f:
+                    n = struct.unpack("<Q", f.read(8))[0]
+                    header = json.loads(f.read(n))
+                fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
+                self._shard_fds[shard] = fd
+                self._fd_size[fd] = os.fstat(fd).st_size
+                headers[shard] = (8 + n, header)
+            data_start, header = headers[shard]
+            fd = self._shard_fds[shard]
+            pieces = []
+            # Sorted so a row's reads walk the file forward, and so the record is
+            # deterministic regardless of weight_map iteration order.
+            for key, role, kind in sorted(entries, key=lambda e: (e[1], e[2])):
+                entry = header[key]
+                off, end_off = entry["data_offsets"]
+                bank, dst, broadcast, shape = self._row_layout(role, kind)
+                expected = 4 if broadcast else shape[0] * shape[1]
+                if (entry["dtype"] != _KIND_DTYPE[kind]
+                        or end_off - off != expected or off < 0
+                        or data_start + end_off > self._fd_size[fd]
+                        or (not broadcast and entry["shape"] != shape)):
+                    raise ValueError(f"unsupported or corrupt native NVFP4 tensor: {key}")
+                pieces.append((data_start + off, end_off - off, bank, dst, broadcast))
+            self._records[bank_layer * self.num_experts + expert] = (fd, pieces)
 
     def _read_row(self, flat: int, row: int) -> None:
         """Read expert ``flat`` from the checkpoint into pool row ``row``."""
         fd, pieces = self._records[flat]
-        regions = _regions_of(pieces)
+        regions = _regions_of([(off, length) for off, length, _b, _d, _bc in pieces])
         size = self._fd_size[fd]
         cursors, cursor = [], 0
         for start, end in regions:
@@ -259,26 +365,30 @@ class MirrorExpertPool:
                 got += chunk
             cursors.append(cursor)
             cursor += end - start
-        for (_, name, scalar), (off, length) in zip(_TENSOR_MAP, pieces):
-            region = next(i for i, (start, end) in enumerate(regions)
+        for off, length, bank, dst_off, broadcast in pieces:
+            region = next(idx for idx, (start, end) in enumerate(regions)
                           if start <= off and off + length <= end)
             start = cursors[region] + off - regions[region][0]
             raw = self._sview[start:start + length]
             try:
-                dst = self.banks[name][row]
-                if scalar:
+                dst = self.banks[bank][row]
+                if broadcast:
                     # Match the loader's F32 -> F16 tensor conversion (overflow to
                     # inf, not fill_()'s error). struct.unpack avoids
                     # torch.frombuffer on a possibly-unaligned 4-byte slice.
                     f32 = struct.unpack("<f", bytes(raw))[0]
-                    dst.copy_(torch.tensor(f32, dtype=torch.float16))
+                    begin = dst_off // 2
+                    dst[begin:begin + broadcast].copy_(
+                        torch.tensor(f32, dtype=torch.float16)
+                    )
                 else:
                     # memmove, not Tensor.copy_: the torch dispatcher costs ~5.7 ms
                     # per row here, a memmove 0.077 ms (measured).
                     src = torch.frombuffer(raw, dtype=torch.uint8)
                     try:
                         ctypes.memmove(
-                            dst.view(torch.uint8).data_ptr(), src.data_ptr(), length
+                            dst.view(torch.uint8).data_ptr() + dst_off,
+                            src.data_ptr(), length,
                         )
                     finally:
                         del src

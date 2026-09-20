@@ -15,6 +15,14 @@ import struct
 import pytest
 import torch
 
+import types
+
+from freetoken.models.nemotron_h.weight import (
+    NVFP4_EXPERT_SOURCE_SPEC as NEMOTRON_SPEC,
+)
+from freetoken.models.qwen3_5_moe.weight import (
+    NVFP4_EXPERT_SOURCE_SPEC as QWEN_SPEC,
+)
 from freetoken.moe.mirror_pool import MirrorExpertPool, nvfp4_bank_shapes, plan_capacity
 
 pytestmark = pytest.mark.skipif(
@@ -86,6 +94,10 @@ def checkpoint(tmp_path):
 def _pool(root, capacity, reserve_rows=0):
     """A pool for the row-level tests below.
 
+    Driven by the REAL Nemotron-H source spec, not a test-local copy: the point
+    of these tests is that the shipped spec locates rows in a checkpoint laid
+    out the way that model's checkpoints are.
+
     ``reserve_rows=0`` by default: this toy geometry (16 rows) is smaller than
     the three-layer writeback/staging reserve a real pool holds back, and these
     tests exercise checkpoint I/O and the coverage refusal, not runtime sizing.
@@ -93,6 +105,8 @@ def _pool(root, capacity, reserve_rows=0):
     """
     return MirrorExpertPool(
         root, LAYERS, EXPERTS, capacity, hidden_size=H, intermediate_size=I,
+        spec=NEMOTRON_SPEC,
+        config=types.SimpleNamespace(moe_layer_ids=list(range(LAYERS))),
         reserve_rows=reserve_rows,
     )
 
@@ -138,3 +152,115 @@ def test_load_initial_refuses_to_break_coverage(checkpoint):
             pool.load_initial(set(range(4)))  # 12 absent, capacity 4
     finally:
         pool.close()
+
+# --------------------------------------------------------------------------
+# Gated models (Qwen3.5 / Ornith): same six banks, different checkpoint layout
+# --------------------------------------------------------------------------
+
+G_LAYERS, G_EXPERTS, G_H, G_I = 2, 4, 32, 32
+
+
+def _write_gated_checkpoint(root):
+    """Qwen3.5/Ornith-shaped NVFP4 checkpoint: three projections, gate|up fused.
+
+    The loader packs gate into the first I output rows of the gate_up banks and
+    up into the next I (models/nvfp4_banks.py). The mirror must land on exactly
+    those bytes, because a GPU miss may be served from either source.
+    """
+    per_role = {
+        "gate_proj": ((G_I, G_H // 2), (G_I, G_H // 16)),
+        "up_proj": ((G_I, G_H // 2), (G_I, G_H // 16)),
+        "down_proj": ((G_H, G_I // 2), (G_H, G_I // 16)),
+    }
+    header, blob, off = {}, bytearray(), 0
+    expected = {}
+
+    def _bytes(shape, seed):
+        n = 1
+        for d in shape:
+            n *= d
+        return bytes(((seed * 31 + k) % 251) + 1 for k in range(n))
+
+    for layer in range(G_LAYERS):
+        for expert in range(G_EXPERTS):
+            flat = layer * G_EXPERTS + expert
+            rows = {}
+            for ri, (proj, (wshape, sshape)) in enumerate(per_role.items()):
+                base = f"model.language_model.layers.{layer}.mlp.experts.{expert}.{proj}"
+                for suffix, shape, dt in (("weight", wshape, "U8"),
+                                          ("weight_scale", sshape, "F8_E4M3")):
+                    raw = _bytes(shape, flat * 7 + ri * 3 + len(suffix))
+                    header[f"{base}.{suffix}"] = {
+                        "dtype": dt, "shape": list(shape),
+                        "data_offsets": [off, off + len(raw)]}
+                    blob += raw
+                    off += len(raw)
+                    rows[(proj, suffix)] = torch.frombuffer(
+                        bytearray(raw), dtype=torch.uint8).view(*shape).clone()
+                g = float(flat + 1) + ri
+                payload = struct.pack("<f", g)
+                header[f"{base}.weight_scale_2"] = {
+                    "dtype": "F32", "shape": [], "data_offsets": [off, off + 4]}
+                blob += payload
+                off += 4
+                rows[(proj, "global")] = g
+            # gate first, then up -- the fusion the loader performs.
+            expected[(flat, "gate_up_packed")] = torch.cat(
+                [rows[("gate_proj", "weight")], rows[("up_proj", "weight")]])
+            expected[(flat, "gate_up_scale")] = torch.cat(
+                [rows[("gate_proj", "weight_scale")], rows[("up_proj", "weight_scale")]])
+            expected[(flat, "gate_up_global")] = torch.cat([
+                torch.full((G_I,), rows[("gate_proj", "global")], dtype=torch.float16),
+                torch.full((G_I,), rows[("up_proj", "global")], dtype=torch.float16)])
+            expected[(flat, "down_packed")] = rows[("down_proj", "weight")]
+            expected[(flat, "down_scale")] = rows[("down_proj", "weight_scale")]
+            expected[(flat, "down_global")] = torch.full(
+                (G_H,), rows[("down_proj", "global")], dtype=torch.float16)
+
+    head = json.dumps(header).encode()
+    with open(os.path.join(root, "model.safetensors"), "wb") as f:
+        f.write(struct.pack("<Q", len(head)))
+        f.write(head)
+        f.write(blob)
+    with open(os.path.join(root, "model.safetensors.index.json"), "w") as f:
+        json.dump({"weight_map": {k: "model.safetensors" for k in header}}, f)
+    with open(os.path.join(root, "config.json"), "w") as f:
+        json.dump({"layers_block_type": ["moe"] * G_LAYERS}, f)
+    return expected
+
+
+def test_gated_rows_match_the_checkpoint(tmp_path):
+    """Ornith's layout reads byte-exact through the shipped Qwen3.5 spec."""
+    root = str(tmp_path)
+    expected = _write_gated_checkpoint(root)
+    total = G_LAYERS * G_EXPERTS
+    pool = MirrorExpertPool(
+        root, G_LAYERS, G_EXPERTS, total, hidden_size=G_H, intermediate_size=G_I,
+        spec=QWEN_SPEC, config=types.SimpleNamespace(), reserve_rows=0,
+    )
+    try:
+        assert pool.gated, "the Qwen3.5 spec is gated"
+        assert pool.shapes["gate_up_packed"][0] == (2 * G_I, G_H // 2)
+        pool.load_initial(set())
+        for flat in range(total):
+            row = pool.pool_row_of_id[flat]
+            assert row >= 0
+            for name in pool.shapes:
+                got = pool.banks[name][row]
+                want = expected[(flat, name)]
+                if got.dtype == torch.float16:
+                    assert torch.equal(got.cpu(), want), (flat, name)
+                else:
+                    assert torch.equal(got.view(torch.uint8).cpu(),
+                                       want.view(torch.uint8)), (flat, name)
+    finally:
+        pool.close()
+
+
+def test_a_model_without_a_published_spec_is_refused(tmp_path):
+    """No spec means nobody verified that layout: refuse, do not guess."""
+    root = str(tmp_path)
+    _write_gated_checkpoint(root)
+    with pytest.raises(ValueError, match="expert source spec"):
+        MirrorExpertPool(root, G_LAYERS, G_EXPERTS, G_LAYERS * G_EXPERTS,
+                         hidden_size=G_H, intermediate_size=G_I, reserve_rows=0)

@@ -30,6 +30,32 @@ class Nvfp4ExpertSourceSpec:
     hidden_size_attr: str | None = None
 
 
+def expert_source_spec(config) -> Nvfp4ExpertSourceSpec | None:
+    """This model's NVFP4 expert source spec, or None if it does not publish one.
+
+    The spec is what lets a consumer read expert tensors out of a checkpoint
+    without hardcoding one model's key layout -- the difference between
+    ``backbone.layers.N.mixer.experts.E.up_proj`` (Nemotron-H, ungated) and
+    ``model.language_model.layers.N.mlp.experts.E.gate_proj`` (Qwen3.5/Ornith,
+    gated), which are otherwise the same six banks.
+
+    Only models that export ``NVFP4_EXPERT_SOURCE_SPEC`` are resolved. A model
+    whose spec has never been exercised through this path returns None, so the
+    caller refuses explicitly instead of reading a layout nobody verified.
+    """
+    import importlib
+
+    model_type = getattr(config, "model_type", "") or ""
+    if not model_type.isidentifier():
+        return None
+    try:
+        module = importlib.import_module(f"freetoken.models.{model_type}.weight")
+    except ModuleNotFoundError:
+        return None
+    spec = getattr(module, "NVFP4_EXPERT_SOURCE_SPEC", None)
+    return spec if isinstance(spec, Nvfp4ExpertSourceSpec) else None
+
+
 def _num_moe_layers(config) -> int:
     value = getattr(config, "num_moe_layers", None)
     if value is not None:

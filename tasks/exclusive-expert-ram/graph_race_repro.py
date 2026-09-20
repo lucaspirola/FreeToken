@@ -19,6 +19,11 @@ os.environ.setdefault("FREETOKEN_EXPERT_ARENA", "1")
 from swap_smoke import write_ckpt, L, E, H, ISZ
 from freetoken.moe.offload_cache import OffloadMoeCache
 from freetoken.moe.mirror_pool import MirrorExpertPool, plan_capacity
+import types
+
+from freetoken.models.nemotron_h.weight import (
+    NVFP4_EXPERT_SOURCE_SPEC as NEMOTRON_SPEC,
+)
 from freetoken.moe.offload_kernels import materialize_layer
 
 
@@ -30,10 +35,13 @@ def main():
         total = L * E
         gpu = int(total * 0.74)
         cap = plan_capacity(L, E, gpu)
+        cfg = types.SimpleNamespace(moe_layer_ids=list(range(L)))
         pool = MirrorExpertPool(root, L, E, cap, hidden_size=H,
-                                intermediate_size=ISZ, device=dev)
+                                intermediate_size=ISZ, spec=NEMOTRON_SPEC,
+                                config=cfg, device=dev)
         full = MirrorExpertPool(root, L, E, total, hidden_size=H,
-                                intermediate_size=ISZ, device=dev)
+                                intermediate_size=ISZ, spec=NEMOTRON_SPEC,
+                                config=cfg, device=dev)
         full.load_initial(set())
         golden = {f: full.banks["gate_up_packed"][full.pool_row_of_id[f]].clone()
                   for f in range(total)}

@@ -18,6 +18,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 os.environ.setdefault("FREETOKEN_EXPERT_ARENA", "1")
 
 from freetoken.moe.mirror_pool import MirrorExpertPool, nvfp4_bank_shapes, plan_capacity
+import types
+
+from freetoken.models.nemotron_h.weight import (
+    NVFP4_EXPERT_SOURCE_SPEC as NEMOTRON_SPEC,
+)
 from freetoken.moe.offload_cache import OffloadMoeCache
 
 L, E, H, ISZ = 3, 8, 32, 32
@@ -73,10 +78,13 @@ def main():
     with tempfile.TemporaryDirectory() as root:
         write_ckpt(root)
         gpu = 16
+        cfg = types.SimpleNamespace(moe_layer_ids=list(range(L)))
         pool = MirrorExpertPool(root, L, E, plan_capacity(L, E, gpu),
-                                hidden_size=H, intermediate_size=ISZ, device=dev)
+                                hidden_size=H, intermediate_size=ISZ,
+                                spec=NEMOTRON_SPEC, config=cfg, device=dev)
         full = MirrorExpertPool(root, L, E, L * E,
-                                hidden_size=H, intermediate_size=ISZ, device=dev)
+                                hidden_size=H, intermediate_size=ISZ,
+                                spec=NEMOTRON_SPEC, config=cfg, device=dev)
         full.load_initial(set())
         golden = {f: {n: full.banks[n][full.pool_row_of_id[f]].clone()
                       for n in full.shapes} for f in range(L * E)}

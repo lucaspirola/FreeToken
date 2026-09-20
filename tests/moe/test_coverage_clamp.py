@@ -20,6 +20,7 @@ import os
 os.environ.setdefault("FREETOKEN_EXPERT_ARENA", "1")
 import struct
 import tempfile
+import types
 
 import pytest
 import torch
@@ -28,6 +29,9 @@ pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="coverage clamp needs CUDA"
 )
 
+from freetoken.models.nemotron_h.weight import (
+    NVFP4_EXPERT_SOURCE_SPEC as NEMOTRON_SPEC,
+)
 from freetoken.moe.mirror_pool import (
     MirrorExpertPool,
     default_reserve_rows,
@@ -83,8 +87,14 @@ def _write_checkpoint(root):
 
 
 def _pool(root, capacity):
+    # The REAL Nemotron-H spec, as in test_mirror_pool: the checkpoint written
+    # above is laid out the way that model's checkpoints are, and a test-local
+    # copy of the spec would only prove the test agrees with itself.
     return MirrorExpertPool(root, LAYERS, EXPERTS, capacity,
                             hidden_size=H, intermediate_size=ISZ,
+                            spec=NEMOTRON_SPEC,
+                            config=types.SimpleNamespace(
+                                moe_layer_ids=list(range(LAYERS))),
                             device=torch.device("cuda"))
 
 

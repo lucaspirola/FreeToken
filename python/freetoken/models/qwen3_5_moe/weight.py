@@ -47,6 +47,11 @@ _NVFP4_SOURCE_SPEC = Nvfp4ExpertSourceSpec(
     layer_to_bank=lambda layer, config: layer,  # every layer is MoE
     desc="Qwen3.5 NVFP4 experts",
 )
+
+# Public handle for consumers that must read expert rows straight from the
+# checkpoint without knowing this model's key layout (the bounded host mirror
+# in moe/mirror_pool.py). Resolved by models.nvfp4_banks.expert_source_spec.
+NVFP4_EXPERT_SOURCE_SPEC = _NVFP4_SOURCE_SPEC
 # Suffixes of the per-tensor modelopt quant scales; consumed alongside their ``.weight``,
 # never yielded on their own.
 _SCALE_SUFFIXES = (".weight_scale", ".weight_scale_2", ".input_scale")

@@ -789,14 +789,32 @@ class Engine:
                   or os.environ.get("FREETOKEN_MIRROR_EXPERT_RAM", "0") == "1")
         if mirror:
             mc = config.model_config
+            from freetoken.models.nvfp4_banks import expert_source_spec
+
+            mirror_spec = expert_source_spec(mc)
             if (
                 cache_factory is not None or config.moe_backend != "offload"
                 or config.moe_pageable_gpu or config.moe_cpu_layers is not None
                 or config.use_dummy_weight or config.tp_info.size != 1
-                or mc.expert_quant != "nvfp4" or mc.expert_gated
-                or mc.nemotron_h_args is None or config.nvfp4_backend != "triton"
+                or mc.expert_quant != "nvfp4" or config.nvfp4_backend != "triton"
             ):
-                raise ValueError("mirror expert RAM requires native Nemotron NVFP4, triton, single-rank GPU offload")
+                raise ValueError(
+                    "mirror expert RAM requires native NVFP4 experts, the triton "
+                    "backend and single-rank GPU offload"
+                )
+            if mirror_spec is None:
+                raise ValueError(
+                    f"mirror expert RAM has no expert source spec for model type "
+                    f"{mc.model_type!r}: it cannot locate expert rows in this "
+                    f"checkpoint. Export NVFP4_EXPERT_SOURCE_SPEC from that "
+                    f"model's weight module once its layout is verified."
+                )
+            if mirror_spec.gated != bool(mc.expert_gated):
+                raise ValueError(
+                    f"mirror expert RAM: spec says gated={mirror_spec.gated} but "
+                    f"the config says expert_gated={mc.expert_gated}; the row "
+                    f"layout would be half the size it should be"
+                )
             # Decode CUDA graphs stay ON -- that is the whole point: a mirror
             # miss is a plain H2D, exactly what the baseline captures.
             #
@@ -928,8 +946,10 @@ class Engine:
             if mirror:
                 mirror_pool = MirrorExpertPool(
                     config.model_path, mc.num_moe_layers, mc.num_experts, capacity,
-                    hidden_size=mc.expert_hidden_size or mc.hidden_size,
+                    hidden_size=(getattr(mc, mirror_spec.hidden_size_attr)
+                                 if mirror_spec.hidden_size_attr else mc.hidden_size),
                     intermediate_size=mc.moe_intermediate_size,
+                    spec=mirror_spec, config=mc,
                     device=self.device,
                 )
                 # _grow_runtime_kv_arena consults the pool's coverage bound so
@@ -1448,9 +1468,15 @@ class Engine:
         )
         from freetoken.moe.mirror_pool import nvfp4_bank_shapes
 
+        from freetoken.models.nvfp4_banks import expert_source_spec
+
         mc = config.model_config
+        spec = expert_source_spec(mc)
+        hidden = (getattr(mc, spec.hidden_size_attr) if spec and spec.hidden_size_attr
+                  else mc.hidden_size)
         shapes = nvfp4_bank_shapes(
-            mc.expert_hidden_size or mc.hidden_size, mc.moe_intermediate_size
+            hidden, mc.moe_intermediate_size,
+            gated=bool(getattr(spec, "gated", False)),
         )
         sources = {
             name: [torch.empty((mc.num_experts, *tail), dtype=dtype, device="meta")]
