@@ -1,0 +1,6 @@
+Sep 20 22:00:39 TESSERACT serve-default.sh[1347748]: [2026-09-20|22:00:39|core|rank=0] INFO     Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode graphs enabled, prefill overlap off
+Sep 20 22:01:03 TESSERACT serve-default.sh[1347748]: [2026-09-20|22:01:03|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+Sep 20 22:02:04 TESSERACT serve-default.sh[1348713]: [2026-09-20|22:02:04|core|rank=0] INFO     Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode graphs enabled, prefill overlap off
+Sep 20 22:02:22 TESSERACT serve-default.sh[1348713]: [2026-09-20|22:02:22|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+Sep 20 22:23:45 TESSERACT serve-default.sh[1360149]: [2026-09-20|22:23:45|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+Sep 21 02:21:10 TESSERACT serve-default.sh[1616610]: [2026-09-21|02:21:10|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB

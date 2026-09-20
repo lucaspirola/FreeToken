@@ -2,12 +2,23 @@
 # Host RAM x decode curve for Ornith-1.5-35B-A3B-NVFP4.
 #
 # A different model, not a different flag: qwen3_5_moe, 256 experts per MoE
-# layer against Lightning's 128, GATED silu experts (2I gate|up rows) against
-# Lightning's ungated relu2, I=512, hidden 2048, 256K context. Its expert rows
-# are ~1.67 MiB against Lightning's 5.36, and there are ~10240 of them, so the
-# whole-model banks are ~16.7 GiB -- MORE than Lightning's 15.41 on a 28 GiB
-# host. The baseline arm is therefore the one at risk here; if it will not
-# start, that is the finding, not a failed run.
+# layer against Lightning's 128, GATED silu experts (separate gate|up) against
+# Lightning's ungated relu2, I=512, hidden 2048, 256K context.
+#
+# Geometry read off the checkpoint itself (not from the config):
+#   one expert row = gate 524288 + up 524288 + down 524288 B of packed NVFP4,
+#   plus three e4m3 block-scale planes (65536 B each) and three f32 globals
+#   = 1769484 B = 1.688 MiB, against Lightning's 5.36 MiB.
+#   40 layers x 256 experts = 10240 rows -> 16.88 GiB for the whole model,
+#   MORE than Lightning's 15.41 on a 28 GiB host. The baseline arm is
+#   therefore the one at risk here; if it will not start, that is the
+#   finding, not a failed run.
+#   config.json has no decoder_sparse_step and no mlp_only_layers, so every
+#   one of the 40 layers is MoE -- which is what the model's own spec assumes
+#   (layer_to_bank = identity in models/qwen3_5_moe/weight.py).
+#   That spec's regex was checked against this checkpoint's weight_map: it
+#   matches 92160 tensors (40 x 256 x 3 projections x 3 kinds) and excludes
+#   the 768 mtp.layers.* expert tensors of the MTP head, which is not served.
 #
 # Known caveat, measured not assumed: no host has a tuned NVFP4 prefill table
 # for Ornith's GEMM shapes (only Lightning's two, only on the 5080), so its
@@ -36,7 +47,7 @@ run() {
     [ "$avail" -ge 22 ] && break
     sleep 20
   done
-  FT_ROWS="$rows" timeout 1800 tasks/exclusive-expert-ram/measure.sh "$arm" 2>&1 | tail -26
+  FT_ROWS="$rows" timeout 1800 tasks/exclusive-expert-ram/measure.sh "$arm" 2>&1 | tail -40
   systemctl --user reset-failed "ft-measure-$arm" 2>/dev/null
   sleep 15
 }

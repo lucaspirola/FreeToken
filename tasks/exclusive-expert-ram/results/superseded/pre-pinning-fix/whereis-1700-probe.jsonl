@@ -1,0 +1,1 @@
+{"target": 8000, "prompt_tokens": 8014, "ttft_s": 0.21, "prefill_tok_s": 38163.0, "gen_tokens": 127, "decode_tok_s": 128.6, "total_s": 1.2}

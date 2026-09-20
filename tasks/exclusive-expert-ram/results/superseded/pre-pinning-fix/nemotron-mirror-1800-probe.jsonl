@@ -1,0 +1,3 @@
+{"target": 8000, "prompt_tokens": 8014, "ttft_s": 0.22, "prefill_tok_s": 37246.0, "gen_tokens": 127, "decode_tok_s": 130.8, "total_s": 1.2}
+{"target": 32000, "prompt_tokens": 32027, "ttft_s": 3.06, "prefill_tok_s": 10468.0, "gen_tokens": 127, "decode_tok_s": 130.0, "total_s": 4.0}
+{"target": 80000, "prompt_tokens": 80028, "ttft_s": 11.5, "prefill_tok_s": 6957.0, "gen_tokens": 127, "decode_tok_s": 112.3, "total_s": 12.6}

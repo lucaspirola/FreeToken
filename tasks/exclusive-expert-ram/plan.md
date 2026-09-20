@@ -21,9 +21,20 @@ the same port. Two models, neither optional:
 | model_type | `nemotron_h` | `qwen3_5_moe` |
 | MoE layers x experts | 23 x 128 = 2944 rows | 40 x 256 = 10240 rows |
 | experts | ungated (relu2) | gated (silu, gate\|up fused) |
-| expert row | 5.36 MiB | ~1.67 MiB |
-| expert banks | 15.41 GiB | ~16.7 GiB |
+| expert row | 5.36 MiB | 1.688 MiB |
+| expert banks | 15.41 GiB | 16.88 GiB |
 | context | 1M | 256K |
+
+Ornith's row and bank sizes are read off the checkpoint, not the config: one
+expert is gate+up+down packed NVFP4 (524288 B each) plus three e4m3 block-scale
+planes (65536 B each) and three f32 globals = 1769484 B. Its `config.json` has
+neither `decoder_sparse_step` nor `mlp_only_layers`, so all 40 layers are MoE,
+which is what `models/qwen3_5_moe/weight.py` assumes (`layer_to_bank` is the
+identity). That file's key regex was checked against this checkpoint's
+`weight_map`: it matches 92160 tensors (40 x 256 x 3 projections x 3 kinds) and
+excludes the 768 `mtp.layers.*` expert tensors of the MTP head, which is not
+served. So the mirror reaches Ornith through the model's own spec, with no
+Nemotron geometry anywhere in the pool.
 
 ## What it is
 
@@ -164,7 +175,9 @@ to load and host boundaries, and graphs stay on. No code for it remains.
 
 ## Where the numbers are
 
-`tasks/exclusive-expert-ram/results/sweep.tsv`, one row per arm, produced by
-`tasks/exclusive-expert-ram/measure.sh` (one arm at a time, alone on the host,
-warmed before measuring, on a spare port — never :1919). `STATUS.md` reads the
-curve.
+`tasks/exclusive-expert-ram/results/sweep.tsv`, one row per arm. Each arm is
+produced by `tasks/exclusive-expert-ram/measure.sh` (one arm at a time, alone on
+the host, warmed before measuring, on a spare port — never :1919) into its own
+`$ARM-record.json`; `table.py` then rebuilds the TSV from every record with a
+fixed column list. `results/README.md` records what the RAM column means and the
+two definitions that were tried and discarded. `STATUS.md` reads the curve.

@@ -1,0 +1,7 @@
+arm	model	rows	ratio	ram_gib	pinned_gib	ram_after_80k_gib	rss_gib	locked_gib	anon_gib	file_gib	unevict_gib	current_gib	peak_current_gib	gpu_mib	decode_8k	ttft_8k	decode_32k	ttft_32k	decode_80k	ttft_80k
+nemotron-baseline	NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4	0	0.91	18.54	15.49	18.57	19.39	0.0	3.0	20.0	0.0	23.12	23.88	15147	174.4	0.33	164.6	2.91	160.3	11.13
+nemotron-1700	NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4	1700	0.91	12.14	9.11	0.01	0.0	0.0	1.32	2.58	0.0	0.0	0.0	554	133.0	0.22	133.5	3.01	0	31.8
+nemotron-2100	NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4	2100	0.91	21.32	18.11	21.08	21.94	0.0	2.98	18.12	0.0	21.19	21.19	15147	136.9	0.21	137.3	3.02	122.1	11.4	0	0	0.235
+nemotron-2500	NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4	2500	0.91	20.39	18.12	20.44	21.99	0.0	2.98	18.41	0.0	21.5	21.5	15147	142.9	0.21	142.9	3.02	127.1	11.37	0	0	0.433
+nemotron-2944	NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4	2944	0.91	20.18	18.12	20.21	21.99	0.0	2.98	18.18	0.0	21.26	21.26	15147	151.0	0.21	149.3	2.99	132.6	11.25	0	0	0.719
+nemotron-baseline2	NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4	0	0.91	18.53	15.49	18.57	19.36	0.0	3.0	19.7	0.0	22.82	23.47	15147	175.5	0.33	170.3	2.89	157.1	10.94

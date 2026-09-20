@@ -15,8 +15,9 @@
 # worthless if a second model is resident. The server runs as a transient --user unit so
 # an agent shell dying cannot take it down mid-measurement.
 #
-# Output: one row appended to tasks/exclusive-expert-ram/results/sweep.tsv, plus the raw
-# probe JSON and /v1/stats of the arm beside it.
+# Output: tasks/exclusive-expert-ram/results/$ARM-record.json, the raw probe JSON, the
+# arm's /v1/stats and its pool geometry from the log. sweep.tsv is then REBUILT from every
+# record by table.py -- never appended to here (see that file for why).
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")/../.."
 REPO="$PWD"
