@@ -47,7 +47,11 @@ def _act_stats_on(batch) -> bool:
     )
 
 
-def _linear(args: "NemotronHArgs", name: str, in_f: int, out_f: int):
+def _linear(args: "NemotronHArgs", name: str, in_f: int, out_f: int,
+            act: str | None = None):
+    """``act`` is a REQUEST to fuse the activation, honoured only by the NVFP4
+    layer; the other two quantizations have no fused epilogue, so the caller
+    must ask what it actually got (see :class:`NemotronHMLP`)."""
     quant = args.module_quant(name)
     if quant == "fp8_pertensor":
         from freetoken.kernel.triton.fp8_pertensor_linear import Fp8PerTensorLinear
@@ -58,7 +62,7 @@ def _linear(args: "NemotronHArgs", name: str, in_f: int, out_f: int):
         # bf16 at load, which costs ~1.6 GiB of resident weights on Lightning.
         from freetoken.kernel.triton.nvfp4_linear import Nvfp4DenseLinear
 
-        return Nvfp4DenseLinear(in_f, out_f, has_bias=False)
+        return Nvfp4DenseLinear(in_f, out_f, has_bias=False, act=act)
     return LinearReplicated(in_f, out_f, has_bias=False)
 
 
@@ -310,14 +314,34 @@ class NemotronHAttention(BaseOP):
 
 
 class NemotronHMLP(BaseOP):
+    """Nemotron-H's ungated MLP: ``down(relu(up(x))**2)``.
+
+    The NVFP4 kernels carry a fused ``relu2`` epilogue, and its docstrings said
+    it was what this path used -- but nothing in the tree ever passed ``act``,
+    so the epilogue was dead code and every shared expert ran the two-pass
+    eager form: store the pre-activation, read it back, square it, store again.
+    Asking for it is worth 1.59x at M=1, 1.64x at M=64 and 1.69x at M=1024 on
+    Lightning's shared-expert shape (N=1856, K=2688, RTX 5080), and it is no
+    less accurate -- the fused form squares in the fp32 accumulator instead of
+    in bf16 after the store, and both sit the same distance from an fp32
+    dequant+matmul reference.
+    """
+
     def __init__(self, config: "ModelConfig", layer_id: int, name: str, width: int):
         args = config.nemotron_h_args
         prefix = f"backbone.layers.{layer_id}.mixer.{name}"
-        self.up_proj = _linear(args, f"{prefix}.up_proj", config.hidden_size, width)
+        self.up_proj = _linear(args, f"{prefix}.up_proj", config.hidden_size, width,
+                               act="relu2")
         self.down_proj = _linear(args, f"{prefix}.down_proj", width, config.hidden_size)
+        # Only the NVFP4 layer honours the request; fp8/bf16 still need the
+        # eager activation, and a silently-skipped relu2 is a wrong model.
+        self._act_fused = getattr(self.up_proj, "act", None) == "relu2"
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.down_proj.forward(F.relu(self.up_proj.forward(x)).square())
+        h = self.up_proj.forward(x)
+        if not self._act_fused:
+            h = F.relu(h).square()
+        return self.down_proj.forward(h)
 
 
 class _NemotronRouter(BaseOP):

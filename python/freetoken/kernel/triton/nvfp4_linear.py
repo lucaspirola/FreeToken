@@ -979,9 +979,24 @@ def nvfp4_dense_linear_t(
     :func:`nvfp4_transpose_resident` (``weight_t`` [K//8, N] int32, ``scale_t`` [K//16, N]).
     ``act="relu2"`` fuses Nemotron's ungated MLP activation into the epilogue."""
     if _USE_REF:
-        out = _gemm_scratch(
-            x.reshape(-1, x.shape[-1]).contiguous(), weight_t.t(), scale_t.t(),
-            weight_global, x.dtype, transposed=True,
+        # ``_ref``, not ``_gemm_scratch``. This branch used to call one of the
+        # very kernels the hatch exists to validate, so on the ONLY layout the
+        # server actually serves (``nvfp4_transpose_resident`` runs at load, so
+        # every dense NVFP4 layer is K-major) the A/B compared the triton path
+        # against the triton path and agreed by construction. The real
+        # dequant+matmul reference was reachable only through the row-major
+        # entry point, which production never calls.
+        #
+        # ``_ref`` wants the checkpoint-native row-major operands, and the
+        # K-major pair is an exact permutation of them: weight_t is
+        # ``weight.view(int32).t().contiguous()``, so transposing back and
+        # making it contiguous reproduces the original int32 rows byte for
+        # byte, and ``view(uint8)`` re-exposes them as ``[N, K//2]``.
+        out = _ref(
+            x,
+            weight_t.t().contiguous().view(torch.uint8),
+            scale_t.t().contiguous(),
+            weight_global, x.dtype,
         ).reshape(*x.shape[:-1], weight_t.shape[1])
         out = out + bias.to(out.dtype) if bias is not None else out
         return _act_eager(out, _ACT_CODE[act])

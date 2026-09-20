@@ -41,6 +41,7 @@ themselves are imported, not vendored.
 
 from __future__ import annotations
 
+import functools
 import os
 
 import torch
@@ -388,6 +389,31 @@ def _marlin_pack_proj(
     return qweight, s, g_out
 
 
+def _e4m3_fold_error(folded: torch.Tensor) -> float:
+    """Max relative error the e4m3 round-trip costs the folded block scales."""
+    rt = folded.to(torch.float8_e4m3fn).float()
+    denom = folded.abs().clamp(min=torch.finfo(torch.float32).tiny)
+    return float(((rt - folded).abs() / denom).max())
+
+
+@functools.lru_cache(maxsize=1)
+def _warn_b12x_scale_fold_once(pct: int) -> None:
+    logger.warning(
+        "b12x pack: this checkpoint's gate and up global scales differ, so the "
+        "ratio is folded into the block scales, which are e4m3 (3 mantissa "
+        "bits) in this kernel's format. Worst-case block scale error after the "
+        "fold is ~%d%%. Marlin's bf16 block scales do not pay this; "
+        "--nvfp4-backend=marlin is the exact-fold alternative where it runs "
+        "(sm_80-99).",
+        pct,
+    )
+
+
+def _warn_b12x_scale_fold(err: float) -> None:
+    """Say it once per magnitude, not once per layer (32 layers x chunks)."""
+    _warn_b12x_scale_fold_once(int(round(err * 100)))
+
+
 @torch.no_grad()
 def marlin_repack_layer(
     layer_banks: dict[str, torch.Tensor],
@@ -408,7 +434,6 @@ def marlin_repack_layer(
     where the dict is keyed by the 4 ``nvfp4_marlin`` bank names and the two alphas are
     ``[E]`` bf16 on ``device``. Staging ``.to(device, non_blocking=True)`` from the native
     source works whether or not it is pinned (pageable -> synchronous copy)."""
-    H = config.hidden_size
     I = config.moe_intermediate_size
     gu_packed_l = layer_banks["gate_up_packed"]
     gu_scale_l = layer_banks["gate_up_scale"]
@@ -417,6 +442,31 @@ def marlin_repack_layer(
     dn_scale_l = layer_banks["down_scale"]
     dn_global_l = layer_banks["down_global"]
     E = gu_packed_l.size(0)
+
+    # H comes from the bank being repacked, not from ``config.hidden_size``.
+    # The expert stack's input width is not always the residual hidden size --
+    # that is precisely why ``Nvfp4ExpertSourceSpec.hidden_size_attr`` exists,
+    # and the loader that wrote these banks resolved H through it
+    # (models/nvfp4_banks.py). Reading the residual width here instead would
+    # reshape the rows against a stride nothing in them has, silently, on any
+    # model where the two differ. The banks cannot disagree with themselves:
+    # gate_up_packed holds [2I, H/2] e2m1 bytes per expert, so H = numel / I.
+    # Marlin is the sm_80-99 pick, i.e. the Ada box -- not a path the 5080 ever
+    # takes, which is why nothing here had caught it.
+    gu_row_bytes = gu_packed_l[0].numel()
+    if I <= 0 or gu_row_bytes % I:
+        raise ValueError(
+            f"gate_up_packed carries {gu_row_bytes} bytes per expert, which is "
+            f"not a multiple of moe_intermediate_size={I}"
+        )
+    H = gu_row_bytes // I
+    dn_row_bytes = dn_packed_l[0].numel()
+    if dn_row_bytes != H * I // 2:
+        raise ValueError(
+            f"down_packed carries {dn_row_bytes} bytes per expert; [H={H}, "
+            f"I/2={I // 2}] needs {H * I // 2}. The two banks disagree on the "
+            f"expert geometry."
+        )
 
     gate_up_q = gu_packed_l.view(torch.int32).view(E, H // 16, 4 * I)
     gate_up_s = gu_scale_l.view(E, H // 16, 2 * I)
@@ -650,13 +700,25 @@ def b12x_repack_layer(
         gu_g = gu_global_l[start:end].to(device)
         # The merged gate_up rows carry w1/w3 globals (ungated experts carry a single
         # broadcast up global); b12x takes one alpha per expert, so fold any ratio into
-        # the block scales like the Marlin pack does.
+        # the block scales.
+        #
+        # NOT "like the Marlin pack does", which is what this said. Marlin's
+        # block scales are bf16 (8 mantissa bits) and absorb the ratio almost
+        # exactly; b12x's are e4m3 (3 mantissa bits), which is the kernel's
+        # format and not something this function may choose. Folding therefore
+        # REQUANTIZES every scale it touches, for up to 2^-4 of relative error
+        # per block. Nemotron-3.5-Lightning never reaches it (ungated experts
+        # carry one broadcast global, so the ratio is exactly 1 and the branch
+        # is skipped); a gated checkpoint whose w1 and w3 globals differ does,
+        # and it should not find that out from a benchmark.
         g = gu_g.float()
         g_max = g.max(dim=1, keepdim=True).values
         gu_s_native = gu_scale_l[start:end].to(device).to(torch.float16)
         ratio = g / g_max
         if not torch.all(ratio == 1.0):
-            gu_s_native = (gu_s_native.float() * ratio.unsqueeze(-1)).to(torch.float16)
+            folded = gu_s_native.float() * ratio.unsqueeze(-1)
+            gu_s_native = folded.to(torch.float16)
+            _warn_b12x_scale_fold(_e4m3_fold_error(folded))
         # The down bank stores one w2 global broadcast per output row; b12x takes a
         # single alpha per expert, so a row-varying global cannot be represented (the
         # marlin pack folds the ratio into the block scales instead -- do not let such

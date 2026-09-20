@@ -27,6 +27,10 @@ from pathlib import Path
 from typing import Any, Dict
 
 import torch
+
+from freetoken.utils import init_logger
+
+logger = init_logger(__name__)
 import triton
 import triton.language as tl
 
@@ -465,8 +469,32 @@ def nvfp4_moe_config(
             bucket = min(configs, key=lambda b: (abs(b - M), b))
             cfg = dict(configs[bucket])
     if cfg is None:
+        _warn_untuned_prefill(num_experts, N, K, name)
         cfg = _prefill_config_default(M)
     return _prefill_launch_env_override(cfg)
+
+
+@functools.lru_cache(maxsize=32)
+def _warn_untuned_prefill(num_experts: int, N: int, K: int, name: str | None) -> None:
+    """Say, once per shape, that prefill is running on the MiniMax-M2 tiles.
+
+    The fallback is a legitimate design -- an untuned (shape, device) must still
+    run -- but it was silent, and silence is how a model ends up served on
+    launch constants swept for a different geometry with nobody aware of it.
+    Only Lightning's two GEMMs are tuned, and only on the 5080, so every other
+    model on every host takes this path: Ornith-1.5-35B (E=256, N=1024/2048,
+    K=2048/1024) takes it on all of them.
+
+    ``lru_cache`` is the once-per-shape gate: this is called from the prefill
+    hot path, once per layer per chunk.
+    """
+    logger.warning(
+        "NVFP4 prefill GEMM E=%d N=%d K=%d on %s has no tuned table; using the "
+        "MiniMax-M2 default tiles. Tune with benchmarks/bench_moe_prefill_gemm.py "
+        "and drop the JSON in moe/configs/triton_<ver>/ (%s).",
+        num_experts, N, K, name or "an unidentified device",
+        nvfp4_config_filename(num_experts, N, K, name or "DEVICE"),
+    )
 
 
 # --- A-operand k-deinterleave (on by default) --------------------------------------
