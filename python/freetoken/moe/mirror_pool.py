@@ -203,10 +203,39 @@ class MirrorExpertPool:
             )
             self._scratch = mmap.mmap(-1, scratch_bytes)
             self._sview = memoryview(self._scratch)
+            # NOT pin_memory=True. torch's caching host allocator rounds every
+            # allocation to the next power of two
+            # (ATen/core/CachingHostAllocator.h: `roundSize =
+            # PowerOf2Ceil(size)`, then allocate_host_memory(roundSize)), and
+            # this pool asks it for two banks of several GiB each. Measured on
+            # Nemotron, host RAM actually pinned against the pool it was asked
+            # for:
+            #
+            #     1700 rows  pool  8.90 GiB -> 9.11 GiB pinned   (banks 3.95 -> 4)
+            #     2100 rows  pool 10.99 GiB -> 18.11 GiB pinned  (banks 4.88 -> 8)
+            #     2500 rows  pool 13.08 GiB -> 18.12 GiB pinned  (banks 5.81 -> 8)
+            #     2944 rows  pool 15.41 GiB -> 18.12 GiB pinned  (banks 6.85 -> 8)
+            #
+            # i.e. up to 2x the pool, and a capacity knob whose RAM cost does
+            # not move at all across most of its range -- which is exactly how
+            # the first sweeps read. The baseline is nearly exact (15.41 ->
+            # 15.49) only because it allocates per layer, where the rounding
+            # has little room to bite.
+            #
+            # Allocating pageable and pinning the exact byte range with
+            # cudaHostRegister (the same call the baseline's banks go through,
+            # freetoken.kernel.pinned.host_register) costs the allocator's
+            # reuse, which this pool does not want: the banks are allocated
+            # once at startup and live for the process.
+            from freetoken.kernel.pinned import host_register
+
+            self._registered = []
             for name, (tail, dtype) in self.shapes.items():
-                self.banks[name] = torch.empty(
-                    (capacity, *tail), dtype=dtype, pin_memory=True
-                )
+                bank = torch.empty((capacity, *tail), dtype=dtype)
+                nbytes = bank.numel() * bank.element_size()
+                host_register(bank.data_ptr(), nbytes)
+                self._registered.append(bank.data_ptr())
+                self.banks[name] = bank
             self.row_bytes = {
                 name: _row_bytes(tail, dtype) for name, (tail, dtype) in self.shapes.items()
             }
@@ -469,6 +498,16 @@ class MirrorExpertPool:
         if getattr(self, "_closed", False):
             return
         self._closed = True
+        # Unpin before the tensors are collected: a cudaHostRegister pin
+        # outliving its allocation is a dangling registration.
+        for addr in getattr(self, "_registered", ()):  # noqa: B007
+            try:
+                from freetoken.kernel.pinned import host_unregister
+
+                host_unregister(addr)
+            except Exception:                      # teardown must not raise
+                pass
+        self._registered = []
         if self._sview is not None:
             self._sview.release()
             self._sview = None
