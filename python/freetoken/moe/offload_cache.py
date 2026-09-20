@@ -151,6 +151,13 @@ MARLIN_MAX_CACHE_SIZE = 992
 FREETOKEN_EXPERT_ARENA = os.environ.get("FREETOKEN_EXPERT_ARENA", "0").strip() == "1"
 
 
+# Usage the mirror stamps on the prefill buffer region. Victim selection is an
+# argmin over ``usage``, so a slot carrying this is never chosen -- which is how
+# the region stays the prefill path's alone. Large but far from int64 overflow,
+# and the slots are never hit, so nothing ever increments it.
+_PREFILL_BUFFER_USAGE = 1 << 62
+
+
 @dataclass
 class OffloadMoeCache:
     num_layers: int
@@ -532,6 +539,14 @@ class OffloadMoeCache:
         # unavailable), and row counters for cache reports.
         self._prefill_slot_snapshot: torch.Tensor | None = None
         self._prefill_snapshot_np = None
+        # Mirror-only prefill assembly (see _prefetch_split_mirror).
+        self._mirror_prefill_pool_snapshot: torch.Tensor | None = None
+        self._mirror_prefill_pool_np = None
+        self._mirror_prefill_idx: torch.Tensor | None = None
+        self._mirror_prefill_idx_host: torch.Tensor | None = None
+        self._mirror_prefill_idx_np = None
+        self._mirror_prefill_hit_count: torch.Tensor | None = None
+        self._mirror_prefill_miss_count: torch.Tensor | None = None
         self._prefill_hit_d2d_active = False
         self._hit_d2d_fallback_logged = False
         self._batch_memcpy = None
@@ -1645,11 +1660,37 @@ class OffloadMoeCache:
             )
         self.banks = [(self.bank_sources[n], self.bank_caches[n]) for n in self.bank_schema]
         self._build_mirror_plan(pool)
+        if self.prefill_overlap:
+            # The mirror's prefill path needs its own index/snapshot buffers,
+            # and _build_mirror_plan has just made self._mirror available to
+            # allocate them against. The later cache-geometry rebuild calls
+            # this too; doing it here means a cache that never resizes (the
+            # default profile) still has them.
+            self._init_prefill_overlap_buffers()
         logger.info_rank0(
             "mirror expert pool attached: %d host rows, %.2f GiB pinned "
             "(whole-model host residency skipped; graphs/overlap unchanged)",
             pool.capacity, pool.pool_bytes / 2**30,
         )
+
+    def _mirror_prefill_base(self) -> int:
+        """First cache slot a decode resident may occupy.
+
+        Under the mirror the prefill double buffer owns the head of the cache
+        outright (``mirror_pool.prefill_buffer_slots``): everything below this
+        index is buffer, everything at or above it is a decode resident. The
+        baseline shares those slots between the two uses, which is safe only
+        because it holds the whole model in host RAM; here the buffer's own
+        invalidation would drop an expert's only copy.
+
+        Returns 0 when there is no mirror or no overlap -- the shared-slot
+        behaviour the rest of the cache already implements.
+        """
+        if getattr(self, "_mirror", None) is None or not self.prefill_overlap:
+            return 0
+        from freetoken.moe.mirror_pool import prefill_buffer_slots
+
+        return prefill_buffer_slots(self.num_experts)
 
     def _build_mirror_plan(self, pool) -> None:
         """Device-resident residency maps + the fused copy descriptors.
@@ -1806,14 +1847,24 @@ class OffloadMoeCache:
         self.slot_for_id.fill_(-1)
         self.usage.zero_()
 
-        per_layer = self.cache_size // self.num_layers
-        extra = self.cache_size - per_layer * self.num_layers
+        # The prefill double buffer owns the head of the cache; decode
+        # residents start above it. The usage sentinel is what keeps them
+        # apart: victim selection is an argmin over usage, so it never reaches
+        # into the buffer region and no expert's only copy can land where the
+        # next prefill layer will overwrite it.
+        base_slot = self._mirror_prefill_base()
+        if base_slot:
+            self.usage[:base_slot].fill_(_PREFILL_BUFFER_USAGE)
+        resident_slots = max(self.cache_size - base_slot, 0)
+
+        per_layer = resident_slots // self.num_layers
+        extra = resident_slots - per_layer * self.num_layers
         gpu_plan: list[int] = []
         for layer in range(self.num_layers):
             count = per_layer + (1 if layer < extra else 0)
             base = layer * self.num_experts
             gpu_plan.extend(base + e for e in range(min(count, self.num_experts)))
-        gpu_plan = gpu_plan[: self.cache_size]
+        gpu_plan = gpu_plan[:resident_slots]
         # Stage through the mirror's own pinned rows (overwritten below), a
         # chunk at a time, so no extra host buffer is needed.
         chunk = min(pool.capacity, len(gpu_plan))
@@ -1825,7 +1876,8 @@ class OffloadMoeCache:
             for i, flat in enumerate(batch):
                 pool._read_row(flat, i)
             dst_rows[: len(batch)].copy_(
-                torch.tensor([begin + i for i in range(len(batch))], dtype=torch.int32)
+                torch.tensor([base_slot + begin + i for i in range(len(batch))],
+                             dtype=torch.int32)
             )
             count_t.fill_(len(batch))
             fast_index_copy_multi_jit(
@@ -1834,9 +1886,9 @@ class OffloadMoeCache:
             )
             torch.cuda.synchronize(self.device)
         ids = torch.tensor(gpu_plan, dtype=torch.int32, device=self.device)
-        self.id_of_slot[: len(gpu_plan)] = ids
+        self.id_of_slot[base_slot: base_slot + len(gpu_plan)] = ids
         self.slot_for_id.view(-1)[ids.long()] = torch.arange(
-            len(gpu_plan), dtype=torch.int32, device=self.device
+            base_slot, base_slot + len(gpu_plan), dtype=torch.int32, device=self.device
         )
         # Now the mirror takes everything the GPU does not hold, then spends the
         # slack on duplicates of the GPU's coldest rows -- the ones LFU evicts
@@ -1854,9 +1906,11 @@ class OffloadMoeCache:
         )
         self._mirror_publish_free_rows()
         logger.info_rank0(
-            "mirror warm start: %d experts on GPU, %d mirrored, %d duplicated, "
-            "%d rows in reserve (%.1f%% of evictions skip the writeback)",
-            len(gpu_plan), filled, seeded, int(m["free_count"].item()),
+            "mirror warm start: %d experts on GPU (slots %d..%d, %d held for the "
+            "prefill buffer), %d mirrored, %d duplicated, %d rows in reserve "
+            "(%.1f%% of evictions skip the writeback)",
+            len(gpu_plan), base_slot, base_slot + len(gpu_plan), base_slot,
+            filled, seeded, int(m["free_count"].item()),
             100.0 * seeded / max(len(gpu_plan), 1),
         )
         return {"gpu": len(gpu_plan), "mirrored": filled, "duplicates": seeded,
@@ -2126,7 +2180,36 @@ class OffloadMoeCache:
             self.prefill_ready_events = [torch.cuda.Event() for _ in range(2)]
             self.prefill_release_events = [torch.cuda.Event() for _ in range(2)]
             self.prefill_begin_event = torch.cuda.Event()
-        if self.prefill_hit_d2d and self.device.type == "cuda":
+        if getattr(self, "_mirror", None) is not None and self.device.type == "cuda":
+            # The mirror assembles a prefill layer from the only two places
+            # coverage allows -- a resident's own slot, or the expert's pool row
+            # -- so it needs a pinned view of both maps and one index pair per
+            # layer. Snapshots are taken once per chunk (begin_prefill); during
+            # a prefill there are no decode admissions, so they cannot go stale.
+            E = self.num_experts
+            self._prefill_slot_snapshot = torch.empty(
+                (self.num_layers, E), dtype=torch.int32, pin_memory=True
+            )
+            self._prefill_snapshot_np = self._prefill_slot_snapshot.numpy()
+            self._mirror_prefill_pool_snapshot = torch.empty(
+                (self.num_layers * E,), dtype=torch.int32, pin_memory=True
+            )
+            self._mirror_prefill_pool_np = self._mirror_prefill_pool_snapshot.numpy()
+            # Rows: 0 hit dst, 1 hit src, 2 miss dst, 3 miss src.
+            self._mirror_prefill_idx_host = torch.empty(
+                (2, 4, E), dtype=torch.int32, pin_memory=True
+            )
+            self._mirror_prefill_idx_np = self._mirror_prefill_idx_host.numpy()
+            self._mirror_prefill_idx = torch.empty(
+                (2, 4, E), dtype=torch.int32, device=self.device
+            )
+            self._mirror_prefill_hit_count = torch.zeros(
+                (1,), dtype=torch.int64, device=self.device
+            )
+            self._mirror_prefill_miss_count = torch.zeros(
+                (1,), dtype=torch.int64, device=self.device
+            )
+        elif self.prefill_hit_d2d and self.device.type == "cuda":
             self._prefill_slot_snapshot = torch.empty(
                 (self.num_layers, self.num_experts), dtype=torch.int32, pin_memory=True
             )
@@ -2142,6 +2225,13 @@ class OffloadMoeCache:
             )
 
     def _invalidate_prefill_buffer(self, buffer_id: int) -> None:
+        if self._mirror_prefill_base():
+            # Nothing to invalidate: under the mirror these slots never hold a
+            # decode resident (the warm start seats residents above them and
+            # the usage sentinel keeps victim selection out), so no id map
+            # points here and no expert loses its only copy when the next
+            # layer overwrites the bytes.
+            return
         if self._size_class_enabled:
             assert self._prefill_borrow_class is not None
             class_begin, _ = self._class_ranges[self._prefill_borrow_class]
@@ -2170,6 +2260,18 @@ class OffloadMoeCache:
             # fence the first prefetch would stomp bytes a running GEMM is reading.
             self.prefill_begin_event.record(torch.cuda.current_stream(self.device))
             self.prefill_copy_stream.wait_event(self.prefill_begin_event)
+        if getattr(self, "_mirror", None) is not None:
+            # The mirror runs its own hit/miss split (_prefetch_split_mirror),
+            # whose sources are the two residency maps rather than the host
+            # banks. One sync per chunk buys pure host math for every layer.
+            self._prefill_hit_d2d_active = False
+            with torch.cuda.stream(self.prefill_copy_stream):
+                self._prefill_slot_snapshot.copy_(self.slot_for_id, non_blocking=True)
+                self._mirror_prefill_pool_snapshot.copy_(
+                    self._mirror["pool_row_of_id"], non_blocking=True
+                )
+            self.prefill_copy_stream.synchronize()
+            return
         self._prefill_hit_d2d_active = self.prefill_hit_d2d and self._hit_d2d_usable()
         if self._prefill_hit_d2d_active:
             # The copy stream is fenced behind the previous decode, so the snapshot
@@ -2205,7 +2307,9 @@ class OffloadMoeCache:
                 else:
                     dst.copy_(src, non_blocking=True)
 
-        if self._prefill_hit_d2d_active:
+        if getattr(self, "_mirror", None) is not None:
+            self._prefetch_split_mirror(layer_id, buffer_id)
+        elif self._prefill_hit_d2d_active:
             self._prefetch_split(layer_id, buffer_id)
         elif self.prefill_copy_stream is None:
             copy()
@@ -2220,6 +2324,90 @@ class OffloadMoeCache:
 
         self._prefill_buffer_layer[buffer_id] = layer_id
         self._prefill_buffer_released[buffer_id] = False
+
+    def _prefetch_split_mirror(self, layer_id: int, buffer_id: int) -> None:
+        """Assemble one prefill expert layer in the double buffer, without disk.
+
+        The coverage invariant -- every expert on the GPU or in the pool -- is
+        exactly the statement that this is always possible. Each of the layer's
+        experts is either a decode resident, copied slot -> buffer on the device
+        with no PCIe traffic, or it has a pool row, copied host -> buffer over
+        PCIe. Each half is one ``fast_index_copy_multi_jit`` launch across all
+        banks, on the copy stream under the existing release/ready discipline.
+        The two row sets are disjoint and the buffer region is disjoint from the
+        residents, so neither half can alias the other.
+
+        This replaces what the branch inherited, where a mirrored prefill drove
+        ``materialize_layer``: that reinstalls the layer into the LRU slots and
+        invalidates every other resident, which emptied the mirror and made a
+        full checkpoint re-read mandatory at every prefill->decode transition
+        (1923 + 1021 + 739 rows, 19.3 GiB, measured as 8.0 s of TTFT on an 8K
+        prompt whose baseline prefill is 0.34 s). Here the LRU is never
+        touched, so coverage survives the sweep and the boundary restore that
+        cost never runs.
+        """
+        import numpy as np
+
+        from freetoken.kernel.fast_index_copy import fast_index_copy_multi_jit
+
+        E = self.num_experts
+        base_flat = layer_id * E
+        base_slot = self._mirror_prefill_base()
+        m = self._mirror
+        idx_np = self._mirror_prefill_idx_np[buffer_id]
+
+        slots = self._prefill_snapshot_np[layer_id]
+        # Slots below base_slot are the buffers themselves: volatile within the
+        # chunk and never decode residents here, so they are not valid sources.
+        resident = slots >= base_slot
+        pos = np.arange(E, dtype=np.int32)
+        dst_base = np.int32(buffer_id * E)
+
+        hit_pos = pos[resident]
+        n_hit = int(hit_pos.size)
+        idx_np[0, :n_hit] = dst_base + hit_pos
+        idx_np[1, :n_hit] = slots[resident]
+
+        miss_pos = pos[~resident]
+        n_miss = int(miss_pos.size)
+        rows = self._mirror_prefill_pool_np[base_flat + miss_pos]
+        if n_miss and int(rows.min()) < 0:
+            flat = int(base_flat) + int(miss_pos[int(rows.argmin())])
+            raise RuntimeError(
+                f"bounded expert mirror lost coverage before prefill: expert "
+                f"{flat} (layer {layer_id}) is neither a GPU resident nor in "
+                f"the pool, so this layer cannot be assembled. The pool is too "
+                f"small for this KV ceiling: raise --moe-mirror-host-rows (or "
+                f"leave it at -1 to auto-size)."
+            )
+        idx_np[2, :n_miss] = dst_base + miss_pos
+        idx_np[3, :n_miss] = rows
+
+        self.prefill_hit_rows += n_hit
+        self.prefill_total_rows += E
+
+        dev = self._mirror_prefill_idx[buffer_id]
+        with torch.cuda.stream(self.prefill_copy_stream):
+            if self._prefill_buffer_has_release_event[buffer_id]:
+                self.prefill_copy_stream.wait_event(
+                    self.prefill_release_events[buffer_id]
+                )
+            dev.copy_(self._mirror_prefill_idx_host[buffer_id], non_blocking=True)
+            if n_hit:
+                self._mirror_prefill_hit_count.fill_(n_hit)
+                fast_index_copy_multi_jit(
+                    m["cache_ptrs"], m["cache_ptrs"], m["feat_bytes"],
+                    dev[0, :n_hit], dev[1, :n_hit],
+                    self._mirror_prefill_hit_count,
+                )
+            if n_miss:
+                self._mirror_prefill_miss_count.fill_(n_miss)
+                fast_index_copy_multi_jit(
+                    m["cache_ptrs"], m["pool_ptrs"], m["feat_bytes"],
+                    dev[2, :n_miss], dev[3, :n_miss],
+                    self._mirror_prefill_miss_count,
+                )
+            self.prefill_ready_events[buffer_id].record(self.prefill_copy_stream)
 
     def _hit_d2d_usable(self) -> bool:
         """Whether the hit-D2D split can serve this prefill; logs the first fallback.

@@ -15,10 +15,8 @@ disagree, which is the whole point.
 """
 from __future__ import annotations
 
-import json
 import os
 os.environ.setdefault("FREETOKEN_EXPERT_ARENA", "1")
-import struct
 import tempfile
 import types
 
@@ -35,55 +33,15 @@ from freetoken.models.nemotron_h.weight import (
 from freetoken.moe.mirror_pool import (
     MirrorExpertPool,
     default_reserve_rows,
-    nvfp4_bank_shapes,
     plan_capacity,
 )
+
+from tests.moe._mirror_checkpoint import write_nvfp4_checkpoint
 
 LAYERS, EXPERTS, H, ISZ = 6, 8, 32, 32
 TOTAL = LAYERS * EXPERTS          # 48 rows
 _GPU = 30                         # GPU holds 30, so 18 rows must live in the pool
 _STEP = 4                         # arena chunk granularity
-
-
-def _write_checkpoint(root):
-    """Same minimal NVFP4 checkpoint the other mirror tests use."""
-    shapes = nvfp4_bank_shapes(H, ISZ)
-    suffix_of = {
-        "gate_up_packed": ("up_proj.weight", "U8"),
-        "gate_up_scale": ("up_proj.weight_scale", "F8_E4M3"),
-        "gate_up_global": ("up_proj.weight_scale_2", "F32"),
-        "down_packed": ("down_proj.weight", "U8"),
-        "down_scale": ("down_proj.weight_scale", "F8_E4M3"),
-        "down_global": ("down_proj.weight_scale_2", "F32"),
-    }
-    header, blob, off = {}, bytearray(), 0
-    for layer in range(LAYERS):
-        for e in range(EXPERTS):
-            flat = layer * EXPERTS + e
-            for name, (tail, _dt) in shapes.items():
-                suffix, dt = suffix_of[name]
-                key = f"backbone.layers.{layer}.mixer.experts.{e}.{suffix}"
-                if dt == "F32":
-                    payload, shape = struct.pack("<f", float(flat + 1)), []
-                else:
-                    n = 1
-                    for d in tail:
-                        n *= d
-                    payload = bytes(((flat * 13 + k) % 251) + 1 for k in range(n))
-                    shape = list(tail)
-                header[key] = {"dtype": dt, "shape": shape,
-                               "data_offsets": [off, off + len(payload)]}
-                blob += payload
-                off += len(payload)
-    head = json.dumps(header).encode()
-    with open(os.path.join(root, "model.safetensors"), "wb") as f:
-        f.write(struct.pack("<Q", len(head)))
-        f.write(head)
-        f.write(blob)
-    with open(os.path.join(root, "model.safetensors.index.json"), "w") as f:
-        json.dump({"weight_map": {k: "model.safetensors" for k in header}}, f)
-    with open(os.path.join(root, "config.json"), "w") as f:
-        json.dump({"layers_block_type": ["moe"] * LAYERS}, f)
 
 
 def _pool(root, capacity):
@@ -126,7 +84,7 @@ def test_geometry_is_not_degenerate():
 def test_floor_is_the_gpu_slot_count_coverage_needs():
     """min_gpu_slots = total - capacity + reserve, derived from the pool alone."""
     with tempfile.TemporaryDirectory() as root:
-        _write_checkpoint(root)
+        write_nvfp4_checkpoint(root, LAYERS, EXPERTS, H, ISZ)
         cap = plan_capacity(LAYERS, EXPERTS, _GPU)
         pool = _pool(root, cap)
         try:
@@ -149,7 +107,7 @@ def test_a_bigger_pool_lowers_the_floor():
     capacity), which silently turned the RAM knob into a KV-ceiling knob.
     """
     with tempfile.TemporaryDirectory() as root:
-        _write_checkpoint(root)
+        write_nvfp4_checkpoint(root, LAYERS, EXPERTS, H, ISZ)
         floors = []
         for cap in (TOTAL - 12, TOTAL - 6, TOTAL):
             pool = _pool(root, cap)
@@ -166,7 +124,7 @@ def test_a_bigger_pool_lowers_the_floor():
 def test_capacity_below_the_reserve_is_refused():
     """A pool that is all reserve covers nothing; say so at construction."""
     with tempfile.TemporaryDirectory() as root:
-        _write_checkpoint(root)
+        write_nvfp4_checkpoint(root, LAYERS, EXPERTS, H, ISZ)
         with pytest.raises(ValueError, match=r"--moe-mirror-host-rows"):
             _pool(root, default_reserve_rows(EXPERTS))
 
@@ -174,7 +132,7 @@ def test_capacity_below_the_reserve_is_refused():
 def test_coverage_holds_at_the_floor_and_breaks_below_it():
     """The floor is tight: coverage survives exactly at it, not one chunk under."""
     with tempfile.TemporaryDirectory() as root:
-        _write_checkpoint(root)
+        write_nvfp4_checkpoint(root, LAYERS, EXPERTS, H, ISZ)
         cap = plan_capacity(LAYERS, EXPERTS, _GPU)
         cache, pool = _cache_and_pool(root, cap)
         try:
@@ -203,7 +161,7 @@ def test_a_lost_copy_is_a_hard_error_not_a_counter():
     the evidence sat inert in a diagnostic document.
     """
     with tempfile.TemporaryDirectory() as root:
-        _write_checkpoint(root)
+        write_nvfp4_checkpoint(root, LAYERS, EXPERTS, H, ISZ)
         cap = plan_capacity(LAYERS, EXPERTS, _GPU)
         cache, pool = _cache_and_pool(root, cap)
         try:
@@ -226,7 +184,7 @@ def test_a_lost_copy_is_a_hard_error_not_a_counter():
 def test_fault_counters_reach_the_host_without_a_sync():
     """The pinned snapshot must be wired to the device counters."""
     with tempfile.TemporaryDirectory() as root:
-        _write_checkpoint(root)
+        write_nvfp4_checkpoint(root, LAYERS, EXPERTS, H, ISZ)
         cap = plan_capacity(LAYERS, EXPERTS, _GPU)
         cache, pool = _cache_and_pool(root, cap)
         try:

@@ -98,6 +98,24 @@ def default_reserve_rows(num_experts: int) -> int:
     return 3 * num_experts
 
 
+def prefill_buffer_slots(num_experts: int) -> int:
+    """GPU slots the prefill double buffer borrows from the head of the cache.
+
+    ``_init_prefill_overlap_buffers`` views the first ``2 * num_experts`` slots
+    as two whole-layer buffers. Without the mirror those slots double as decode
+    residents between prefills and the buffer evicts them on reuse. With the
+    mirror that eviction would drop an expert's only copy, so under the mirror
+    the region is the prefill path's alone: the warm start seats decode
+    residents from ``2 * num_experts`` upwards and leaves these slots empty
+    with a usage sentinel, which the argmin(usage) victim search never picks.
+
+    The cost is this many decode slots; the return is that prefill stops
+    destroying the mirror's coverage, which is what forced a full checkpoint
+    re-read at every prefill->decode transition.
+    """
+    return 2 * num_experts
+
+
 def plan_capacity(num_layers: int, num_experts: int, final_gpu_slots: int,
                   reserve: int | None = None) -> int:
     """Rows the mirror must hold so coverage survives the KV ceiling.

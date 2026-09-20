@@ -818,14 +818,23 @@ class Engine:
             # Decode CUDA graphs stay ON -- that is the whole point: a mirror
             # miss is a plain H2D, exactly what the baseline captures.
             #
-            # Prefill overlap is the one thing that must go. Its double buffer
-            # prefetches a whole layer straight from the host banks
-            # (prefetch_prefill_layer), which the mirror does not have: its
-            # sources are meta tensors and a layer's rows are scattered across
-            # pool rows. It also needs two swap plans in flight at once.
-            # Prefill is a small share of a long request, so this costs far less
-            # than losing graphs would.
-            object.__setattr__(config, "moe_prefill_overlap", False)
+            # Prefill overlap stays ON too, and must. Turning it off (as this
+            # branch first did, on the grounds that the double buffer streams a
+            # layer "straight from the host banks", which the mirror does not
+            # have) sends prefill through materialize_layer, which reinstalls
+            # the layer into the LRU slots and invalidates every other
+            # resident. That empties the mirror, so coverage has to be rebuilt
+            # from the checkpoint at every prefill->decode transition: 19.3 GiB
+            # of disk per request, measured as 8.0 s of TTFT on an 8K prompt
+            # whose baseline prefill is 0.34 s, and 74.7 s at 80K against 9.8 s.
+            # The premise was wrong in the first place: a layer's rows do not
+            # have to come from the host banks. Coverage says every expert is a
+            # GPU resident or has a pool row, so the buffer is assembled from
+            # those two places with no disk at all
+            # (OffloadMoeCache._prefetch_split_mirror). What the mirror does
+            # need is the buffer region to itself, which costs
+            # prefill_buffer_slots(num_experts) decode slots and is priced into
+            # _mirror_final_gpu_slots and the arena's coverage floor.
             # Graphs stay ON. The graphs-mode corruption is not a race: a
             # pure replay never runs host code, so the prefill->decode boundary
             # warm start (host + disk, in ensure_experts) could never fire
@@ -835,7 +844,8 @@ class Engine:
             # before the replay is admitted.
             logger.info_rank0(
                 "Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode "
-                "graphs enabled, prefill overlap off"
+                "graphs enabled, prefill overlap on (layers assembled from "
+                "resident slots + pool rows, no disk)"
             )
         if cache_factory is not None and config.moe_cache_auto:
             raise ValueError(
@@ -1499,22 +1509,25 @@ class Engine:
         kv_ceiling = cache_per_page * (ceiling_tokens // config.page_size)
         slots = int(max(budget - kv_ceiling, 0) // per_slot)
         total = mc.num_moe_layers * mc.num_experts
-        # The arithmetic above priced the plan for the DEFAULT profile, where
-        # prefill overlap borrows two expert-layer buffers from the cache;
-        # with the mirror on, overlap is disabled and the budget shifts, so
-        # the arena's TRUE floor can land well BELOW the planned slot count --
-        # measured on this host: planned 1552, actual floor 1152 at the 1M
-        # ceiling; the mirror then could not cover the complement and the 600K
-        # request died mid-flight. Two model-generic terms re-price the floor:
-        #   * the two overlap buffers the plan assumed but mirror mode does
-        #     not grant (2 * num_experts), plus
+        # ``slots`` counts every cache slot the budget affords, but not all of
+        # them hold a decode resident, and the pool must be sized against the
+        # residents. Two model-generic terms re-price it:
+        #   * the prefill double buffer, which under the mirror owns the head
+        #     of the cache outright (prefill_buffer_slots), plus
         #   * four arena chunks of release granularity (FREETOKEN_ARENA_STEP_
         #     SLOTS, default 8) so chunk-boundary overshoot stays covered.
-        # A model that cannot fit complement + reserve in host RAM fails
-        # LOUDLY at startup (MirrorExpertPool.load_initial raises) instead of
-        # dying mid-request hours later.
+        # Getting this wrong is not a slow path but a dead request: measured on
+        # this host, a plan of 1552 against an actual floor of 1152 at the 1M
+        # ceiling left the mirror unable to cover the complement, and the 600K
+        # request died mid-flight. A model that cannot fit complement + reserve
+        # in host RAM fails LOUDLY at startup (MirrorExpertPool.load_initial
+        # raises) instead of dying mid-request hours later.
+        from freetoken.moe.mirror_pool import prefill_buffer_slots
+
         step = _arena_step_slots()
-        conservative = max(slots - 2 * mc.num_experts - 4 * step, mc.num_experts)
+        conservative = max(
+            slots - prefill_buffer_slots(mc.num_experts) - 4 * step, mc.num_experts
+        )
         return max(min(conservative, total), mc.num_experts)
 
     def _plan_growable_kv(
@@ -1701,7 +1714,14 @@ class Engine:
         mirror_pool = getattr(self, "_mirror_pool_ref", None)
         cov_floor = 0
         if mirror_pool is not None:
-            cov_floor = -(-mirror_pool.min_gpu_slots // step_slots) * step_slots
+            # min_gpu_slots counts RESIDENTS; the arena floor counts cache
+            # slots, and under the mirror the head of the cache is the prefill
+            # buffer's, holding no resident. Omitting that term would let the
+            # shrink hand away slots coverage still needs.
+            from freetoken.moe.mirror_pool import prefill_buffer_slots
+
+            need = mirror_pool.min_gpu_slots + prefill_buffer_slots(moe.num_experts)
+            cov_floor = -(-need // step_slots) * step_slots
         floor = max(floor, cov_floor)
         pending_before = self._pending_graph_bs
         target_moe = old_moe
