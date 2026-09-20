@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Host RAM x decode curve for Nemotron-3.5-Lightning-30B-A3B-NVFP4.
+#
+# Capacity points, in mirror rows (5.36 MiB each, 2944 rows = the whole model):
+#   ~1700  the bottom stop: complement + reserve, no room for a single duplicate
+#    2100  near what auto-sizing picks
+#    2500  half the spare budget spent on duplicates
+#    2944  the whole model mirrored -- the most RAM this design can hold
+# The baseline (rows=0) pins the whole model AND keeps no pool, so it is not
+# the same as the 2944 arm.
+#
+# One arm at a time, each alone on the host; the RAM column is anonymous memory
+# (see measure.sh), never memory.current.
+set -u
+cd "$(dirname "$(readlink -f "$0")")/../.."
+
+run() {
+  local arm="$1" rows="$2"
+  echo "=============== $arm (rows=$rows) $(date +%H:%M:%S)"
+  for _ in $(seq 10); do
+    avail=$(awk '/MemAvailable/ {print int($2/1048576)}' /proc/meminfo)
+    [ "$avail" -ge 22 ] && break
+    sleep 20
+  done
+  FT_ROWS="$rows" timeout 1800 tasks/exclusive-expert-ram/measure.sh "$arm" 2>&1 | tail -26
+  systemctl --user reset-failed "ft-measure-$arm" 2>/dev/null
+  sleep 15
+}
+
+run nemotron-r-baseline 0
+run nemotron-r-1700     1700
+run nemotron-r-2100     2100
+run nemotron-r-2500     2500
+run nemotron-r-2944     2944
+echo "=============== nemotron sweep done $(date +%H:%M:%S)"

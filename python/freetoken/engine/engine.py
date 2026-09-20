@@ -1074,6 +1074,22 @@ class Engine:
                 # Coverage must hold before the first forward: fill the GPU cache
                 # and give the mirror the complement.
                 cache.mirror_warm_start()
+                # The pinned pool IS the host RAM this profile costs, and how
+                # much of it is duplicates is what decides the writeback rate,
+                # so both belong in the log rather than in a benchmark's notes.
+                _residents = cache.cache_size - cache._mirror_prefill_base()
+                _complement = max(mirror_pool.total - _residents, 0)
+                _dupes = max(mirror_pool.capacity - _complement
+                             - mirror_pool.reserve_rows, 0)
+                logger.info_rank0(
+                    "Mirror pool: %d rows pinned (%.2f GiB), %d cover the "
+                    "complement of %d GPU residents, %d reserved, up to %d "
+                    "duplicates (a duplicate makes its expert's next eviction "
+                    "free of any host traffic)",
+                    mirror_pool.capacity,
+                    getattr(mirror_pool, "pool_bytes", 0) / 2**30,
+                    _complement, _residents, mirror_pool.reserve_rows, _dupes,
+                )
             else:
                 cache.set_bank_sources(banks.sources, layer_residency=banks.layer_residency)
                 cache.set_alphas(banks.gate_up_alpha, banks.down_alpha)

@@ -1,56 +1,141 @@
-# Exclusive expert RAM (FREETOKEN_EXCLUSIVE_EXPERT_RAM=1) — engineering plan
+# Bounded host mirror for the NVFP4 expert cache — design
 
-Worktree: /tmp/freetoken-exclusive-swap-worktree. Geometry (verified from the checkpoint config):
-23 MoE layers × 128 experts = 2944 rows; row = 5,621,632 B = 5.36 MiB (5.62 MB); top-k 6.
-GPU arena 2175 slots at start, planned final 1552 at the 1M-token KV ceiling. Baseline profile: 20.2 GiB cgroup, 176 tok/s.
-Every server start below goes through `scripts/serve-default.sh` + `~/.config/freetoken/serve.env` (env var added there), never hand-typed flags; use a spare port (1920) and stop it before any torch pytest.
+Branch `exp/exclusive-expert-ram`, worktree
+`/home/lucas/ai/FreeToken-wt/exclusive-expert-ram`.
 
-## Part 1 — KV-growth crash: diagnosis and fix
+**The branch name is older than the design it now carries.** It started as
+"exclusive expert RAM", a disk-backed pool behind
+`FREETOKEN_EXCLUSIVE_EXPERT_RAM=1` in which a GPU miss could fall through to the
+checkpoint. That design is **REJECTED** — see "Rejected" at the bottom — and
+nothing in the tree implements it. What exists is a bounded pinned host mirror.
 
-1. **Instrument the live guard** — `engine.py::_grow_runtime_kv_arena` (~l.1560). Around `moe.set_usable_slots(target_moe)` log: `torch.cuda.mem_get_info()[0]` before/after, the int returned by `set_usable_slots` (bytes actually uncommitted), `memory_allocated/reserved`, and `old_moe, target_moe, capacity, floor`. Also log the expected delta `arena_bytes_for_usable(old_moe) - arena_bytes_for_usable(target_moe)`.
-   Run: `FREETOKEN_EXCLUSIVE_EXPERT_RAM=1 scripts/serve-default.sh` on :1920, then a 70K-token request; `grep -n "Growable-KV\|set_usable_slots" ~/.cache/freetoken/logs/ft_serve.log | tail`.
-   Expected: one of three signatures — (a) returned bytes ≈ 0.61 GiB and mem_get_info rises → guard math bug; (b) returned bytes ≈ 0.61 GiB and mem_get_info stays 0 → WSL2/WDDM reporting problem; (c) returned bytes 0 or no shrink → `target_moe >= old_moe` path never reached (then the log line "could not fund" would appear instead; it did not, so (c) is least likely).
-2. **Reconcile the standalone repro's +3.73 GiB** — same three numbers in the repro after `set_usable_slots(2064)`. 111 slots × 5.36 MiB = 0.58 GiB, so +3.73 GiB is 6× too large: either the repro measured `empty_cache()` of unrelated caching-allocator blocks, or each of the 6 bank ladders uses a whole-row byte count (`_alloc_arena_bank_cache` l.615 computes per-bank `row_bytes`, which looks right; confirm `sum(meta["row_bytes"])==5,621,632`). Expected: repro delta becomes 0.58 GiB once measured without `empty_cache`, which tells us the live 0.00 is not "unmap didn't happen".
-3. **Root-cause candidates, in order**: (i) on WSL2 `cudaMemGetInfo` free is the Windows-side adapter budget; at `FREETOKEN_MEMORY_RATIO=1.00` the tuner pushed the box to the edge with graphs+overlap ON, and exclusive mode has prefill activations (2.83 GiB allocated) resident at the growth boundary because prefill is synchronous and eager, so free stays pinned at 0 even after 0.58 GiB is unmapped (the driver reclaims lazily / the released pages back a Windows shared-memory deficit). (ii) `_invalidate_exclusive_slots` (called inside `_arena_shrink` BEFORE the unmap) does 111 synchronous O_DIRECT refills (~0.3 s) — harmless for memory but confirms victims are refilled eagerly (see Part 3). Discriminator for (i): in step 1 also log `nvidia-smi --query-gpu=memory.used,memory.total` at the same instant; if used drops by ~0.58 GiB while mem_get_info stays 0, it is (i).
-4. **Fix (independent of (i) vs (a))** — replace the mem_get_info-only guard with byte accounting, which the arena already provides exactly: `live_free = max(mem_get_info_free, live_free_before + released_bytes)`; keep mem_get_info as a logged advisory. `set_usable_slots` returns the exact bytes uncommitted and `commit_pages` maps the exact KV suffix, so this is sound; keep the existing rollback on `commit_pages` failure (VMM commit raises on real exhaustion). Also size the request as `extra_needed = desired_free - live_free_before` only when `live_free_before` is trustworthy; when it reads 0 with `memory_reserved > 0`, use `desired_free` (already the case) — no change.
-   Symbols: `engine.py::_grow_runtime_kv_arena`; unit test in `tests/engine/test_cache_budget.py` style (pure function) for the new guard arithmetic.
-   Run: `uv run --no-sync pytest -q tests/engine/test_cache_budget.py tests/scheduler` (server stopped). Expected: pass; then the 70K request on :1920 logs "Committed growable KV through 131072 tokens … MoE slots 2175 -> 2064" and completes.
-5. **Exclusive-mode arena floor** — `floor = num_experts` (128) with overlap off; at the 1M ceiling the plan needs 1552, fine. But `_plan_growable_kv` (engine.py:551) was validated with overlap/graphs of the default profile; re-run start and confirm the log line "planned final MoE cache" still says 1552 with the env var set. Expected: identical or larger.
-6. **Regression guard**: 70K, 200K and 600K-token requests in sequence on :1920 (`benchmarks/switchyard_soak` long-prompt fixtures), then `acceptance.sh R3` (KV growth, no tracebacks). Expected: each request answers; log shows monotone MoE slots 2175 → … ≥ 1552; no "refused an unsafe VMM commit".
+## Objective
 
-## Part 2 — Host pool capacity: derivation and default
+Serve the same models on less host RAM than the default profile's
+whole-model-in-RAM residency, at the highest decode throughput that costs
+buys — measured, on this tree, against a warm baseline taken the same day on
+the same port. Two models, neither optional:
 
-7. **Where 1392 comes from**: 2944 total rows − 1552 final GPU slots = 1392. It is the exclusivity bound: a row is either on GPU or in the host pool, so more than `L·E − moe_final` host slots can never be filled once KV has grown to the ceiling; at startup (2175 GPU slots) only 769 host slots are fillable. So 1392 is the *maximum useful* capacity, not an arbitrary example — but it is the "whole model resident somewhere, zero disk reads at steady state" point, i.e. the least RAM-saving choice.
-8. **Formula** (implement in `engine.py` where `ExclusiveExpertPool` is built, replacing the hard-coded `"1392"`):
-   `slots_max_useful = num_moe_layers*num_experts − final_moe_slots` (from `_plan_growable_kv`, 1392 here)
-   `slots_ram = floor((FREETOKEN_EXCLUSIVE_HOST_GB·2^30 − fixed_footprint) / row_bytes)`, fixed_footprint measured 6.35 GiB
-   `slots_min = 2·num_experts` (256: one layer in flight during `materialize_layer` plus one layer of decode misses)
-   `capacity = clamp(slots_ram, slots_min, slots_max_useful)`; env `FREETOKEN_EXCLUSIVE_HOST_SLOTS` overrides directly.
-   Resulting cgroup ≈ 6.35 GiB + capacity × 5.36 MiB (+ ~0.5 GiB pinned-page and mmap scratch); at 1392 → ~13.6 GiB (measured 13.64, consistent).
-9. **Measured default**: sweep capacity ∈ {256, 512, 768, 1024, 1392} with the same 3-prompt set (short, 8K, 70K) after a warm start; record host-pool hit rate (add counters `pool_hits/pool_misses` in `exclusive_pool.refill`, exposed via `/v1/stats`), decode tok/s, cgroup `memory.current`. Command per point: `FREETOKEN_EXCLUSIVE_HOST_SLOTS=N scripts/serve-default.sh` (port 1920), `benchmarks/switchyard_soak` decode probe, `cat /sys/fs/cgroup/system.slice/freetoken-serve.service/memory.current`. Expected: hit rate rises steeply until the pool covers the decode working set (roughly 23 layers × ~20 hot experts ≈ 500–700 rows) then flattens; choose the knee. Ship default = knee (expect 768 → ~10.4 GiB cgroup, ~9.8 GiB saved vs baseline); document 1392 as "max useful" and the formula in `docs/nemotron.md`.
+| | Nemotron-3.5-Lightning-30B-A3B-NVFP4 | Ornith-1.5-35B-A3B-NVFP4 |
+|---|---|---|
+| model_type | `nemotron_h` | `qwen3_5_moe` |
+| MoE layers x experts | 23 x 128 = 2944 rows | 40 x 256 = 10240 rows |
+| experts | ungated (relu2) | gated (silu, gate\|up fused) |
+| expert row | 5.36 MiB | ~1.67 MiB |
+| expert banks | 15.41 GiB | ~16.7 GiB |
+| context | 1M | 256K |
 
-## Part 3 — Decode performance, ranked (current ~25 tok/s; disk 2.6 ms/row, H2D 0.12 ms)
+## What it is
 
-10. **Stop refilling victims eagerly** (effort: S, expected 1.5–2×). `copy_missing_exclusive` and `_invalidate_exclusive_slots` call `_restore_exclusive_ids` for every evicted GPU expert: a synchronous 2.6 ms disk read per victim on the decode critical path, doubling disk traffic. Victims are the GPU's LRU/LFU-coldest rows; reading them on demand at the next miss costs the same 2.6 ms only if they are ever needed. Make restore lazy: drop the row from `gpu_ids` and leave `host_slot_of_id=-1`; optionally enqueue the victim id on a background refill queue that only fills *free* host slots (never evicts an LRU owner). Keep the "no GPU→host copy" invariant.
-11. **Batch per-step I/O** (S–M, 1.3–1.5×). In `copy_missing_exclusive` the loop does refill→upload→`wait_upload` per expert. Instead: refill all n misses (disk), issue all n H2D copies on the pool stream, one event wait, then publish maps. Requires n ≤ free host slots (guaranteed when capacity ≥ 2E, step 8).
-12. **Next-layer prefetch thread** (M, 1.5–2× on top). After routing for layer ℓ is known, the miss set for ℓ+1 is not — but the top-k for layer ℓ+1 can be predicted from the previous token's routing (temporal locality is what makes the GPU hit rate 94.7%). A background thread refills the host pool with the previous step's layer ℓ+1 ids that are not in `gpu_ids ∪ host` while layer ℓ's GEMM runs; host hit on the real miss then costs 0.12 ms instead of 2.6 ms. Needs a lock around `id_of_host_slot`/`_last_use` (currently plain Python lists, single-caller assumption in the docstring).
-13. **Async disk with io_uring / preadv on a thread pool** (M). O_DIRECT reads at 3.8 GB/s are latency-bound per row; 6 rows in parallel from a thread pool hides most of it. Combine with 11.
-14. **O(1) host-slot allocation** (S). `refill` scans `id_of_host_slot` and `_last_use` linearly (2 × 1392 Python iterations per row); keep a free-list plus an `OrderedDict` LRU.
-15. **Graphs / staging** (L; only after 10–13). The eager decision is right today: a captured decode graph cannot inject a synchronous disk read. A viable later design is the existing two-phase shape: run `ensure_experts` eagerly outside the graph for all 23 layers using the *previous* step's routing prediction, do the host→GPU staging into slots ≥ the arena floor, then replay a captured graph whose expert lookups hit; on a real miss (predicted wrong), fall back to eager for that step. Expect ~2× on the non-MoE part only; not worth it before the disk path is <20% of step time. Prefill overlap stays off: `_begin_exclusive_plan` requires a single pending plan and the double buffer would need two.
+The default profile pins every expert bank in host RAM, so a GPU cache miss is
+a plain H2D. That is fast and costs the whole model in RAM. The mirror keeps a
+**bounded pinned pool** holding only what the GPU does not, plus slack.
 
-## Part 4 — Correctness review notes (fold into the same worktree)
+**The coverage invariant is the whole design:**
 
-16. **Victim identity (old − final set difference)** is sound only because `_begin_exclusive_plan` raises on a second plan, all ops are eager on one stream, and each `ensure_experts`/`materialize_layer` is followed by exactly one `copy_missing`. Add an assert in `copy_missing_exclusive` that `len(old) == cache_size` and that every planned expert's slot in `evict_slots` is either -1 or a victim; add a test with a same-layer `materialize_layer` that relocates slots above E.
-17. **Partial-failure hole**: if a refill raises mid-loop, that expert's `slot_for_id` is already -1 but the kernel has already rewritten `expert_ids` to that slot, so the GEMM reads stale bytes silently. Fix: catch, restore the old owner bookkeeping is impossible (bytes overwritten) — so raise a hard engine error for this request and `reset()`; document it. `refill` retry loop itself is correct (block-aligned re-reads, stall detection); the F32→F16 scalar path matches the loader but `torch.frombuffer` on an unaligned 4-byte slice is UB-adjacent — copy the 4 bytes via `struct.unpack("<f")` and `torch.tensor(..., dtype=float16)` instead.
-18. **`_invalidate_exclusive_slots` inside `_arena_shrink`** runs disk I/O before `torch.cuda.synchronize` — order is fine (host-only), but with step 10 it becomes a pure bookkeeping op; keep the "raise if a plan is pending" guard.
-19. **Env-var default** in `engine.py` (`"1392"`) becomes the computed formula of step 8; the `ExpertBanks` meta tensors keep `bank_sources` non-DMA (the early return at offload_cache.py:872 depends on it — add a comment).
+    for every expert id:  on_gpu(id)  OR  in_pool(id)
 
-## Part 5 — Final validation checklist (server on :1919 via the system unit, env var in serve.env)
+It is what makes a GPU miss a plain H2D and never a disk read, which is what
+keeps decode CUDA graphs capturable. Every sizing rule below is derived from
+it, and every failure mode is a way of breaking it.
 
-20. `sudo systemctl show -p LimitMEMLOCK freetoken-serve` → infinity; log has no "settled pageable"; `acceptance.sh R6` passes (pool banks are pinned).
-21. Long context: 70K, 200K, 600K-token prompts complete; `acceptance.sh R3` passes (KV growth, no tracebacks, no graph captures expected in exclusive mode — R3's "one capture" line must be read as "zero" here; note it in the results file).
-22. Memory: `memory.current` of the unit at idle and after the 600K request, versus 20.2 GiB baseline; report the delta and confirm ≤ formula from step 8 + 0.5 GiB.
-23. Decode: 127-token stream tok/s and TTFT before/after steps 10–14, in `benchmarks/results/nemotron35_lightning_5080_exclusive_<date>.md`; state the accepted trade explicitly.
-24. Outputs: same-seed greedy outputs for 3 prompts equal to the baseline profile (already verified for short prompts; repeat for 70K).
-25. Tests with the model unloaded: `uv run --no-sync pytest -q tests/scheduler tests/engine/test_cache_budget.py tests/moe/test_exclusive_pool.py` (move the mini-checkpoint pytest into the tree).
-26. Merge to main only after 20–25 pass; restart the unit; keep `scripts/serve-default.sh` comments truthful (exclusive stays opt-in; baseline profile unchanged).
+* `MirrorExpertPool` (`moe/mirror_pool.py`) owns the pinned rows and reads the
+  checkpoint with O_DIRECT at load and at host boundaries only — never on a
+  decode step.
+* The residency maps live on the device; the Triton swap kernel
+  (`moe/mirror_kernels.py`) turns each step's misses into H2D admissions, D2H
+  writebacks for victims with no pool row, and D2D relocations for experts that
+  are already resident in another slot.
+* Rows are located through the model's own `Nvfp4ExpertSourceSpec`
+  (`models/nvfp4_banks.py`, exported per model as `NVFP4_EXPERT_SOURCE_SPEC`),
+  so the pool has no key format, layer-type list or gating assumption of its
+  own. A model that has not published a spec is **refused**, not guessed at.
+
+## Sizing, all derived from coverage
+
+* `plan_capacity(L, E, final_gpu_slots)` = `L*E - final_gpu_slots + reserve`.
+  Sized for the KV **ceiling**, where the GPU cache is smallest and the host
+  side must be largest: growing a pinned pool later costs ~762 ms/GiB.
+* `default_reserve_rows(E)` = `3 * E`. One layer so a writeback always has a
+  landing row the same step's upload is not reading, one for staging, and one
+  of decode-burst slack (measured: 4401 starved writebacks with only two).
+  The planner and the pool must agree on this number, because the arena floor
+  is priced against it.
+* `min_gpu_slots` = `total - capacity + reserve`, i.e. the GPU residents
+  coverage needs. A saturated pool (`capacity >= total`) is exempt. The KV
+  arena may not shrink the expert cache below it; `_grow_runtime_kv_arena`
+  folds it into the floor **before** the shrink, and adds the buffer region
+  below, because `min_gpu_slots` counts residents while the floor counts slots.
+* `prefill_buffer_slots(E)` = `2 * E`: the head of the cache, which the prefill
+  double buffer owns outright under the mirror. See below.
+
+## Slot regions under the mirror
+
+    [0, 2E)            prefill double buffer -- prefill's alone
+    [2E, cache_size)   decode LRU residents
+
+The baseline lets decode use the buffer slots between prefills, which is safe
+only because it holds the whole model in host RAM. Here, evicting an occupant
+to make room for a prefill layer would drop an expert's only copy.
+
+Keeping decode out is **not** a matter of marking those slots unattractive.
+Under LFU the victim search ranks by owner frequency first and only breaks ties
+with usage, and an empty slot loads `other=-1` — the minimum possible — so a
+permanently empty region wins every admission. The floor is therefore a victim
+**candidate mask**, carried in a third element of the device-resident bounds
+tensor so it survives a CUDA graph capture.
+
+## Prefill
+
+Prefill runs through the overlap double buffer and reads **no checkpoint bytes
+at all**. Coverage is exactly the statement that this is possible: each of a
+layer's experts is either a decode resident — gathered slot -> buffer D2D, no
+PCIe — or has a pool row, copied host -> buffer H2D. One
+`fast_index_copy_multi_jit` launch each, on the copy stream
+(`_prefetch_split_mirror`).
+
+The alternative, `materialize_layer`, reinstalls the layer into the LRU slots
+and invalidates every other resident. That empties the mirror and forces a full
+coverage rebuild from disk at every prefill->decode transition. Measured, that
+is 19.3 GiB per request and 8.0 s of TTFT on an 8K prompt whose baseline
+prefill takes 0.34 s. It is the single largest thing that was wrong here.
+
+## Hard requirements
+
+* **`FREETOKEN_EXPERT_ARENA=1`.** Only the gated `_v2` admission kernel
+  publishes `victim_ids`/`prior_ids`, and the swap kernel needs the displaced
+  expert's identity to know whether its bytes still exist. On the ungated
+  kernel every writeback is skipped and coverage is lost with the fault
+  counters still reading zero. `attach_mirror_pool` refuses.
+* Native NVFP4 experts, the triton backend, single-rank GPU offload, no CPU or
+  pageable routing.
+* A published `NVFP4_EXPERT_SOURCE_SPEC` for the model, agreeing with the
+  config about gating.
+
+## How a failure shows up
+
+`resolve_swaps` cannot raise from inside a Triton kernel, so it counts:
+`violations` (admission with no host copy) and `starved` (a writeback with no
+free row). `mirror_fault_check()` turns either into a `RuntimeError` at the
+scheduler's batch boundary — output past that point is wrong, not merely slow.
+
+The counters are a **backstop for the sizing, not a detector**: a stale
+free-row publish once served wrong experts with `violations` still at 0 (see
+`_mirror_publish_free_rows`). Correct sizing is what keeps coverage, so every
+capacity change must also be checked against long-context output, not counters.
+
+## Rejected
+
+**Disk-backed exclusive pool** (`FREETOKEN_EXCLUSIVE_EXPERT_RAM`,
+`ExclusiveExpertPool`, the original `plan.md`). A GPU miss could fall through
+to the checkpoint, which puts an O_DIRECT read on the decode path. That breaks
+CUDA graphs — a replay runs no host code — so decode would have had to go
+eager. The bounded mirror gives the same RAM lever with the disk contact moved
+to load and host boundaries, and graphs stay on. No code for it remains.
+
+## Where the numbers are
+
+`tasks/exclusive-expert-ram/results/sweep.tsv`, one row per arm, produced by
+`tasks/exclusive-expert-ram/measure.sh` (one arm at a time, alone on the host,
+warmed before measuring, on a spare port — never :1919). `STATUS.md` reads the
+curve.

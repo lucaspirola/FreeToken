@@ -1,0 +1,4 @@
+# Per-arm env files: they are a copy of the host's serve.env with the sweep's
+# own knobs substituted, so they are reproducible from measure.sh and would
+# otherwise commit whatever the host happened to have in its environment.
+results/*.env
