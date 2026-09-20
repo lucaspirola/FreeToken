@@ -1090,6 +1090,37 @@ class Engine:
                     getattr(mirror_pool, "pool_bytes", 0) / 2**30,
                     _complement, _residents, mirror_pool.reserve_rows, _dupes,
                 )
+                # How much of the expert arena the growable KV may still take.
+                # The coverage floor is the mirror's, so a pool too small for
+                # the configured context ceiling shows up HERE -- at startup,
+                # in slots and GiB -- instead of 30 s into the request that
+                # cannot be funded. Measured on Nemotron at 1700 rows: floor
+                # 1888 against a 1923-slot arena, i.e. 35 slots = 0.18 GiB of
+                # slack, and an 80K prompt needs 0.46 GiB. That server died
+                # mid-request with "growable KV refused an unsafe VMM commit"
+                # and could not be restarted.
+                try:
+                    from freetoken.moe.mirror_pool import prefill_buffer_slots
+
+                    _step = max(int(getattr(cache, "arena_step_slots", 0) or 1), 1)
+                    _need = (mirror_pool.min_gpu_slots
+                             + prefill_buffer_slots(cache.num_experts))
+                    _cov_floor = -(-_need // _step) * _step
+                    _slack = cache.cache_size - _cov_floor
+                    _row = getattr(cache, "bank_row_bytes", 0) or 0
+                    logger.info_rank0(
+                        "Mirror pool: the coverage floor is %d of %d arena "
+                        "slots, leaving %d slots (%.2f GiB) the growable KV "
+                        "may still take%s",
+                        _cov_floor, cache.cache_size, _slack,
+                        max(_slack, 0) * _row / 2**30,
+                        "" if _slack > 0 else
+                        " -- the arena is AT its floor, so KV cannot grow at "
+                        "all: raise --moe-mirror-host-rows",
+                    )
+                except Exception:             # diagnosis must never fail a load
+                    logger.debug_rank0("mirror arena-slack log skipped",
+                                       exc_info=True)
             else:
                 cache.set_bank_sources(banks.sources, layer_residency=banks.layer_residency)
                 cache.set_alphas(banks.gate_up_alpha, banks.down_alpha)
@@ -1832,9 +1863,24 @@ class Engine:
                         mem_GB(required_free), mem_GB(live_free),
                     )
                 if live_free < required_free:
+                    # Say WHY there is nothing left to release. When a mirror
+                    # is attached and the arena has been driven onto its floor,
+                    # the binding constraint is the pool's coverage floor, not
+                    # VRAM -- and the fix is a bigger pool, which this message
+                    # is the only place the operator will hear about.
+                    at_floor = mirror_pool is not None and target_moe <= floor
+                    hint = (
+                        f" (expert arena is at its coverage floor of {floor} "
+                        f"slots for a {mirror_pool.capacity}-row mirror; it "
+                        f"released {mem_GB(released_bytes)} and has no more to "
+                        f"give: raise --moe-mirror-host-rows, or serve a "
+                        f"shorter context)"
+                        if at_floor else ""
+                    )
                     raise RuntimeError(
                         "growable KV refused an unsafe VMM commit: "
-                        f"need {mem_GB(required_free)} free, have {mem_GB(live_free)}"
+                        f"need {mem_GB(required_free)} free, have "
+                        f"{mem_GB(live_free)}{hint}"
                     )
             pool.commit_pages(target_pages)
             if self.config.tp_info.size > 1:

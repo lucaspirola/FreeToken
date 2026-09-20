@@ -36,6 +36,15 @@ def _methods(*names: str):
                 synchronize=lambda *_: None,
                 memory_allocated=lambda *_: 0,
                 memory_reserved=lambda *_: 0,
+                # Advisory only: the arena branch logs the driver's own free
+                # reading beside its byte ledger (on this WSL2 host the driver
+                # can report 0 while the VMM unmaps are real, which is why the
+                # ledger is what the decision uses). It was added to
+                # _grow_runtime_kv_arena on this branch without being added
+                # here, and the two arena tests have been failing ever since --
+                # they pass on main. Silent, because nothing in the sweep runs
+                # tests/engine.
+                mem_get_info=lambda *_: (0, 0),
             )
         ),
         # Module-level helper (not a class method, so the ClassDef-only extraction
