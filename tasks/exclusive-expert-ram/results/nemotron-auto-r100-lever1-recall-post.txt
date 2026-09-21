@@ -1,0 +1,7 @@
+{"target": 21000, "prompt_tokens": 19757, "seconds": 2.8, "planted": ["ZULU-2188", "ROMEO-6864", "KILO-3647"], "recalled": ["ZULU-2188"], "all_three": false, "answer": "I need to find the authorization codes in the text. The user mentioned that the authorization code for this section is ZULU-2188, but I need to find all authorization codes that appear in the text, in"}
+{"target": 120000, "prompt_tokens": 112048, "seconds": 16.2, "planted": ["ROMEO-1813", "TANGO-6789", "ZULU-5364"], "recalled": ["ROMEO-1813", "TANGO-6789", "ZULU-5364"], "all_three": true, "answer": "ROMEO-1813, TANGO-6789, ZULU-5364"}
+{"target": 240000, "prompt_tokens": 224417, "seconds": 49.4, "planted": ["SIERRA-6523", "SIERRA-1067", "ROMEO-9011"], "recalled": ["SIERRA-6523", "SIERRA-1067", "ROMEO-9011"], "all_three": true, "answer": "SIERRA-6523, SIERRA-1067, ROMEO-9011"}
+--- needles ---
+[21000 -> 19927 tok] 5/7  codes=ok multihop=FAIL counting=FAIL ordering=ok contradiction=ok arithmetic=ok negative=ok
+[120000 -> 112298 tok] 3/7  codes=ok multihop=FAIL counting=FAIL ordering=FAIL contradiction=ok arithmetic=FAIL negative=ok
+wrote tasks/exclusive-expert-ram/results/nemotron-lever1-needles.json

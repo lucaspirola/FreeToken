@@ -831,10 +831,13 @@ class Engine:
             # have to come from the host banks. Coverage says every expert is a
             # GPU resident or has a pool row, so the buffer is assembled from
             # those two places with no disk at all
-            # (OffloadMoeCache._prefetch_split_mirror). What the mirror does
-            # need is the buffer region to itself, which costs
-            # prefill_buffer_slots(num_experts) decode slots and is priced into
-            # _mirror_final_gpu_slots and the arena's coverage floor.
+            # (OffloadMoeCache._prefetch_split_mirror). The buffer region no
+            # longer needs to be exclusive to prefill either -- a decode
+            # resident there is written back before a fill overwrites it
+            # (_invalidate_prefill_buffer) -- so only the pool-capacity
+            # estimate in _mirror_final_gpu_slots still prices
+            # prefill_buffer_slots(num_experts) as unavailable to decode; the
+            # arena's coverage floor no longer does.
             # Graphs stay ON. The graphs-mode corruption is not a race: a
             # pure replay never runs host code, so the prefill->decode boundary
             # warm start (host + disk, in ensure_experts) could never fire
@@ -1077,7 +1080,10 @@ class Engine:
                 # The pinned pool IS the host RAM this profile costs, and how
                 # much of it is duplicates is what decides the writeback rate,
                 # so both belong in the log rather than in a benchmark's notes.
-                _residents = cache.cache_size - cache._mirror_prefill_base()
+                # mirror_warm_start seats residents from slot 0 now (the
+                # buffer region is no longer excluded), so every arena slot
+                # counts as a resident here.
+                _residents = cache.cache_size
                 _complement = max(mirror_pool.total - _residents, 0)
                 _dupes = max(mirror_pool.capacity - _complement
                              - mirror_pool.reserve_rows, 0)
@@ -1109,12 +1115,15 @@ class Engine:
                 # count repeats the list and then raises on the division.
                 # ``arena_layout`` is the public accessor for the pair.
                 try:
-                    from freetoken.moe.mirror_pool import prefill_buffer_slots
-
                     _layout = cache.arena_layout
                     _step = max(int(_layout[1]) if _layout else 1, 1)
-                    _need = (mirror_pool.min_gpu_slots
-                             + prefill_buffer_slots(cache.num_experts))
+                    # No prefill_buffer_slots term: the double buffer's slots
+                    # are candidates for decode residents now (a resident
+                    # there is written back before a prefill fill overwrites
+                    # it), so they no longer need to be priced out of the
+                    # floor as dead space. Measured on Nemotron: this drops
+                    # the floor by 256 of 2173 arena slots.
+                    _need = mirror_pool.min_gpu_slots
                     _cov_floor = -(-_need // _step) * _step
                     _slack = cache.cache_size - _cov_floor
                     _row = sum(cache.bank_row_bytes or ())
@@ -1773,13 +1782,13 @@ class Engine:
         mirror_pool = getattr(self, "_mirror_pool_ref", None)
         cov_floor = 0
         if mirror_pool is not None:
-            # min_gpu_slots counts RESIDENTS; the arena floor counts cache
-            # slots, and under the mirror the head of the cache is the prefill
-            # buffer's, holding no resident. Omitting that term would let the
-            # shrink hand away slots coverage still needs.
-            from freetoken.moe.mirror_pool import prefill_buffer_slots
-
-            need = mirror_pool.min_gpu_slots + prefill_buffer_slots(moe.num_experts)
+            # No prefill_buffer_slots term: those slots are candidates for
+            # decode residents now (_invalidate_prefill_buffer writes one
+            # back before a prefill fill overwrites it), so they are no
+            # longer dead space the floor must additionally protect --
+            # min_gpu_slots alone already counts every resident the pool's
+            # capacity guarantees coverage for.
+            need = mirror_pool.min_gpu_slots
             cov_floor = -(-need // step_slots) * step_slots
         floor = max(floor, cov_floor)
         pending_before = self._pending_graph_bs

@@ -1,4 +1,4 @@
-# Bounded expert mirror — status 2026-09-22
+# Bounded expert mirror — status 2026-09-22 (lever 1 landed)
 
 Supersedes the 2026-09-18 status entirely. That document's two headline claims
 are both contradicted by measurement in this tree:
@@ -113,6 +113,111 @@ start, not a pool effect — it appears equally in the arm that has no pool. Pas
 2 is the TTFT of record for this reason. Phase 3 (1M) exercises KV growth
 properly and will say whether anything else hides in it.
 
+## Lever 1 — decode gets the whole arena, and the buffer pays nothing for it
+
+Under the pool, decode ran on 1917 of 2173 arena slots: the prefill double
+buffer kept the first 2*E = 256 for itself, fenced off by a victim floor
+(`e2ac473`). The whole-model baseline shares those slots freely, because with
+every expert in RAM overwriting a slot loses nothing. That missing 12% of
+residents was the largest measured cause of the decode gap.
+
+The floor is gone. `_invalidate_prefill_buffer` now writes a buffer half's
+occupants back to the pool before the fill overwrites them
+(`mirror_kernels.writeback_buffer_occupants`, one launch per half), and
+`mirror_warm_start` seats residents from slot 0. The coverage invariant
+`on_gpu(id) OR in_pool(id)` is unchanged: a retained duplicate is a free
+eviction, a sole copy is written into a free-stack row exactly as a decode
+victim would be, and reserve exhaustion increments the same `starved` counter
+rather than dropping an expert.
+
+That alone cost TTFT: 0.68 -> 1.47 s at 8K (+116%), because every prefill then
+evicted the 256 decode residents sitting in the half it was about to use, and
+each sole copy paid a 5.36 MiB writeback. The cause was visible in the record
+rather than guessed: pass-1 TTFT was unchanged (0.19 -> 0.25 s) and only pass 2
+regressed, and pass 1 runs on a fresh server whose buffer slots are still
+EMPTY. So the fix targets exactly that: **an admission landing in the buffer
+region always retains its source pool row** (one condition in
+`_resolve_swaps_kernel`), making every occupant a duplicate by construction, so
+invalidation is pure free eviction with no PCIe transfer. It cannot starve the
+reserve, because it only withholds a push onto the free stack.
+
+Conditions as always: GPU empty, ratio 1.00, thinking OFF, decode and TTFT from
+probe pass 2, port 1920, 2026-09-22. Four baselines bracket the sweep.
+
+| arm | host RAM | decode 8K/32K/80K | TTFT 8K/32K/80K | free evict |
+|---|---|---|---|---|
+| baseline, whole model (x4) | 18.22-18.37 | ~194 / ~190 / ~179 | 0.64 / 2.86 / 9.46 | — |
+| auto pool (Phase 0) | 12.90 | 164.9 / 160.3 / 152.3 | 0.68 / 3.01 / 9.68 | 28.4% |
+| + lever 1 | 12.86 | 171.7 / 169.5 / 162.5 | 1.47 / 4.79 / 10.18 | 64.9% |
+| **+ forced retention** | 12.86-13.46 | **177.0 / 175.9 / 162.8** | **0.66 / 3.00 / 9.66** | **95.4%** |
+
+**The decode gap to the whole model is 15-16% -> 7-9%**, TTFT is inside the
++-5% gate (and better than the Phase 0 auto arm), residents are 2173 of 2173,
+and the coverage floor fell 1696 -> 1440 slots, handing the growable KV 1.34
+GiB more headroom (2.50 -> 3.84 GiB) -- which is what Phase 3's 1M proof needs.
+0 coverage faults, 0 starved, one graph capture, no coverage-lost errors.
+
+**Lever 1 also delivered most of lever 2.** Free evictions went 28.4% -> 64.9%
+from the write-back alone (it CREATES a RAM copy for experts that had none),
+then -> 95.4% with forced retention. Lever 2's own target was >50%, and only
+4.6% of evictions still pay a writeback, so teaching the LFU victim search to
+read `pool_row_of_id` must be re-priced against this arm before it is built.
+
+### Correctness: the pool serves the same model, byte for byte
+
+Counters are not evidence (a stale free-row publish once served the WRONG
+experts at 0 faults). Both arms ran `recall.py` at 21K/120K/240K and the
+seven-type battery at 21K/120K, same settings, same seeds:
+
+* recall: **3 of 3 codes at every size on both arms**, `finish_reason` stop,
+  27 completion tokens -- no truncation.
+* battery: **14 of 14 answers byte-identical** between the bounded pool and the
+  whole model in RAM at temperature 0, including the two wrong ones.
+
+So both arms score 5/7 at 21K and 3/7 at 120K, and neither failure is the
+pool's: `counting` is answered 5 and 4 against a true 7 by BOTH arms (the
+model's own limit at length), and every other miss is `finish_reason=length` --
+the server's `--max-output-tokens 16384` clipping a thinking answer that had
+already found the fact. The multi-hop question emitted 125119 characters of
+reasoning without reaching an answer. Phase 7 raises that cap; the battery is
+re-run once at the raised cap rather than twice.
+
+### Two measurement artefacts, recorded rather than averaged away
+
+* **A one-off growable-KV commit can contaminate a probe pass.** Arm `lever1b`
+  reported TTFT 3.94 s at 8K while its 32K/80K were clean; the journal shows
+  `Committed growable KV through 131072 tokens; MoE slots 2173 -> 2056` landing
+  inside that window -- the same pathology behind the old 46.4 tok/s outlier.
+  Two passes reduce but do not eliminate it. A contaminated number is repeated,
+  never averaged: `lever1c` is the number of record.
+* **Host RAM varies ~0.56 GiB between identical arms** (`lever1b` 12.90 vs
+  `lever1c` 13.46, same code), more than the ~0.2 GiB previously claimed.
+  Report it as a range across repeats.
+
+### Prefill once, ask many: only below the resting KV size
+
+The plan's evaluation strategy assumes a long haystack is prefilled once and
+every question then hits the radix prefix cache. That holds only up to
+`--kv-grow-step-tokens`. On every request completion the scheduler shrinks the
+growable KV back to exactly one grow step (`scheduler.py:2271`,
+`initial = min(cm.num_pages, step)`) and gets there by calling the radix tree's
+real LRU eviction (`scheduler.py:2344, 2473-2489`) before decommitting.
+Measured: `cached_tokens` 19840 at a 19927-token haystack (under the 65536
+floor) and **0** at 112298 (above it), ~17 s of re-prefill per question.
+
+`--pin-prefix-max-tokens` does NOT fix this and did nothing at all here:
+pinning is gated on `pinning_enabled = is_hybrid and pin_prefix_min_tokens > 0`
+(`scheduler/cache.py:579-581`) with `is_hybrid = (type == "hybrid_radix")`
+(`cache.py:93`), and this model resolves to `cache_type='radix'`. Even under a
+hybrid cache the auto-pin only fires for a prefix shared by two session keys,
+never one session repeating its own haystack.
+
+Each commit/release cycle also swings the expert arena (MoE slots 2088 <-> 2048
+per question) and invalidates the shrunk slots (`offload_cache.py:1281-1283`),
+so they return cold -- churn on top of the re-prefill. Needle and recall arms
+must therefore set `--kv-grow-step-tokens` at least as large as the biggest
+haystack, and any per-question timing taken without that is prefill-bound.
+
 ## Superseded: measured 2026-09-21 at ratio 0.91, on a SHARED GPU
 
 **Every decode number in this section is void.** The piro-board embedder held
@@ -176,10 +281,9 @@ Work is tracked as the phases of `~/.claude/plans/steady-baking-bird.md`
 (levers 1-4, 1M, Ornith across three KV lanes, long generation, needles).
 Phase 0 is done and is the section above.
 
-* **Lever 1** — decode runs on 1667 of 2173 arena slots because the prefill
-  double buffer keeps the first 2*E = 256 for itself; give them back.
-* **Lever 2** — ~71% of evictions still pay a VRAM->RAM writeback because
-  victim selection cannot see whether the victim already has a RAM copy.
+* **Lever 2** — RE-PRICE FIRST. Its premise was that ~70% of evictions pay a
+  writeback; after lever 1 only 4.6% do, past lever 2's own >50% target. Decide
+  against the lever-1 arm rather than building to a stale number.
 * **Lever 4** — the pool reserve is 384 experts (3*E, 2.0 GiB), sized before
   retention existed; sweep 3E/2E/E.
 * Ornith-1.5-35B-A3B-NVFP4: the same curve, on the same harness

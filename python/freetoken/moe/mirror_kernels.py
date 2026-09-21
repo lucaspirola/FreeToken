@@ -37,6 +37,14 @@ Three hazards, all found by measurement
    wasted transfer. The kernel now emits a descriptor only for slots whose
    current owner differs from the expert being installed, which is why
    ``h2d_src``/``h2d_dst`` are compacted with their own count.
+
+``writeback_buffer_occupants`` is the same writeback decision (retained
+duplicate needs no copy, sole copy pops the free stack) applied to the
+prefill double buffer's own slots instead of a decode admission's. It shares
+the free stack and the fault counters with ``_resolve_swaps_kernel`` above,
+but nothing is being admitted, so there is no retention choice and no
+``freed_rows`` staging: a vacated slot is simply empty until decode or the
+next prefill fill claims it.
 """
 from __future__ import annotations
 
@@ -51,6 +59,12 @@ def resolve_swaps(cache, layer_id: int) -> None:
     # Rows the free stack must keep for this launch's writebacks; retention
     # stops above it. See the kernel's `retain_floor`.
     retain_floor = cache._mirror_pool.reserve_rows
+    # Slots below this are the prefill double buffer's own region: an
+    # admission landing there is forced to retain its source row (see
+    # `buffer_slots` in the kernel) so that region's own eviction, in
+    # `_writeback_buffer_kernel`, is always free. 0 when there is no mirror
+    # overlap buffer, which makes the forced-retention branch unreachable.
+    buffer_slots = cache._mirror_prefill_base()
     _resolve_swaps_kernel[(1,)](
         cache.src_indices,
         cache.evict_slots,
@@ -77,6 +91,7 @@ def resolve_swaps(cache, layer_id: int) -> None:
         layer_id,
         cache.num_experts,
         retain_floor,
+        buffer_slots,
         BLOCK=triton.next_power_of_2(max(plan, 1)),
     )
 
@@ -93,7 +108,7 @@ def publish_freed_rows(cache) -> None:
     )
 
 
-@triton.jit(do_not_specialize=["layer_id", "num_experts", "retain_floor"])
+@triton.jit(do_not_specialize=["layer_id", "num_experts", "retain_floor", "buffer_slots"])
 def _resolve_swaps_kernel(
     src_indices_ptr,      # int32 [plan]  layer-local expert id of each miss
     evict_slots_ptr,      # int32 [plan]  GPU slot each miss lands in
@@ -121,6 +136,8 @@ def _resolve_swaps_kernel(
     layer_id,
     num_experts,
     retain_floor,         # keep this many rows free; retain duplicates above it
+    buffer_slots,         # slots < this are the prefill buffer region; an
+                          # admission there always retains (see below)
     BLOCK: tl.constexpr,
 ):
     """One program: the miss count is <= top_k * batch (decode) or num_experts
@@ -227,7 +244,24 @@ def _resolve_swaps_kernel(
                 # must stop while the stack can still absorb this launch's
                 # writebacks: `retain_floor` is the pool's reserve, which is
                 # three layers' worth and bounds `plan` by construction.
-                if free_top > retain_floor:
+                #
+                # Below `buffer_slots`, retention is not optional: a slot
+                # there is the prefill double buffer's, and MEASURED (Phase
+                # 1 lever 1 record) freeing this row anyway made every
+                # buffer-region eviction pay a 5.36 MiB D2H on the very next
+                # prefill that reuses this half -- TTFT at 8K went from 0.68s
+                # to 1.47s, all of it in pass 2 (after decode has populated
+                # the buffer), none in pass 1 (still empty). Forcing
+                # retention here means `_writeback_buffer_kernel` always
+                # finds a duplicate and takes its free-evict branch instead.
+                # This never competes with `retain_floor` for a scarce
+                # resource -- it only WITHHOLDS a push onto the free stack,
+                # which is always possible -- so it cannot itself starve;
+                # what it can do is make the free stack drain faster for
+                # everyone else, which is exactly what the existing
+                # `starved` counter on the victim-writeback branch above
+                # already watches for.
+                if slot < buffer_slots or free_top > retain_floor:
                     retained += 1
                 else:
                     # At the floor: the admission's old row falls free --
@@ -265,4 +299,142 @@ def _publish_freed_kernel(
         tl.store(free_rows_ptr + top, tl.load(freed_rows_ptr + i))
         top += 1
     tl.store(free_count_ptr, top)
+    # Clearing the staging is not optional: publish is idempotent ONLY because
+    # of this line. Without it a publish that is not preceded by a resolve
+    # republishes the previous step's freed rows, putting the same pool row on
+    # the free stack twice -- two experts would then own one row and the model
+    # would serve the wrong weights with every fault counter still at zero.
     tl.store(n_freed_ptr, 0)
+
+
+def writeback_buffer_occupants(cache, slot_start: int, count: int) -> None:
+    """Write back a prefill buffer half's current occupants (device-side).
+
+    Decode is no longer fenced out of the buffer region (the victim floor
+    that did that is gone -- see ``_sync_layer_slot_bounds``), so a slot here
+    may hold a real decode resident instead of the permanent empty the buffer
+    used to guarantee. Called from ``_invalidate_prefill_buffer`` right before
+    the fill overwrites these slots' bytes: a retained duplicate
+    (``pool_row_of_id >= 0`` already) needs no copy, and a sole GPU copy is
+    written into a free-stack row exactly as a decode eviction would do it.
+    One launch per buffer half, not a Python loop over its slots.
+    """
+    m = cache._mirror
+    wb = cache._mirror_writeback
+    _writeback_buffer_kernel[(1,)](
+        cache.id_of_slot,
+        cache.slot_for_id.view(-1),
+        m["pool_row_of_id"],
+        m["id_of_pool_row"],
+        m["free_rows"],
+        m["free_count"],
+        wb["d2h_src"],
+        wb["d2h_dst"],
+        wb["n_d2h"],
+        wb["ids"],
+        wb["rows"],
+        wb["n_wb"],
+        wb["vacated"],
+        wb["n_vacated"],
+        m["stats"],
+        slot_start,
+        count,
+        BLOCK=triton.next_power_of_2(max(count, 1)),
+    )
+
+
+@triton.jit(do_not_specialize=["slot_start", "count"])
+def _writeback_buffer_kernel(
+    id_of_slot_ptr,        # int32 [cap]  slot -> flat expert id, or -1
+    slot_for_id_ptr,       # int32 [L*E]  flat expert id -> slot, or -1
+    pool_row_of_id_ptr,    # int32 [L*E]  pool row holding each expert, or -1
+    id_of_pool_row_ptr,    # int32 [cap]  inverse of the above
+    free_rows_ptr,         # int32 [cap]  stack of unowned pool rows
+    free_count_ptr,        # int32 [1]    stack depth
+    d2h_src_ptr,           # int32 [count] GPU slot of each occupant written back
+    d2h_dst_ptr,           # int32 [count] pool row receiving it
+    n_d2h_ptr,             # int64 [1]    writeback count
+    wb_id_ptr,             # int32 [count] flat expert id of each writeback
+    wb_row_ptr,            # int32 [count] pool row it landed in (== d2h_dst)
+    n_wb_ptr,              # int64 [1]
+    vacated_ptr,           # int32 [count] flat expert id of every occupant found
+                           #               here, written back or not
+    n_vacated_ptr,         # int64 [1]
+    stats_ptr,             # int64 [6]    shared with resolve_swaps: swaps,
+                           #              free_evict, d2h, violations, starved,
+                           #              retained
+    slot_start,            # first GPU slot of this buffer half
+    count,                 # slots in this buffer half (== num_experts)
+    BLOCK: tl.constexpr,
+):
+    """One program, serial: ``count`` is one expert layer's worth (<= a few
+    thousand), small enough that no atomics are needed for the free stack or
+    the ownership maps -- the same shape argument ``_resolve_swaps_kernel``
+    relies on.
+
+    Unlike a decode eviction, nothing here is a swap: the slot is not being
+    handed to a new admission, only vacated, so there is no retention
+    decision and no ``freed_rows`` staging (hazard 2 in this module's
+    docstring does not apply -- no row is pushed back to the stack this
+    launch, only popped).
+
+    ``vacated_ptr`` exists because ``_prefetch_split_mirror`` classifies a
+    layer's experts from a per-chunk HOST snapshot of ``slot_for_id``, not
+    the live device tensor -- and a decode resident can now sit in a buffer
+    slot that a LATER layer this same chunk still expects to read as a hit
+    from that exact slot. Reporting every occupant this call vacates, not
+    only the ones written back, is what lets the caller patch that snapshot
+    to -1 for all of them, so a later classification never reads a slot this
+    call has already invalidated.
+    """
+    free_top = tl.load(free_count_ptr)
+    n_d2h = 0
+    n_wb = 0
+    n_vacated = 0
+    free_evict = 0
+    starved = 0
+
+    for i in range(0, count):
+        slot = slot_start + i
+        old = tl.load(id_of_slot_ptr + slot)
+        if old >= 0:
+            row = tl.load(pool_row_of_id_ptr + old)
+            if row >= 0:
+                # Retained duplicate: the pool already has this expert's
+                # bytes, so evicting the GPU copy is free (measured: ~28% of
+                # buffer-region occupants at the reserve this design was
+                # priced against).
+                free_evict += 1
+            elif free_top > 0:
+                free_top -= 1
+                dst_row = tl.load(free_rows_ptr + free_top)
+                tl.store(d2h_src_ptr + n_d2h, slot)
+                tl.store(d2h_dst_ptr + n_d2h, dst_row)
+                n_d2h += 1
+                tl.store(id_of_pool_row_ptr + dst_row, old)
+                tl.store(pool_row_of_id_ptr + old, dst_row)
+                tl.store(wb_id_ptr + n_wb, old)
+                tl.store(wb_row_ptr + n_wb, dst_row)
+                n_wb += 1
+            else:
+                # Reserve exhausted: this occupant's only copy is about to be
+                # destroyed by the fill. Identical to resolve_swaps's starved
+                # branch -- counted, not corrected, because the host check
+                # (mirror_fault_check) is what turns a nonzero count into a
+                # hard failure instead of silently wrong experts.
+                starved += 1
+            # Vacate ownership either way: the slot is about to hold a
+            # different (or no) expert once the fill runs, and an admission
+            # elsewhere must see this expert as no longer GPU-resident.
+            tl.store(slot_for_id_ptr + old, -1)
+            tl.store(id_of_slot_ptr + slot, -1)
+            tl.store(vacated_ptr + n_vacated, old)
+            n_vacated += 1
+
+    tl.store(free_count_ptr, free_top)
+    tl.store(n_d2h_ptr, n_d2h)
+    tl.store(n_wb_ptr, n_wb)
+    tl.store(n_vacated_ptr, n_vacated)
+    tl.store(stats_ptr + 1, tl.load(stats_ptr + 1) + free_evict)
+    tl.store(stats_ptr + 2, tl.load(stats_ptr + 2) + n_d2h)
+    tl.store(stats_ptr + 4, tl.load(stats_ptr + 4) + starved)

@@ -99,19 +99,24 @@ def default_reserve_rows(num_experts: int) -> int:
 
 
 def prefill_buffer_slots(num_experts: int) -> int:
-    """GPU slots the prefill double buffer borrows from the head of the cache.
+    """GPU slots the prefill double buffer physically occupies at the head of the cache.
 
     ``_init_prefill_overlap_buffers`` views the first ``2 * num_experts`` slots
-    as two whole-layer buffers. Without the mirror those slots double as decode
-    residents between prefills and the buffer evicts them on reuse. With the
-    mirror that eviction would drop an expert's only copy, so under the mirror
-    the region is the prefill path's alone: the warm start seats decode
-    residents from ``2 * num_experts`` upwards and leaves these slots empty
-    with a usage sentinel, which the argmin(usage) victim search never picks.
+    as two whole-layer buffers. A decode resident may sit in this region too
+    (there is no separate reservation any more -- an earlier design fenced
+    decode out of it entirely with a victim floor, which cost 256 of 2173
+    arena slots on Nemotron for no coverage benefit): the region's only
+    special property is that ``offload_cache._invalidate_prefill_buffer``
+    writes a slot's occupant back to the pool before every fill here
+    overwrites it, so the coverage invariant survives the overwrite exactly
+    as it does for a decode eviction anywhere else in the cache.
 
-    The cost is this many decode slots; the return is that prefill stops
-    destroying the mirror's coverage, which is what forced a full checkpoint
-    re-read at every prefill->decode transition.
+    The return value is still needed by the coverage math that does NOT
+    change: ``_prefetch_split_mirror`` treats any expert whose slot falls in
+    this region as a miss (its bytes there are volatile within the chunk),
+    so a mirror pool must be sized as if these slots held no resident for the
+    purpose of coverage sizing, even though decode may in fact be using them
+    between prefills.
     """
     return 2 * num_experts
 

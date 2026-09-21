@@ -614,7 +614,7 @@ def _ensure_experts_sized_kernel_v2(
     policy_steps_ptr,
     layer_id,
     num_active,
-    bounds_ptr,  # [3] int32: (class_begin, class_end, victim_floor), device-resident
+    bounds_ptr,  # [2] int32: (class_begin, class_end), device-resident
                  # (see lru_slot_range_device)
     usable_ptr,  # [1] int32: usable-slot bound, device-resident (see OffloadMoeCache.usable_slots)
     victim_ids_ptr,  # [plan] int32: expert id displaced by each admission, -1 if none
@@ -640,7 +640,6 @@ def _ensure_experts_sized_kernel_v2(
     """
     class_begin = tl.load(bounds_ptr + 0)
     class_end = tl.load(bounds_ptr + 1)
-    victim_floor = tl.load(bounds_ptr + 2)
     usable = tl.load(usable_ptr)
 
     step = tl.load(step_ptr) + 1
@@ -677,16 +676,16 @@ def _ensure_experts_sized_kernel_v2(
     if num_missing > 0:
         off_c = tl.arange(0, BLOCK_C)
         allowed = (off_c >= class_begin) & (off_c < class_end) & (off_c < usable)
-        # A slot below ``victim_floor`` is not a candidate. Under the bounded
-        # mirror the head of the cache is the prefill double buffer's, and an
-        # expert admitted there loses its pool row while its bytes are about to
-        # be overwritten by the next prefill layer -- coverage gone, with no
-        # counter to show it. A usage sentinel cannot express this: LFU ranks by
-        # ``owner_frequency`` first, and an EMPTY slot loads ``other=-1``, the
-        # minimum possible frequency, so empty slots always win the first round
-        # and usage only breaks ties inside that group. ``allowed`` still covers
-        # the loads, so an active owner below the floor is still recognised.
-        candidate = allowed & (off_c >= victim_floor)
+        # Every allowed slot is a candidate, including the prefill double
+        # buffer's head-of-cache slots: under the bounded mirror, a decode
+        # admission there now writes back that slot's occupant to the pool
+        # before the next prefill fill overwrites it
+        # (offload_cache._invalidate_prefill_buffer / mirror_kernels
+        # writeback_buffer_occupants), so an expert seated here is no longer
+        # coverage-fragile the way it was when this floor existed. The
+        # candidate mask used to exclude those slots; see git history
+        # (e2ac473) for why that was needed before the writeback existed.
+        candidate = allowed
         oid = tl.load(id_of_slot_ptr + off_c, mask=allowed, other=-1)
         usage = tl.load(
             usage_ptr + off_c,

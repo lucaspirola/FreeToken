@@ -151,12 +151,6 @@ MARLIN_MAX_CACHE_SIZE = 992
 FREETOKEN_EXPERT_ARENA = os.environ.get("FREETOKEN_EXPERT_ARENA", "0").strip() == "1"
 
 
-# Usage the mirror stamps on the prefill buffer region. Victim selection is an
-# argmin over ``usage``, so a slot carrying this is never chosen -- which is how
-# the region stays the prefill path's alone. Large but far from int64 overflow,
-# and the slots are never hit, so nothing ever increments it.
-_PREFILL_BUFFER_USAGE = 1 << 62
-
 
 @dataclass
 class OffloadMoeCache:
@@ -1539,7 +1533,7 @@ class OffloadMoeCache:
         return 0, self.cache_size
 
     def lru_slot_range_device(self, layer_id: int) -> torch.Tensor:
-        """Device-resident ``(class_begin, class_end, victim_floor)`` for ``layer_id``.
+        """Device-resident ``[class_begin, class_end)`` pair for ``layer_id``.
 
         A view (no copy) into ``self._layer_slot_bounds``, kept in sync with
         :meth:`lru_slot_range` by :meth:`_sync_layer_slot_bounds`. The gated
@@ -1562,18 +1556,19 @@ class OffloadMoeCache:
         place when the shape is unchanged, so an already-captured CUDA graph
         that references this tensor's storage keeps seeing it.
         """
-        # Third column: the lowest slot the victim search may take. Zero
-        # everywhere except under the bounded mirror, where the head of the
-        # cache is the prefill double buffer's and admitting a decode expert
-        # there would destroy coverage (see _mirror_prefill_base and the
-        # candidate mask in offload_kernels).
-        floor = self._mirror_prefill_base()
-        bounds = torch.empty((self.num_layers, 3), dtype=torch.int32)
+        # No victim floor: under the bounded mirror the prefill double
+        # buffer's slots are candidates too, exactly like the rest of the
+        # cache. A decode admission there now writes back the slot's
+        # occupant before the next prefill fill overwrites it
+        # (_invalidate_prefill_buffer / mirror_kernels.writeback_buffer_occupants),
+        # so excluding them from the victim search only cost residents for no
+        # coverage benefit -- 256 of 2173 arena slots, measured. See git
+        # history (e2ac473) for the floor this replaced.
+        bounds = torch.empty((self.num_layers, 2), dtype=torch.int32)
         for layer_id in range(self.num_layers):
             begin, end = self.lru_slot_range(layer_id)
             bounds[layer_id, 0] = begin
             bounds[layer_id, 1] = end
-            bounds[layer_id, 2] = max(begin, floor)
         bounds = bounds.to(self.device)
         if (
             self._layer_slot_bounds is None
@@ -1680,8 +1675,9 @@ class OffloadMoeCache:
             )
         self.banks = [(self.bank_sources[n], self.bank_caches[n]) for n in self.bank_schema]
         self._build_mirror_plan(pool)
-        # The victim floor is a function of the mirror, which only exists now:
-        # every earlier sync (__post_init__, set_bank_sources) computed it as 0.
+        # Harmless idempotent refresh: lru_slot_range does not depend on the
+        # mirror, but nothing else calls this once bank_caches exists, so
+        # keeping the call is cheap insurance against that assumption moving.
         self._sync_layer_slot_bounds()
         if self.prefill_overlap:
             # The mirror's prefill path needs its own index/snapshot buffers,
@@ -1876,15 +1872,13 @@ class OffloadMoeCache:
         self.slot_for_id.fill_(-1)
         self.usage.zero_()
 
-        # The prefill double buffer owns the head of the cache; decode
-        # residents start above it. The usage sentinel is what keeps them
-        # apart: victim selection is an argmin over usage, so it never reaches
-        # into the buffer region and no expert's only copy can land where the
-        # next prefill layer will overwrite it.
-        base_slot = self._mirror_prefill_base()
-        if base_slot:
-            self.usage[:base_slot].fill_(_PREFILL_BUFFER_USAGE)
-        resident_slots = max(self.cache_size - base_slot, 0)
+        # Residents are seated from slot 0: the prefill double buffer no
+        # longer needs the head of the cache reserved for its exclusive use.
+        # _invalidate_prefill_buffer now writes an occupant back to the pool
+        # before the fill overwrites it, so a decode resident there is exactly
+        # as safe as one anywhere else in the cache.
+        base_slot = 0
+        resident_slots = self.cache_size
 
         per_layer = resident_slots // self.num_layers
         extra = resident_slots - per_layer * self.num_layers
@@ -1938,10 +1932,10 @@ class OffloadMoeCache:
         )
         self._mirror_publish_free_rows()
         logger.info_rank0(
-            "mirror warm start: %d experts on GPU (slots %d..%d, %d held for the "
-            "prefill buffer), %d mirrored, %d duplicated, %d rows in reserve "
-            "(%.1f%% of evictions skip the writeback)",
-            len(gpu_plan), base_slot, base_slot + len(gpu_plan), base_slot,
+            "mirror warm start: %d experts on GPU (slots %d..%d), %d mirrored, "
+            "%d duplicated, %d rows in reserve (%.1f%% of evictions skip the "
+            "writeback)",
+            len(gpu_plan), base_slot, base_slot + len(gpu_plan),
             filled, seeded, int(m["free_count"].item()),
             100.0 * seeded / max(len(gpu_plan), 1),
         )
@@ -2217,8 +2211,14 @@ class OffloadMoeCache:
             # The mirror assembles a prefill layer from the only two places
             # coverage allows -- a resident's own slot, or the expert's pool row
             # -- so it needs a pinned view of both maps and one index pair per
-            # layer. Snapshots are taken once per chunk (begin_prefill); during
-            # a prefill there are no decode admissions, so they cannot go stale.
+            # layer. The slot-map snapshot is taken once per chunk (begin_prefill)
+            # and never goes stale: the only chunk-internal writer
+            # (_invalidate_prefill_buffer) always rewrites a slot already below
+            # 2E, and slots < 2E (including -1) classify as a miss on both sides
+            # (see _prefetch_split_mirror). The pool-row snapshot is NOT immune
+            # the same way -- a buffer occupant's writeback changes its pool row
+            # mid-chunk -- so _mirror_writeback_buffer patches this numpy array
+            # in place for every row it writes, instead of leaving it frozen.
             E = self.num_experts
             self._prefill_slot_snapshot = torch.empty(
                 (self.num_layers, E), dtype=torch.int32, pin_memory=True
@@ -2242,6 +2242,32 @@ class OffloadMoeCache:
             self._mirror_prefill_miss_count = torch.zeros(
                 (1,), dtype=torch.int64, device=self.device
             )
+            # Dedicated writeback descriptors for _mirror_writeback_buffer, sized
+            # for a whole buffer half (<= E occupants) rather than reusing the
+            # decode step's d2h_src/d2h_dst (sized for one admission batch,
+            # which can be far smaller): the two run at different points in the
+            # request lifecycle (prefill vs decode) but on the same device
+            # state, so aliasing their descriptor buffers would let one
+            # overwrite the other's in-flight plan.
+            self._mirror_writeback = {
+                "d2h_src": torch.zeros((E,), dtype=torch.int32, device=self.device),
+                "d2h_dst": torch.zeros((E,), dtype=torch.int32, device=self.device),
+                "n_d2h": torch.zeros((1,), dtype=torch.int64, device=self.device),
+                "ids": torch.zeros((E,), dtype=torch.int32, device=self.device),
+                "rows": torch.zeros((E,), dtype=torch.int32, device=self.device),
+                "n_wb": torch.zeros((1,), dtype=torch.int64, device=self.device),
+                # Every occupant this call finds, written back or not (a
+                # retained duplicate is vacated too) -- see
+                # _writeback_buffer_kernel's docstring for why the slot
+                # snapshot needs all of them, not just the writebacks.
+                "vacated": torch.zeros((E,), dtype=torch.int32, device=self.device),
+                "n_vacated": torch.zeros((1,), dtype=torch.int64, device=self.device),
+                # n_d2h and n_vacated read together as one pinned host copy
+                # per invalidate call (see _mirror_writeback_buffer), rather
+                # than each forcing its own device sync via a separate
+                # .item().
+                "n_d2h_vacated_host": torch.zeros((2,), dtype=torch.int64, pin_memory=True),
+            }
         elif self.prefill_hit_d2d and self.device.type == "cuda":
             self._prefill_slot_snapshot = torch.empty(
                 (self.num_layers, self.num_experts), dtype=torch.int32, pin_memory=True
@@ -2259,11 +2285,11 @@ class OffloadMoeCache:
 
     def _invalidate_prefill_buffer(self, buffer_id: int) -> None:
         if self._mirror_prefill_base():
-            # Nothing to invalidate: under the mirror these slots never hold a
-            # decode resident (the warm start seats residents above them and
-            # the usage sentinel keeps victim selection out), so no id map
-            # points here and no expert loses its only copy when the next
-            # layer overwrites the bytes.
+            # Under the mirror these slots CAN hold a decode resident now (the
+            # victim floor that used to fence decode out is gone), so the old
+            # empties-only assumption would drop an expert's only copy when
+            # the next layer overwrites the bytes. Write it back first.
+            self._mirror_writeback_buffer(buffer_id)
             return
         if self._size_class_enabled:
             assert self._prefill_borrow_class is not None
@@ -2278,6 +2304,86 @@ class OffloadMoeCache:
         # usage=0 makes these slots the oldest, so the argmin(usage) victim selection in
         # ensure_experts evicts them first.
         self.usage[slot_start:slot_end].zero_()
+
+    def _mirror_writeback_buffer(self, buffer_id: int) -> None:
+        """Preserve a prefill buffer half's occupants before the fill overwrites them.
+
+        Runs on the copy stream, ahead of the fill launches
+        ``_prefetch_split_mirror`` issues on that same stream, so ordering
+        between "vacate this slot" and "write new bytes into it" is plain
+        stream order -- the same discipline ``copy_missing_mirror`` uses for a
+        decode swap. Safe against a concurrently running decode step for the
+        same reason the frozen prefill snapshots are (see
+        ``_init_prefill_overlap_buffers``): under single-lane scheduling this
+        session is the one prefilling, so nothing else is admitting into the
+        shared free stack / ownership maps while this runs.
+        """
+        import numpy as np
+
+        from freetoken.kernel.fast_index_copy import fast_index_copy_multi_jit
+        from freetoken.moe.mirror_kernels import writeback_buffer_occupants
+
+        E = self.num_experts
+        slot_start = buffer_id * E
+        m = self._mirror
+        wb = self._mirror_writeback
+        with torch.cuda.stream(self.prefill_copy_stream):
+            if self._prefill_buffer_has_release_event[buffer_id]:
+                self.prefill_copy_stream.wait_event(
+                    self.prefill_release_events[buffer_id]
+                )
+            writeback_buffer_occupants(self, slot_start, E)
+            # Forced retention (resolve_swaps) makes every buffer-region
+            # occupant a duplicate, so in steady state this launch finds
+            # nothing to D2H -- only the vacated-slot list is ever
+            # non-empty. Issue the D2H unconditionally and let the
+            # device-side count drive how many rows it actually moves
+            # (the same pattern copy_missing_mirror uses for m["d2h_*"]),
+            # instead of reading the count on the host first just to
+            # decide whether to launch: that read is itself a sync, so
+            # gating on it bought nothing but a second one below.
+            fast_index_copy_multi_jit(
+                m["pool_ptrs"], m["cache_ptrs"], m["feat_bytes"],
+                wb["d2h_dst"], wb["d2h_src"], wb["n_d2h"],
+            )
+            m["stats_host"].copy_(m["stats"], non_blocking=True)
+            # One host sync per invalidate call, not two: n_d2h and
+            # n_vacated are read together off one small pinned copy rather
+            # than each forcing its own device sync. The vacated-snapshot
+            # patch below still needs a host round trip for correctness
+            # (_prefetch_split_mirror's classification reads the frozen
+            # numpy snapshot, not the live device tensor -- see
+            # _init_prefill_overlap_buffers), so this sync itself cannot be
+            # dropped, only shared between the two counts it gates.
+            wb["n_d2h_vacated_host"].copy_(
+                torch.stack((wb["n_d2h"][0], wb["n_vacated"][0])),
+                non_blocking=True,
+            )
+        self.prefill_copy_stream.synchronize()
+        n_d2h = int(wb["n_d2h_vacated_host"][0].item())
+        n_vacated = int(wb["n_d2h_vacated_host"][1].item())
+        if n_d2h:
+            # _prefetch_split_mirror's miss lookup reads this frozen
+            # snapshot, not the live tensor (see
+            # _init_prefill_overlap_buffers), so a row this call just wrote
+            # must land here too -- otherwise a later (or this very) layer
+            # would see the pre-writeback -1 and raise a false coverage-lost
+            # error for an expert that is, in fact, covered as of this line.
+            ids = wb["ids"][:n_d2h].cpu().numpy().astype(np.int64)
+            rows = wb["rows"][:n_d2h].cpu().numpy()
+            self._mirror_prefill_pool_np[ids] = rows
+        if n_vacated:
+            # This buffer half's occupants -- ALL of them, duplicate or sole
+            # copy -- are no longer GPU-resident once this call returns, but
+            # decode may have seated any of them anywhere in the arena
+            # (there is no floor keeping them out of the buffer region any
+            # more), including a slot a LATER layer this same chunk still
+            # expects to read as a hit. Patching the frozen slot snapshot to
+            # -1 for every one of them is what keeps that later
+            # classification from reading a slot this call already
+            # invalidated -- see _writeback_buffer_kernel's docstring.
+            vacated = wb["vacated"][:n_vacated].cpu().numpy().astype(np.int64)
+            self._prefill_snapshot_np.reshape(-1)[vacated] = -1
 
     def begin_prefill(self) -> None:
         if not self.prefill_overlap:
@@ -2378,6 +2484,29 @@ class OffloadMoeCache:
         prompt whose baseline prefill is 0.34 s). Here the LRU is never
         touched, so coverage survives the sweep and the boundary restore that
         cost never runs.
+
+        Called first, before any of the classification below: this buffer
+        half may currently hold a decode resident (the victim floor that used
+        to prevent that is gone), and ``_invalidate_prefill_buffer`` must
+        write it back -- and patch the pool-row and slot snapshots the
+        lookups below read -- before those lookups run. Without this
+        ordering, an expert of THIS layer sitting in one of this half's
+        slots would still show the pre-writeback -1 a few lines down and
+        trip the coverage-lost error for coverage that, by then, actually
+        holds.
+
+        The hit test below is ``slots >= 0``, not a threshold against the
+        buffer region: a decode resident can now sit ANYWHERE in the arena,
+        including the OTHER buffer half (not this call's own), and reading
+        that live, not-yet-invalidated slot as a hit is exactly as valid as
+        reading one from the ordinary decode region -- the two buffer halves
+        are invalidated one at a time, in program order on this same stream,
+        so a half not yet touched this call is still exactly what its
+        snapshot says. What makes the frozen, once-per-chunk snapshot safe to
+        keep reading after the first invalidate is that every invalidate
+        patches it in place for every occupant it vacates (see
+        ``_mirror_writeback_buffer``); without that patch a later layer could
+        read a slot THIS call already handed to someone else.
         """
         import numpy as np
 
@@ -2385,14 +2514,12 @@ class OffloadMoeCache:
 
         E = self.num_experts
         base_flat = layer_id * E
-        base_slot = self._mirror_prefill_base()
         m = self._mirror
+        self._invalidate_prefill_buffer(buffer_id)
         idx_np = self._mirror_prefill_idx_np[buffer_id]
 
         slots = self._prefill_snapshot_np[layer_id]
-        # Slots below base_slot are the buffers themselves: volatile within the
-        # chunk and never decode residents here, so they are not valid sources.
-        resident = slots >= base_slot
+        resident = slots >= 0
         pos = np.arange(E, dtype=np.int32)
         dst_base = np.int32(buffer_id * E)
 

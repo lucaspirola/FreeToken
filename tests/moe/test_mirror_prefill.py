@@ -52,18 +52,22 @@ from freetoken.models.nemotron_h.weight import (
     NVFP4_EXPERT_SOURCE_SPEC as NEMOTRON_SPEC,
 )
 from freetoken.moe.mirror_pool import MirrorExpertPool, prefill_buffer_slots
-from freetoken.moe.offload_cache import _PREFILL_BUFFER_USAGE, OffloadMoeCache
+from freetoken.moe.offload_cache import OffloadMoeCache
 
 from tests.moe._mirror_checkpoint import write_nvfp4_checkpoint
 
 LAYERS, EXPERTS, H, ISZ = 6, 8, 32, 32
 TOTAL = LAYERS * EXPERTS            # 48 expert rows
-_GPU = 32                           # 16 buffer slots + 16 decode residents
+_GPU = 32                           # decode residents; the buffer region is
+                                     # no longer excluded from this count
 _STEP = 4
-# Complement (48 - 16) plus one layer of reserve. The production reserve is
-# three layers; at this toy size that would exceed the model, and what these
-# tests exercise is the prefill path, not the reserve's arithmetic.
-_RESERVE = EXPERTS
+# Complement (48 - 32) plus two layers of reserve. Two, not the production
+# three: with no victim floor, BOTH prefill buffer halves can need a full
+# writeback burst back-to-back at the start of a chunk (layer 0 into buffer
+# 0, layer 1 into buffer 1), so the reserve must absorb 2*EXPERTS here, not
+# the one layer a decode-only burst needs. Production's 3*num_experts covers
+# this with room to spare; this toy size just needs the arithmetic to match.
+_RESERVE = 2 * EXPERTS
 _CAP = (TOTAL - (_GPU - prefill_buffer_slots(EXPERTS))) + _RESERVE
 
 
@@ -84,6 +88,38 @@ def _cache(root):
     cache.attach_mirror_pool(pool)
     cache.mirror_warm_start()
     return cache, pool
+
+
+def _bare_cache(root):
+    """Attach without warm start: every ownership/pool-row map starts at -1.
+
+    Gives the writeback tests a known-empty slate to seat exact scenarios
+    on (a retained duplicate vs. a sole GPU copy) without fighting whatever
+    ``mirror_warm_start``'s even spread across layers happened to seat in
+    the buffer region.
+    """
+    pool = MirrorExpertPool(
+        root, LAYERS, EXPERTS, _CAP, hidden_size=H, intermediate_size=ISZ,
+        spec=NEMOTRON_SPEC,
+        config=types.SimpleNamespace(moe_layer_ids=list(range(LAYERS))),
+        reserve_rows=_RESERVE, device=torch.device("cuda"),
+    )
+    cache = OffloadMoeCache(
+        num_layers=LAYERS, num_experts=EXPERTS, cache_size=_GPU,
+        slot_capacity=_GPU, arena_step_slots=_STEP,
+        device=torch.device("cuda"), quant_format="nvfp4", cache_policy="lfu",
+        prefill_overlap=True,
+    )
+    cache.direct_device_banks = True
+    cache.attach_mirror_pool(pool)
+    return cache, pool
+
+
+def _assert_same(got, want, what):
+    """Compare raw bytes: float8_e4m3 carries NaN patterns torch.equal rejects."""
+    g = got.cpu().contiguous().view(torch.uint8)
+    w = want.cpu().contiguous().view(torch.uint8)
+    assert torch.equal(g, w), f"{what} does not hold its own weights"
 
 
 def _golden(root):
@@ -117,11 +153,13 @@ def _sweep(cache, check=None):
     torch.cuda.synchronize()
 
 
-def test_the_buffer_region_belongs_to_prefill_alone():
-    """Residents sit above the buffer, which carries the victim sentinel.
+def test_warm_start_seats_the_whole_arena():
+    """No slots held back for the buffer: decode gets every arena slot.
 
-    This is what makes the buffer's invalidation free: nothing the next layer
-    overwrites was ever an expert's only copy.
+    An earlier design fenced the buffer region ([0, 2E)) out of decode with a
+    victim floor, priced at 256 of 2173 arena slots on Nemotron for no
+    coverage benefit once the writeback exists. Warm start now seats
+    residents from slot 0, exactly like the rest of the cache.
     """
     with tempfile.TemporaryDirectory() as root:
         write_nvfp4_checkpoint(root, LAYERS, EXPERTS, H, ISZ)
@@ -129,19 +167,16 @@ def test_the_buffer_region_belongs_to_prefill_alone():
         try:
             base = cache._mirror_prefill_base()
             assert base == prefill_buffer_slots(EXPERTS) == 2 * EXPERTS
-            assert (cache.id_of_slot[:base] == -1).all(), (
-                "a decode resident in the buffer region would be dropped "
-                "without a writeback the first time prefill reused the slot"
+            # _GPU == TOTAL - complement, and warm start has nothing left to
+            # hold back, so every slot -- including the buffer region -- is a
+            # resident.
+            assert int((cache.id_of_slot >= 0).sum()) == _GPU
+            assert (cache.id_of_slot[:base] >= 0).any(), (
+                "the buffer region should hold residents like any other slot"
             )
-            assert (cache.usage[:base] == _PREFILL_BUFFER_USAGE).all(), (
-                "victim selection is an argmin over usage; without the "
-                "sentinel these slots are the FIRST ones decode evicts into"
-            )
-            resident = cache.id_of_slot[base:]
-            assert int((resident >= 0).sum()) == _GPU - base
             slots = cache.slot_for_id.view(-1)
             live = slots[slots >= 0]
-            assert int(live.min()) >= base
+            assert int(live.numel()) == _GPU
         finally:
             pool.close()
 
@@ -220,18 +255,18 @@ def test_a_prefill_sweep_leaves_coverage_standing():
             pool.close()
 
 
-def test_decode_never_admits_into_the_prefill_buffer():
-    """The exact hole that crashed the first run of this design.
+def test_decode_may_admit_into_the_prefill_buffer_and_prefill_still_covers():
+    """The exact hole an earlier design closed with a victim floor.
 
-    Reserving the region is not enough on its own: under LFU the victim
-    search ranks by owner frequency FIRST, and an empty slot loads
-    ``other=-1`` -- the minimum possible frequency -- so the permanently
-    empty buffer region won every admission outright. The expert landed
-    there, its pool row was freed as the source of the upload, and the next
-    prefill layer overwrote the bytes. The server died at the first real
-    request with "expert 73 (layer 0) is neither a GPU resident nor in the
-    pool". A usage sentinel cannot express this, because usage only breaks
-    ties inside the minimum-frequency group; the victim candidate mask can.
+    That floor fenced decode out of the buffer region entirely (256 of 2173
+    arena slots on Nemotron, held back for no coverage benefit once a
+    writeback exists): without it, or without the writeback,
+    ``_prefetch_split_mirror`` would overwrite a decode resident's only copy
+    and the server died at the first real request with "expert 73 (layer 0)
+    is neither a GPU resident nor in the pool". The fix keeps the floor gone
+    and makes coverage survive the overwrite instead: this run drives
+    admissions into the buffer region on purpose, then runs a full prefill
+    sweep over the mess and checks nothing was lost.
     """
     with tempfile.TemporaryDirectory() as root:
         write_nvfp4_checkpoint(root, LAYERS, EXPERTS, H, ISZ)
@@ -239,6 +274,7 @@ def test_decode_never_admits_into_the_prefill_buffer():
         try:
             base = cache._mirror_prefill_base()
             torch.manual_seed(0)
+            saw_buffer_admission = False
             for step in range(60):
                 layer = step % LAYERS
                 ids = torch.randperm(EXPERTS, device="cuda")[:4]
@@ -246,21 +282,221 @@ def test_decode_never_admits_into_the_prefill_buffer():
                 cache.ensure_experts(layer, ids)   # rewrites ids to slot ids
                 cache.copy_missing()
                 torch.cuda.synchronize()
-                assert int(ids.min()) >= base, (
-                    f"step {step}: an admission took slot {int(ids.min())}, "
-                    f"inside the prefill buffer region [0, {base})"
-                )
-                assert (cache.id_of_slot[:base] == -1).all(), (
-                    f"step {step}: the buffer region acquired an owner"
-                )
+                if int(ids.min()) < base:
+                    saw_buffer_admission = True
                 cache.mirror_fault_check()
-            # And the prefill path still works on the cache decode left behind.
+            assert saw_buffer_admission, (
+                "the buffer region was never a candidate in 60 steps -- this "
+                "run no longer exercises what it is meant to test"
+            )
+            # And the prefill path still works on the cache decode left behind,
+            # writing back whatever decode seated in the buffer region.
             _sweep(cache)
             cache.mirror_fault_check()
             slots = cache.slot_for_id.view(-1).cpu().tolist()
             rows = cache._mirror["pool_row_of_id"].cpu().tolist()
             assert [f for f in range(TOTAL)
                     if slots[f] < base and rows[f] < 0] == []
+        finally:
+            pool.close()
+
+
+def test_writeback_skips_retained_duplicates():
+    """A buffer occupant that already has a pool row needs no D2H.
+
+    The common case (measured: ~28% of evictions at the reserve this design
+    is priced against are already free) is a retained duplicate, seeded by
+    admission-time retention or by warm start's seed_duplicates. The
+    writeback must recognise it and spend no PCIe traffic on it.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        write_nvfp4_checkpoint(root, LAYERS, EXPERTS, H, ISZ)
+        cache, pool = _bare_cache(root)
+        try:
+            E = EXPERTS
+            m = cache._mirror
+            slot_for_id = cache.slot_for_id.view(-1)
+            flats = list(range(E))  # layer 0's experts, one per buffer-0 slot
+            for slot, flat in enumerate(flats):
+                cache.id_of_slot[slot] = flat
+                slot_for_id[flat] = slot
+                row = flat  # arbitrary distinct pool rows
+                pool._read_row(flat, row)
+                m["pool_row_of_id"][flat] = row
+                m["id_of_pool_row"][row] = flat
+            cache._mirror_publish_free_rows()
+            free_before = int(m["free_count"].item())
+
+            cache._invalidate_prefill_buffer(0)
+            torch.cuda.synchronize()
+
+            assert int(m["stats"][2].item()) == 0, "retained duplicates need no D2H"
+            assert int(m["stats"][1].item()) == E, "every occupant should free-evict"
+            assert (cache.id_of_slot[:E] == -1).all()
+            assert int(slot_for_id[torch.tensor(flats, device="cuda")].eq(-1).all())
+            assert int(m["free_count"].item()) == free_before, (
+                "no free rows should be consumed for duplicates"
+            )
+            cache.mirror_fault_check()
+        finally:
+            pool.close()
+
+
+def test_writeback_preserves_a_sole_copys_bytes():
+    """A buffer occupant with no pool row is written back, byte-exact.
+
+    This is the case the victim floor used to avoid altogether: a decode
+    resident whose only copy sits in the slot a prefill fill is about to
+    overwrite. The writeback must land it in a free pool row holding its own
+    checkpoint bytes, not a neighbour's -- the same check
+    test_mirror_retention.py::test_a_retained_row_still_holds_its_own_expert
+    makes for a decode eviction's retained row.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        write_nvfp4_checkpoint(root, LAYERS, EXPERTS, H, ISZ)
+        golden = _golden(root)
+        cache, pool = _bare_cache(root)
+        try:
+            E = EXPERTS
+            m = cache._mirror
+            slot_for_id = cache.slot_for_id.view(-1)
+            flats = list(range(E))  # layer 0's experts, one per buffer-0 slot
+            for slot, flat in enumerate(flats):
+                cache.id_of_slot[slot] = flat
+                slot_for_id[flat] = slot
+                for name, bank in cache.bank_caches.items():
+                    bank[slot].copy_(golden[flat][name].to(cache.device))
+                # pool_row_of_id[flat] stays -1: this is a sole GPU copy.
+            cache._mirror_publish_free_rows()
+            free_before = int(m["free_count"].item())
+            assert free_before >= E, "the reserve must cover a whole buffer half"
+
+            cache._invalidate_prefill_buffer(0)
+            torch.cuda.synchronize()
+
+            assert int(m["stats"][2].item()) == E, f"expected {E} writebacks"
+            assert int(m["stats"][3].item()) == 0, "no coverage violations"
+            assert int(m["stats"][4].item()) == 0, "no starved writebacks"
+            assert (cache.id_of_slot[:E] == -1).all()
+            assert int(slot_for_id[torch.tensor(flats, device="cuda")].eq(-1).all())
+            assert int(m["free_count"].item()) == free_before - E
+
+            rows = m["pool_row_of_id"].cpu().tolist()
+            inv = m["id_of_pool_row"].cpu().tolist()
+            for flat in flats:
+                row = rows[flat]
+                assert row >= 0, f"expert {flat} lost its only copy"
+                assert inv[row] == flat, (
+                    f"expert {flat} claims row {row}, which the inverse map "
+                    f"gives to {inv[row]}"
+                )
+                for name, bank in pool.banks.items():
+                    _assert_same(bank[row], golden[flat][name],
+                                 f"expert {flat} pool row {row} bank {name}")
+            cache.mirror_fault_check()
+        finally:
+            pool.close()
+
+
+def test_admission_into_the_buffer_region_forces_retention():
+    """A slot < 2E always keeps its admission's source pool row.
+
+    MEASURED regression this guards: without this, an admission that lands
+    in the buffer region at the retention floor frees its source row like
+    any other slot, so the very next prefill that overwrites this half pays
+    a 5.36 MiB D2H to write it back -- TTFT at 8K went from 0.68s to 1.47s,
+    entirely in pass 2 (after decode has populated the buffer). Forcing
+    retention for buffer-region admissions means that D2H can never happen:
+    the occupant is always a duplicate, so ``_writeback_buffer_kernel``
+    always takes its free-evict branch.
+
+    Drives ``resolve_swaps`` directly (like the ``_writeback_buffer_kernel``
+    tests above drive their kernel) with the free stack set exactly AT the
+    retention floor -- the one condition under which a non-buffer admission
+    would free its source row -- to prove the buffer-region admission
+    retains anyway.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        write_nvfp4_checkpoint(root, LAYERS, EXPERTS, H, ISZ)
+        cache, pool = _bare_cache(root)
+        try:
+            from freetoken.moe.mirror_kernels import publish_freed_rows, resolve_swaps
+
+            E = EXPERTS
+            m = cache._mirror
+            slot_for_id = cache.slot_for_id.view(-1)
+            base = cache._mirror_prefill_base()
+            assert base == 2 * E
+
+            target_slot = 3  # inside buffer 0's region ([0, E))
+            assert target_slot < base
+            flat_new = 0     # layer 0, expert 0 -- the admission under test
+            src_row = 40     # an arbitrary unowned pool row standing in for
+                              # "this expert's bytes already sit in the pool"
+
+            # The admission: slot 3 was empty (no victim), flat_new arrives
+            # from the pool. ensure_experts would normally have already
+            # written id_of_slot/slot_for_id and staged prior/victim before
+            # resolve_swaps runs -- reproduce exactly that contract by hand.
+            cache.id_of_slot[target_slot] = flat_new
+            slot_for_id[flat_new] = target_slot
+            cache.evict_slots[0] = target_slot
+            cache.src_indices[0] = flat_new % E
+            cache.num_indices[0] = 1
+            cache.victim_ids[0] = -1
+            cache.prior_ids[0] = -1
+            m["prev_slot_of_id"][flat_new] = -1
+            m["pool_row_of_id"][flat_new] = src_row
+            m["id_of_pool_row"][src_row] = flat_new
+
+            # AT the floor: free_top == retain_floor, so a non-buffer
+            # admission's `free_top > retain_floor` test is false and it
+            # would free src_row. Only the `slot < buffer_slots` half of the
+            # OR can save it here.
+            retain_floor = pool.reserve_rows
+            m["free_count"][0] = retain_floor
+
+            stats_before = m["stats"].clone()
+            resolve_swaps(cache, layer_id=0)
+            torch.cuda.synchronize()
+
+            assert int(m["n_freed"].item()) == 0, (
+                "the buffer-region admission staged its source row for "
+                "freeing -- forced retention did not fire"
+            )
+            assert int(m["pool_row_of_id"][flat_new].item()) == src_row, (
+                "the admission's source row was not retained"
+            )
+            assert int(m["id_of_pool_row"][src_row].item()) == flat_new
+            stats = m["stats"]
+            assert int(stats[5].item()) - int(stats_before[5].item()) == 1, (
+                "retained count should have gone up by exactly this admission"
+            )
+            assert int(stats[0].item()) - int(stats_before[0].item()) == 1, (
+                "swaps count should reflect this one admission"
+            )
+            publish_freed_rows(cache)  # no-op: nothing was staged
+            torch.cuda.synchronize()
+            assert int(m["free_count"].item()) == retain_floor, (
+                "publish must not have grown the free stack"
+            )
+
+            # Now invalidate buffer 0: the occupant this admission left in
+            # slot 3 must be found already-mirrored (free_evict), not D2H'd.
+            d2h_before = int(m["stats"][2].item())
+            free_evict_before = int(m["stats"][1].item())
+            cache._invalidate_prefill_buffer(0)
+            torch.cuda.synchronize()
+
+            assert int(m["stats"][2].item()) == d2h_before, (
+                "the forced-retention occupant should cost zero D2H on eviction"
+            )
+            assert int(m["stats"][1].item()) == free_evict_before + 1, (
+                "the forced-retention occupant should free-evict"
+            )
+            assert cache.id_of_slot[target_slot].item() == -1
+            assert int(slot_for_id[flat_new].item()) == -1
+            cache.mirror_fault_check()
         finally:
             pool.close()
 
