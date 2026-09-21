@@ -28,7 +28,7 @@ ROWS="${FT_ROWS:-0}"
 PORT="${FT_PORT:-1920}"
 SIZES="${FT_SIZES:-8000 32000 80000}"
 NAME="${FT_NAME:-nemotron-3.5-lightning}"
-RATIO="${FT_RATIO:-0.91}"   # same for every arm; a sweep that moves two knobs measures neither
+RATIO="${FT_RATIO:-1.00}"   # same for every arm; a sweep that moves two knobs measures neither
 UNIT="ft-measure-$ARM"
 OUT="$REPO/tasks/exclusive-expert-ram/results"
 mkdir -p "$OUT"

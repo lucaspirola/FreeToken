@@ -1099,15 +1099,25 @@ class Engine:
                 # slack, and an 80K prompt needs 0.46 GiB. That server died
                 # mid-request with "growable KV refused an unsafe VMM commit"
                 # and could not be restarted.
+                # Both of these were wrong the first time and the except
+                # below swallowed it, so the line never printed: the arena step
+                # is the RESOLVED ``_arena_step_slots`` (the dataclass field of
+                # the same name is None until __post_init__ resolves it, which
+                # silently made the floor a 1-slot rounding), and
+                # ``bank_row_bytes`` is a LIST of per-bank row bytes, one entry
+                # per arena VMM allocation -- multiplying a list by the slot
+                # count repeats the list and then raises on the division.
+                # ``arena_layout`` is the public accessor for the pair.
                 try:
                     from freetoken.moe.mirror_pool import prefill_buffer_slots
 
-                    _step = max(int(getattr(cache, "arena_step_slots", 0) or 1), 1)
+                    _layout = cache.arena_layout
+                    _step = max(int(_layout[1]) if _layout else 1, 1)
                     _need = (mirror_pool.min_gpu_slots
                              + prefill_buffer_slots(cache.num_experts))
                     _cov_floor = -(-_need // _step) * _step
                     _slack = cache.cache_size - _cov_floor
-                    _row = getattr(cache, "bank_row_bytes", 0) or 0
+                    _row = sum(cache.bank_row_bytes or ())
                     logger.info_rank0(
                         "Mirror pool: the coverage floor is %d of %d arena "
                         "slots, leaving %d slots (%.2f GiB) the growable KV "
@@ -1119,8 +1129,10 @@ class Engine:
                         "all: raise --moe-mirror-host-rows",
                     )
                 except Exception:             # diagnosis must never fail a load
-                    logger.debug_rank0("mirror arena-slack log skipped",
-                                       exc_info=True)
+                    # WARNING, not debug: this handler silently hid two real
+                    # bugs in the block above for a whole measurement round.
+                    logger.warning_rank0("mirror arena-slack log skipped",
+                                         exc_info=True)
             else:
                 cache.set_bank_sources(banks.sources, layer_residency=banks.layer_residency)
                 cache.set_alphas(banks.gate_up_alpha, banks.down_alpha)

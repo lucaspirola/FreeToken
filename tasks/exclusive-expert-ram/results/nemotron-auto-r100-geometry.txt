@@ -1,0 +1,4 @@
+Sep 22 00:58:49 TESSERACT serve-default.sh[325630]: [2026-09-22|00:58:49|core|rank=0] INFO     Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode graphs enabled, prefill overlap on (layers assembled from resident slots + pool rows, no disk)
+Sep 22 00:59:08 TESSERACT serve-default.sh[325630]: [2026-09-22|00:59:08|core|rank=0] INFO     Mirror pool: 1893 rows pinned (9.91 GiB), 1027 cover the complement of 1917 GPU residents, 384 reserved, up to 482 duplicates (a duplicate makes its expert's next eviction free of any host traffic)
+Sep 22 00:59:08 TESSERACT serve-default.sh[325630]: [2026-09-22|00:59:08|core|rank=0] INFO     Mirror pool: the coverage floor is 1696 of 2173 arena slots, leaving 477 slots (2.50 GiB) the growable KV may still take
+Sep 22 00:59:08 TESSERACT serve-default.sh[325630]: [2026-09-22|00:59:08|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB

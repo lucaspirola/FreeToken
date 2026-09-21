@@ -28,7 +28,13 @@
 #   FREETOKEN_PORT                default 1919
 #   FREETOKEN_PIN_BUDGET_GB       default 17 (>= expert banks; lower only if RAM is short)
 #   FREETOKEN_HOST_RAM_RESERVE_GB default 0 (RAM the preflight keeps free; owner's choice)
-#   FREETOKEN_MEMORY_RATIO        default 0.91 of VRAM (KV ceiling + expert cache)
+#   FREETOKEN_MEMORY_RATIO        default 1.00 of FREE VRAM (KV ceiling + expert cache).
+#                                 tune-memory-ratio.sh measured 1.00 on this 5080 on
+#                                 2026-09-17 (2056 expert slots vs 1985 at 0.91) and the
+#                                 owner chose it everywhere on 2026-09-22. It is a
+#                                 fraction of FREE VRAM, so it sizes itself to whatever
+#                                 else holds the card -- which is also why a measurement
+#                                 taken beside another GPU process is not comparable.
 #   FREETOKEN_CACHE_DIR           default $HOME/.cache/freetoken (spill, traces, logs)
 #   FREETOKEN_EXTRA_ARGS          appended verbatim (last flag wins for repeated options)
 #   TVM_FFI_CUDA_ARCH_LIST        auto-detected from nvidia-smi (12.0 Blackwell, 8.9 Ada)
@@ -62,7 +68,7 @@ exec uv run ft serve \
   --max-running-requests 1 --linear-state-slots 13 --kv-grow-step-tokens 65536 \
   --num-tokens 1048576 --max-seq-len-override 1048576 --kv-cache-dtype q8_0 \
   --attention-backend triton --moe-backend offload --moe-cache-auto --moe-cache-policy lfu \
-  --memory-ratio "${FREETOKEN_MEMORY_RATIO:-0.91}" --max-prefill-length 8192 \
+  --memory-ratio "${FREETOKEN_MEMORY_RATIO:-1.00}" --max-prefill-length 8192 \
   --host-ram-reserve-gb "${FREETOKEN_HOST_RAM_RESERVE_GB:-0}" \
   --session-spill-ram-gb 1 --session-spill-disk-gb 50 --session-spill-limit-gb 50 \
   --session-spill-dir "$CACHE/spill" \
