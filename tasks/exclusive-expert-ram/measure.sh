@@ -10,6 +10,9 @@
 #   FT_SIZES   probe prompt sizes             (default "8000 32000 80000")
 #   FT_EXTRA   extra ft serve flags, verbatim (last flag wins; e.g. a lower seq-len cap)
 #   FT_NAME    served model name for the probe (default nemotron-3.5-lightning)
+#   FT_POST    command run while the server is STILL UP (recall.py, needles.py):
+#              sees FREETOKEN_URL/FREETOKEN_MODEL_NAME, output -> $ARM-post.txt
+#   FT_POST_TIMEOUT  seconds for FT_POST (default 3600)
 #   FT_KV      KV lane by name, recorded with the number so it is attributable:
 #              q8q8 (q8_0 K + q8_0 V, the default lane), q8q6, q6q5. Anything
 #              else is passed through verbatim as flags. Only these asymmetric
@@ -188,6 +191,24 @@ if ! FREETOKEN_URL="http://127.0.0.1:$PORT" FREETOKEN_MODEL_NAME="$NAME" \
   echo "[$ARM] probe failed; recording the arm anyway" >&2
 fi
 cat "$OUT/$ARM-probe.jsonl"
+
+# Correctness is the model's OUTPUT, not the fault counters: a stale free-row
+# publish once served the WRONG experts with coverage_faults at 0 (plan.md).
+# FT_POST runs while the server is still up -- the only moment recall.py or
+# needles.py can reach it, since this script stops the unit on the way out.
+# The command sees FREETOKEN_URL and FREETOKEN_MODEL_NAME already pointing at
+# this arm, and its output is kept beside the arm's other artefacts. A failure
+# here is recorded, never silent, but does not discard the arm: the numbers
+# above were still measured, and a recall failure is itself a finding.
+if [ -n "${FT_POST:-}" ]; then
+  echo "[$ARM] post: $FT_POST"
+  if ! FREETOKEN_URL="http://127.0.0.1:$PORT" FREETOKEN_MODEL_NAME="$NAME" \
+       timeout "${FT_POST_TIMEOUT:-3600}" bash -c "$FT_POST" \
+       > "$OUT/$ARM-post.txt" 2>&1; then
+    echo "[$ARM] POST FAILED (exit $?) -- see $ARM-post.txt" >&2
+  fi
+  tail -20 "$OUT/$ARM-post.txt" || true
+fi
 
 curl -fsS --max-time 10 "http://127.0.0.1:$PORT/v1/stats" > "$OUT/$ARM-stats.json" 2>/dev/null || true
 

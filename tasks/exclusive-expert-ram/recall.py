@@ -12,8 +12,18 @@ serves wrong experts usually still parrots the most recent tokens.
 
     recall.py 21000 240000 713000
 
+Thinking is OFF here, deliberately. This is a RETRIEVAL test: the answer is
+three literal strings that are in the context or are not, and reasoning adds
+nothing. It also used to make the test lie -- the server serves with thinking
+ON by default, so a 64-token budget was spent on a thinking preamble and the
+answer came back truncated mid-sentence ("...the authorization code for this
+section is ZULU-2188, but I need to find all..."), scoring 1 of 3 codes at 21K
+while 120K and 240K passed. The gate was reporting the budget, not the model.
+Measured 2026-09-22 on the lever-1 arm.
+
 Environment: FREETOKEN_URL (default http://127.0.0.1:1920),
-FREETOKEN_MODEL_NAME (default nemotron-3.5-lightning).
+FREETOKEN_MODEL_NAME (default nemotron-3.5-lightning),
+RECALL_MAX_TOKENS (answer budget, default 192).
 """
 from __future__ import annotations
 
@@ -62,8 +72,9 @@ def ask(prompt: str, codes: list[str]) -> dict:
         data=json.dumps({
             "model": NAME,
             "messages": [{"role": "user", "content": prompt + question}],
-            "max_tokens": 64,
+            "max_tokens": int(os.environ.get("RECALL_MAX_TOKENS", "192")),
             "temperature": 0.0,
+            "chat_template_kwargs": {"enable_thinking": False},
         }).encode(),
         headers={"Content-Type": "application/json"},
     )
@@ -72,8 +83,12 @@ def ask(prompt: str, codes: list[str]) -> dict:
         body = json.load(r)
     text = body["choices"][0]["message"]["content"]
     found = [c for c in codes if c in text]
+    usage = body.get("usage", {}) or {}
     return {
-        "prompt_tokens": body.get("usage", {}).get("prompt_tokens"),
+        "thinking": False,
+        "finish_reason": body["choices"][0].get("finish_reason"),
+        "prompt_tokens": usage.get("prompt_tokens"),
+        "completion_tokens": usage.get("completion_tokens"),
         "seconds": round(time.perf_counter() - t0, 1),
         "planted": codes,
         "recalled": found,

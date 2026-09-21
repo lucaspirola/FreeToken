@@ -37,7 +37,15 @@ prompt interleaved between questions evicts the prefix.
 Environment: FREETOKEN_URL (default http://127.0.0.1:1920),
 FREETOKEN_MODEL_NAME (default nemotron-3.5-lightning),
 NEEDLES_OUT (write the JSON report here as well as stdout),
-NEEDLES_MAX_TOKENS (answer budget, default 2048 -- thinking needs room).
+NEEDLES_MAX_TOKENS (retrieval answer budget, default 1024),
+NEEDLES_THINK_MAX_TOKENS (thinking-question budget, default 16384).
+
+The prefix cache has a budget of its own: the server's --pin-prefix-max-tokens
+defaults to 65536, so a haystack larger than that is NOT kept and every
+question re-prefills it. Measured: at a 19927-token haystack the questions
+reported cached_tokens 19840 (hit), at 112298 they reported 0 (miss, ~17 s of
+re-prefill each). Raise the flag for a needle arm above 65 K, or accept that
+the per-question timings are prefill-bound. This script warns when it sees it.
 
 Exit status is 1 if any type-1 (codes) question failed at any size: that is the
 hard gate, the same one recall.py enforces. The other six are reported and
@@ -57,7 +65,18 @@ import urllib.request
 
 URL = os.environ.get("FREETOKEN_URL", "http://127.0.0.1:1920")
 NAME = os.environ.get("FREETOKEN_MODEL_NAME", "nemotron-3.5-lightning")
-MAX_TOKENS = int(os.environ.get("NEEDLES_MAX_TOKENS", "2048"))
+# Two budgets, because the two kinds of question are not the same workload.
+# A retrieval answer is a few tokens. A thinking answer spends its budget on
+# reasoning FIRST and only then writes the answer, so a budget that merely
+# fits the answer truncates mid-thought and scores the model as wrong when it
+# had already found the fact. Measured 2026-09-22 on the lever-1 arm at 2048:
+# multihop, ordering and arithmetic all came back finish_reason=length at
+# exactly 2047 completion tokens with 9.7-13.9 K characters of reasoning, and
+# the multihop answer visibly contained the right fact ("Delia Marsh's manager
+# is Ov Petran") without ever reaching the second hop. That was the harness
+# under-measuring the model, not the model failing.
+MAX_TOKENS = int(os.environ.get("NEEDLES_MAX_TOKENS", "1024"))
+THINK_MAX_TOKENS = int(os.environ.get("NEEDLES_THINK_MAX_TOKENS", "16384"))
 
 # Filler that tokenizes densely and answers nothing on its own. Deliberately
 # the same vocabulary recall.py uses, so a haystack of a given size costs the
@@ -300,10 +319,11 @@ def run_size(target: int, rng: random.Random) -> dict:
     out["prefill_cached_tokens"] = _cached(usage)
 
     for kind, (question, thinking, scorer) in QUESTIONS.items():
+        budget = THINK_MAX_TOKENS if thinking else MAX_TOKENS
         try:
             body = _post(
                 [{"role": "user", "content": haystack + "\n\n" + question}],
-                thinking=thinking, max_tokens=MAX_TOKENS)
+                thinking=thinking, max_tokens=budget)
         except Exception as exc:                       # a failure is a result
             out["questions"][kind] = {"error": f"{type(exc).__name__}: {exc}",
                                       "thinking": thinking, "correct": False}
@@ -322,6 +342,9 @@ def run_size(target: int, rng: random.Random) -> dict:
             # column can be read against a thinking-OFF one.
             "reasoning_chars": len(reasoning),
             "finish_reason": body["choices"][0].get("finish_reason"),
+            # A truncated answer is a harness result, not a model result: it
+            # says the budget ran out before the model could answer.
+            "truncated": body["choices"][0].get("finish_reason") == "length",
             "answer": text.strip()[:400],
         }
     out["truth"] = truth
@@ -338,8 +361,19 @@ def main(sizes: list[str]) -> int:
         report["sizes"].append(res)
         if not res["questions"].get("codes", {}).get("correct"):
             hard_failure = 1
-        line = " ".join(f"{k}={'ok' if v.get('correct') else 'FAIL'}"
-                        for k, v in res["questions"].items())
+        # Distinguish a wrong answer from one that never finished, and say
+        # so on the line: they mean completely different things.
+        line = " ".join(
+            f"{k}={'ok' if v.get('correct') else ('TRUNC' if v.get('truncated') else 'FAIL')}"
+            for k, v in res["questions"].items())
+        cached = [v.get("cached_tokens") for v in res["questions"].values()]
+        if res.get("prompt_tokens") and all(
+                (c or 0) < 0.5 * res["prompt_tokens"] for c in cached):
+            print(f"  WARNING: prefix cache MISSED at {res['target']} "
+                  f"(cached {cached[0]} of {res['prompt_tokens']} prompt "
+                  f"tokens). Every question re-prefilled the haystack; raise "
+                  f"--pin-prefix-max-tokens above the haystack size.",
+                  flush=True)
         print(f"[{res['target']} -> {res.get('prompt_tokens')} tok] "
               f"{res['score']}/7  {line}", flush=True)
     text = json.dumps(report, indent=1)
