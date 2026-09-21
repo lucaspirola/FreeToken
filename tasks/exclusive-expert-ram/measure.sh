@@ -10,6 +10,11 @@
 #   FT_SIZES   probe prompt sizes             (default "8000 32000 80000")
 #   FT_EXTRA   extra ft serve flags, verbatim (last flag wins; e.g. a lower seq-len cap)
 #   FT_NAME    served model name for the probe (default nemotron-3.5-lightning)
+#   FT_KV      KV lane by name, recorded with the number so it is attributable:
+#              q8q8 (q8_0 K + q8_0 V, the default lane), q8q6, q6q5. Anything
+#              else is passed through verbatim as flags. Only these asymmetric
+#              pairs are validated (server/args.py), and only on the triton
+#              attention backend.
 #
 # Every arm runs ALONE: a 28 GiB host cannot hold two of these, and the numbers are
 # worthless if a second model is resident. The server runs as a transient --user unit so
@@ -29,6 +34,16 @@ PORT="${FT_PORT:-1920}"
 SIZES="${FT_SIZES:-8000 32000 80000}"
 NAME="${FT_NAME:-nemotron-3.5-lightning}"
 RATIO="${FT_RATIO:-1.00}"   # same for every arm; a sweep that moves two knobs measures neither
+# A KV lane is part of the identity of a number, not a detail of how it was
+# taken: the same arm on q6/q5 is a different measurement, so the lane name
+# goes into the record and the flags go in LAST (last flag wins over FT_EXTRA).
+KV="${FT_KV:-}"
+case "$KV" in
+  ""|q8q8) KV_FLAGS="" ;;
+  q8q6)    KV_FLAGS="--kv-cache-dtype-k q8_0 --kv-cache-dtype-v q6_0" ;;
+  q6q5)    KV_FLAGS="--kv-cache-dtype-k q6_0 --kv-cache-dtype-v q5_0" ;;
+  *)       KV_FLAGS="$KV" ;;
+esac
 UNIT="ft-measure-$ARM"
 OUT="$REPO/tasks/exclusive-expert-ram/results"
 mkdir -p "$OUT"
@@ -89,7 +104,7 @@ systemd-run --user --unit="$UNIT" --property=OOMScoreAdjust=1000 \
   --setenv=PATH="$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/wsl/lib" \
   --setenv=FREETOKEN_HOST_ENV="$ARMENV" \
   --setenv=FREETOKEN_PORT="$PORT" \
-  --setenv=FREETOKEN_EXTRA_ARGS="${FT_EXTRA:-}" \
+  --setenv=FREETOKEN_EXTRA_ARGS="${FT_EXTRA:-} $KV_FLAGS" \
   "$REPO/scripts/serve-default.sh" >/dev/null
 
 # From here on the unit must never outlive this script: a leaked server holds the GPU and
@@ -208,7 +223,7 @@ for pid in $(cat "$CGDIR/cgroup.procs" 2>/dev/null); do
 done
 gpu_used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)
 
-RATIO_USED="$RATIO" python3 - "$ARM" "$MODEL" "$ROWS" "$mem_now" "$mem_peak" "$gpu_used" \
+RATIO_USED="$RATIO" KV_USED="${KV:-q8q8}" python3 - "$ARM" "$MODEL" "$ROWS" "$mem_now" "$mem_peak" "$gpu_used" \
   "$OUT/$ARM-probe.jsonl" "$OUT/$ARM-stats.json" "$OUT/$ARM-record.json" \
   "$mem_file" "$mem_unevict" "$mem_cur" "$avail_before" "$avail_after" \
   "$rss_kb" "$lck_kb" "$avail_ready" "$pinned_ready" "$rss_ready" "$mem_shmem" <<'PY'
@@ -219,6 +234,9 @@ av_ready, pinned_ready, rss_ready, shmem = sys.argv[17:21]
 gib = lambda b: round(int(b) / 2**30, 2)
 rec = {"arm": arm, "model": os.path.basename(model), "rows": rows,
        "ratio": os.environ.get("RATIO_USED", ""),
+       # The KV lane this arm ran on. Without it a 256K Ornith row cannot be
+       # told from the same arm on a cheaper lane.
+       "kv": os.environ.get("KV_USED", ""),
        # THE metric: host RAM the MODEL holds, sampled with the server ready
        # and nothing served yet. This is what the mirror's capacity knob moves.
        "ram_gib": gib(int(av_before) - int(av_ready)),

@@ -39,6 +39,11 @@ export FT_NAME=ornith
 # appended last and the last flag wins.
 export FT_EXTRA="--num-tokens 262144 --max-seq-len-override 262144 --served-model-name ornith"
 
+# Three KV lanes, because the owner asked for the trade-off, not one number:
+# q8/q8 is the reference, q8 K + q6 V and q6 K + q5 V are the two asymmetric
+# pairs the server validates (K is kept more precise than V in both, which is
+# the pair that survives long context). Each lane is a separate arm and the
+# lane name lands in the record, so no row is ambiguous later.
 run() {
   local arm="$1" rows="$2"
   echo "=============== $arm (rows=$rows) $(date +%H:%M:%S)"
@@ -47,16 +52,45 @@ run() {
     [ "$avail" -ge 22 ] && break
     sleep 20
   done
-  FT_ROWS="$rows" timeout 1800 tasks/exclusive-expert-ram/measure.sh "$arm" 2>&1 | tail -40
+  # The GPU must be ours alone: --memory-ratio is a fraction of FREE VRAM, so
+  # an arm sharing the card sizes itself to a smaller GPU and its decode number
+  # is void. This cost a whole sweep on 2026-09-21.
+  for _ in $(seq 30); do
+    used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)
+    [ "${used:-1}" -eq 0 ] && break
+    echo "[$arm] waiting: GPU holds ${used} MiB"; sleep 10
+  done
+  used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)
+  if [ "${used:-1}" -ne 0 ]; then
+    echo "[$arm] REFUSED: GPU still holds ${used} MiB" >&2
+    nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv,noheader >&2
+    return 1
+  fi
+  systemctl --user reset-failed "ft-measure-$arm" 2>/dev/null
+  FT_ROWS="$rows" timeout 3600 tasks/exclusive-expert-ram/measure.sh "$arm" 2>&1 | tail -40
+  journalctl --user -u "ft-measure-$arm" --no-pager -o cat 2>/dev/null \
+    | sed 's/\x1b\[[0-9;]*m//g' > "tasks/exclusive-expert-ram/results/$arm-journal.txt"
   systemctl --user reset-failed "ft-measure-$arm" 2>/dev/null
   sleep 15
 }
 
+# FT_KV selects the lane for this invocation; the arm name carries it so the
+# three lanes never overwrite each other's records.
+LANE="${FT_KV:-q8q8}"
+export FT_KV="$LANE"
+
 for arg in "$@"; do
   case "$arg" in
-    baseline) run ornith-baseline 0 ;;
-    auto)     run ornith-auto     -1 ;;
-    *)        run "ornith-$arg"   "$arg" ;;
+    baseline) run "ornith-baseline-$LANE" 0 ;;
+    auto)     run "ornith-auto-$LANE"     -1 ;;
+    lanes)
+      # Every lane, both arms, baseline bracketing each lane. ~6 arms.
+      for lane in q8q8 q8q6 q6q5; do
+        FT_KV="$lane" run "ornith-baseline-$lane" 0
+        FT_KV="$lane" run "ornith-auto-$lane"    -1
+      done
+      ;;
+    *)        run "ornith-$arg-$LANE"   "$arg" ;;
   esac
 done
 echo "=============== ornith sweep done $(date +%H:%M:%S)"

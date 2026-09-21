@@ -16,7 +16,7 @@ import pathlib
 import sys
 
 COLUMNS = [
-    "arm", "model", "rows", "ratio",
+    "arm", "model", "rows", "ratio", "kv",
     # The RAM answer, then its attribution (results/README.md).
     "ram_gib", "rss_ready_gib", "devzero_gib", "ram_after_80k_gib", "rss_gib", "locked_gib", "anon_gib", "file_gib", "shmem_gib",
     "unevict_gib", "current_gib", "peak_current_gib", "gpu_mib",
