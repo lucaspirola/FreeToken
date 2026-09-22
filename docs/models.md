@@ -36,6 +36,38 @@ work too.
   `offload`, upgraded to `hybrid` when a cached `ft bench bw` profile
   recommends it.
 
+## NVFP4 expert row layout
+
+`freetoken.models.nvfp4_banks.nvfp4_expert_row_layout(H, I, *, gated, kind_map=None)`
+is the single source of truth for one native NVFP4 expert's host row: the 6
+bank shapes (`gate_up_packed/scale/global`, `down_packed/scale/global`), where
+each checkpoint tensor (`(role, kind)`, role = gate/up/down, kind =
+weight/weight_scale/weight_scale_2) lands inside its bank (`bank`,
+`byte_offset`, on-disk `checkpoint_shape`/`checkpoint_dtype`), and the total
+`row_bytes` per expert. `_alloc_nvfp4_host_banks` calls it instead of carrying
+its own copy of the shapes.
+
+This replaces four places that used to re-derive the same layout by hand
+(`models/nvfp4_banks.py`, `moe/mirror_pool.py`'s `nvfp4_bank_shapes` /
+`_row_layout` / `_KIND_DTYPE`, `moe/offload_cache.py`'s
+`_BANK_BYTES_PER_EXPERT["nvfp4"]`, and `engine/cache_budget.py`, the one that
+was already derived from real tensors) — see
+`tasks/exclusive-expert-ram/reviews/2026-09-22-refactor-plan-final.md` section
+3.4. Wiring the mirror pool and the pin-budget estimator onto this function
+(S5a part 2) is deferred until after the upstream merge brings the
+`Nvfp4ExpertSourceSpec.kind_map` field this function's `kind_map` parameter is
+already shaped for; until then `_alloc_nvfp4_host_banks` is the only consumer,
+and the parameter is accepted but unused (see the function's docstring).
+
+`tests/moe/test_nvfp4_row_layout.py` proves rows built from this function are
+byte-equal to what `load_nvfp4_expert_source_banks` actually loads, for an
+ungated and a gated modelopt-named synthetic checkpoint. A third variant —
+gated, with compressed-tensors' `weight_packed`/`weight_global_scale` naming —
+is included too, but documents a gap rather than closing it: the loader's
+kind handling is hardcoded to modelopt's three names and refuses that
+checkpoint today ("unknown NVFP4 expert tensor kind"), which is exactly why
+`kind_map` is deferred to the merge rather than retrofitted now.
+
 ## Notes
 
 - `ft checkpoint` conversion is optional — it pre-converts a checkpoint into
