@@ -17,16 +17,29 @@ on the path that TWO DIFFERENT sessions matched through, ending at
 Budgets: every pinned snapshot holds one GDN state slot, so pins are budgeted in slots
 (``pin_prefix_max_slots``, auto = the pool's snapshot-cache slots minus 2) as well as KV
 tokens; over either, the least-recently-matched pin is released first.
+
+Scope (S13, ``--pin-prefix-scope``): everything above is ``shared``, the default. Under
+``session`` a request with a session key also pins the prefix it leaves in the tree at its
+finish (``_cache_req_hybrid`` -> ``_pin_session_prefix``), holding the whole path's KV but
+only the deepest ``max(1, pin_slot_budget // 2)`` snapshots; a hit refreshes the pins it
+shares a path with. Those tests drive whole requests through ``match_req`` / ``cache_req``
+the way the scheduler does (``_serve``), including the production geometry of the
+single-lane profile (13 state slots, 8192-token prefill chunks, Mamba-2 track 128).
 """
 from __future__ import annotations
 
+import itertools
 from types import SimpleNamespace
 
+import pytest
 import torch
 
+from freetoken.core import Req, SamplingParams
 from freetoken.kvcache.linear_state_pool import LinearStatePool
 from freetoken.models.config import LinearGatedDeltaGroupConfig
-from freetoken.scheduler.cache import CacheManager
+from freetoken.scheduler import cache as cache_mod
+from freetoken.scheduler.cache import (PIN_WORKING_SET_SLOTS_PER_REQUEST, CacheManager,
+                                       pin_prefix_scope_error)
 
 
 def _pool(num_slots=16):
@@ -43,11 +56,13 @@ def _pend(ids):
     return SimpleNamespace(input_ids=t, input_len=len(ids), mm_embeds=None)
 
 
-def _cm(pool, min_tokens=4, max_tokens=0, max_slots=-1, working_set=0, num_pages=64):
-    page_table = torch.zeros(4, num_pages, dtype=torch.int32)
+def _cm(pool, min_tokens=4, max_tokens=0, max_slots=-1, working_set=0, num_pages=64,
+        scope="shared", rows=4):
+    page_table = torch.zeros(rows, num_pages, dtype=torch.int32)
     return CacheManager(num_pages, 1, page_table, "hybrid_radix", linear_state_pool=pool,
                         pin_prefix_min_tokens=min_tokens, pin_prefix_max_tokens=max_tokens,
-                        pin_prefix_max_slots=max_slots, pin_working_set_slots=working_set)
+                        pin_prefix_max_slots=max_slots, pin_working_set_slots=working_set,
+                        pin_prefix_scope=scope)
 
 
 def _insert(cm, pool, ids):
@@ -411,3 +426,310 @@ def test_rebuild_drops_the_pins_with_the_tree():
     cm.rebuild(64, torch.zeros(4, 64, dtype=torch.int32))
     assert cm._pins == {} and cm._pin_locked == {} and _ledger(cm) == (0, 0, 0)
     assert cm.prefix_counters.hits == 2                       # the reuse counters are cumulative
+
+
+# =========================================================================== S13: session scope
+_uids = itertools.count(1000)
+
+
+@pytest.fixture
+def pin_clock(monkeypatch):
+    """Strictly increasing ``time.monotonic`` for the pin ledger's ``last_match`` (the tree's
+    own ``monotonic_ns`` stamps are already deterministic, conftest.py), so LRU-release
+    assertions cannot tie."""
+    monkeypatch.setattr(cache_mod, "time", SimpleNamespace(monotonic=itertools.count(1).__next__))
+
+
+def _serve(cm, pool, ids, *, session=None, chunk=8, track=4, row=0):
+    """One request through the manager the way the scheduler drives it:
+
+    * admission (``prefill.py _try_allocate_one``): ``match_req``, ``lock``, reserve the 3-slot
+      working set (live + 2 ping-pong), and the ``note_prompt_admitted`` the batch reports;
+    * one prefill forward per ``chunk`` tokens, each tracking the deepest ``track`` boundary
+      strictly inside its extend (``attention/linear.py build_fla_metadata``), then the
+      per-chunk ``cache_req(finished=False)`` commit (``scheduler.py`` prefill branch);
+    * the finish ``cache_req(finished=True)`` donating the live slot at ``len(ids)``.
+
+    Returns the finished Req. page_size is 1, so page indices are token indices."""
+    mr = cm.match_req(_pend(ids))
+    h = mr.cuda_handle
+    cm.lock(h)
+    assert cm.reserve_mamba_slots(3), "the working set must seat"
+    cm.note_prompt_admitted(h, len(ids), session_key=session)
+    req = Req(input_ids=torch.tensor(ids, dtype=torch.int32), table_idx=row,
+              cached_len=h.cached_len, output_len=1, uid=next(_uids),
+              sampling_params=SamplingParams(), cache_handle=h, session_id=session)
+    if h.cached_len:
+        cm.page_table[row, :h.cached_len] = h.get_matched_indices()
+    req.linear_slot_idx = pool.alloc(1)[0]
+    req.mamba_ping_pong = tuple(pool.alloc(2))
+    req.mamba_next_track_idx = 0
+    n = len(ids)
+    while req.cached_len < n:
+        s = req.cached_len
+        e = min(n, s + chunk)
+        cm.page_table[row, s:e] = cm._allocate(e - s)
+        c = (e - s - 1) // track
+        if c >= 1:
+            req.mamba_last_track_seqlen = s + c * track
+            req.mamba_next_track_idx = 1 - req.mamba_next_track_idx
+        req.cached_len = e
+        cm.cache_req(req, finished=False)
+    cm.cache_req(req, finished=True)
+    return req
+
+
+def _path_nodes(cm, ids):
+    """Every node on the root path the tree holds for ``ids`` (deepest first), tombstones too."""
+    node, matched = cm.prefix_cache._walk(torch.tensor(ids, dtype=torch.int32))
+    assert matched == len(ids)
+    out = []
+    while not node.is_root():
+        out.append(node)
+        node = node.parent
+    return out
+
+
+def _ends(cm, nodes):
+    return sorted(cm.prefix_cache._path_len(n) for n in nodes)
+
+
+# --------------------------------------------------------------------------- scope + refusal
+def test_pin_prefix_scope_error_refuses_session_without_a_finite_token_budget():
+    assert pin_prefix_scope_error("shared", 0) is None            # today's default stays legal
+    assert pin_prefix_scope_error("shared", 65536) is None
+    assert pin_prefix_scope_error("session", 262144) is None
+    assert "finite --pin-prefix-max-tokens" in pin_prefix_scope_error("session", 0)
+    assert "must be one of" in pin_prefix_scope_error("private", 262144)
+    pool = _pool()
+    assert _cm(pool).pin_prefix_scope == "shared"                  # the constructor default
+    with pytest.raises(ValueError, match="finite"):
+        _cm(pool, scope="session", max_tokens=0)
+    with pytest.raises(ValueError, match="one of"):
+        _cm(pool, scope="bogus", max_tokens=8)
+
+
+# --------------------------------------------------------------------------- the producer's pin
+def test_session_scope_pins_the_producers_prefix_at_finish(pin_clock):
+    """20 tokens in 8-token chunks, track 4: chunk commits at 4 and 12 (the 4-token last
+    chunk has no boundary strictly inside it), the finish donate at 20. The request's own
+    lock is gone, the pin holds the whole path and its three snapshots."""
+    pool = _pool()
+    cm = _cm(pool, min_tokens=4, max_tokens=64, scope="session", num_pages=256)
+    ids = list(range(1, 21))
+    _serve(cm, pool, ids, session="a")
+    path = _path_nodes(cm, ids)
+    assert _ends(cm, [n for n in path if n.mamba_value is not None]) == [4, 12, 20]
+    assert _ledger(cm) == (1, 20, 3)
+    assert list(cm._pins) == [path[0]]                             # the finish node
+    assert all(n.mamba_ref_count == 1 for n in path)
+    assert _tree(cm).full_protected == 20 and _tree(cm).full_evictable == 0
+    cm.check_integrity()
+
+    # The growable-KV shrink (_evict_growable_prefix_pages -> evict_full) cannot take it.
+    assert _tree(cm).evict_full(10 ** 6).kv_indices.numel() == 0
+    # The session's next question hits the whole haystack.
+    h = _admit(cm, ids, session="a")
+    assert h.cached_len == 20
+
+
+def test_shared_scope_ignores_the_producers_finish():
+    """The default: the same request pins nothing, exactly as before S13."""
+    pool = _pool()
+    cm = _cm(pool, min_tokens=4, max_tokens=64, num_pages=256)
+    ids = list(range(1, 21))
+    _serve(cm, pool, ids, session="a")
+    assert _ledger(cm) == (0, 0, 0) and cm._pins == {}
+    assert _tree(cm).full_protected == 0 and _tree(cm).mamba_protected == 0
+    assert _tree(cm).evict_full(10 ** 6).kv_indices.numel() == 20   # all of it evictable
+    c = cm.prefix_counters.as_dict()
+    assert (c["pin_evictions"], c["pin_budget_refusals"]) == (0, 0)
+
+
+def test_session_scope_needs_a_session_key_and_the_min_tokens():
+    pool = _pool()
+    cm = _cm(pool, min_tokens=16, max_tokens=64, scope="session", num_pages=256)
+    _serve(cm, pool, list(range(1, 21)), session=None)             # no key: a probe, a one-shot
+    assert _ledger(cm) == (0, 0, 0)
+    _serve(cm, pool, list(range(101, 113)), session="a")           # 12 < 16 tokens
+    assert _ledger(cm) == (0, 0, 0)
+    _serve(cm, pool, list(range(201, 221)), session="a")
+    assert _ledger(cm) == (1, 20, 3)
+    cm.check_integrity()
+
+
+def test_session_scope_is_off_at_min_tokens_zero():
+    pool = _pool()
+    cm = _cm(pool, min_tokens=0, max_tokens=64, scope="session", num_pages=256)
+    _serve(cm, pool, list(range(1, 21)), session="a")
+    assert _ledger(cm) == (0, 0, 0)
+
+
+# --------------------------------------------------------------------------- KV-only remainder
+def test_a_session_pin_holds_the_whole_kv_path_but_only_the_deepest_snapshots():
+    """Budget 6 (13 slots, one lane), cap 3: a 48-token path has commits at 4..44 and the
+    finish at 48 -- but the pool's snapshot cache keeps only some of them. The pin holds the
+    three deepest; the others are KV-only: ``evict_mamba`` tombstones them, ``evict_full``
+    still cannot take their KV, and a question diverging inside the pinned tail still
+    restores from a pinned snapshot."""
+    pool = _pool(num_slots=13)
+    cm = _cm(pool, min_tokens=4, max_tokens=64, scope="session", num_pages=256,
+             working_set=PIN_WORKING_SET_SLOTS_PER_REQUEST * 1)
+    assert cm.pin_slot_budget == 6 and cm._session_pin_slot_cap() == 3
+    ids = list(range(1, 49))
+    _serve(cm, pool, ids, session="a")
+    path = _path_nodes(cm, ids)
+    snaps = [n for n in path if n.mamba_value is not None]
+    assert len(snaps) > 3
+    assert _ledger(cm) == (1, 48, 3)
+    locked = [n for n in path if n.mamba_ref_count]
+    assert _ends(cm, locked) == [36, 44, 48]                       # the deepest three
+    cm.ensure_mamba_slots(pool.num_slots)                          # all the pressure there is
+    assert _ends(cm, [n for n in path if n.mamba_value is not None]) == [36, 44, 48]
+    assert _tree(cm).evict_full(10 ** 6).kv_indices.numel() == 0
+    assert _tree(cm).full_protected == 48
+    h = _admit(cm, ids[:46] + [900, 901], session="a")
+    assert h.cached_len == 44                                      # >= 48 - one 8-token chunk
+    cm.check_integrity()
+
+
+def test_a_session_pin_at_slot_budget_zero_is_refused_not_made_kv_only():
+    pool = _pool()
+    cm = _cm(pool, min_tokens=4, max_tokens=64, max_slots=0, scope="session", num_pages=256)
+    _serve(cm, pool, list(range(1, 21)), session="a")
+    c = cm.prefix_counters.as_dict()
+    assert (c["pinned_prefixes"], c["pin_budget_refusals"]) == (0, 1)
+    assert _tree(cm).full_protected == 0 and _tree(cm).mamba_protected == 0
+
+
+def test_releasing_a_session_pin_keeps_exactly_what_the_remaining_pins_chose(pin_clock):
+    """R1 = H+a (snapshots 4, 12, a20), R2 = H+b restores at 12 and commits 16 on the trunk
+    (snapshots b20, 16, 12, 4). Cap 3: R2 holds b20, 16, 12 -- not 4. Releasing R1 must drop
+    4 (a shared-scope pin would have kept every snapshot ancestor of R2) and keep 12."""
+    pool = _pool(num_slots=13)
+    cm = _cm(pool, min_tokens=4, max_tokens=64, scope="session", num_pages=256,
+             working_set=PIN_WORKING_SET_SLOTS_PER_REQUEST * 1)
+    trunk = list(range(1, 17))
+    r1, r2 = trunk + [31, 32, 33, 34], trunk + [41, 42, 43, 44]
+    _serve(cm, pool, r1, session="a")
+    _serve(cm, pool, r2, session="a")
+    n1, n2 = _path_nodes(cm, r1)[0], _path_nodes(cm, r2)[0]
+    assert set(cm._pins) == {n1, n2}
+    assert _ends(cm, cm._pins[n2].snapshots) == [12, 16, 20]
+    assert _ledger(cm) == (2, 24, 5)                               # 4, 12, a20 + 16, b20
+    cm._release_pin(n1)
+    assert _ledger(cm) == (1, 20, 3)
+    by_end = {cm.prefix_cache._path_len(n): n for n in _path_nodes(cm, r2)}
+    assert by_end[12].mamba_ref_count == 1 and by_end[16].mamba_ref_count == 1
+    assert by_end[4].mamba_ref_count == 0                          # KV-only now
+    assert n1.mamba_ref_count == 0 and n1.ref_count == 0
+    cm._release_pin(n2)
+    assert _ledger(cm) == (0, 0, 0)
+    assert _tree(cm).full_protected == 0 and _tree(cm).mamba_protected == 0
+    cm.check_integrity()
+
+
+# --------------------------------------------------------------------------- LRU + handoff
+def test_session_pins_release_lru_under_pin_prefix_max_tokens(pin_clock):
+    """max 45 tokens: X and Y (20 each) fit, Z does not. A hit on X refreshes it, so Z's
+    pin releases Y -- the pin least recently MATCHED, not the oldest."""
+    pool = _pool()
+    cm = _cm(pool, min_tokens=4, max_tokens=45, scope="session", num_pages=256)
+    x, y, z = list(range(1, 21)), list(range(101, 121)), list(range(201, 221))
+    _serve(cm, pool, x, session="a")
+    _serve(cm, pool, y, session="b")
+    assert _ledger(cm)[:2] == (2, 40)
+    _admit(cm, x, session="a")                                     # a re-reads its haystack
+    _serve(cm, pool, z, session="c")
+    c = cm.prefix_counters.as_dict()
+    assert (c["pinned_prefixes"], c["pinned_tokens"]) == (2, 40)
+    assert (c["pin_evictions"], c["pin_budget_refusals"]) == (1, 0)
+    assert set(cm._pins) == {_path_nodes(cm, x)[0], _path_nodes(cm, z)[0]}
+    assert all(n.ref_count == 0 for n in _path_nodes(cm, y))       # Y is evictable again
+    # A path over the whole budget is refused, and releases nothing on the way.
+    _serve(cm, pool, list(range(301, 351)), session="d")
+    c = cm.prefix_counters.as_dict()
+    assert (c["pinned_prefixes"], c["pin_evictions"], c["pin_budget_refusals"]) == (2, 1, 1)
+    cm.check_integrity()
+
+
+def test_handoff_session_b_admitted_while_a_pin_is_held(pin_clock):
+    """The single-lane handoff at the production slot geometry (13 slots, one lane: budget
+    6, cap 3). A pins its 40-token haystack; B is admitted and served while A's pin is
+    held -- its working set seats and no snapshot donation is skipped; B's pin fits beside
+    A's. A's fourth question still hits. C then needs room: the LRU release takes B, not
+    A, because A's question refreshed A's pin."""
+    pool = _pool(num_slots=13)
+    cm = _cm(pool, min_tokens=16, max_tokens=64, scope="session", num_pages=256,
+             working_set=PIN_WORKING_SET_SLOTS_PER_REQUEST * 1)
+    hay = list(range(1, 41))
+    _serve(cm, pool, hay, session="A")
+    assert _ledger(cm) == (1, 40, 3)
+
+    b = list(range(500, 524))
+    _serve(cm, pool, b, session="B")
+    assert cm._mamba_donation_skips == 0
+    c = cm.prefix_counters.as_dict()
+    assert (c["pinned_prefixes"], c["pinned_tokens"], c["pinned_slots"]) == (2, 64, 6)
+    assert (c["pin_evictions"], c["pin_budget_refusals"]) == (0, 0)
+
+    cm.ensure_mamba_slots(pool.num_slots)                          # every unpinned snapshot goes
+    h = _admit(cm, hay[:38] + [777, 778], session="A")             # A's fourth question
+    assert h.cached_len == 36                                      # >= 40 - one 8-token chunk
+    assert _tree(cm).full_protected == 64
+
+    _serve(cm, pool, list(range(600, 624)), session="C")
+    c = cm.prefix_counters.as_dict()
+    assert (c["pinned_prefixes"], c["pinned_tokens"], c["pinned_slots"]) == (2, 64, 6)
+    assert (c["pin_evictions"], c["pin_budget_refusals"]) == (1, 0)
+    assert _path_nodes(cm, hay)[0] in cm._pins                     # A survived the handoff
+    assert _path_nodes(cm, b)[0] not in cm._pins
+    assert _admit(cm, hay[:38] + [779], session="A").cached_len == 36
+    cm.check_integrity()
+
+
+# --------------------------------------------------------------------------- consequence (b)
+def test_a_120k_haystack_carries_more_snapshots_than_the_single_lane_pin_budget():
+    """The production numbers (scripts/serve-default.sh): --linear-state-slots 13,
+    --max-running-requests 1, --max-prefill-length 8192, Nemotron-H Mamba-2 track 128,
+    page_size 1. A 120,000-token prompt runs 15 prefill chunks (14 x 8192 + 5312), each
+    committing one snapshot (at +8064, the last at 114688 + 5248 = 119936), and the finish
+    donates one more at 120000: 16 nodes on the path. The pool (12 usable slots, 3 held by
+    the request) keeps at most 9 of the chunk snapshots, so 10 snapshot-bearing nodes remain
+    -- against a pin slot budget of 13 - 4 - 1 - 2 = 6. A shared-scope pin of that path is
+    refused whole; the session-scope pin holds all 120,000 tokens of KV and the three
+    deepest snapshots, and a question diverging at the haystack's end restores within one
+    chunk of it."""
+    tokens, chunk, track = 120_000, 8192, 128
+    # The 25% clamp (PIN_BUDGET_MAX_FRACTION) takes 262,144 down to 121,024 here, still
+    # above the path; production's 1M-token pool leaves 262,144 unclamped.
+    num_pages = 4 * tokens + 4096
+    ids = list(range(1, tokens + 1))
+
+    def run(scope):
+        pool = _pool(num_slots=13)
+        cm = _cm(pool, min_tokens=1024, max_tokens=262_144, scope=scope,
+                 num_pages=num_pages, rows=1,
+                 working_set=PIN_WORKING_SET_SLOTS_PER_REQUEST * 1)
+        _serve(cm, pool, ids, session="A", chunk=chunk, track=track)
+        return pool, cm
+
+    pool, cm = run("shared")
+    assert cm.pin_slot_budget == 6
+    path = _path_nodes(cm, ids)
+    snaps = [n for n in path if n.mamba_value is not None]
+    assert len(path) == 16 and len(snaps) == 10
+    assert cm._mamba_donation_skips == 0
+    assert cm.pin_prefix(path[0]) is False                         # 10 slots > budget 6
+    assert cm.prefix_counters.pin_budget_refusals == 1 and _ledger(cm) == (0, 0, 0)
+
+    pool, cm = run("session")
+    path = _path_nodes(cm, ids)
+    assert _ledger(cm) == (1, tokens, 3)
+    assert cm.prefix_counters.pin_budget_refusals == 0
+    assert _ends(cm, [n for n in path if n.mamba_ref_count]) == [114_560, 119_936, 120_000]
+    cm.ensure_mamba_slots(pool.num_slots)
+    assert _tree(cm).evict_full(10 ** 9).kv_indices.numel() == 0
+    h = _admit(cm, ids[:119_990] + [0], session="A")
+    assert h.cached_len == 119_936 and h.cached_len >= tokens - chunk
+    cm.check_integrity()

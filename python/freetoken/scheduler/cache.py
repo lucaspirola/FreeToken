@@ -47,12 +47,49 @@ PIN_WORKING_SET_SLOTS_PER_REQUEST = 4
 #: reach, so donations and a restoring hit always have somewhere to land.
 PIN_SLOT_BUDGET_SPARE = 2
 
+#: ``--pin-prefix-scope``. ``shared`` (the default) pins only a prefix that two DIFFERENT
+#: sessions matched through (``_shared_pin_target``). ``session`` also pins the prefix a
+#: request carrying a session key leaves in the tree when it finishes
+#: (``_pin_session_prefix``), so one agent re-reading its own haystack keeps it across the
+#: growable-KV shrink that otherwise evicts it between two questions.
+PIN_PREFIX_SCOPES = ("shared", "session")
+
+#: Under ``session`` scope one pin holds at most ``pin_slot_budget // PIN_SESSION_SLOT_SHARE``
+#: (>= 1) GDN snapshots -- the DEEPEST ones on its path, the rest of the path is held as KV
+#: only. A long prompt carries more snapshots than the whole budget (one per prefill chunk,
+#: up to the pool's snapshot cache: 10 on a 120K path under the 13-slot single-lane profile,
+#: whose budget is 6), and a pin that took the whole budget would be released by the next
+#: session's first pin -- the handoff the scope has to survive. ``shared`` scope keeps its
+#: all-or-nothing pin (every snapshot on the path, or refused).
+PIN_SESSION_SLOT_SHARE = 2
+
+
+def pin_prefix_scope_error(scope: str, max_tokens: int) -> str | None:
+    """Why ``--pin-prefix-scope``/``--pin-prefix-max-tokens`` cannot be served, or None.
+
+    ``session`` pins every keyed prompt of ``>= pin_prefix_min_tokens``, so its KV budget has
+    to be an explicit number: 0 means "25% of the KV pool" (``PIN_BUDGET_MAX_FRACTION``),
+    which on a 1M-token pool lets one pinned haystack hold 256K tokens of KV that no other
+    session can reclaim until a newer pin or ``DELETE /v1/cache/pins`` releases it.
+    """
+    if scope not in PIN_PREFIX_SCOPES:
+        return f"--pin-prefix-scope must be one of {', '.join(PIN_PREFIX_SCOPES)}, got {scope!r}"
+    if scope == "session" and int(max_tokens or 0) == 0:
+        return ("--pin-prefix-scope session needs a finite --pin-prefix-max-tokens (> 0): "
+                "0 lets session pins hold 25% of the KV pool")
+    return None
+
 
 @dataclass
 class _PrefixPin:
-    """One auto-pin: the deepest node it holds, and when a request last matched it."""
+    """One auto-pin: the deepest node it holds, and when a request last matched it.
+
+    ``snapshots`` is None for an all-snapshots pin (``shared`` scope: every snapshot-bearing
+    ancestor is held); under ``session`` scope it names the snapshot nodes this pin chose
+    to hold, so a release keeps exactly those for the pins that remain."""
     node: object
     last_match: float
+    snapshots: tuple | None = None
 
 
 def _pooled_sums_at(req, length: int):
@@ -73,7 +110,8 @@ class CacheManager:
                  linear_state_pool=None, swa_pool=None, sliding_window_size=None,
                  committed_pages: int | None = None, page_index_offset: int = 0,
                  pin_prefix_min_tokens: int = 0, pin_prefix_max_tokens: int = 0,
-                 pin_prefix_max_slots: int = -1, pin_working_set_slots: int = 0):
+                 pin_prefix_max_slots: int = -1, pin_working_set_slots: int = 0,
+                 pin_prefix_scope: str = "shared"):
         # The `_free_slots` follows a page-aligned manner. For example, if page_size = 2,
         # the `_free_slots` may look like [0, 2, 4, 6, ...], and each slot represents a page.
         device = page_table.device
@@ -130,6 +168,10 @@ class CacheManager:
                 "unlimited" if requested == 0 else requested, self.pin_prefix_max_tokens,
                 int(PIN_BUDGET_MAX_FRACTION * 100), num_pages * page_size,
             )
+        scope_error = pin_prefix_scope_error(pin_prefix_scope, requested)
+        if scope_error is not None:
+            raise ValueError(scope_error)
+        self.pin_prefix_scope = pin_prefix_scope
         self.prefix_counters = PrefixCounters()
         self._pins: dict = {}
         self._pin_locked: dict = {}
@@ -631,7 +673,9 @@ class CacheManager:
         requires both keys present and different). The producer of a node is not recorded
         (``cache_req`` never learns the node), so the pin fires on the second distinct
         session seen matching THROUGH the node, not on the first foreign hit of a private
-        prefix.
+        prefix. Under ``session`` scope the producer's pin is taken at its finish instead
+        (``_pin_session_prefix``), and a hit here refreshes the pins it shares a path with
+        (``_touch_pins_through``).
         """
         cached_len = handle.cached_len
         self.prefix_counters.note_admitted(
@@ -641,6 +685,8 @@ class CacheManager:
         node = getattr(handle, "node", None)
         if not self.pinning_enabled or cached_len <= 0 or node is None or node.is_root():
             return
+        if self.pin_prefix_scope == "session":
+            self._touch_pins_through(node)
         target = self._shared_pin_target(node, session_key)
         if target is not None:
             self.pin_prefix(target)
@@ -675,7 +721,9 @@ class CacheManager:
         node), so ``evict_full`` cannot take the path and ``evict_mamba`` cannot tombstone
         the node's snapshot -- and ``full_ref >= mamba_ref`` holds because nothing here
         bypasses it. Every snapshot-bearing ancestor is locked the same way so its
-        snapshot survives too (the restore point of every shorter reuse of the prefix).
+        snapshot survives too (the restore point of every shorter reuse of the prefix);
+        under ``session`` scope only the deepest ``_session_pin_slot_cap`` of them are, and
+        the rest of the path is held as KV only.
         Re-entrant: re-pinning an already pinned node only refreshes its last-match time,
         and a node another pin already locked is not locked twice.
 
@@ -702,17 +750,25 @@ class CacheManager:
             pin.last_match = now
             return True
         path = self._root_path(node)
+        # The snapshots this pin holds: every one on the path (shared scope), or the deepest
+        # ``_session_pin_slot_cap`` of them (session scope; ``path`` runs node -> root, so a
+        # prefix of the list is the deepest). The rest of the path is still held as KV.
+        snaps = [n for n in path if n.mamba_value is not None]
+        cap = self._session_pin_slot_cap()
+        if cap is not None:
+            snaps = snaps[:cap]
+        held = set(snaps)
         # What the pin costs against an EMPTY ledger: if that does not fit, refuse before
         # releasing anything (a release would buy nothing).
         all_tokens = sum(n.length for n in path)
-        all_slots = sum(1 for n in path if n.mamba_value is not None)
+        all_slots = len(snaps)
         if (all_slots > self.pin_slot_budget
                 or (self.pin_prefix_max_tokens and all_tokens > self.pin_prefix_max_tokens)):
             self.prefix_counters.pin_budget_refusals += 1
             return False
         while True:
             need = [n for n in path
-                    if (n is node or n.mamba_value is not None) and n not in self._pin_locked]
+                    if (n is node or n in held) and n not in self._pin_locked]
             new_slots = sum(1 for n in need if n.mamba_value is not None)
             covered = self._pin_covered_nodes()
             new_tokens = sum(n.length for n in path if n not in covered)
@@ -726,9 +782,64 @@ class CacheManager:
         for n in need:
             self.prefix_cache.inc_lock(n)
             self._pin_locked[n] = n.mamba_value is not None
-        self._pins[node] = _PrefixPin(node, now)
+        self._pins[node] = _PrefixPin(node, now, None if cap is None else tuple(snaps))
         self._recount_pins()
         return True
+
+    def _session_pin_slot_cap(self) -> int | None:
+        """Snapshots one pin may hold: None (all of its path) under ``shared`` scope,
+        ``max(1, pin_slot_budget // PIN_SESSION_SLOT_SHARE)`` under ``session``. With a
+        budget of 0 the cap stays 1, so a pin of a snapshot node is refused, not turned
+        into a KV-only pin: a hybrid match truncates to the deepest LIVE snapshot, and a
+        pinned path whose snapshots were all tombstoned would hold KV no request can use."""
+        if self.pin_prefix_scope != "session":
+            return None
+        return max(1, self.pin_slot_budget // PIN_SESSION_SLOT_SHARE)
+
+    def _touch_pins_through(self, node) -> None:
+        """``session`` scope: a hit that shares a pinned path refreshes that pin -- the hit
+        node lies on the pin's root path (a question diverging inside the pinned haystack)
+        or the pin's node lies on the hit's (a turn continuing past it). The LRU release
+        under ``pin_prefix_max_tokens``/the slot budget then takes the pin least recently
+        MATCHED: a session re-reading its own pinned haystack never reaches ``pin_prefix``
+        (no second key), which is how ``shared`` scope refreshes."""
+        if not self._pins:
+            return
+        now = time.monotonic()
+        hit_path = set(self._root_path(node))
+        for pin in self._pins.values():
+            if pin.node in hit_path:
+                pin.last_match = now
+                continue
+            cur = pin.node
+            while not cur.is_root():
+                if cur is node:
+                    pin.last_match = now
+                    break
+                cur = cur.parent
+
+    def _pin_session_prefix(self, req: Req) -> None:
+        """``session`` scope, at the producer's finish (``_cache_req_hybrid``): pin the
+        deepest snapshot-bearing node the request just left in the tree.
+
+        Only a request with a session key (``Req.session_id``: an explicit session or the
+        header/prompt_cache_key-inferred lease key; a hidden-state probe has none) whose
+        reusable prefix is ``>= pin_prefix_min_tokens``. At finish and not per prefill chunk:
+        until then the request's own lock holds its path, and one pin per finished request
+        keeps the LRU ledger at one entry per turn instead of one per chunk. An aborted
+        request is pinned the same way (its forwarded prefix is a valid prefix). The pin is
+        budgeted and released like any other (``pin_prefix``)."""
+        if self.pin_prefix_scope != "session" or not self.pinning_enabled:
+            return
+        if getattr(req, "session_id", None) is None:
+            return
+        length = align_down(req.cached_len, self.page_size)
+        if length < self.pin_prefix_min_tokens:
+            return
+        m = self.prefix_cache.match_prefix(req.input_ids[:length])
+        if m.node.is_root() or m.cached_len < self.pin_prefix_min_tokens:
+            return
+        self.pin_prefix(m.node)
 
     def _pin_over_budget(self, new_tokens: int, new_slots: int) -> bool:
         c = self.prefix_counters
@@ -780,9 +891,12 @@ class CacheManager:
         snapshot-bearing ancestors of some remaining pin, stay locked)."""
         self._pins.pop(node, None)
         needed: set = set()
-        for n in self._pins:
-            needed.add(n)
-            cur = n.parent
+        for pin in self._pins.values():
+            needed.add(pin.node)
+            if pin.snapshots is not None:        # session scope: exactly what it chose
+                needed.update(pin.snapshots)
+                continue
+            cur = pin.node.parent
             while not cur.is_root():
                 if cur.mamba_value is not None:
                     needed.add(cur)
@@ -1206,6 +1320,7 @@ class CacheManager:
             else:
                 self.unlock(old_handle)
                 self._free(page_indices[free_upto :])
+            self._pin_session_prefix(req)
             self._free_req_slots(req, keep_live=keep_live)
             return
 
