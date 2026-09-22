@@ -1,0 +1,8 @@
+kernel launches: before 116810 after 116810; 72 kernel names, 0 with different counts
+SAME [CUDA memcpy Device-to-Device]: count 4195 / 4195, bytes 72.362 / 72.362
+SAME [CUDA memcpy Device-to-Host]: count 193 / 193, bytes 0.027 / 0.027
+SAME [CUDA memcpy Host-to-Device]: count 1181 / 1181, bytes 0.081 / 0.081
+SAME [CUDA memset]: count 128 / 128, bytes 0.000 / 0.000
+counters: IDENTICAL {"mirror_swaps": 629, "mirror_free_evictions": 443, "mirror_writebacks": 186, "mirror_coverage_faults": 0, "mirror_starved_writebacks": 0, "mirror_retained_rows": 443, "mirror_buffer_free_evictions": 256, "decode_missing": 629, "decode_active": 17526, "decode_fetched": 0, "decode_calls": 0}
+GPU span of the request: before 0.875 s, after 0.899 s (+2.8%)
+RESULT: IDENTICAL
