@@ -27,6 +27,7 @@ _ROUTED_EXPERT_KEY_RE = re.compile(
 )
 _NVFP4_SOURCE_SPEC = Nvfp4ExpertSourceSpec(
     key_pattern=_ROUTED_EXPERT_KEY_RE,
+    key_template="model.layers.{layer}.mlp.experts.{expert}.{proj}.{kind}",
     proj_to_role={"gate_proj": "gate", "up_proj": "up", "down_proj": "down"},
     layer_to_bank=lambda layer, config: (
         None
