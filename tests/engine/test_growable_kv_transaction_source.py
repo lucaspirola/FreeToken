@@ -125,6 +125,8 @@ class _ArenaMoe(_Moe):
         super().__init__(size)
         self.arena_layout = (capacity, step)
         self.bank_row_bytes = [row_bytes]
+        # Whole-model residency (the real cache's default): coverage floor 0.
+        self.residency = SimpleNamespace(min_gpu_slots=lambda: 0)
         self.fail_target = fail_target
 
     def set_usable_slots(self, size):

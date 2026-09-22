@@ -22,6 +22,7 @@ import torch
 
 from freetoken.engine.cache_budget import arena_bytes_for_usable
 from freetoken.engine.engine import Engine
+from freetoken.moe.residency import WholeModelResidency
 
 MiB = 1024 * 1024
 GRANULE = 2 * MiB
@@ -64,6 +65,8 @@ class FakeArenaMoe:
         self.bank_row_bytes = ROW_BYTES
         self.num_experts = num_experts
         self.prefill_overlap = prefill_overlap
+        # The real cache's default residency: whole model in host RAM, floor 0.
+        self.residency = WholeModelResidency()
         self.usable_calls: list[int] = []
         self.rebuild_calls: list[int] = []
 

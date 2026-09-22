@@ -33,6 +33,7 @@ from freetoken.moe import is_offload_moe_strategy
 from freetoken.moe.expert_banks import load_expert_banks
 from freetoken.moe.host_banks import PinFailed
 from freetoken.moe.offload_cache import OffloadMoeCache, attach_offload_moe_cache
+from freetoken.moe.residency import build_residency
 from freetoken.utils import (
     align_ceil,
     init_logger,
@@ -884,79 +885,8 @@ class Engine:
         # Otherwise load_expert_banks gives the model module a setup hook first, then
         # falls back to per-quant providers, and the engine wires the banks into cache.
         cache_factory = getattr(self.model, "make_offload_moe_cache", None)
-        # Bounded host mirror. --moe-mirror-host-rows is the flag (0 off,
-        # -1 auto-size, >0 explicit rows); FREETOKEN_MIRROR_HOST_ROWS is the
-        # same knob spelled for serve.env, and FREETOKEN_MIRROR_EXPERT_RAM=1
-        # is the plain on switch that auto-sizes. Either one turns it on: the
-        # flag alone used to be silently inert, which is worse than both.
-        mirror_rows = config.moe_mirror_host_rows or 0
-        if mirror_rows == 0:
-            mirror_rows = int(os.environ.get("FREETOKEN_MIRROR_HOST_ROWS", "0"))
-        mirror = (mirror_rows != 0
-                  or os.environ.get("FREETOKEN_MIRROR_EXPERT_RAM", "0") == "1")
-        if mirror:
-            mc = config.model_config
-            from freetoken.models.nvfp4_banks import expert_source_spec
-
-            mirror_spec = expert_source_spec(mc)
-            if (
-                cache_factory is not None or config.moe_strategy != "offload"
-                or config.moe_pageable_gpu or config.moe_cpu_layers is not None
-                or config.use_dummy_weight or config.tp_info.size != 1
-                or mc.expert_quant != "nvfp4" or config.nvfp4_backend != "triton"
-            ):
-                raise ValueError(
-                    "mirror expert RAM requires native NVFP4 experts, the triton "
-                    "backend and single-rank GPU offload"
-                )
-            if mirror_spec is None:
-                raise ValueError(
-                    f"mirror expert RAM has no expert source spec for model type "
-                    f"{mc.model_type!r}: it cannot locate expert rows in this "
-                    f"checkpoint. Export NVFP4_EXPERT_SOURCE_SPEC from that "
-                    f"model's weight module once its layout is verified."
-                )
-            if mirror_spec.gated != bool(mc.expert_gated):
-                raise ValueError(
-                    f"mirror expert RAM: spec says gated={mirror_spec.gated} but "
-                    f"the config says expert_gated={mc.expert_gated}; the row "
-                    f"layout would be half the size it should be"
-                )
-            # Decode CUDA graphs stay ON -- that is the whole point: a mirror
-            # miss is a plain H2D, exactly what the baseline captures.
-            #
-            # Prefill overlap stays ON too, and must. Turning it off (as this
-            # branch first did, on the grounds that the double buffer streams a
-            # layer "straight from the host banks", which the mirror does not
-            # have) sends prefill through materialize_layer, which reinstalls
-            # the layer into the LRU slots and invalidates every other
-            # resident. That empties the mirror, so coverage has to be rebuilt
-            # from the checkpoint at every prefill->decode transition: 19.3 GiB
-            # of disk per request, measured as 8.0 s of TTFT on an 8K prompt
-            # whose baseline prefill is 0.34 s, and 74.7 s at 80K against 9.8 s.
-            # The premise was wrong in the first place: a layer's rows do not
-            # have to come from the host banks. Coverage says every expert is a
-            # GPU resident or has a pool row, so the buffer is assembled from
-            # those two places with no disk at all
-            # (OffloadMoeCache._prefetch_split_mirror). The buffer region no
-            # longer needs to be exclusive to prefill either -- a decode
-            # resident there is written back before a fill overwrites it
-            # (_invalidate_prefill_buffer) -- so only the pool-capacity
-            # estimate in _mirror_final_gpu_slots still prices
-            # prefill_buffer_slots(num_experts) as unavailable to decode; the
-            # arena's coverage floor no longer does.
-            # Graphs stay ON. The graphs-mode corruption is not a race: a
-            # pure replay never runs host code, so the prefill->decode boundary
-            # warm start (host + disk, in ensure_experts) could never fire
-            # after any post-capture prefill, leaving decode against an empty
-            # mirror. The restore is now driven by the scheduler's batch
-            # boundary (Scheduler._forward), which is always host-visible,
-            # before the replay is admitted.
-            logger.info_rank0(
-                "Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode "
-                "graphs enabled, prefill overlap on (layers assembled from "
-                "resident slots + pool rows, no disk)"
-            )
+        mc = config.model_config
+        residency = build_residency(config, mc, self)
         if cache_factory is not None and config.moe_cache_auto:
             raise ValueError(
                 "--moe-cache-auto is not supported for models with a custom "
@@ -988,7 +918,7 @@ class Engine:
             pageable_gpu_layer_ids = _auto_pageable_gpu_layers(
                 config, config.model_config.num_moe_layers
             )
-        if not config.moe_pageable_gpu and not mirror:
+        if not config.moe_pageable_gpu and not residency.bounded:
             # Upstream 477c860 refuses a plain offload boot whose banks exceed a known
             # pin budget instead of silently locking layers for CPU decode. The two
             # fork-only profiles below own their own residency plan, so they keep it.
@@ -1051,53 +981,8 @@ class Engine:
                         requested_residency.append(HostResidency.LOCKED.value)
                     else:
                         requested_residency.append(HostResidency.PINNED.value)
-            if mirror:
-                from freetoken.moe.mirror_pool import (
-                    MirrorExpertPool, plan_capacity, resolve_reserve_rows,
-                )
-                from freetoken.moe.expert_banks import ExpertBanks
-                # Resolved ONCE here and passed to BOTH plan_capacity and
-                # MirrorExpertPool below: they must agree on the reserve or
-                # the planner sizes the arena floor against a different
-                # number than the pool actually withholds (see
-                # resolve_reserve_rows / default_reserve_rows docstrings).
-                mirror_reserve_rows = resolve_reserve_rows(mc.num_experts)
-                logger.info_rank0(
-                    "Mirror pool: reserve resolved to %d rows%s",
-                    mirror_reserve_rows,
-                    (f" (FREETOKEN_MIRROR_RESERVE_ROWS="
-                     f"{os.environ['FREETOKEN_MIRROR_RESERVE_ROWS']!r})")
-                    if os.environ.get("FREETOKEN_MIRROR_RESERVE_ROWS", "").strip()
-                    else " (default: 3 * num_experts)",
-                )
-                # Size for the KV ceiling, where the GPU cache is smallest and
-                # the host side must be largest. Growing a pinned pool later
-                # costs ~762 ms/GiB (measured), a stall no request should pay.
-                capacity = mirror_rows if mirror_rows > 0 else plan_capacity(
-                    mc.num_moe_layers, mc.num_experts,
-                    self._mirror_final_gpu_slots(config),
-                    reserve=mirror_reserve_rows,
-                )
-            else:
-                mirror_pool = None
-            if mirror:
-                mirror_pool = MirrorExpertPool(
-                    config.model_path, mc.num_moe_layers, mc.num_experts, capacity,
-                    hidden_size=(getattr(mc, mirror_spec.hidden_size_attr)
-                                 if mirror_spec.hidden_size_attr else mc.hidden_size),
-                    intermediate_size=mc.moe_intermediate_size,
-                    spec=mirror_spec, config=mc,
-                    device=self.device,
-                    reserve_rows=mirror_reserve_rows,
-                )
-                # _grow_runtime_kv_arena consults the pool's coverage bound so
-                # the KV never grows past what the mirror can complement.
-                self._mirror_pool_ref = mirror_pool
-                banks = ExpertBanks("nvfp4", {
-                    name: [torch.empty((mc.num_experts, *tail), dtype=dtype, device="meta")]
-                    * mc.num_moe_layers
-                    for name, (tail, dtype) in mirror_pool.shapes.items()
-                })
+            if residency.bounded:
+                banks = residency.placeholder_banks(mc)
             else:
                 try:
                     with _weight_load_context():
@@ -1223,79 +1108,7 @@ class Engine:
             cache.direct_device_banks = bool(config.kv_grow_step_tokens)
             # before set_bank_sources: the residency validation and the copy plan's skip of non-pinned layers key on the CPU-layer set
             cache.cpu_layer_ids = cpu_layer_ids
-            if mirror_pool is not None:
-                cache.attach_mirror_pool(mirror_pool)
-                # Coverage must hold before the first forward: fill the GPU cache
-                # and give the mirror the complement.
-                cache.mirror_warm_start()
-                # The pinned pool IS the host RAM this profile costs, and how
-                # much of it is duplicates is what decides the writeback rate,
-                # so both belong in the log rather than in a benchmark's notes.
-                # mirror_warm_start seats residents from slot 0 now (the
-                # buffer region is no longer excluded), so every arena slot
-                # counts as a resident here.
-                _residents = cache.cache_size
-                _complement = max(mirror_pool.total - _residents, 0)
-                _dupes = max(mirror_pool.capacity - _complement
-                             - mirror_pool.reserve_rows, 0)
-                logger.info_rank0(
-                    "Mirror pool: %d rows pinned (%.2f GiB), %d cover the "
-                    "complement of %d GPU residents, %d reserved, up to %d "
-                    "duplicates (a duplicate makes its expert's next eviction "
-                    "free of any host traffic)",
-                    mirror_pool.capacity,
-                    getattr(mirror_pool, "pool_bytes", 0) / 2**30,
-                    _complement, _residents, mirror_pool.reserve_rows, _dupes,
-                )
-                # How much of the expert arena the growable KV may still take.
-                # The coverage floor is the mirror's, so a pool too small for
-                # the configured context ceiling shows up HERE -- at startup,
-                # in slots and GiB -- instead of 30 s into the request that
-                # cannot be funded. Measured on Nemotron at 1700 rows: floor
-                # 1888 against a 1923-slot arena, i.e. 35 slots = 0.18 GiB of
-                # slack, and an 80K prompt needs 0.46 GiB. That server died
-                # mid-request with "growable KV refused an unsafe VMM commit"
-                # and could not be restarted.
-                # Both of these were wrong the first time and the except
-                # below swallowed it, so the line never printed: the arena step
-                # is the RESOLVED ``_arena_step_slots`` (the dataclass field of
-                # the same name is None until __post_init__ resolves it, which
-                # silently made the floor a 1-slot rounding), and
-                # ``bank_row_bytes`` is a LIST of per-bank row bytes, one entry
-                # per arena VMM allocation -- multiplying a list by the slot
-                # count repeats the list and then raises on the division.
-                # ``arena_layout`` is the public accessor for the pair.
-                try:
-                    _layout = cache.arena_layout
-                    _step = max(int(_layout[1]) if _layout else 1, 1)
-                    # No prefill_buffer_slots term: the double buffer's slots
-                    # are candidates for decode residents now (a resident
-                    # there is written back before a prefill fill overwrites
-                    # it), so they no longer need to be priced out of the
-                    # floor as dead space. Measured on Nemotron: this drops
-                    # the floor by 256 of 2173 arena slots.
-                    _need = mirror_pool.min_gpu_slots
-                    _cov_floor = -(-_need // _step) * _step
-                    _slack = cache.cache_size - _cov_floor
-                    _row = sum(cache.bank_row_bytes or ())
-                    logger.info_rank0(
-                        "Mirror pool: the coverage floor is %d of %d arena "
-                        "slots, leaving %d slots (%.2f GiB) the growable KV "
-                        "may still take%s",
-                        _cov_floor, cache.cache_size, _slack,
-                        max(_slack, 0) * _row / 2**30,
-                        "" if _slack > 0 else
-                        " -- the arena is AT its floor, so KV cannot grow at "
-                        "all: raise --moe-mirror-host-rows",
-                    )
-                except Exception:             # diagnosis must never fail a load
-                    # WARNING, not debug: this handler silently hid two real
-                    # bugs in the block above for a whole measurement round.
-                    logger.warning_rank0("mirror arena-slack log skipped",
-                                         exc_info=True)
-            else:
-                cache.set_bank_sources(banks.sources, layer_residency=banks.layer_residency)
-                cache.set_alphas(banks.gate_up_alpha, banks.down_alpha)
+            residency.attach(cache, banks)
             if cache.pageable_gpu:
                 cache.prepare_pageable_staging(
                     config.max_running_req * config.model_config.num_experts_per_tok
@@ -1682,72 +1495,6 @@ class Engine:
             fallback_per_expert_bytes=expert_bytes_per_slot(sources),
         )
 
-    def _mirror_final_gpu_slots(self, config) -> int:
-        """GPU slots left for experts once the KV arena reaches its ceiling.
-
-        ``_plan_growable_kv`` answers this exactly but needs the MoE cache to
-        exist, and the mirror must be sized before that. This reproduces the
-        same budget arithmetic from config alone: total budget minus the KV
-        ceiling, divided by the bytes one expert slot costs.
-        """
-        from freetoken.engine.cache_budget import (
-            expert_bytes_per_slot,
-            net_cache_budget_bytes,
-        )
-        from freetoken.moe.mirror_pool import nvfp4_bank_shapes
-
-        from freetoken.models.nvfp4_banks import expert_source_spec
-
-        mc = config.model_config
-        spec = expert_source_spec(mc)
-        hidden = (getattr(mc, spec.hidden_size_attr) if spec and spec.hidden_size_attr
-                  else mc.hidden_size)
-        shapes = nvfp4_bank_shapes(
-            hidden, mc.moe_intermediate_size,
-            gated=bool(getattr(spec, "gated", False)),
-        )
-        sources = {
-            name: [torch.empty((mc.num_experts, *tail), dtype=dtype, device="meta")]
-            for name, (tail, dtype) in shapes.items()
-        }
-        per_slot = expert_bytes_per_slot(sources)
-        cache_per_page, fixed_cache_size, _tok, _res = self._pool_cls.kv_cost(config)
-        budget = net_cache_budget_bytes(
-            config.memory_ratio,
-            self._baseline_free,
-            self._weights_bytes,
-            fixed_cache_size,
-        )
-        # The mirror is built before the KV pool exists, so take the ceiling
-        # from config (--num-tokens / --num-pages, the growable KV target)
-        # rather than self.num_pages, which is set later.
-        ceiling_tokens = config.num_token_override or (
-            (config.num_page_override or 0) * config.page_size
-        )
-        kv_ceiling = cache_per_page * (ceiling_tokens // config.page_size)
-        slots = int(max(budget - kv_ceiling, 0) // per_slot)
-        total = mc.num_moe_layers * mc.num_experts
-        # ``slots`` counts every cache slot the budget affords, but not all of
-        # them hold a decode resident, and the pool must be sized against the
-        # residents. Two model-generic terms re-price it:
-        #   * the prefill double buffer, which under the mirror owns the head
-        #     of the cache outright (prefill_buffer_slots), plus
-        #   * four arena chunks of release granularity (FREETOKEN_ARENA_STEP_
-        #     SLOTS, default 8) so chunk-boundary overshoot stays covered.
-        # Getting this wrong is not a slow path but a dead request: measured on
-        # this host, a plan of 1552 against an actual floor of 1152 at the 1M
-        # ceiling left the mirror unable to cover the complement, and the 600K
-        # request died mid-flight. A model that cannot fit complement + reserve
-        # in host RAM fails LOUDLY at startup (MirrorExpertPool.load_initial
-        # raises) instead of dying mid-request hours later.
-        from freetoken.moe.mirror_pool import prefill_buffer_slots
-
-        step = _arena_step_slots()
-        conservative = max(
-            slots - prefill_buffer_slots(mc.num_experts) - 4 * step, mc.num_experts
-        )
-        return max(min(conservative, total), mc.num_experts)
-
     def _plan_growable_kv(
         self,
         target_pages: int,
@@ -1929,17 +1676,16 @@ class Engine:
         # (min_gpu_slots); round it UP to chunk granularity, because a partial
         # chunk is not releasable and a floor below a chunk boundary would let
         # the shrink land under it.
-        mirror_pool = getattr(self, "_mirror_pool_ref", None)
-        cov_floor = 0
-        if mirror_pool is not None:
-            # No prefill_buffer_slots term: those slots are candidates for
-            # decode residents now (_invalidate_prefill_buffer writes one
-            # back before a prefill fill overwrites it), so they are no
-            # longer dead space the floor must additionally protect --
-            # min_gpu_slots alone already counts every resident the pool's
-            # capacity guarantees coverage for.
-            need = mirror_pool.min_gpu_slots
-            cov_floor = -(-need // step_slots) * step_slots
+        # Whole-model residency's min_gpu_slots() is 0, so its cov_floor is 0.
+        mirror_pool = getattr(moe.residency, "pool", None)
+        # No prefill_buffer_slots term: those slots are candidates for
+        # decode residents now (_invalidate_prefill_buffer writes one
+        # back before a prefill fill overwrites it), so they are no
+        # longer dead space the floor must additionally protect --
+        # min_gpu_slots alone already counts every resident the pool's
+        # capacity guarantees coverage for.
+        need = moe.residency.min_gpu_slots()
+        cov_floor = -(-need // step_slots) * step_slots
         floor = max(floor, cov_floor)
         pending_before = self._pending_graph_bs
         target_moe = old_moe

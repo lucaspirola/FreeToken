@@ -71,10 +71,6 @@ class ServerArgs(SchedulerConfig):
     # peak reset; see engine.cuda_memory for the allocator-counter scope.
     cuda_memory_telemetry: bool = False
     # Answer with the model's own reasoning when a turn produces reasoning but no visible
-    # Bound host expert RAM to N mirror rows (0 = off, -1 = auto-size from
-    # model geometry + KV ceiling). Native NVFP4 experts only.
-    moe_mirror_host_rows: int = 0  # 0 = off (default), -1 = auto-size from model geometry + KV ceiling
-
     # content and no tool call (--force-nonempty-content). Per request, a chat template
     # kwarg of the same name overrides it; thinking-off turns default to on.
     force_nonempty_content: bool = False
@@ -1024,6 +1020,18 @@ def parse_args(
             "stops with an error naming this flag. Native NVFP4 experts only."
         ),
     )
+    parser.add_argument(
+        "--expert-residency",
+        choices=["whole", "mirror"],
+        default=None,
+        help=(
+            "Where expert bytes live while they are not on the GPU: 'whole' keeps "
+            "every expert row pinned in host RAM (default); 'mirror' bounds host "
+            "expert RAM to --moe-mirror-host-rows rows (auto-sized when 0 or -1). "
+            "Unset: 'mirror' when --moe-mirror-host-rows, FREETOKEN_MIRROR_HOST_ROWS "
+            "is non-zero or FREETOKEN_MIRROR_EXPERT_RAM=1, else 'whole'."
+        ),
+    )
 
     parser.add_argument(
         "--kv-reserve-tokens",
@@ -1545,6 +1553,25 @@ def parse_args(
 
     if kwargs.get("kv_grow_step_tokens") is None:
         kwargs["kv_grow_step_tokens"] = 0
+    # Expert residency (moe/residency.py). The FREETOKEN_MIRROR_* environment
+    # names resolve HERE and nowhere else: FREETOKEN_MIRROR_HOST_ROWS is
+    # --moe-mirror-host-rows spelled for serve.env, FREETOKEN_MIRROR_EXPERT_RAM=1 is
+    # the plain on switch that auto-sizes (tasks/exclusive-expert-ram/measure.sh
+    # writes and strips both). Either one turns the mirror on unless
+    # --expert-residency says otherwise: the flag alone used to be silently inert.
+    explicit_rows = kwargs.get("moe_mirror_host_rows") or 0
+    rows = explicit_rows
+    if rows == 0:
+        rows = int(os.environ.get("FREETOKEN_MIRROR_HOST_ROWS", "0"))
+    env_on = os.environ.get("FREETOKEN_MIRROR_EXPERT_RAM", "0") == "1"
+    if kwargs.get("expert_residency") is None:
+        kwargs["expert_residency"] = "mirror" if (rows != 0 or env_on) else "whole"
+    elif kwargs["expert_residency"] == "whole" and explicit_rows != 0:
+        parser.error(
+            f"--expert-residency whole contradicts --moe-mirror-host-rows {explicit_rows}: "
+            "mirror rows size the bounded residency; drop one of the two"
+        )
+    kwargs["moe_mirror_host_rows"] = rows
     kwargs["auto_prefill_chunk"] = not explicit_prefill_chunk
     disabled = set(ENCODER_KINDS) if kwargs.pop("text_model_only") else set()
     disabled.update(kwargs.pop("mm_disable"))

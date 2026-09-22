@@ -4,7 +4,7 @@ import copy
 import math
 from dataclasses import dataclass, field, replace
 from functools import cached_property
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Literal
 
 import torch
 from freetoken.distributed import DistributedInfo
@@ -96,6 +96,15 @@ class EngineConfig:
     kv_reserve_tokens: int = 8192  # KV floor for --moe-cache-auto; small by design (MoE-priority)
     moe_cache_policy: str = "lru"
     moe_prefill_overlap: bool = True
+    # Where an expert's bytes live while it is not on the GPU (moe/residency.py):
+    # "whole" pins every expert row in host RAM; "mirror" bounds host expert RAM to
+    # a pool of moe_mirror_host_rows rows. Resolved by server/args.py (the
+    # FREETOKEN_MIRROR_EXPERT_RAM / FREETOKEN_MIRROR_HOST_ROWS aliases live there).
+    expert_residency: Literal["whole", "mirror"] = "whole"
+    # Bound host expert RAM to N mirror rows (0 = off / auto-size under
+    # expert_residency="mirror", -1 = auto-size from model geometry + KV ceiling).
+    # Native NVFP4 experts only.
+    moe_mirror_host_rows: int = 0
     # Prefill hit/miss split: serve cache-resident experts D2D during prefill
     # prefetch instead of re-streaming the full layer over PCIe. Needs CUDA >= 12.8
     # (cudaMemcpyBatchAsync); no-op unless moe_cache_size > 2 * num_experts.
