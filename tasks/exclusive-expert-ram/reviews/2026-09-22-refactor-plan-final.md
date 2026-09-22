@@ -16,6 +16,33 @@ the correction is stated in place and not hidden.
 
 Reader assumption: you have the repository and nothing else.
 
+### Provenance audit (2026-09-23): whose rule is whose
+
+The `/goal` that drives this campaign was drafted by the agent and pasted by the owner,
+so its rules block reads as the owner's while most of it is not. Checked against the
+owner's actual messages (campaign record `K-attribution-audit-2026-09-23`):
+
+- **Owner's own words:** single lane is permanent design; stop the piro-board embedder for
+  measurements and do not restart it; the four goals (G1 sync with upstream at any time,
+  G2 the smart KV manager, G3 the RAM saver as a switch, G4 adding models without breaking
+  the code); delete the legacy growable path and reimplement GGUF Ornith on the new one;
+  Ornith subordinate; everything but Phase E; the S13 pin-prefix step; a new branch for
+  this; the campaign comes before the upstream PR (2026-09-23: "I will not run the pr
+  command, move on with our campaign").
+- **Agent-authored, previously presented as the owner's:** never `uv sync`; the owner
+  starts checkpoint servers; two probe passes with pass 2 of record; port 1920; baseline
+  bracketing; the 22 GiB MemAvailable floor; "stop only for authority"; revert-not-patch.
+  These are measurement and safety practice proposed by the agent. They stay in force as
+  the campaign's working rules until the owner changes them, but they are labelled as
+  agent practice below, not as owner decisions.
+- **Not found in any owner message:** the quote "a refactor that loses any of that is a
+  failure"; "owner accepted" for merge-not-rebase and for the upstream PR; memory ratio
+  1.00 as an owner decision (recorded as such in an earlier plan; unverified).
+- **Factual corrections:** 76.9 tok/s is probe pass 1 at 1M; pass 2 was 72.9. The pool
+  record is 8K/80K/713K, not 8K/32K/80K. The 809-passed floor is stale. Nemotron routes
+  top-6, not top-8 (Ornith is top-8). Ornith has 2 experts whose tensors span shards
+  ((18, 90) and (38, 225), recounted twice by the S8 lane), not 258.
+
 ---
 
 ## 0. The deliverable, in one paragraph
@@ -30,7 +57,7 @@ contend for a GPU window or a file, the reorganisation wins and Ornith waits; no
 in S0–S11 or S13 may be delayed for S12.**
 
 Measured behaviour that must survive every step (the "evidence record", section 7):
-1M context on Nemotron in 12.26 GiB host RAM, decode 76.9 tok/s, 0 coverage faults,
+1M context on Nemotron in 12.26 GiB host RAM, decode 76.9 tok/s (probe pass 1; pass 2 was 72.9), 0 coverage faults,
 0 starved writebacks, one CUDA-graph capture, and needle/recall answers byte-identical
 between the bounded pool and the whole-model-in-RAM baseline.
 
@@ -42,12 +69,12 @@ between the bounded pool and the whole-model-in-RAM baseline.
 |---|---|---|
 | C-SINGLE-LANE | **Single lane is permanent design**: consumer GPUs, one session computed at a time; other sessions queued and spilled. `--max-running-requests 1` is not a tunable. | Owner: "FreeToken is to run on consumer GPU, not datacenter graded ones, and it's more than proved that it can only handle a single session at a time." Measured (`benchmarks/results/nemotron35_lightning_5080_single_lane_2026-09-17.md:14-28`): single lane 148–174 tok/s decode for one request vs the 16-lane profile's 75 tok/s alone and 16–41 tok/s per lane under load; MoE cache 1924 slots vs 1023 — the 16 lanes' KV was eating the expert arena. Not a controlled A/B (different commits and profiles): margin indicative, direction settled. |
 | C-NO-MAIN | Work stays on `exp/reorg` (branched from `exp/exclusive-expert-ram` at cde7ace, which stays frozen as the mirror-pool record). No merge into `main`, no push, never touch `main`. | Owner's authority limits (handover §1). |
-| C-MERGE-NOT-REBASE | Upstream is taken by `git merge origin/main` into the branch, never by rebase. | Rebase replays 328 agent-authored commits through ~40 recurring conflict hunks and reviews nothing; a merge resolves each hunk once. Owner accepted after correction (section 3.3). |
-| C-EMPTY-GPU | No performance number is valid unless `nvidia-smi` read 0 MiB before the arm, embedder stopped and never restarted by an agent, port 1920, one arm at a time, memory ratio 1.00, two probe passes, pass 2 of record. | Handover §11; `tasks/exclusive-expert-ram/measure.sh`. |
-| C-EVIDENCE | The evidence record (section 7) must be reproduced at every GPU checkpoint. A step that fails a checkpoint is **reverted on the branch, not patched forward**. | Owner: "a refactor that loses any of that is a failure." |
+| C-MERGE-NOT-REBASE | Upstream is taken by `git merge origin/main` into the branch, never by rebase. | Rebase replays 328 agent-authored commits through ~40 recurring conflict hunks and reviews nothing; a merge resolves each hunk once. Agent recommendation (section 3.3); no owner acceptance found in the owner's messages (audit 2026-09-23). |
+| C-EMPTY-GPU | No performance number is valid unless `nvidia-smi` read 0 MiB before the arm, embedder stopped and never restarted by an agent, port 1920, one arm at a time, memory ratio 1.00, two probe passes, pass 2 of record. | Embedder stop: owner. Ratio 1.00: recorded as an owner decision in an earlier plan, not found in owner messages. Empty GPU, port, passes: agent measurement practice. Handover §11; `tasks/exclusive-expert-ram/measure.sh`. |
+| C-EVIDENCE | The evidence record (section 7) must be reproduced at every GPU checkpoint. A step that fails a checkpoint is **reverted on the branch, not patched forward**. | Agent-authored rule. The quote formerly attributed to the owner here appears in no owner message (audit 2026-09-23). Rationale: a regression must not be hidden by patching under a checkpoint. |
 | C-REORG-OVER-ORNITH | S12 never pre-empts S0–S11/S13 for GPU time or file ownership. | Owner, 2026-09-22 (section 0). |
-| C-SERVER-VENV | Tests run with the server venv, model unloaded: `PYTHONPATH=$PWD/python /home/lucas/ai/FreeToken/.venv/bin/python -m pytest -q ...`. Never `uv sync`. Never torch pytest beside a live model. Never start a server from an agent shell. | Handover §11–12; `CLAUDE.md`. |
-| C-UPSTREAM-PR | Exactly one upstream PR is authorised (VMMTensor and/or the spec fields), **after S0**, and the owner runs it on hardware and submits it himself. | Upstream `AGENTS.md`/`CONTRIBUTING.md` refuse agent PRs; owner accepted. Upstreaming is subordinate to goal 1, not its mechanism. |
+| C-SERVER-VENV | Tests run with the server venv, model unloaded: `PYTHONPATH=$PWD/python /home/lucas/ai/FreeToken/.venv/bin/python -m pytest -q ...`. Do not `uv sync` the live server's venv while it serves (agent caution, not an owner rule; the owner's `CLAUDE.md` uses `uv sync` to set up a machine). Never torch pytest beside a live model. Never start a server from an agent shell. | Handover §11–12; `CLAUDE.md`. |
+| C-UPSTREAM-PR | Exactly one upstream PR is authorised (VMMTensor and/or the spec fields), **after S0**, and the owner runs it on hardware and submits it himself. | Upstream `AGENTS.md`/`CONTRIBUTING.md` refuse agent PRs. Owner asked about the PR; no acceptance found, and on 2026-09-23 the owner parked it ("I will not run the pr command"). Upstreaming is subordinate to goal 1, not its mechanism. |
 | C-LEGACY-OFF | The legacy rebuild-and-recapture growable path is deleted (S10, unconditional). GGUF Ornith is re-implemented on the arena (S12b) and waits on it. | Owner Q2 answer. |
 | C-ELASTIC-OFF | `--elastic-initial-requests` is retired (S11). | Follows from C-SINGLE-LANE. |
 
@@ -122,7 +149,7 @@ Size: S ≤ 1 day, M 2–5 days, L 1–2 weeks. "GPU" says whether the step itse
 - **What**: `git fetch origin && git merge origin/main`; resolve the 24 files. Hunk policy: upstream wins wherever the fork did not deliberately change behaviour; fork wins in fork-owned regions; `models/nvfp4_banks.py` keeps upstream's `kind_map`/`global_reciprocal` *and* our `gated`/`hidden_size_attr`; `offload_cache.py:126` takes upstream's table and then S5b's `gated` argument. Trivial add/add on `AGENTS.md`, `CLAUDE.md`.
 - **Why**: section 3.2; the sync must be proven on real code before the reorganisation is measured against it, and S5a needs upstream's spec fields.
 - **Could break**: behaviour can shift — `03c28d2` exact Triton top-k/top-p sampling, `e05cff8` fused_topk through the in-repo router, `2757bb5` `--gpu` bound via NVML, `58f4b9e` sm_89 `_scaled_mm` change (the Ada box). Reference outputs may legitimately change.
-- **Verify**: `git merge-tree --write-tree origin/main HEAD | grep -c '^CONFLICT'` → 0; CPU suites at or above the handover counts (`tests/moe tests/engine tests/scheduler` ≥ 809 passed / 5 skipped; `tests/kernels tests/models` ≥ 632 / 11); **GPU checkpoint 1**, which re-records the whole-model needle/recall reference **on this commit** so later byte comparisons have a valid reference.
+- **Verify**: `git merge-tree --write-tree origin/main HEAD | grep -c '^CONFLICT'` → 0; CPU suites at or above the handover counts (counts at writing: 809 / 5 and 632 / 11; after the S0 merge the floors are 871 passed / 8 skipped and 871 passed / 195 skipped with 4 upstream failures that reproduce on pristine origin/main); **GPU checkpoint 1**, which re-records the whole-model needle/recall reference **on this commit** so later byte comparisons have a valid reference.
 - **Exclusive**: no other worker edits `python/` while the merge is open.
 
 ### PR-1 — One upstream PR (G1, subordinate; S; owner runs it)
@@ -239,12 +266,12 @@ Phase A may run after S0 instead if the owner wants the sync proven first; nothi
 ## 7. Evidence record and checkpoints
 
 ### 7.1 The record that must survive
-From `tasks/exclusive-expert-ram/results/nemotron-reserve-2e-1m-{record.json,stats.json,journal.txt,probe.jsonl,env}` and `results/needles-2026-09-22-reading.md`: best config (all four levers, reserve 2E): **1M context in 12.26 GiB host RAM, decode 76.9 tok/s, 0 coverage faults, 0 starved writebacks, one CUDA-graph capture**; needle answers **byte-identical** between pool and whole model at temperature 0 (five of six earlier "failures" were the 16384 thinking cap, `d4f04a6`); recall 3/3 at 21K/120K/240K. Noise floor: 8.7% between identical arms at 80K decode (handover §12); host RAM varies ~0.56 GiB between identical arms (STATUS).
+From `tasks/exclusive-expert-ram/results/nemotron-reserve-2e-1m-{record.json,stats.json,journal.txt,probe.jsonl,env}` and `results/needles-2026-09-22-reading.md`: best config (all four levers, reserve 2E): **1M context in 12.26 GiB host RAM, decode 76.9 tok/s (probe pass 1; pass 2 72.9), 0 coverage faults, 0 starved writebacks, one CUDA-graph capture**; needle answers **byte-identical** between pool and whole model at temperature 0 (five of six earlier "failures" were the 16384 thinking cap, `d4f04a6`); recall 3/3 at 21K/120K/240K. Noise floor: 8.7% between identical arms at 80K decode (handover §12); host RAM varies ~0.56 GiB between identical arms (STATUS).
 
-### 7.2 The acceptance bundle (every GPU checkpoint; owner starts the server; agents never do)
-1. CPU: `tests/moe tests/engine tests/scheduler` ≥ 809 passed and `tests/kernels tests/models` ≥ 632 passed (counts may rise, never fall except by S11's deliberate deletions, which are listed in the step).
+### 7.2 The acceptance bundle (every GPU checkpoint; the agent launches `checkpoint1.sh` as a systemd transient unit, never from an agent shell; owner chose "You run it" on 2026-09-23)
+1. CPU: `tests/moe tests/engine tests/scheduler` ≥ 871 passed and `tests/kernels tests/models` ≥ 871 passed (floors after S0; 809 / 632 at writing). **Plus every other test directory** (`tests/server tests/tokenizer tests/kvcache tests/attention tests/layers tests/checkpoint tests/daemon tests/dsv4 tests/mm`), with failures classified against both merge parents: checkpoint 1's second boot on 2026-09-23 answered every chat request with HTTP 500 (`generation.py _preflight`: upstream's `tokenize` now returns `UserMsg`, the fork's preflight still called `.numel()` on it), and none of the four suites above imports that path (counts may rise, never fall except by S11's deliberate deletions, which are listed in the step).
 2. Device, model unloaded, GPU empty: `pytest tests/moe/test_mirror_device.py tests/moe/test_expert_arena_vmm.py tests/kernels/test_vmm_tensor.py`.
-3. One arm at the record config (`results/nemotron-reserve-2e-1m.env`; C-EMPTY-GPU): pass-2 decode within 9% of 76.9 tok/s at 1M and of the 8K/32K/80K record; host RAM 12.26 ± 0.6 GiB; `stats.json` `coverage_faults == 0 and starved_writebacks == 0`; journal has exactly one graph capture and no `Traceback`; `benchmarks/switchyard_soak/checks/acceptance.sh R3` and `R6` pass.
+3. One arm at the record config (`results/nemotron-reserve-2e-1m.env`; C-EMPTY-GPU): decode compared pass by pass within 9% of the record — 1M: pass 1 76.9, pass 2 72.9; 8K/80K/713K (`nemotron-reserve-2e`): pass 1 180.3/154.8/91.7, pass 2 172.1/154.1/107.6; host RAM 12.26 ± 0.6 GiB; `stats.json` `coverage_faults == 0 and starved_writebacks == 0`; journal has exactly one graph capture and no `Traceback`; `benchmarks/switchyard_soak/checks/acceptance.sh R3` and `R6` pass.
 4. Correctness: `tasks/exclusive-expert-ram/needles.py` at 21K/120K with the raised thinking budget and `recall.py` at 21K/120K/240K; answers byte-identical to the whole-model reference **recorded on the same commit** (re-recorded once at checkpoint 1 after S0, then reused).
 5. S7 only: the `MoE slots a -> b` transition sequence in the 1M journal diffs clean against the record.
 
@@ -252,12 +279,12 @@ From `tasks/exclusive-expert-ram/results/nemotron-reserve-2e-1m-{record.json,sta
 Before and after S6/S7, on the same commit pair, one 128-token decode at 8K under `torch.profiler` (or `nsys` if installed): the **count of kernel launches per decode step** and the **bytes moved per step** (`mirror_stats()` swaps/writebacks/retained, and `decode_miss_stats()`) must be identical. Identical launches plus identical bytes means no new GPU work; the remaining difference is Python outside the captured graph, which the graph replay never runs. File the two profiles under `results/instrument-<step>-{before,after}.txt`.
 
 ### 7.4 Revert rule
-A step whose checkpoint fails any of 7.2.3–7.2.5 is reverted on the branch (`git revert` of its commits, or reset of the lane's unmerged work) and re-attempted from the recorded failure, never patched forward under the checkpoint.
+A step whose checkpoint fails any of 7.2.3–7.2.5 is reverted on the branch (`git revert` of its commits, or reset of the lane's unmerged work) and re-attempted from the recorded failure, never patched forward under the checkpoint. (Agent-authored rule, see the provenance audit.) Applied case, 2026-09-23: checkpoint 1 on the S0 merge failed at boot because the merge silently dropped the `nvfp4`/`none` rows of `moe/expert_banks.py:_PROVIDERS`. That was fixed as a completion of the merge resolution (the fork's rows restored, a regression test added), not reverted: reverting the merge would undo G1 itself. The owner may overrule.
 
 ---
 
 ## 8. Do not do this
-Carried over: no kernel body edits; no change to the coverage invariant, the free stack or `publish_freed_rows`; no rewrite of session spill; C-NO-MAIN; no `uv sync`; no server from an agent shell; embedder stays down; no numbers on a non-empty GPU; never edit `python/freetoken/**` while an `ft-measure-*` unit is live.
+Carried over: no kernel body edits; no change to the coverage invariant, the free stack or `publish_freed_rows`; no rewrite of session spill; C-NO-MAIN; no `uv sync` of the live server's venv (agent caution); no server from an agent shell; embedder stays down; no numbers on a non-empty GPU; never edit `python/freetoken/**` while an `ft-measure-*` unit is live.
 Added: no `git rebase` onto upstream (C-MERGE-NOT-REBASE); no upstream PR without the owner running it (C-UPSTREAM-PR); no collapsing of the `_v2` kernel twins (the gating is the point of graph-safe resize); no change to `measure.sh` knob names (`FT_RESERVE`, `FT_TIEBREAK`, …) without both a write and a strip entry; do not move `tasks/exclusive-expert-ram/*.py` while `test_mirror_device.py` shells out to them (S6 may move them to `tests/moe/device/` afterwards, as one commit); do not edit a moved function's body in the same commit as the move; do not touch `_mirror_final_gpu_slots`'s `4 * step` before S8's planner/estimator test exists; do not touch `~/.config/freetoken/serve.env` except the already-authorised ratio; do not start S12 before S8 and checkpoint 2; do not let S12 hold a GPU window a reorganisation checkpoint needs; do not re-tune the Ornith tables (they are committed, `bc6f815`).
 
 ---

@@ -53,7 +53,12 @@ class TokenizingState(FakeState):
 
             def tokenize(self, msgs):
                 state.rendered.extend(msgs)
-                return [SimpleNamespace(numel=lambda: state._prompt_tokens) for _ in msgs]
+                # TokenizeManager.tokenize returns UserMsg (upstream contract); the stub
+                # returned a bare tensor-like before the S0 merge and hid a preflight 500.
+                return [
+                    SimpleNamespace(input_ids=SimpleNamespace(numel=lambda: state._prompt_tokens))
+                    for _ in msgs
+                ]
 
         return _Manager()
 

@@ -1,0 +1,13 @@
+fetching origin ...
+== upstream-sync-check ==
+base: origin/main (cab110ecb74ab2358f8950f9065d4d517877fc8b)
+head: HEAD (040acff2b0b060834fce8c51e1eb13cf850840f5)
+merge-base: cab110ecb74ab2358f8950f9065d4d517877fc8b
+ahead: 348   behind: 0
+
+conflicting files: 0
+
+silent fork-symbol losses (clean or partially-clean merge, no marker for the lost text):
+  none detected
+
+OK: 0 conflicting file(s) <= budget 0
