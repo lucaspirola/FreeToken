@@ -430,6 +430,7 @@ def nvfp4_expert_spec(model_path: str, config) -> Nvfp4ExpertSourceSpec:
     kind_map = {stored[role].name: kind for role, kind in _BANK_KINDS.items()}
     return Nvfp4ExpertSourceSpec(
         key_pattern=re.compile(_EXPERT_KEY_RE.format(kinds="|".join(map(re.escape, kind_map)))),
+        key_template="model.language_model.layers.{layer}.mlp.experts.{expert}.{proj}.{kind}",
         proj_to_role={"gate_proj": "gate", "up_proj": "up", "down_proj": "down"},
         layer_to_bank=lambda layer, config: layer,  # every layer is MoE
         desc=f"Qwen3.5 NVFP4 experts ({quant.dialect})",
@@ -448,6 +449,7 @@ NVFP4_EXPERT_SOURCE_SPEC = Nvfp4ExpertSourceSpec(
     key_pattern=re.compile(
         _EXPERT_KEY_RE.format(kinds="weight|weight_scale|weight_scale_2")
     ),
+    key_template="model.language_model.layers.{layer}.mlp.experts.{expert}.{proj}.{kind}",
     proj_to_role={"gate_proj": "gate", "up_proj": "up", "down_proj": "down"},
     layer_to_bank=lambda layer, config: layer,  # every layer is MoE
     desc="Qwen3.5 NVFP4 experts",

@@ -43,6 +43,7 @@ _EXPERT_KEY_RE = re.compile(
 )
 _NVFP4_SOURCE_SPEC = Nvfp4ExpertSourceSpec(
     key_pattern=_EXPERT_KEY_RE,
+    key_template="language_model.model.layers.{layer}.block_sparse_moe.experts.{expert}.{proj}.{kind}",
     proj_to_role={"w1": "gate", "w3": "up", "w2": "down"},
     # Experts exist only for layers [first_k_dense_replace, num_layers); banks pack by
     # MoE-layer index so the leading dense layers leave no holes (GLM precedent).

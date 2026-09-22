@@ -35,6 +35,7 @@ def _layer_to_bank(layer: int, config) -> int | None:
 
 _SOURCE_SPEC = Nvfp4ExpertSourceSpec(
     key_pattern=_EXPERT_KEY_RE,
+    key_template="backbone.layers.{layer}.mixer.experts.{expert}.{proj}.{kind}",
     proj_to_role={"up_proj": "up", "down_proj": "down"},
     layer_to_bank=_layer_to_bank,
     desc="Nemotron-H NVFP4 experts",
