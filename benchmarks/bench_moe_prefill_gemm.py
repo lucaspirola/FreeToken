@@ -7,11 +7,19 @@ M-block and the kernel is arithmetic bound.  This script reports **TFLOP/s again
 card's measured GEMM ceiling** instead, times the two GEMMs separately, and sweeps the
 tile space that `moe/configs/*.json` is keyed on.
 
-Geometry is Nemotron-3.5-Lightning's (H=2688, I=1856, E=128, top-6, ungated ReLU^2), the
-same as `bench_nvfp4_moe_kernels.py`.  At M=8192 the pair is 9.81e11 FLOPs; the RTX 5080's
-*measured* ceilings (benchmarks/results/nemotron35_lightning_5080_prefill_q8_2026-09-05.md)
-are 123.0 TFLOP/s for cuBLAS bf16 and 118.4 TFLOP/s for Triton's own `tl.dot`, so the
-honest denominator for a Triton kernel is 118.
+Geometry is selectable with ``--model`` (or the individual ``--hidden``/``--intermediate``/
+``--experts``/``--top-k``/``--activation``/``--gated`` flags) and defaults to today's
+Nemotron-3.5-Lightning shape when nothing is passed, matching `bench_nvfp4_moe_kernels.py`:
+
+  * ``nemotron`` (default): H=2688, I=1856, E=128, top-6, ungated ReLU^2.
+    GEMM shapes (E=128, N=1856, K=2688) and (E=128, N=2688, K=1856).
+    At M=8192 the pair is 9.81e11 FLOPs; the RTX 5080's *measured* ceilings
+    (benchmarks/results/nemotron35_lightning_5080_prefill_q8_2026-09-05.md) are
+    123.0 TFLOP/s for cuBLAS bf16 and 118.4 TFLOP/s for Triton's own `tl.dot`, so the
+    honest denominator for a Triton kernel is 118.
+  * ``ornith``: H=2048, I=512, E=256, top-8, gated SiLU.
+    GEMM shapes (E=256, N=1024, K=2048) [gate_up, N = 2*I] and
+    (E=256, N=2048, K=512) [down].
 
 Routing matters: the padded row count `moe_align_block_size` produces is
 `sum_e ceil(n_e / BLOCK_M) * BLOCK_M`, so a skewed routing pads more than a uniform one.
@@ -49,8 +57,17 @@ import itertools
 import json
 import statistics
 
-H, I, E, TOP_K = 2688, 1856, 128, 6  # noqa: E741 -- MoE shape notation
-ACTIVATION = "relu2"
+from moe_geometry import MODEL_GEOMETRIES, add_geometry_args
+from moe_geometry import gate_up_n as _shared_gate_up_n
+from moe_geometry import resolve_geometry as _resolve_geometry
+
+# Nemotron-3.5-Lightning MoE geometry (ungated ReLU^2), the no-flags default -- see
+# moe_geometry.MODEL_GEOMETRIES, the single shared table this and tune_nvfp4_moe.py
+# both read, so the two scripts cannot drift into two different "Ornith" shapes.
+H, I, E, TOP_K = (MODEL_GEOMETRIES["nemotron"][k]
+                  for k in ("hidden", "intermediate", "experts", "top_k"))  # noqa: E741
+ACTIVATION = MODEL_GEOMETRIES["nemotron"]["activation"]
+GATED = MODEL_GEOMETRIES["nemotron"]["gated"]
 
 # Measured on this card (prefill_q8 write-up S1), not the 225 TFLOP/s spec sheet.
 CUBLAS_BF16_TFLOPS = 123.0
@@ -121,7 +138,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--device", type=int, default=0)
     p.add_argument("--m", type=int, nargs="+", default=[8192])
-    p.add_argument("--experts", type=int, default=E)
+    add_geometry_args(p)
     p.add_argument("--grid", choices=sorted(GRIDS) + ["shipped"], default="shipped")
     p.add_argument("--grid-json", default=None,
                    help='an explicit grid, e.g. \'{"BLOCK_SIZE_M":[64,128]}\' (missing keys '
@@ -147,9 +164,35 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def _banks(num_experts: int, seed: int, device):
-    """One layer of random ungated ModelOpt NVFP4 banks, on the device (686 MiB)."""
+def resolve_geometry(args: argparse.Namespace) -> dict:
+    """``--model`` preset, then any explicit individual flag overrides it field-by-field.
+
+    No flags at all -> the "nemotron" preset, which is exactly the historical module
+    constants (H, I, E, TOP_K, ACTIVATION, GATED) -- the no-flags path is unchanged.
+    Thin wrapper over :func:`moe_geometry.resolve_geometry`, the copy
+    ``tune_nvfp4_moe.py`` also calls, so the two scripts cannot disagree on a shape.
+    """
+    return _resolve_geometry(args)
+
+
+def _gate_up_n(gated: bool | None = None) -> int:
+    """gate_up bank's N: ``2*I`` (gate and up concatenated) when gated, else ``I``."""
+    if gated is None:
+        gated = GATED
+    return _shared_gate_up_n(I, gated)
+
+
+def _banks(num_experts: int, seed: int, device, gated: bool | None = None):
+    """One layer of random ModelOpt NVFP4 banks, on the device.
+
+    Ungated (Nemotron, the default): gate_up bank is ``[E, I, H//2]`` (N = I) -- byte-
+    identical to the original ungated-only implementation, same RNG call order.
+    Gated (Ornith, SiLU): gate_up bank is ``[E, 2*I, H//2]`` (N = 2*I, gate and up
+    concatenated on N). The down bank is the same shape either way: ``[E, H, I//2]``.
+    """
     import torch
+
+    gate_up_n = _gate_up_n(gated)
 
     g = torch.Generator().manual_seed(seed)
 
@@ -157,9 +200,9 @@ def _banks(num_experts: int, seed: int, device):
         return t.to(device)
 
     return (
-        to(torch.randint(0, 256, (num_experts, I, H // 2), dtype=torch.uint8, generator=g)),
-        to((torch.rand(num_experts, I, H // 16, generator=g) * 1.5 + 0.25).to(torch.float8_e4m3fn)),
-        to(torch.full((num_experts, I), 0.5, dtype=torch.float16)),
+        to(torch.randint(0, 256, (num_experts, gate_up_n, H // 2), dtype=torch.uint8, generator=g)),
+        to((torch.rand(num_experts, gate_up_n, H // 16, generator=g) * 1.5 + 0.25).to(torch.float8_e4m3fn)),
+        to(torch.full((num_experts, gate_up_n), 0.5, dtype=torch.float16)),
         to(torch.randint(0, 256, (num_experts, H, I // 2), dtype=torch.uint8, generator=g)),
         to((torch.rand(num_experts, H, I // 16, generator=g) * 1.5 + 0.25).to(torch.float8_e4m3fn)),
         to(torch.full((num_experts, H), 0.75, dtype=torch.float16)),
@@ -219,8 +262,12 @@ def _time_us(fn, warmup: int, iters: int) -> float:
 
 
 def _pair_flops(m: int) -> float:
-    """gate_up [I, H] plus down [H, I], over m * top_k routed rows."""
-    return 2.0 * m * TOP_K * (H * I) * 2.0
+    """gate_up [gate_up_n, H] plus down [H, I], over m * top_k routed rows.
+
+    ``gate_up_n`` is ``I`` ungated or ``2*I`` gated; at ``gate_up_n == I`` this is
+    exactly the original ``2.0 * m * TOP_K * (H * I) * 2.0``.
+    """
+    return 2.0 * m * TOP_K * H * (_gate_up_n() + I)
 
 
 def _pair_weight_bytes(distinct_experts: int) -> float:
@@ -230,7 +277,8 @@ def _pair_weight_bytes(distinct_experts: int) -> float:
 
     At M=8192 this is 7 % of the time and irrelevant; at M=256 it is the whole story.
     """
-    per_expert = (I * (H // 2) + I * (H // 16)) + (H * (I // 2) + H * (I // 16))
+    gate_up_n = _gate_up_n()
+    per_expert = (gate_up_n * (H // 2) + gate_up_n * (H // 16)) + (H * (I // 2) + H * (I // 16))
     return float(distinct_experts * per_expert)
 
 
@@ -319,7 +367,7 @@ def sweep_configs(grid_name: str, grid_json: str | None, m: int, device):
     from freetoken.moe.fused_nvfp4 import nvfp4_moe_config
 
     apply_cfg_env(None)
-    shipped = nvfp4_moe_config(m, I, H, device, E)
+    shipped = nvfp4_moe_config(m, _gate_up_n(), H, device, E)
     if grid_json:
         grid = {k: dict(shipped, **{})[k] if False else v for k, v in json.loads(grid_json).items()}
         grid = {k: tuple(v) for k, v in grid.items()}
@@ -337,6 +385,13 @@ def main(argv: list[str] | None = None) -> int:
     import torch
 
     args = parse_args(argv)
+    geo = resolve_geometry(args)
+    global H, I, E, TOP_K, ACTIVATION, GATED
+    H, I, E, TOP_K, ACTIVATION, GATED = (
+        geo["hidden"], geo["intermediate"], geo["experts"], geo["top_k"],
+        geo["activation"], geo["gated"],
+    )
+    args.experts = E  # single source of truth from here on (was args.experts | preset)
     device = torch.device(f"cuda:{args.device}")
     torch.cuda.set_device(device)
     from freetoken.moe.fused_nvfp4 import nvfp4_moe_config
@@ -344,7 +399,7 @@ def main(argv: list[str] | None = None) -> int:
     banks = _banks(args.experts, args.seed, device)
     print(
         f"NVFP4 prefill grouped GEMM @ H={H} I={I} E={args.experts} top-{TOP_K} "
-        f"act={ACTIVATION}; ceilings {CUBLAS_BF16_TFLOPS:.0f} (cuBLAS) / "
+        f"act={ACTIVATION} gated={GATED}; ceilings {CUBLAS_BF16_TFLOPS:.0f} (cuBLAS) / "
         f"{TRITON_DOT_TFLOPS:.0f} (tl.dot) TFLOP/s"
     )
     rows: list[dict] = []
@@ -353,7 +408,7 @@ def main(argv: list[str] | None = None) -> int:
         hidden = torch.randn(m, H, dtype=torch.bfloat16, device=device) / 4
         distinct = int(torch.unique(ids).numel())
         flops = _pair_flops(m)
-        shipped = nvfp4_moe_config(m, I, H, device, args.experts)
+        shipped = nvfp4_moe_config(m, _gate_up_n(), H, device, args.experts)
         pad = padded_rows(ids, args.experts, shipped["BLOCK_SIZE_M"])
         print(
             f"\nM={m}  routed rows={m * TOP_K}  distinct experts={distinct}  "

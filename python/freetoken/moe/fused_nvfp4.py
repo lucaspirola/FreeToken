@@ -482,8 +482,8 @@ def _warn_untuned_prefill(num_experts: int, N: int, K: int, name: str | None) ->
     run -- but it was silent, and silence is how a model ends up served on
     launch constants swept for a different geometry with nobody aware of it.
     Only Lightning's two GEMMs are tuned, and only on the 5080, so every other
-    model on every host takes this path: Ornith-1.5-35B (E=256, N=1024/2048,
-    K=2048/1024) takes it on all of them.
+    model on every host takes this path: Ornith-1.5-35B (E=256, gate_up
+    N=1024/K=2048, down N=2048/K=512) takes it on all of them.
 
     ``lru_cache`` is the once-per-shape gate: this is called from the prefill
     hot path, once per layer per chunk.

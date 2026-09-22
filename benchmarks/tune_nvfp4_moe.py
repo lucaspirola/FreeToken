@@ -36,9 +36,18 @@ import json
 import statistics
 from pathlib import Path
 
-# Nemotron-3.5-Lightning MoE geometry (ungated ReLU^2: gate_up is [I, H], down is [H, I]).
-H, I, E, TOP_K = 2688, 1856, 128, 6  # noqa: E741 -- H/I/E is the MoE shape notation
-ACTIVATION = "relu2"
+from moe_geometry import MODEL_GEOMETRIES, add_geometry_args  # noqa: F401 -- re-exported
+from moe_geometry import gate_up_n as _shared_gate_up_n
+from moe_geometry import resolve_geometry
+
+# Nemotron-3.5-Lightning MoE geometry (ungated ReLU^2: gate_up is [I, H], down is [H, I]),
+# the no-flags default -- see moe_geometry.MODEL_GEOMETRIES, the single shared table this
+# and bench_moe_prefill_gemm.py both read, so the two scripts (one measures, this one also
+# WRITES the JSON the server loads) cannot drift into two different "Ornith" shapes.
+H, I, E, TOP_K = (MODEL_GEOMETRIES["nemotron"][k]
+                  for k in ("hidden", "intermediate", "experts", "top_k"))  # noqa: E741
+ACTIVATION = MODEL_GEOMETRIES["nemotron"]["activation"]
+GATED = MODEL_GEOMETRIES["nemotron"]["gated"]
 
 DECODE_M = (1, 2, 4, 8, 16)
 DECODE_PICK_M = (1, 2, 4)
@@ -67,7 +76,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--device", type=int, default=0)
     p.add_argument("--decode", action="store_true")
     p.add_argument("--prefill", action="store_true")
-    p.add_argument("--experts", type=int, default=E)
+    add_geometry_args(p)
     p.add_argument("--decode-m", type=int, nargs="+", default=list(DECODE_M))
     p.add_argument("--decode-pick-m", type=int, nargs="+", default=list(DECODE_PICK_M))
     p.add_argument("--prefill-m", type=int, nargs="+", default=list(PREFILL_M))
@@ -127,8 +136,16 @@ def _try_time(calls, warmup: int, iters: int) -> float:
 
 
 def _banks(num_experts: int, device, seed: int):
-    """One layer of random ungated ModelOpt NVFP4 banks, resident on the GPU (~700 MiB)."""
+    """One layer of random ModelOpt NVFP4 banks, resident on the GPU (~700 MiB).
+
+    Ungated (Nemotron, the default): gate_up bank is ``[E, I, H//2]`` (N = I) -- byte-
+    identical to the original ungated-only implementation, same RNG call order.
+    Gated (Ornith, SiLU): gate_up bank is ``[E, 2*I, H//2]`` (N = 2*I, gate and up
+    concatenated on N). The down bank is the same shape either way: ``[E, H, I//2]``.
+    """
     import torch
+
+    n = _shared_gate_up_n(I, GATED)
 
     g = torch.Generator().manual_seed(seed)
 
@@ -136,9 +153,9 @@ def _banks(num_experts: int, device, seed: int):
         return t.to(device)
 
     gate_up = (
-        to(torch.randint(0, 256, (num_experts, I, H // 2), dtype=torch.uint8, generator=g)),
-        to((torch.rand(num_experts, I, H // 16, generator=g) * 1.5 + 0.25).to(torch.float8_e4m3fn)),
-        to(torch.full((num_experts, I), 0.5, dtype=torch.float16)),
+        to(torch.randint(0, 256, (num_experts, n, H // 2), dtype=torch.uint8, generator=g)),
+        to((torch.rand(num_experts, n, H // 16, generator=g) * 1.5 + 0.25).to(torch.float8_e4m3fn)),
+        to(torch.full((num_experts, n), 0.5, dtype=torch.float16)),
     )
     down = (
         to(torch.randint(0, 256, (num_experts, H, I // 2), dtype=torch.uint8, generator=g)),
@@ -163,15 +180,18 @@ def _routing(m: int, num_experts: int, device, seed: int):
 def _tune_decode(args, device) -> dict:
     import torch
 
-    from freetoken.moe.fused_nvfp4 import _decode_gemm_marlin
+    from freetoken.moe.fused_nvfp4 import _act_code, _decode_gemm_marlin
 
     gate_up, down = _banks(args.experts, device, args.seed)
     draws = {
         m: [_routing(m, args.experts, device, args.seed + 1000 * k) for k in range(args.routings)]
         for m in args.decode_m
     }
+    n = _shared_gate_up_n(I, GATED)
     gemms = (
-        ("gate_up", gate_up, I, H, 1, False),  # ACT=1 (relu2 fused), no routed weight
+        # ACT is the fused-epilogue code: 1 for relu2 (ungated), 0 otherwise -- a gated
+        # activation (silu) is applied host-side by _run_act, same as the prefill path.
+        ("gate_up", gate_up, n, H, _act_code(ACTIVATION), False),
         ("down", down, H, I, 0, True),
     )
     grid = list(itertools.product(DECODE_BLOCK_N, DECODE_BLOCK_KW, DECODE_WARPS))
@@ -258,8 +278,14 @@ def _prefill_calls(gemm_args, cfg, act, draws, block_m, num_experts):
 def _tune_prefill(args, device) -> dict:
     import torch
 
+    from freetoken.moe.fused_nvfp4 import _act_code
+
+    n = _shared_gate_up_n(I, GATED)
     gate_up, down = _banks(args.experts, device, args.seed)
-    tables: dict[tuple, dict[int, dict]] = {(I, H): {}, (H, I): {}}
+    # Keyed (N, K) per GEMM -- gate_up is (n, H) where n = 2*I gated or I ungated, down
+    # is always (H, I). This tuple is exactly what `_write_configs` turns into the
+    # config filename, so a swap here is a swap of which file gets which tiles.
+    tables: dict[tuple, dict[int, dict]] = {(n, H): {}, (H, I): {}}
     grid = list(
         itertools.product(
             PREFILL_BLOCK_N, PREFILL_BLOCK_KB, PREFILL_GROUP_M, PREFILL_WARPS, PREFILL_STAGES
@@ -273,11 +299,16 @@ def _tune_prefill(args, device) -> dict:
             for k in range(max(1, min(args.routings, 4)))
         ]
         hidden = torch.randn(m, H, dtype=torch.bfloat16, device=device) / 4
-        ic1 = torch.empty(m, TOP_K, I, dtype=torch.bfloat16, device=device)
+        ic1 = torch.empty(m, TOP_K, n, dtype=torch.bfloat16, device=device)
+        # down's synthetic A: a dedicated [M*top_k, I] buffer, not a view of ic1 --
+        # gated ic1 is [.., 2*I] and the real activation (silu_and_mul) that would
+        # narrow it to I is not applied here (values are junk either way; only the
+        # shape/stride the kernel launches against has to be right for timing).
+        ic2 = torch.empty(m * TOP_K, I, dtype=torch.bfloat16, device=device)
         ic3 = torch.empty(m, TOP_K, H, dtype=torch.bfloat16, device=device)
         gemms = (
-            ((hidden, gate_up, ic1, TOP_K, False), 1, (I, H)),
-            ((ic1.view(-1, I), down, ic3, 1, True), 0, (H, I)),
+            ((hidden, gate_up, ic1, TOP_K, False), _act_code(ACTIVATION), (n, H)),
+            ((ic2, down, ic3, 1, True), 0, (H, I)),
         )
         per_block_m: dict[int, dict] = {}
         for block_m in PREFILL_BLOCK_M:
@@ -303,7 +334,7 @@ def _tune_prefill(args, device) -> dict:
         for _t, cfg, shape in chosen["gemms"]:
             tables[shape][m] = cfg
             print(f"      {shape}: {cfg}")
-        del hidden, ic1, ic3, draws
+        del hidden, ic1, ic2, ic3, draws
         torch.cuda.empty_cache()
 
     del gate_up, down
@@ -348,13 +379,20 @@ def main(argv: list[str] | None = None) -> int:
     import torch
 
     args = parse_args(argv)
+    geo = resolve_geometry(args)
+    global H, I, E, TOP_K, ACTIVATION, GATED
+    H, I, E, TOP_K, ACTIVATION, GATED = (
+        geo["hidden"], geo["intermediate"], geo["experts"], geo["top_k"],
+        geo["activation"], geo["gated"],
+    )
+    args.experts = E  # single source of truth from here on (was args.experts | preset)
     if not (args.decode or args.prefill):
         args.decode = args.prefill = True
     device = torch.device(f"cuda:{args.device}")
     torch.cuda.set_device(device)
     print(
         f"tuning NVFP4 MoE kernels @ H={H} I={I} E={args.experts} top-{TOP_K} "
-        f"act={ACTIVATION} on {torch.cuda.get_device_name(device)} "
+        f"act={ACTIVATION} gated={GATED} on {torch.cuda.get_device_name(device)} "
         f"({torch.cuda.get_device_properties(device).multi_processor_count} SMs), "
         f"routings={args.routings}"
     )
