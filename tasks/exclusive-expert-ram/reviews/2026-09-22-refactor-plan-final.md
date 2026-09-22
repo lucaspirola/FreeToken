@@ -1,7 +1,9 @@
-# Reorganisation plan for `exp/exclusive-expert-ram` — final, authoritative
+# Reorganisation plan for `exp/reorg` — final, authoritative
 
-Written 2026-09-22 against HEAD `bc6f815` in the worktree
-`/home/lucas/ai/FreeToken-wt/exclusive-expert-ram` (branch `exp/exclusive-expert-ram`,
+Written 2026-09-22 against HEAD `bc6f815`, now carried on its own branch. The work
+happens in the worktree `/home/lucas/ai/FreeToken-wt/reorg` (branch `exp/reorg`,
+branched at `cde7ace` from `exp/exclusive-expert-ram`, which is frozen as the
+mirror-pool record and is never committed to again by this campaign;
 fork of `origin` = https://github.com/FlashML-org/FreeToken, merge-base `bd372b6`,
 last fetch 2026-09-17). Every `file:line` below was read at `bc6f815`; re-check
 before editing, because lines move. This document authorises nothing by itself:
@@ -39,7 +41,7 @@ between the bounded pool and the whole-model-in-RAM baseline.
 | id | constraint | reason / evidence |
 |---|---|---|
 | C-SINGLE-LANE | **Single lane is permanent design**: consumer GPUs, one session computed at a time; other sessions queued and spilled. `--max-running-requests 1` is not a tunable. | Owner: "FreeToken is to run on consumer GPU, not datacenter graded ones, and it's more than proved that it can only handle a single session at a time." Measured (`benchmarks/results/nemotron35_lightning_5080_single_lane_2026-09-17.md:14-28`): single lane 148–174 tok/s decode for one request vs the 16-lane profile's 75 tok/s alone and 16–41 tok/s per lane under load; MoE cache 1924 slots vs 1023 — the 16 lanes' KV was eating the expert arena. Not a controlled A/B (different commits and profiles): margin indicative, direction settled. |
-| C-NO-MAIN | Work stays on `exp/exclusive-expert-ram`. No merge into `main`, no push, never touch `main`. | Owner's authority limits (handover §1). |
+| C-NO-MAIN | Work stays on `exp/reorg` (branched from `exp/exclusive-expert-ram` at cde7ace, which stays frozen as the mirror-pool record). No merge into `main`, no push, never touch `main`. | Owner's authority limits (handover §1). |
 | C-MERGE-NOT-REBASE | Upstream is taken by `git merge origin/main` into the branch, never by rebase. | Rebase replays 328 agent-authored commits through ~40 recurring conflict hunks and reviews nothing; a merge resolves each hunk once. Owner accepted after correction (section 3.3). |
 | C-EMPTY-GPU | No performance number is valid unless `nvidia-smi` read 0 MiB before the arm, embedder stopped and never restarted by an agent, port 1920, one arm at a time, memory ratio 1.00, two probe passes, pass 2 of record. | Handover §11; `tasks/exclusive-expert-ram/measure.sh`. |
 | C-EVIDENCE | The evidence record (section 7) must be reproduced at every GPU checkpoint. A step that fails a checkpoint is **reverted on the branch, not patched forward**. | Owner: "a refactor that loses any of that is a failure." |
@@ -301,7 +303,7 @@ C-SINGLE-LANE, C-NO-MAIN, C-MERGE-NOT-REBASE, C-EMPTY-GPU, C-EVIDENCE (with the 
 
 ### 9.3 After a compaction, before acting
 History is evidence, not authority. Re-verify, in this order, from the repository and the host:
-1. `git -C /home/lucas/ai/FreeToken-wt/exclusive-expert-ram status --porcelain` and `git log --oneline -5` — which lane's files are dirty, what the last commit was.
+1. `git -C /home/lucas/ai/FreeToken-wt/reorg status --porcelain` and `git log --oneline -5` — which lane's files are dirty, what the last commit was.
 2. `git merge-tree --write-tree origin/main HEAD | grep -c '^CONFLICT'` — where goal 1 stands right now.
 3. `systemctl is-active freetoken-serve`, `systemctl list-units 'ft-measure-*'`, `nvidia-smi --query-gpu=memory.used --format=csv,noheader`, `free -g` — whether the GPU is empty and whether any code edit is forbidden right now.
 4. The campaign's active frontier: which step records are `verified`, which have receipts pending a checkpoint, which worker identities are live (list them; do not spawn a replacement without checking).
