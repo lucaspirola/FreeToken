@@ -154,8 +154,13 @@ def test_m512_is_served_by_its_own_bucket_at_block_m_32():
     assert 512 in fn.PREFILL_M_BUCKETS
     device = "NVIDIA_GeForce_RTX_5080"
     configs = Path(fn.__file__).with_name("configs")
-    tables = sorted(configs.glob(f"triton_*/nvfp4,*device_name={device}.json"))
-    assert tables, "the 5080 prefill tables are the ones this ticket measured"
+    # E=128 is Nemotron, the geometry this ticket measured. The assertions below are a
+    # MEASURED RESULT for that shape, not a property of the kernel: on Ornith (E=256,
+    # hidden 2048, intermediate 512, gated) the tuner measured BLOCK_M=16 winning at
+    # M=512 (658.1 us/pair against 670.8 for BLOCK_M=32, commit bc6f815), so globbing
+    # every 5080 table asserted Nemotron's answer over a model that legitimately differs.
+    tables = sorted(configs.glob(f"triton_*/nvfp4,E=128,*device_name={device}.json"))
+    assert tables, "the 5080 Nemotron prefill tables are the ones this ticket measured"
     for path in tables:
         table = json.loads(path.read_text())
         assert set(table["512"]) == set(table["256"]), path
