@@ -133,7 +133,11 @@ _BANK_BYTES_PER_EXPERT = {
         + (H // 128) * fp8_block_scale_pad(H // 128, I // 128)
     ) * 2,
     "q4_0": lambda H, I: 2 * I * (H // 32) * 18 + H * (I // 32) * 18,
-    "nvfp4": lambda H, I: 2 * I * (H // 2 + H // 16 + 2) + H * (I // 2 + I // 16 + 2),
+    # gate|up is 2*I rows for a gated expert, I rows (up only) for an ungated
+    # one (Nemotron-H relu2); the default keeps every (H, I) caller on gated.
+    # Equals models.nvfp4_banks.nvfp4_expert_row_layout(H, I, gated=...).row_bytes.
+    "nvfp4": lambda H, I, gated=True: (2 if gated else 1) * I * (H // 2 + H // 16 + 2)
+    + H * (I // 2 + I // 16 + 2),
     "mxfp4": lambda H, I: 2 * I * (H // 2 + H // 32 + 2) + H * (I // 2 + I // 32 + 2),
     "ds_fp4": lambda H, I: 2 * I * (H // 2 + H // 32) + H * (I // 2 + I // 32),
     # Upper bound for the mixed Poolside artifact.  Its early layers are groupwise
