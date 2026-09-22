@@ -38,6 +38,10 @@ export FT_NAME=ornith
 # The launcher hardcodes Lightning's 1M ceiling and served name; FT_EXTRA is
 # appended last and the last flag wins.
 export FT_EXTRA="--num-tokens 262144 --max-seq-len-override 262144 --served-model-name ornith"
+# measure.sh defaults to "8000 32000 80000". Without this line every Ornith arm
+# would stop at 80K and the 256K ceiling -- the whole point of testing this
+# model -- would never be probed, in all six lane arms, silently.
+export FT_SIZES="${FT_SIZES:-8000 32000 80000 200000 256000}"
 
 # Three KV lanes, because the owner asked for the trade-off, not one number:
 # q8/q8 is the reference, q8 K + q6 V and q6 K + q5 V are the two asymmetric

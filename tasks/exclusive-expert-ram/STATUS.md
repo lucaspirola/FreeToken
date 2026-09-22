@@ -268,7 +268,82 @@ because of the counter bug above:** the ceiling was computed against the inflate
 95.4% free-eviction rate, which left no headroom by construction. Against the true
 53.4%, lever 2 recovers 20.7 points.
 
-## Lever 4 — the reserve is now a knob (measurement pending)
+## Lever 4 — the reserve: 2E is the winner, E breaks coverage
+
+Arms `nemotron-reserve-{3e,2e,1e}`, 2026-09-22, empty GPU (0 MiB), ratio 1.00,
+auto pool, KV q8_0/q8_0, sizes 8K/80K/713K, two probe passes, **thinking OFF**.
+Each arm's journal records `Mirror pool: reserve resolved to N rows
+(FREETOKEN_MIRROR_RESERVE_ROWS='N')`, so every row below is attributable.
+
+| reserve | pool rows / GiB | host RAM GiB | 713K | outcome |
+|---|---|---|---|---|
+| 3E = 384 (default) | 1893 / 9.91 | 13.18 | 0 starved, 0 faults | works |
+| **2E = 256** | 1765 / 9.24 | **12.24** | 0 starved, 0 faults | **works, -0.94 GiB** |
+| E = 128 | 1637 / 8.57 | — | never reached | **coverage lost, refuses to serve** |
+
+**E is too small, and it failed the right way.** 33 seconds in, on the FIRST 8K
+prefill -- not under 713K pressure:
+
+    RuntimeError: bounded expert mirror lost coverage before prefill: expert 161
+    (layer 1) is neither a GPU resident nor in the pool, so this layer cannot be
+    assembled.
+
+The server answered 503 and stopped rather than assembling the layer from
+whatever happened to be resident. That is the correctness guarantee holding under
+a real under-provisioning: wrong weights would have produced fluent tokens with
+every fault counter at zero, which is the failure mode this branch exists to
+prevent. (It does take the backend worker down rather than failing the one
+request -- the known open defect, unchanged.)
+
+**2E is accepted**: 0.94 GiB of pinned host RAM recovered, 0 starved write-backs
+at 713K, and confirmed at 1M as the plan requires -- arm `nemotron-reserve-2e-1m`,
+reserve verified as 256 rows in its journal:
+
+| | value |
+|---|---|
+| prompt tokens | 1,000,032 (pass 2), 1,000,030 (pass 1) |
+| TTFT p1 / p2 | 1162.74 s / 1438.29 s |
+| decode p1 / p2 | 76.9 / 72.9 tok/s |
+| host RAM | **12.26 GiB** |
+| coverage faults / starved | 0 / 0 |
+| graph captures | 1 |
+
+This is the best 1M configuration measured on this branch: 1M context in
+**12.26 GiB** of host RAM, against 12.94 at the 3E default. Both probe passes
+completed, so the teardown fix holds at the smaller reserve too.
+
+**It also refines the pass-2 finding.** This arm ran 8K and 1M only and lost 5% of
+decode on pass 2 (76.9 -> 72.9, TTFT +24%). The five-size arm, which ran 713K
+first, collapsed to 34.1 with TTFT +78%. So the degradation scales with how much
+large-context work the server has already done, not with the request being a
+repeat -- which points at accumulated pool/arena churn or radix-tree growth rather
+than anything about repetition. Still undiagnosed; the next discriminating step is
+a fresh server serving one 1M request twice with nothing else in between.
+
+### The reserve does not change eviction behaviour -- which gave us a noise floor
+
+3E and 2E recorded **identical** `swaps` (7116), free-eviction rate (0.618) and
+buffer free evictions (1792). The reserve sets pool capacity, not victim choice,
+so the two arms performed provably the same transfer work. Their measured decode
+still differed:
+
+| | 3E | 2E |
+|---|---|---|
+| decode 80K | 168.7 | 154.1 |
+| decode 713K | 102.3 | 107.6 |
+
+Same work, **8.7% apart at 80K**. That is this harness's run-to-run noise floor,
+measured from the inside rather than assumed. Consequences, applied throughout
+this document: lever 2's decode deltas (+4.3% / +3.7% / -2.5%) sit well inside it
+and are NOT a claimed win; decode differences between reserve arms carry no
+signal, so the reserve's real effects are RAM and starvation, both measured
+cleanly. A single arm pair cannot resolve a decode change smaller than ~9% at
+80K -- that needs repeats, which is why contaminated arms are repeated rather
+than averaged.
+
+### The knob
+
+
 
 `FREETOKEN_MIRROR_RESERVE_ROWS` selects the pool's reserve; unset reproduces
 `default_reserve_rows` = 3 * num_experts = 384 on Nemotron (E = 128 experts per
@@ -344,8 +419,18 @@ WRONG -- see the Correction section), and no
 
 **1M is proven.** The KV grew stepwise to the ceiling with the arena yielding slots
 (`Committed growable KV through 1048576 tokens (3.23 GiB physical); MoE slots 1552 -> 1512`)
-against the 1440 floor. A whole-model configuration needs ~18.3 GiB of host RAM and
-cannot reach this context on this GPU at all; the pool serves it in 12.94 GiB.
+against the 1440 floor. The pool serves this in 12.94 GiB of host RAM, against
+~18.3 GiB for the whole-model configuration at 80K.
+
+> **RETRACTED (2026-09-22).** An earlier revision of this section, and the message
+> of commit `67ec22a`, said the whole-model configuration "cannot reach this
+> context on this GPU at all". **That was never measured and is probably wrong.**
+> In whole-model mode every expert is pinned in host RAM, so coverage can never be
+> lost; the growable KV should shrink the arena and the model should still stream
+> its way to 1M, only slower. Every baseline arm on this branch ran 8K/32K/80K and
+> nothing else, so the claim was an argument wearing a measurement's clothes.
+> What is measured is the RAM: 12.94 GiB against ~18.3. Arm `nemotron-baseline-1m`
+> is queued to settle reachability, and this note stays until it does.
 A second, independent arm (`nemotron-1m-only`) measured 1,000,030 prompt tokens at
 TTFT 1125.64 s / 888.0 prefill tok/s / 76.5 decode tok/s — its pass 1 agrees with
 this arm's pass 1 (80.4) to within noise.
