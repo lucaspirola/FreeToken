@@ -5,6 +5,8 @@ from __future__ import annotations
 import functools
 import pathlib
 
+import time
+
 import torch
 
 _CSRC = pathlib.Path(__file__).parent / "csrc" / "vmm_tensor.cpp"
@@ -33,6 +35,9 @@ def _module():
         ],
         verbose=True,
     )
+
+
+_VMM_RETRIES = 6
 
 
 def allocation_granularity(device: torch.device) -> int:
@@ -111,11 +116,43 @@ class VMMTensor:
         return int(self._allocation.mapped_bytes)
 
     def commit_ranges(self, ranges: list[tuple[int, int]]) -> None:
-        self._allocation.commit_ranges(ranges)
+        """Map physical pages into the reserved VA, retrying while the device is busy.
+
+        cuMemSetAccess is issued from the host, but it is ordered against work the
+        device has already been handed: when a range is (re-)mapped right after the
+        growable KV released pages, the driver can answer CUDA_ERROR_NOT_READY --
+        "ask again", not "this failed". It is not sticky and it does not poison the
+        context, so the only correct response is to drain the device and retry.
+        Raising instead kills the scheduler worker, which is how a 1M request that
+        prefilled and decoded perfectly still took the server down on teardown
+        (2026-09-22, tasks/exclusive-expert-ram/results/nemotron-1m-only-journal.txt).
+        """
+        self._retry_while_not_ready(self._allocation.commit_ranges, ranges)
+
+    @staticmethod
+    def _retry_while_not_ready(fn, ranges: list[tuple[int, int]]) -> None:
+        # Six attempts over ~1.3 s. The wait is a device synchronize first (the
+        # cheap, correct barrier) and only then wall-clock backoff.
+        delay = 0.01
+        for attempt in range(_VMM_RETRIES):
+            try:
+                fn(ranges)
+                return
+            except RuntimeError as exc:
+                if "CUDA_ERROR_NOT_READY" not in str(exc) or attempt == _VMM_RETRIES - 1:
+                    raise
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                time.sleep(delay)
+                delay *= 2
 
     def uncommit_ranges(self, ranges: list[tuple[int, int]]) -> None:
-        """Unmap fully committed, granularity-aligned ranges without moving the tensor."""
-        self._allocation.uncommit_ranges(ranges)
+        """Unmap fully committed, granularity-aligned ranges without moving the tensor.
+
+        Same NOT_READY retry as commit_ranges: the unmap is the other half of the
+        arena/KV handover and can meet the device equally busy.
+        """
+        self._retry_while_not_ready(self._allocation.uncommit_ranges, ranges)
 
 
 __all__ = ["VMMTensor", "allocation_granularity"]

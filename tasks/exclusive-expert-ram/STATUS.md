@@ -218,6 +218,83 @@ so they return cold -- churn on top of the re-prefill. Needle and recall arms
 must therefore set `--kv-grow-step-tokens` at least as large as the biggest
 haystack, and any per-question timing taken without that is prefill-bound.
 
+## Phase 3 — 1M proven on Nemotron, and the teardown defect it exposed
+
+Arm `nemotron-1m-fixed`, 2026-09-22, commit of this section. Conditions: empty GPU
+(`nvidia-smi` 0 MiB before the start, embedder stopped and not restarted), memory
+ratio 1.00, auto pool (`--moe-mirror-host-rows -1`), KV lane q8_0/q8_0, two probe
+passes, **thinking OFF** (`probe_decode.py` sends `enable_thinking: false`),
+128 generated tokens per probe. Pool 1893 rows / 9.91 GiB, arena 2173 slots,
+coverage floor 1440 of 2173 (733 slots / 3.84 GiB left for the growable KV).
+
+| prompt | TTFT p1 (s) | TTFT p2 (s) | decode p1 | decode p2 |
+|---|---|---|---|---|
+| 8K | 0.18 | 1.27 | 180.4 | 171.7 |
+| 80K | 174.67 | 21.24 | 157.4 | 172.6 |
+| 240K | 60.18 | 158.88 | 135.6 | 152.3 |
+| 713K | 463.67 | 1214.62 | 96.4 | 109.3 |
+| 1M | 1322.79 | 2349.16 | 80.4 | 34.1 |
+
+Host RAM 12.94 GiB, peak 14.22 GiB. 0 coverage faults, 0 starved write-backs,
+exactly one CUDA-graph capture, 10417 swaps at a 77.5% free-eviction rate, and no
+`cuMemSetAccess` / `Traceback` / backend-worker-death line anywhere in the journal.
+
+**1M is proven.** The KV grew stepwise to the ceiling with the arena yielding slots
+(`Committed growable KV through 1048576 tokens (3.23 GiB physical); MoE slots 1552 -> 1512`)
+against the 1440 floor. A whole-model configuration needs ~18.3 GiB of host RAM and
+cannot reach this context on this GPU at all; the pool serves it in 12.94 GiB.
+A second, independent arm (`nemotron-1m-only`) measured 1,000,030 prompt tokens at
+TTFT 1125.64 s / 888.0 prefill tok/s / 76.5 decode tok/s — its pass 1 agrees with
+this arm's pass 1 (80.4) to within noise.
+
+### The defect: NOT_READY on the arena give-back killed the server
+
+1M prefill and decode were never the problem. After the request the scheduler shrinks
+the growable KV and `_arena_grow` re-maps the just-released VA; `cuMemSetAccess`
+answered `CUDA_ERROR_NOT_READY`, the exception propagated, and the backend worker died
+(`Backend worker is gone and cannot be restarted`). That is why the `nemotron-1m-only`
+arm reported `prompt_tokens: 0` for probe pass 2.
+
+`_arena_shrink` already drains the device before it unmaps (step (b)); `_arena_grow`
+had no matching sync. **The asymmetry predates lever 1**, and `engine.py:2145` already
+issues a full-device synchronize before the arena branch — so lever 1 is exonerated.
+Fix, both Python (no C++ rebuild):
+
+* `torch.cuda.synchronize(self.device)` at the top of `_arena_grow`, symmetric with
+  the shrink path.
+* `VMMTensor.commit_ranges` / `uncommit_ranges` retry `CUDA_ERROR_NOT_READY` six times
+  with a device synchronize and exponential backoff (~1.3 s total). NOT_READY means
+  "ask again", not "this failed"; every other error still raises on the first attempt,
+  so an out-of-memory cannot be retried into a stall. Tests assert all three behaviours
+  (`tests/kernels/test_vmm_tensor.py`).
+
+Reproduce: `FT_NAME=nemotron FT_ROWS=-1 FT_RATIO=1.00 FT_SIZES="8000 80000 240000 713000 1000000" bash tasks/exclusive-expert-ram/measure.sh nemotron-1m-fixed`
+
+### Open finding: the second very large request is ~2x slower than the first
+
+Not a pool defect, not diagnosed yet, and recorded because it changes how the tables
+must be read. Within this arm, with the same prompt on the same server:
+
+| | prefill tok/s pass 1 | pass 2 |
+|---|---|---|
+| 713K | 3117.6 | 642.1 |
+| 1M | 862.4 | 473.9 |
+
+`#cached-token: 0` on every pass-2 prefill batch, so this is a full re-prefill with no
+prefix reuse (expected above `--kv-grow-step-tokens`) — but that explains only why it
+is not *fast*, not why it is *half as fast*. Throughput degrades within the request,
+so it is not queueing. Candidates not yet discriminated: pool/arena churn after pass 1
+has consumed the warm-start duplicates; radix-tree growth and
+`_evict_growable_prefix_pages` cost at a 1M-token tree; VMM fragmentation across
+repeated commit/uncommit ladders.
+
+**Consequence for the protocol.** The plan's rule is that the decode of record is
+pass 2. That rule stands at 8K/32K/80K, where pass 2 is equal or better and where every
+lever comparison in this document was measured. At >= 240K, pass 2 is systematically
+pessimistic from this effect, so both passes are reported above and neither is quietly
+preferred. A single-request 1M figure taken on a freshly started server is the honest
+one for "what does 1M cost": TTFT ~1126-1323 s, decode ~76-80 tok/s.
+
 ## Superseded: measured 2026-09-21 at ratio 0.91, on a SHARED GPU
 
 **Every decode number in this section is void.** The piro-board embedder held
@@ -296,7 +373,10 @@ Phase 0 is done and is the section above.
 ### Open defects (flagged, not fixed)
 
 * A refused growable-KV commit kills the scheduler worker instead of failing
-  the request.
+  the request. (The *transient* NOT_READY case is fixed — see Phase 3 — but a
+  genuinely refused commit still takes the worker down.)
+* The second very large request on a server is about half the prefill speed of
+  the first; see the Phase 3 open finding. Undiagnosed.
 * `MirrorExpertPool.close()` unregisters the pinned banks but does not drop
   `self.banks`.
 * The NVFP4 review's fixes are written but held as a patch, not yet on the

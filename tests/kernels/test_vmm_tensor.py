@@ -130,3 +130,46 @@ def test_vmm_tensor_supports_the_integer_bank_dtypes(dtype):
     assert int(allocation.tensor[elems : elems + 16].sum()) == -3 * 16
     del allocation
     gc.collect()
+
+
+from freetoken.kernel import vmm  # noqa: E402
+
+
+class _FakeAllocation:
+    """Answers NOT_READY for the first `busy` calls, then succeeds."""
+
+    def __init__(self, busy: int, exc_text: str = "cuMemSetAccess failed: CUDA_ERROR_NOT_READY (device not ready)"):
+        self.busy = busy
+        self.exc_text = exc_text
+        self.calls: list[list[tuple[int, int]]] = []
+
+    def __call__(self, ranges):
+        self.calls.append(list(ranges))
+        if len(self.calls) <= self.busy:
+            raise RuntimeError(self.exc_text)
+
+
+def test_commit_retries_while_the_device_is_not_ready(monkeypatch):
+    """NOT_READY means "ask again"; a 1M teardown must not kill the scheduler."""
+    monkeypatch.setattr(vmm.time, "sleep", lambda _s: None)
+    alloc = _FakeAllocation(busy=3)
+    vmm.VMMTensor._retry_while_not_ready(alloc, [(0, 4096)])
+    assert len(alloc.calls) == 4
+    assert alloc.calls[-1] == [(0, 4096)]
+
+
+def test_commit_gives_up_after_the_retry_budget(monkeypatch):
+    monkeypatch.setattr(vmm.time, "sleep", lambda _s: None)
+    alloc = _FakeAllocation(busy=vmm._VMM_RETRIES)
+    with pytest.raises(RuntimeError, match="CUDA_ERROR_NOT_READY"):
+        vmm.VMMTensor._retry_while_not_ready(alloc, [(0, 4096)])
+    assert len(alloc.calls) == vmm._VMM_RETRIES
+
+
+def test_a_real_mapping_error_is_raised_immediately(monkeypatch):
+    """Only NOT_READY is retried -- a genuine failure must surface at once."""
+    monkeypatch.setattr(vmm.time, "sleep", lambda _s: None)
+    alloc = _FakeAllocation(busy=99, exc_text="cuMemCreate failed: CUDA_ERROR_OUT_OF_MEMORY")
+    with pytest.raises(RuntimeError, match="OUT_OF_MEMORY"):
+        vmm.VMMTensor._retry_while_not_ready(alloc, [(0, 4096)])
+    assert len(alloc.calls) == 1

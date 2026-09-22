@@ -1305,6 +1305,12 @@ class OffloadMoeCache:
         return released
 
     def _arena_grow(self, current: int, n: int) -> int:
+        # Symmetric with _arena_shrink step (b): drain the device before touching
+        # the arena's page mappings. Growing means mapping pages into the VA the
+        # growable KV has just released, and cuMemSetAccess is ordered against
+        # device work already queued -- without this it answers NOT_READY.
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
         idx_current = self._arena_boundaries.index(current)
         idx_n = self._arena_boundaries.index(n)
         committed_meta: list[tuple[dict, list[tuple[int, int]]]] = []
