@@ -148,7 +148,7 @@ class StatsTracker:
 
 
 def derive_model_card(config: Any) -> dict:
-    """attn enum + moe bool + ctx from the model config."""
+    """attn enum + moe bool + ctx from the model config; input_modalities is what the API accepts right now."""
     mc = config.model_config
     if getattr(mc, "has_linear_attention", False):
         attn = "hybrid_linear"
@@ -162,6 +162,7 @@ def derive_model_card(config: Any) -> dict:
         "ctx": config.max_seq_len,
         "attn": attn,
         "moe": bool(getattr(mc, "is_moe", False)),
+        "input_modalities": ["text", *sorted(config.served_modalities)],
     }
 
 
@@ -179,7 +180,9 @@ def build_stats(
 ) -> dict:
     """Full /v1/stats doc. throughput is 0 when idle; kv/mamba/swa are null
     when their total is 0 (owned-KV / non-hybrid / non-SWA). kv and swa share one shape:
-    pages + the pool's own page_size (tokens = pages x page_size).
+    pages + the pool's own page_size (tokens = pages x page_size). gpus: the engine's GPU as
+    [{index, name, uuid, total_bytes}] (the primary rank's; a list so TP can extend it), []
+    until the readiness meta arrives.
 
     ``pooled_ready_mean_ms`` is the hidden-state probe's own latency (admission to the
     pooled payload), averaged the same way as ``ttft_mean_ms`` and over the same ring;
@@ -220,6 +223,7 @@ def build_stats(
             if tr.cuda_memory is not None
             else None
         ),
+        "gpus": list(getattr(state, "gpus", None) or []),
         "throughput": {
             "decode_tps": round(tr.decode_tps(), 1),
             "prefill_tps": round(tr.prefill_tps(), 1),

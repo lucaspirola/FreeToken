@@ -258,14 +258,14 @@ def test_explicit_and_implicit_cpu_splits_resolve_without_changing_cache_ownersh
         if isinstance(n, ast.FunctionDef)
         and n.name in {"_parse_cpu_layers_spec", "_resolve_cpu_layers"}
     ]
-    ns = {"is_offload_moe_backend": lambda name: name in {"offload", "hybrid"}}
+    ns = {"is_offload_moe_strategy": lambda name: name in {"offload", "hybrid"}}
     exec(compile(ast.Module(body=funcs, type_ignores=[]), str(ENGINE), "exec"), ns)
 
     explicit = ns["_resolve_cpu_layers"](
-        SimpleNamespace(moe_backend="offload", moe_cpu_layers="2"), 6
+        SimpleNamespace(moe_strategy="offload", moe_cpu_layers="2"), 6
     )
     implicit_auto = ns["_resolve_cpu_layers"](
-        SimpleNamespace(moe_backend="offload", moe_cpu_layers=None), 6
+        SimpleNamespace(moe_strategy="offload", moe_cpu_layers=None), 6
     )
     assert explicit == frozenset({0, 3})
     # Pin-budget auto selection happens after this resolver and starts from the empty set.

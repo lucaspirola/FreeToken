@@ -7,6 +7,7 @@ from .backend import (
     DurableCheckpointBackendMsg,
     ExitMsg,
     UnpinPrefixesBackendMsg,
+    MMItem,
     UserMsg,
 )
 from .frontend import (
@@ -48,6 +49,7 @@ __all__ = [
     "DurableCheckpointBackendMsg",
     "ExitMsg",
     "UnpinPrefixesBackendMsg",
+    "MMItem",
     "UserMsg",
     "BaseTokenizerMsg",
     "BatchTokenizerMsg",

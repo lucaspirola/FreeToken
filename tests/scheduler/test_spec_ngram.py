@@ -601,7 +601,8 @@ def test_candidate_declines_non_greedy_and_crowded_steps():
     assert dec.candidate() is None
     req.aborted = False
 
-    req.mm_embeds = torch.zeros(1)
+    # upstream 68a81ff renamed Req.mm_embeds -> mm_items (a list of MMItem)
+    req.mm_items = [object()]
     assert dec.candidate() is None
 
 

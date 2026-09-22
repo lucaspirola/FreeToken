@@ -49,9 +49,26 @@ NVFP4_EXPERT_SOURCE_SPEC = _SOURCE_SPEC
 
 
 def _dequant_nvfp4(weight, scale, global_scale):
-    from freetoken.models.qwen3_5_moe.weight import _dequant_nvfp4_weight
+    """Dense NVFP4 -> bf16 (W4A16): ``fp4 * block_scale * global_scale``.
 
-    return _dequant_nvfp4_weight(weight, scale, global_scale)
+    ``weight`` is [O, IN//2] uint8, ``scale`` [O, IN//16] fp8-e4m3 and ``global_scale``
+    the checkpoint's per-tensor ``weight_scale_2`` scalar, broadcast to one row per
+    output (upstream 477c860 rewrote qwen3_5_moe/weight.py around an already-expanded
+    per-row global and dropped the scalar-taking wrapper this model called)."""
+    from freetoken.models.qwen3_5_moe.weight import _dequant_nvfp4 as _dequant_rows
+
+    rows = global_scale.reshape(1).to(torch.float16).expand(weight.shape[0]).contiguous()
+    return _dequant_rows(weight, scale, rows)
+
+
+def _nvfp4_parts(f, raw_base: str):
+    """Load a native NVFP4 weight as ``(packed uint8 [O, IN//2], block scale fp8 [O, IN//16],
+    per-output-row global fp16 [O])`` -- the dense W4A16 kernels' expected buffers."""
+    w = f.get_tensor(raw_base + ".weight")            # uint8 packed FP4 (2 codes/byte)
+    s = f.get_tensor(raw_base + ".weight_scale")      # fp8-e4m3 per-16 block scale
+    g2 = f.get_tensor(raw_base + ".weight_scale_2")   # per-tensor global scalar
+    g = g2.reshape(1).to(torch.float16).expand(w.shape[0]).contiguous()
+    return w, s, g
 
 
 def _native_nvfp4(f, base: str):
@@ -60,8 +77,6 @@ def _native_nvfp4(f, base: str):
     per-output-row ``weight_global`` (the checkpoint's scalar ``weight_scale_2``
     broadcast). Same layout the routed-expert banks use, so the dense NVFP4 matrices
     (shared experts, lm_head) never have to be expanded to bf16."""
-    from freetoken.models.qwen3_5_moe.weight import _nvfp4_parts
-
     w, scale, glob = _nvfp4_parts(f, base)
     return [
         (base + ".weight", w),

@@ -76,7 +76,13 @@ def test_shipped_prefill_configs_are_complete():
 
 
 def test_decode_marlin_config_falls_back_and_finds_tuned_entries():
-    """Unknown ``(N, K, top_k, sm)`` -> the generic constants; a swept key -> its entry."""
+    """Unknown ``(N, K, top_k, sm)`` -> the unswept rule; a swept key -> its entry.
+
+    The unswept rule is upstream's, not the generic constants: bd8f3d5 gives a K deeper
+    than ``_DECODE_MARLIN_DEEPK_THRESHOLD`` a narrow N tile and a wide K tile, which it
+    applies at the launch site. The fork's sweep table sits in front of it, so the rule
+    is now what an unswept key falls back to.
+    """
     from freetoken.moe import fused_nvfp4 as fn
 
     generic = {
@@ -84,12 +90,22 @@ def test_decode_marlin_config_falls_back_and_finds_tuned_entries():
         "BLOCK_SIZE_KW": fn._DECODE_MARLIN_BLOCK_KW,
         "num_warps": fn._DECODE_MARLIN_WARPS,
     }
-    assert fn.decode_marlin_config(768, 4096, 8, 132) == generic
+    deep_k = {
+        "BLOCK_SIZE_N": fn._DECODE_MARLIN_DEEPK_BLOCK_N,
+        "BLOCK_SIZE_KW": fn._DECODE_MARLIN_DEEPK_BLOCK_KW,
+        "num_warps": fn._DECODE_MARLIN_WARPS,
+    }
+
+    def unswept(k):
+        return deep_k if k > fn._DECODE_MARLIN_DEEPK_THRESHOLD else generic
+
+    assert fn.decode_marlin_config(768, 4096, 8, 132) == deep_k
+    assert fn.decode_marlin_config(768, 1024, 8, 132) == generic
     for (n, k, top_k, sm), cfg in fn._DECODE_MARLIN_CONFIGS.items():
         assert fn.decode_marlin_config(n, k, top_k, sm) == cfg
         assert set(cfg) == set(generic)
         # a different SM count is a different GPU -> must not borrow the tuned tile
-        assert fn.decode_marlin_config(n, k, top_k, sm + 1) == generic
+        assert fn.decode_marlin_config(n, k, top_k, sm + 1) == unswept(k)
 
 
 def test_prefill_launch_env_override_forces_every_key(monkeypatch):

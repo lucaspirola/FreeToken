@@ -35,7 +35,7 @@ def test_tokenize_manager_passes_chat_template_kwargs():
         chat_template_kwargs={"enable_thinking": True},
     )
 
-    [input_ids] = manager.tokenize([msg])
+    input_ids = manager.tokenize([msg])[0].input_ids
 
     assert tokenizer.chat_template_kwargs == {
         "tokenize": False,
@@ -62,7 +62,7 @@ def test_tokenize_manager_passes_tools_to_chat_template():
         tools=tools,
     )
 
-    [input_ids] = manager.tokenize([msg])
+    input_ids = manager.tokenize([msg])[0].input_ids
 
     assert tokenizer.chat_template_kwargs == {
         "tokenize": False,
@@ -118,7 +118,7 @@ def encode_messages(messages, thinking_mode, reasoning_effort=None):
         tools=tools,
     )
 
-    [input_ids] = manager.tokenize([msg])
+    input_ids = manager.tokenize([msg])[0].input_ids
 
     assert tokenizer.prompt == "dsv4 prompt"
     assert input_ids.tolist() == [4, 5, 6]
@@ -161,7 +161,7 @@ def encode_messages(messages, thinking_mode, reasoning_effort=None):
     ]
     msg = TokenizeMsg(uid=1, text=messages, sampling_params=SamplingParams())
 
-    [input_ids] = manager.tokenize([msg])
+    input_ids = manager.tokenize([msg])[0].input_ids
 
     assert tokenizer.prompt == "dsv4 prompt"
     assert input_ids.tolist() == [4, 5, 6]

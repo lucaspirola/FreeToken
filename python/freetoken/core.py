@@ -12,7 +12,6 @@ if TYPE_CHECKING:
     from freetoken.hidden_states import HiddenStateSink, HiddenStateSpec
     from freetoken.kvcache import BaseCacheHandle, BaseKVCachePool
     from freetoken.kvcache.linear_state_pool import LinearStatePool
-    from freetoken.moe import BaseMoeBackend
     from freetoken.moe.offload_cache import OffloadMoeCache
 
 
@@ -35,7 +34,7 @@ class SamplingParams:
 
     @property
     def is_greedy(self) -> bool:
-        return (self.temperature <= 0.0 or self.top_k == 1) and self.top_p == 1.0
+        return self.temperature <= 0.0 or self.top_k == 1
 
 
 @dataclass(eq=False)
@@ -47,9 +46,10 @@ class Req:
     uid: int
     sampling_params: SamplingParams
     cache_handle: BaseCacheHandle
-    # Optional precomputed multimodal soft-token embeddings (GPU, [num_image_tokens,
-    # hidden]) scattered at image-token positions during this request's prefill.
-    mm_embeds: torch.Tensor | None = None
+    # per-item processor outputs and the tokenizer's precomputed mrope rows and delta
+    mm_items: list | None = None
+    mrope_positions_full: torch.Tensor | None = None  # [3, prompt_len] int32, CPU
+    mrope_delta: int = 0
     # An opt-in session keeps this completed turn's prefix protected for the next turn.
     # None preserves the ordinary one-shot request lifecycle.
     session_id: str | None = None
@@ -60,9 +60,8 @@ class Req:
     hidden_states: "HiddenStateSpec | None" = None
     # Match against the empty prefix instead of the radix tree, so every prompt token is
     # actually computed. The file probe needs it (a cached prefix would leave those
-    # positions' residual streams unobserved); the cache manager reads it in match_req,
-    # next to the multimodal bypass. A pooled-only probe leaves it False and instead
-    # matches only snapshot nodes that carry pooled sums (hybrid radix).
+    # positions' residual streams unobserved). A pooled-only probe leaves it False and
+    # instead matches only snapshot nodes that carry pooled sums (hybrid radix).
     no_prefix_cache: bool = False
     # The resolved client session id (explicit session_id, else the header-inferred key)
     # for the prefix auto-pin's cross-session rule, carried independently of session_id
@@ -151,6 +150,8 @@ class Batch:
     # these fields should be set by scheduler
     input_ids: torch.Tensor = field(init=False)
     positions: torch.Tensor = field(init=False)
+    # [3, n] t/h/w rope positions on mrope models; positions keeps its sequence-index meaning for token_pool / page_table
+    mrope_positions: torch.Tensor | None = field(default=None, init=False)
     out_loc: torch.Tensor | None = field(init=False)
     # Per-(padded-)request table_idx as a GPU int64 tensor, used by GatedDeltaNet
     # decode to gather/scatter recurrent+conv state without host-side loops (so the
@@ -168,8 +169,14 @@ class Batch:
     active_table_idx: "torch.Tensor | None" = None
     # this field should be set by attention backend
     attn_metadata: BaseAttnMetadata = field(init=False)
-    # concatenated multimodal soft-token embeddings for a prefill batch (or None)
+    # concatenated multimodal soft-token embeddings for a prefill batch (or None) and the batch rows they land on
     mm_embeds: torch.Tensor | None = field(default=None, init=False)
+    mm_rows: torch.Tensor | None = field(default=None, init=False)
+    # per batch token, the end (exclusive, in its request) of the image span holding it, 0 for text: the block a bidirectional layer attends within
+    mm_block_ends: torch.Tensor | None = field(default=None, init=False)
+    # this chunk's cache-miss items to encode and the gather plan [(uid, hash, row_lo, row_hi, n, pos), ...] in scatter order
+    mm_encoder_jobs: list | None = field(default=None, init=False)
+    mm_gather_plan: list | None = field(default=None, init=False)
     # --- speculative decoding (verify batch) ---
     # Explicit LM-head row selection, overriding the prefill path's "last token of each
     # request". A verify batch needs the logits of EVERY position it carries; everything else
@@ -213,6 +220,9 @@ class Batch:
     def is_decode(self) -> bool:
         return self.phase == "decode"
 
+    def get_attn_positions(self) -> torch.Tensor:
+        return self.mrope_positions if self.mrope_positions is not None else self.positions
+
     @property
     def size(self) -> int:
         return len(self.reqs)
@@ -228,7 +238,6 @@ class Context:
     # NOTE: this table always treat page_size = 1
     page_table: torch.Tensor = field(init=False)
     attn_backend: BaseAttnBackend = field(init=False)
-    moe_backend: BaseMoeBackend = field(init=False)
     moe_offload_cache: OffloadMoeCache | None = None
     kv_cache: BaseKVCachePool = field(init=False)
     # Per-request recurrent state for GatedDeltaNet layers; set by the engine for

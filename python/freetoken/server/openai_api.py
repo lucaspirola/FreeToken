@@ -40,6 +40,7 @@ from .request_logger import log_request
 from .served_models import served_model_ids, unknown_model_message
 from . import request_trace
 from .generation import (
+    DEFAULT_MAX_OUTPUT_TOKENS,
     ContentDelta,
     GenDone,
     GenEvent,
@@ -132,6 +133,7 @@ def chat_request_to_genspec(
     map_developer_role: bool = True,
     force_nonempty_content: bool = False,
     hidden_states: HiddenStateSpec | None = None,
+    default_max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
 ) -> GenSpec:
     """OpenAI ChatCompletionRequest -> GenSpec (the OpenAI 'to_sampling_params').
 
@@ -172,6 +174,7 @@ def chat_request_to_genspec(
         ignore_eos=req.ignore_eos,
         model_sampling=model_sampling,
         stop=req.stop,
+        default_max_tokens=default_max_tokens,
     )
     if req.logprobs:
         sampling_params.logprobs = True
@@ -473,12 +476,16 @@ async def handle_chat_completion(
         return create_error_response(str(exc), param="kv_transfer_params")
 
     try:
+        default_max_tokens = (
+            getattr(state.config, "max_output_tokens", None) or DEFAULT_MAX_OUTPUT_TOKENS
+        )
         spec = chat_request_to_genspec(
             req,
             model_sampling,
             map_developer_role=not _harmony_chat_template(state),
             force_nonempty_content=getattr(state.config, "force_nonempty_content", False),
             hidden_states=hidden_states,
+            default_max_tokens=default_max_tokens,
         )
     except ValueError as exc:
         return create_error_response(str(exc))
@@ -524,7 +531,10 @@ async def handle_chat_completion(
         trace.seal(status="error", error_code=err.code)
         return create_error_response(str(err), code=err.code)
 
-    uid = await submit_generation(spec, state)
+    try:
+        uid = await submit_generation(spec, state)
+    except GenerationError as exc:
+        return create_error_response(str(exc), code=exc.code)
     # --pooled-sink-dir: the pooled vectors are also appended to a JSONL file once the
     # engine has answered (both paths). Fixed here so the stream generator, which never
     # sees the Request, still records the client's session header.
@@ -948,7 +958,10 @@ async def handle_completion(
     if unsupported is not None:
         return create_error_response(unsupported)
     try:  # surfaces an out-of-range max_tokens as a 400 rather than a 500 from the worker
-        resolved_sampling = _resolve_sampling(req, model_sampling)
+        default_max_tokens = (
+            getattr(state.config, "max_output_tokens", None) or DEFAULT_MAX_OUTPUT_TOKENS
+        )
+        resolved_sampling = _resolve_sampling(req, model_sampling, default_max_tokens)
     except ValueError as exc:
         return create_error_response(str(exc), param="max_tokens")
 
@@ -982,7 +995,7 @@ async def handle_completion(
             TokenizeMsg(
                 uid=uid,
                 text=prompts[0],
-                sampling_params=_resolve_sampling(req, model_sampling),
+                sampling_params=_resolve_sampling(req, model_sampling, default_max_tokens),
                 session_id=req.session_id,
                 session_ttl_seconds=req.session_ttl_seconds,
             )
@@ -1006,7 +1019,7 @@ async def handle_completion(
             TokenizeMsg(
                 uid=uid,
                 text=prompt,
-                sampling_params=_resolve_sampling(req, model_sampling),
+                sampling_params=_resolve_sampling(req, model_sampling, default_max_tokens),
                 session_id=req.session_id,
                 session_ttl_seconds=req.session_ttl_seconds,
             )
@@ -1153,6 +1166,7 @@ def create_error_response(
 def _resolve_sampling(
     req: ChatCompletionRequest | CompletionRequest,
     model_sampling: dict[str, Any],
+    default_max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
 ) -> SamplingParams:
     return resolve_sampling(
         temperature=req.temperature,
@@ -1162,6 +1176,7 @@ def _resolve_sampling(
         ignore_eos=req.ignore_eos,
         model_sampling=model_sampling,
         stop=req.stop,
+        default_max_tokens=default_max_tokens,
     )
 
 

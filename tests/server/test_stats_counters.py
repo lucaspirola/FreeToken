@@ -45,6 +45,7 @@ def _config():
         served_model_name="unit-model",
         max_seq_len=4096,
         page_size=1,
+        served_modalities=frozenset(),  # upstream's /v1/stats reports input modalities
         model_config=SimpleNamespace(has_linear_attention=False, has_swa_attention=False),
     )
 

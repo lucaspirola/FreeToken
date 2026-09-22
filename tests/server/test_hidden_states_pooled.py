@@ -1267,6 +1267,7 @@ def test_stats_reports_the_pooled_ready_mean_beside_the_ttft_mean():
 
     state.config.served_model_name = "client-model"
     state.config.served_model_aliases = ()
+    state.config.served_modalities = frozenset()  # upstream /v1/stats input modalities
     state.config.max_seq_len = 4096
     state.config.page_size = 1
     stats_state = SimpleNamespace(

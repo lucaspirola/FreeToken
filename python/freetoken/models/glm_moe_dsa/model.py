@@ -41,13 +41,14 @@ class GlmFp8LMHead(ParallelLMHead):
 
 
 class GlmMoeDsaDecoderLayer(BaseOP):
-    def __init__(self, config: ModelConfig, layer_id: int):
-        self.self_attn = GlmMoeDsaAttention(config, layer_id)
+    def __init__(self, config: ModelConfig, layer_id: int, *, prefix: str = ""):
+        self.self_attn = GlmMoeDsaAttention(config, layer_id, prefix=f"{prefix}.self_attn")
         if layer_id >= config.first_k_dense_replace:
-            self.mlp: BaseOP = GlmMoeDsaSparseBlock(config, layer_id)
+            self.mlp: BaseOP = GlmMoeDsaSparseBlock(config, layer_id, prefix=f"{prefix}.mlp")
         else:
             self.mlp = GlmDsaGatedMLP(
-                config.hidden_size, config.intermediate_size, quant=config.dense_quant
+                config.hidden_size, config.intermediate_size,
+                quant_config=config.quant, prefix=f"{prefix}.mlp",
             )
         self.input_layernorm = RMSNormFused(size=config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNormFused(
@@ -67,13 +68,16 @@ class GlmMoeDsaDecoderLayer(BaseOP):
 
 
 class GlmMoeDsaModel(BaseOP):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, *, prefix: str = "model"):
         self.embed_tokens = VocabParallelEmbedding(
             num_embeddings=config.vocab_size,
             embedding_dim=config.hidden_size,
         )
         self.layers = OPList(
-            [GlmMoeDsaDecoderLayer(config, layer_id) for layer_id in range(config.num_layers)]
+            [
+                GlmMoeDsaDecoderLayer(config, layer_id, prefix=f"{prefix}.layers.{layer_id}")
+                for layer_id in range(config.num_layers)
+            ]
         )
         self.norm = RMSNormFused(size=config.hidden_size, eps=config.rms_norm_eps)
 
@@ -99,6 +103,8 @@ class GlmMoeDsaForCausalLM(BaseLLMModel):
                 embedding_dim=config.hidden_size,
                 tie_word_embeddings=config.tie_word_embeddings,
                 tied_embedding=self.model.embed_tokens if config.tie_word_embeddings else None,
+                quant_config=config.quant,
+                prefix="lm_head",
             )
         super().__init__()
 

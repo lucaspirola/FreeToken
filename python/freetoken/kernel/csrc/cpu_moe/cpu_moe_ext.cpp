@@ -71,12 +71,19 @@ inline bf16_t f32_to_bf16(float f) {
 // MiniMax-M3): gate/up are combined jointly with the runtime alpha/limit
 // scalars, so it is handled in the do_pass1 epilogue (act_apply never sees it;
 // the mxfp4 kernel additionally fuses its own copy of the same math).
+// ACT_SWIGLU_CLAMP (GLM-5.3 "swiglu_limit") is the same clamped form WITHOUT
+// the (up + 1) bias: clamp(gate, max=lim) * sigmoid(alpha*gate) * clamp(up, +-lim).
+// ACT_RELU2 is the UNGATED relu^2 (Nemotron-3.5): there is no up row at all, so
+// the epilogue must not read one. Both sides of the S0 merge claimed id 4;
+// relu2 keeps it (it is the measured Nemotron decode path) and swiglu_clamp
+// takes 5. Keep these ids in lockstep with _ACT_IDS in moe/cpu_executor.py.
 enum ActKind {
   ACT_SILU = 0,
   ACT_GELU = 1,
   ACT_GELU_TANH = 2,
   ACT_SWIGLUOAI = 3,
   ACT_RELU2 = 4,
+  ACT_SWIGLU_CLAMP = 5,
 };
 
 inline float act_apply(int act, float x) {
@@ -1615,7 +1622,8 @@ struct CpuMoeExecutor {
     bf16_t* g_row = g_scratch.data() + ((size_t)tok * top_k + k) * I;
     const int i0 = static_cast<int>(ib) * IBLK;
     const int i1 = std::min(I, i0 + IBLK);
-    const bool swigluoai = act == ACT_SWIGLUOAI;
+    const bool clamped = act == ACT_SWIGLUOAI || act == ACT_SWIGLU_CLAMP;
+    const float up_bias = act == ACT_SWIGLUOAI ? 1.0f : 0.0f;
     const bool relu2 = act == ACT_RELU2;
     const float lim = swiglu_limit, alpha = swiglu_alpha;
     for (int i = i0; i < i1; ++i) {
@@ -1627,14 +1635,15 @@ struct CpuMoeExecutor {
       } else {
         float up = gemm1_dot(gate_up_l, gu_packed_l, gu_scale_l, gu_global_l, e, I + i,
                              x_row, xe, xo, xi8, xas) * w_in;
-        if (swigluoai) {
-          // clamp(gate, max=lim) * sigmoid(alpha * gate) * (clamp(up, +-lim) + 1)
-          // -- same math as the mxfp4 kernel's fused epilogue (lim == +inf: no clamp).
+        if (clamped) {
+          // clamp(gate, max=lim) * sigmoid(alpha * gate) * (clamp(up, +-lim) + up_bias)
+          // -- swigluoai carries the +1 up bias (gpt-oss/MiniMax); swiglu_clamp
+          // (GLM-5.3) does not. lim == +inf: no clamp.
           if (gate > lim) gate = lim;
           if (up > lim) up = lim;
           else if (up < -lim) up = -lim;
           const float glu = gate / (1.0f + std::exp(-gate * alpha));
-          g_row[i] = f32_to_bf16(glu * (up + 1.0f));
+          g_row[i] = f32_to_bf16(glu * (up + up_bias));
         } else {
           g_row[i] = f32_to_bf16(act_apply(act, gate) * up);
         }
@@ -2162,5 +2171,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // accepts a newer id without error and silently computes the wrong activation
   // (act_apply falls through to gelu_tanh); the probe turns a stale extension
   // into a loud rebuild instruction instead of wrong model outputs.
-  m.def("max_generic_act_id", []() { return static_cast<int>(ACT_RELU2); });
+  m.def("max_generic_act_id", []() { return static_cast<int>(ACT_SWIGLU_CLAMP); });
 }

@@ -27,7 +27,9 @@ def spec_kv_bytes_per_token(spec, config) -> int:
     per-block scale (1.0625 bytes for 8-bit; 0.5625 for packed int4), not the compute
     dtype. This number, times every token of every layer, is what frees VRAM for experts.
     The index slab stays bf16: it is never quantized.
-    """
+
+    ``index_ratio`` > 1 (QSA) stores one index key per token group, not per token; that slab's
+    ring and scratch rows are fixed-size and priced in QSAKVCache.kv_cost instead."""
     if spec.mla:
         bytes_per_pair = _kv_bytes_per_element(config)
     else:
@@ -43,7 +45,10 @@ def spec_kv_bytes_per_token(spec, config) -> int:
         * div_even(spec.num_kv_heads, config.tp_info.size, allow_replicate=True)
         * spec.num_layers
     )
-    return int(per_side_elements * bytes_per_pair) + spec.index_head_dim * spec.num_index_layers * 2
+    return (
+        int(per_side_elements * bytes_per_pair)
+        + spec.index_head_dim * spec.num_index_layers * 2 // spec.index_ratio
+    )
 
 
 def _kv_bytes_per_element(config) -> float:

@@ -166,6 +166,31 @@ def test_namespace_member_name_collisions_are_qualified():
     converted = RP._convert_tools(tools)
     assert [t["function"]["name"] for t in converted] == ["functions__run", "ornith__run"]
     assert RP._response_tool_name("ornith__run", tools) == ("ornith", "run")
+def test_convert_function_call_output_image_moves_to_a_user_turn():
+    # codex's view_image returns the image as the tool output; templates render tool messages as text.
+    req = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-x",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "look"}]},
+                {"type": "function_call", "call_id": "call_1", "name": "view_image", "arguments": '{"path": "a.png"}'},
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": [
+                        {"type": "input_text", "text": "viewed"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,aGk="},
+                    ],
+                },
+            ],
+        }
+    )
+    spec = RP.convert_responses_to_genspec(req, {})
+    assert [m["role"] for m in spec.messages] == ["user", "assistant", "tool", "user"]
+    assert spec.messages[2]["tool_call_id"] == "call_1" and spec.messages[2]["content"] == "viewed"
+    assert spec.messages[3]["content"] == [
+        {"type": "image", "freetoken_ref": {"kind": "url", "data": "data:image/png;base64,aGk="}}
+    ]
 
 
 def test_convert_reasoning_item_merges_into_assistant_turn():
@@ -406,6 +431,7 @@ class FakeState:
         self._cached_tokens = cached_tokens  # stamped on the first ack (admission reply)
         self.maintenance_state = "serving"
         self.config = SimpleNamespace(
+            mm=SimpleNamespace(text_model_only=False, disabled_encoders=frozenset()),
             reasoning_parser=None, tool_call_parser="llama3",
             served_model_name="test-model", model_path="/test",
         )
@@ -1026,3 +1052,23 @@ def test_convert_reasoning_toggle_broadcasts_every_spelling():
         assert spec.chat_template_kwargs == {
             "enable_thinking": False, "thinking_mode": "disabled"
         }, parser
+
+
+def test_convert_function_call_output_text_list_stays_a_plain_tool_message():
+    req = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-x",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]},
+                {"type": "function_call", "call_id": "call_1", "name": "f", "arguments": "{}"},
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": [{"type": "input_text", "text": "a"}, {"type": "input_text", "text": "b"}],
+                },
+            ],
+        }
+    )
+    spec = RP.convert_responses_to_genspec(req, {})
+    assert [m["role"] for m in spec.messages] == ["user", "assistant", "tool"]
+    assert spec.messages[2]["content"] == "ab"

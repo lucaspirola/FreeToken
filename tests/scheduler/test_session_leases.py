@@ -49,7 +49,7 @@ def _req(uid: int, session_id: str):
         uid=uid,
         session_id=session_id,
         session_ttl_seconds=30.0,
-        mm_embeds=None,
+        mm_items=None,
         input_ids=[1, 2, 3, 4],
         cached_len=3,
         table_idx=7,

@@ -42,19 +42,13 @@ from freetoken.kernel.triton.nvfp4_fused_moe import (
     _e2m1_lut,
     _prefill_nvfp4_moe_kernel,
 )
-from freetoken.layers import (
-    gelu_and_mul,
-    gelu_tanh_and_mul,
-    silu_and_mul,
-    swigluoai_and_mul,
-)
+from freetoken.layers import gated_act_and_mul
 from freetoken.moe.fused import moe_align_block_size
-
-_ACT = {"silu": silu_and_mul, "gelu": gelu_and_mul, "gelu_tanh": gelu_tanh_and_mul}
 
 # gemm1 epilogue codes, mirroring the kernels' ``ACT`` constexpr: 0 none, 1 relu(x)**2.
 # Only elementwise activations over the *whole* gemm1 row can be fused; the gated kinds
-# (silu/gelu/swigluoai) need both halves of a row at once and stay on ``_run_act``.
+# (silu/gelu/swigluoai/swiglu_clamp) need both halves of a row at once and stay on
+# ``_run_act`` -> ``gated_act_and_mul``.
 _FUSED_ACT_CODE = {"relu2": 1}
 
 
@@ -70,17 +64,15 @@ def _run_act(
     act_alpha: float,
     act_limit: float,
 ) -> None:
-    """gemm1 -> gemm2 activation dispatch. ``swigluoai`` (MiniMax-M3, clamped
-    gpt-oss swiglu over the banks' uninterleaved [gate; up] halves) carries the
-    per-model ``act_alpha``/``act_limit`` scalars; the plain *_and_mul kinds
-    ignore them."""
+    """gemm1 -> gemm2 activation dispatch. ``relu2`` (Nemotron-3.5, ungated) squares
+    the whole row and is normally fused into gemm1's epilogue instead; every other
+    kind is gated and goes to upstream's ``gated_act_and_mul``, which carries the
+    per-model ``act_alpha``/``act_limit`` scalars for the clamped variants."""
     if activation == "relu2":
         torch.square(torch.relu(gate_up), out=out)
         return
-    if activation == "swigluoai":
-        swigluoai_and_mul(gate_up, out, alpha=act_alpha, limit=act_limit)
-        return
-    _ACT[activation](gate_up, out)
+    gated_act_and_mul(activation, gate_up, out, alpha=act_alpha, limit=act_limit)
+
 
 # Decode is captured into a CUDA graph, so the config must be fixed (no triton.autotune,
 # which benchmarks at run time). Tuned offline against the NVFP4 decode kernels.
@@ -95,6 +87,12 @@ _DECODE_WARPS = 4
 _DECODE_MARLIN_BLOCK_N = 16
 _DECODE_MARLIN_BLOCK_KW = 16
 _DECODE_MARLIN_WARPS = 4
+# Deep-K variant: at K > 2048 (qwen4_exp gate_up, K=2560) a narrower N tile with the whole
+# K strip in one program iteration measures ~13% faster (18.6 vs 21.0us); short-K shapes
+# regress under it, so the split is by K, not by gemm position.
+_DECODE_MARLIN_DEEPK_BLOCK_N = 8
+_DECODE_MARLIN_DEEPK_BLOCK_KW = 128
+_DECODE_MARLIN_DEEPK_THRESHOLD = 2048
 
 # Per-shape decode overrides, keyed by (N, K, top_k, sm_count). Swept cold-L2 (routings
 # rotated past the L2, as benchmarks/bench_nvfp4_moe_kernels.py does) with
@@ -126,9 +124,12 @@ def decode_marlin_config(N: int, K: int, top_k: int, sm_count: int) -> Dict[str,
     cfg = _DECODE_MARLIN_CONFIGS.get((N, K, top_k, sm_count))
     if cfg is not None:
         return dict(cfg)
+    # No swept entry: fall back to upstream's deep-K rule (a long K reduction wants a
+    # narrow N tile and a wide K tile) rather than the generic constants alone.
+    deep_k = K > _DECODE_MARLIN_DEEPK_THRESHOLD
     return {
-        "BLOCK_SIZE_N": _DECODE_MARLIN_BLOCK_N,
-        "BLOCK_SIZE_KW": _DECODE_MARLIN_BLOCK_KW,
+        "BLOCK_SIZE_N": _DECODE_MARLIN_DEEPK_BLOCK_N if deep_k else _DECODE_MARLIN_BLOCK_N,
+        "BLOCK_SIZE_KW": _DECODE_MARLIN_DEEPK_BLOCK_KW if deep_k else _DECODE_MARLIN_BLOCK_KW,
         "num_warps": _DECODE_MARLIN_WARPS,
     }
 

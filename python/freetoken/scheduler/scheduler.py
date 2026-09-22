@@ -6,12 +6,14 @@ import math
 import os
 import time
 from dataclasses import dataclass, field
+
 from typing import TYPE_CHECKING, List, NamedTuple, NoReturn, Set, Tuple, TypeAlias
 
 import torch
 from freetoken.attention.linear import build_fla_metadata
 from freetoken.core import Batch, Req
 from freetoken.env import ENV
+from freetoken.gpu_select import gpu_identity
 from freetoken.message import (
     AbortBackendMsg,
     BaseBackendMsg,
@@ -43,6 +45,7 @@ from .config import SchedulerConfig
 from .counters import GrowableHandoffEvents, build_scheduler_counters
 from .decode import DecodeManager
 from .io import SchedulerIOMixin
+from .mm import cut_image_spans, plan_mm_batch
 from .prefill import ChunkedReq, PrefillManager
 from .spec_ngram import SpecNgramDecoder
 from .status import SchedulerStatusReporter
@@ -168,6 +171,8 @@ class Scheduler(SchedulerIOMixin):
         self.stream = torch.cuda.Stream(device=self.device)
         self.engine_stream_ctx = torch.cuda.stream(self.engine.stream)
         torch.cuda.set_stream(self.stream)
+        # sent on the readiness ack for /v1/stats gpus; a list so TP can add one entry per rank
+        self.gpus = [gpu_identity(self.device.index)] if self.device.type == "cuda" else []
 
         # initialize other managers
         self.table_manager = TableManager(
@@ -215,6 +220,7 @@ class Scheduler(SchedulerIOMixin):
         self.decode_manager = DecodeManager(config.page_size)
         max_prefill_seqs = _resolve_max_prefill_seqs(config)
         compute_capability = _device_compute_capability(self.device)
+        self._bidirectional_mm = any(getattr(g, "bidirectional_mm_blocks", False) for g in config.model_config.attention_groups)
         self.prefill_manager = PrefillManager(
             self.cache_manager,
             self.table_manager,
@@ -228,6 +234,8 @@ class Scheduler(SchedulerIOMixin):
                 max_prefill_seqs,
                 compute_capability,
             ),
+            encoder_cache=self.engine.encoder_cache,
+            keep_images_whole=self._bidirectional_mm,
         )
         if max_prefill_seqs:
             logger.info_rank0(
@@ -349,6 +357,8 @@ class Scheduler(SchedulerIOMixin):
             else config.max_extend_tokens
         )
         self.config = config
+        self._model_is_mrope = config.model_config.model_is_mrope
+        self._warned_cut_image = False
         self.status_reporter = SchedulerStatusReporter(
             log=logger.info_rank0,
             decode_log_interval=config.decode_log_interval,
@@ -1182,6 +1192,17 @@ class Scheduler(SchedulerIOMixin):
                 session.protected_until = None
                 session.last_used_at = time.monotonic()
                 session.active_uid = msg.uid
+            if msg.mm_items and self.engine.encoder_cache is None:
+                # no encoder runtime: fail loudly instead of decoding unexpanded placeholders
+                self.send_result(
+                    [
+                        ErrorReplyMsg(
+                            uid=msg.uid,
+                            error="image input is not supported by this server",
+                        )
+                    ]
+                )
+                return
             input_len, max_seq_len = len(msg.input_ids), self.engine.max_seq_len
             max_output_len = max_seq_len - input_len
             if max_output_len <= 0:
@@ -1244,6 +1265,15 @@ class Scheduler(SchedulerIOMixin):
                 tombstones.pop(next(iter(tombstones)))
             req_to_free = self.prefill_manager.abort_req(msg.uid)
             req_to_free = req_to_free or self.decode_manager.abort_req(msg.uid)
+            if (
+                req_to_free is not None
+                and req_to_free.mm_items
+                and self.engine.encoder_cache is not None
+            ):
+                # drop the aborted request's claims; entries it held alone die here
+                self.engine.encoder_cache.release(
+                    msg.uid, [item.hash for item in req_to_free.mm_items]
+                )
             if req_to_free is not None:
                 # SGLang-style abort: never free resources under an in-flight forward. If the
                 # request is in the launched-but-not-drained batch (overlap), only mark it;
@@ -1547,7 +1577,7 @@ class Scheduler(SchedulerIOMixin):
         # to their tier free-lists; the generic manager frees its KV pages (it reads
         # page_table[req.table_idx], so free the table entry after).
         self.cache_manager.cache_req(req, finished=True)
-        if retain_session and req.session_id is not None and req.mm_embeds is None:
+        if retain_session and req.session_id is not None and not req.mm_items:
             session = self._sessions.get(req.session_id)
             if session is not None and session.active_uid == req.uid:
                 new_handle = self.cache_manager.retain_prefix(
@@ -2841,6 +2871,8 @@ class Scheduler(SchedulerIOMixin):
         if batch.is_prefill:
             self._gather_multimodal(batch)
         batch.positions = _make_positions(batch, self.device)
+        if self._model_is_mrope:
+            batch.mrope_positions = _make_mrope_positions(batch, self.device)
         input_mapping = _make_input_tuple(batch, self.device)
         write_mapping = _make_write_tuple(batch, self.device)
         batch.out_loc = self.engine.page_table[input_mapping]
@@ -2883,14 +2915,20 @@ class Scheduler(SchedulerIOMixin):
         )
 
     def _gather_multimodal(self, batch: Batch) -> None:
-        """Concatenate per-request vision soft tokens (in request order) for a prefill
-        batch so the model can scatter them at image-token positions. ``req.mm_embeds``
-        is kept (not cleared) so the cache manager can recognize multimodal requests and
-        keep them out of the shared prefix cache (image placeholders share a token id but
-        carry per-image content)."""
-        parts = [req.mm_embeds for req in batch.reqs if req.mm_embeds is not None]
-        if parts:
-            batch.mm_embeds = torch.cat(parts, dim=0)
+        """Plan the chunk's encoder jobs, gather rows and scatter rows over the batch; the engine runs them before the LM forward."""
+        jobs, plan, rows, block_ends = plan_mm_batch(batch.padded_reqs, self.engine.encoder_cache)
+        if plan:
+            batch.mm_encoder_jobs = jobs
+            batch.mm_gather_plan = plan
+            batch.mm_rows = torch.tensor(rows, dtype=torch.int64, pin_memory=True).to(self.device, non_blocking=True)
+            batch.mm_block_ends = torch.tensor(block_ends, dtype=torch.int32, pin_memory=True).to(self.device, non_blocking=True)
+        if self._bidirectional_mm and not self._warned_cut_image and (cut := cut_image_spans(batch.padded_reqs)):
+            # only a bidirectional image span loses context when cut, and only an image longer than the chunk still gets cut
+            lo, hi = cut[0]
+            self._warned_cut_image = True
+            logger.warning_rank0(
+                f"an image of {hi - lo} tokens does not fit one prefill chunk (--max-extend-tokens {self.prefill_budget}, or the sliding-window pool's share of it): its earlier rows attend within the first part only"
+            )
 
     def _schedule_next_batch(self) -> ForwardInput | None:
         if (
@@ -3108,6 +3146,28 @@ class Scheduler(SchedulerIOMixin):
             ) * 1e3
         self.decode_manager.filter_reqs(forward_input.batch.reqs)
         return forward_output
+
+
+def _make_mrope_positions(batch: Batch, device: torch.device) -> torch.Tensor:
+    """[3, N] rope rows: an image request's prompt tokens use their precomputed columns, everything else is sequence index + per-request delta."""
+    needed = sum(r.extend_len for r in batch.padded_reqs)
+    host = torch.empty((3, needed), dtype=torch.int32, pin_memory=True)
+    offset = 0
+    for req in batch.padded_reqs:
+        length = req.extend_len
+        out = host[:, offset : offset + length]
+        full = req.mrope_positions_full
+        if full is not None and req.device_len <= full.shape[1]:
+            out.copy_(full[:, req.cached_len : req.device_len])
+        else:
+            row = torch.arange(
+                req.cached_len + req.mrope_delta,
+                req.device_len + req.mrope_delta,
+                dtype=torch.int32,
+            )
+            out.copy_(row.unsqueeze(0).expand(3, -1))
+        offset += length
+    return host.to(device, non_blocking=True)
 
 
 def _make_positions(batch: Batch, device: torch.device) -> torch.Tensor:

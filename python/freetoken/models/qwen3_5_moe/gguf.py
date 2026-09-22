@@ -117,7 +117,7 @@ def parse_gguf_config(shim: "GgufConfigShim") -> ModelConfig:
                 key_head_dim=state_dim,
                 value_head_dim=state_dim,
                 conv_kernel_dim=int(_g(shim, "ssm.conv_kernel")),
-                output_gate=True,
+                output_gate="silu",
             ),
             FullAttentionGroupConfig(
                 name="full",

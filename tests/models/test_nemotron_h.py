@@ -126,7 +126,7 @@ def _meta_model(config):
         get_tp_info()
     except RuntimeError:
         set_tp_info(0, 1)
-    object.__setattr__(config, "moe_backend", "offload")
+    object.__setattr__(config, "moe_strategy", "offload")
     with torch.device("meta"), torch_dtype(torch.bfloat16):
         return NemotronHForCausalLM(config)
 
@@ -607,7 +607,10 @@ def test_real_dense_nvfp4_matches_the_dequant_reference():
         pytest.skip("NVFP4 W4A16 kernels are CUDA-only")
     import safetensors
     from freetoken.kernel.triton.nvfp4_linear import Nvfp4DenseLinear, Nvfp4LMHead
-    from freetoken.models.qwen3_5_moe.weight import _dequant_nvfp4_weight, _nvfp4_parts
+    from freetoken.models.nemotron_h.weight import (
+        _dequant_nvfp4 as _dequant_nvfp4_weight,
+        _nvfp4_parts,
+    )
 
     path = _real_path()
     free, _ = torch.cuda.mem_get_info()

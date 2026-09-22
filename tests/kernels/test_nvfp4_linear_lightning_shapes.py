@@ -257,7 +257,7 @@ def _real_path() -> Path:
 def _load_real(name: str):
     """(packed, block scale, per-row global, per-tensor global) for one real projection."""
     import safetensors
-    from freetoken.models.qwen3_5_moe.weight import _nvfp4_parts
+    from freetoken.models.nemotron_h.weight import _nvfp4_parts
 
     path = _real_path()
     index = json.loads((path / "model.safetensors.index.json").read_text())["weight_map"]

@@ -124,13 +124,18 @@ _BANK_SCHEMAS: dict[str, tuple[str, ...]] = {
     "ds_fp4": ("gate_up_packed", "gate_up_scale", "down_packed", "down_scale"),
 }
 
+# lives in kernel/aot_models.py: the AOT row table shares it and must stay importable in the torch-only kernel-cache build env, which cannot import freetoken.moe
+from freetoken.kernel.aot_models import fp8_block_scale_pad
+
+
 # bytes per (expert, layer) as f(hidden, moe_intermediate), from the bank shapes above; keep in sync with _BANK_SCHEMAS
 # keyed by the config-time format tag (expert_quant / moe_weight_format), not quant_format: "mxfp4" sizes the mxfp4_triton banks, "nvfp4" also covers its repacked variants
 _BANK_BYTES_PER_EXPERT = {
     "bf16": lambda H, I: 3 * I * H * 2,
-    "fp8_block": lambda H, I: (
-        3 * I * H + ((2 * I // 128) * (H // 128) + (H // 128) * (I // 128)) * 2
-    ),
+    "fp8_block": lambda H, I: 3 * I * H + (
+        (2 * I // 128) * fp8_block_scale_pad(2 * I // 128, H // 128)
+        + (H // 128) * fp8_block_scale_pad(H // 128, I // 128)
+    ) * 2,
     "q4_0": lambda H, I: 2 * I * (H // 32) * 18 + H * (I // 32) * 18,
     "nvfp4": lambda H, I: 2 * I * (H // 2 + H // 16 + 2) + H * (I // 2 + I // 16 + 2),
     "mxfp4": lambda H, I: 2 * I * (H // 2 + H // 32 + 2) + H * (I // 2 + I // 32 + 2),
@@ -226,14 +231,18 @@ class OffloadMoeCache:
     # ``slot_capacity`` (a single degenerate chunk spanning the whole arena).
     # Ignored entirely when the gate is off.
     arena_step_slots: int | None = None
+    # bank layout from the expert kernel (a BankSpec per role); when given it replaces the _BANK_SCHEMAS lookup and the slot cap comes from max_slots
+    layout: dict | None = None
+    max_slots: int | None = None
 
     def __post_init__(self) -> None:
         policy_ids = {"lru": 0, "lfu": 1}
         assert self.cache_policy in policy_ids
         assert self.decode_target in ("gpu", "cpu", "hybrid"), self.decode_target
-        assert self.quant_format in _BANK_SCHEMAS, (
-            f"unknown quant_format {self.quant_format!r}"
-        )
+        if self.layout is None:
+            assert self.quant_format in _BANK_SCHEMAS, (
+                f"unknown quant_format {self.quant_format!r}"
+            )
         if (env := os.environ.get("FREETOKEN_MOE_EXTEND_CACHE_TOKENS")) is not None:
             self.extend_cache_tokens = int(env)
         assert self.extend_cache_tokens >= 0, self.extend_cache_tokens
@@ -242,7 +251,7 @@ class OffloadMoeCache:
         self.cpu_executor = None
         # MoE layer ids whose decode runs on the CPU executor; the rest use the GPU
         # offload/PCIe path. Set by the engine after construction (empty = all-GPU,
-        # all layers = the plain --moe-backend cpu case).
+        # all layers = the plain --moe-strategy cpu case).
         self.cpu_layer_ids: frozenset = frozenset()
         # Allow non-pinned layers to keep GPU expert compute by gathering each
         # decode step's misses through a bounded pinned host/device staging pair.
@@ -381,7 +390,10 @@ class OffloadMoeCache:
         # carry independent host attributes -- see layer_residency) and their GPU
         # slot caches, keyed by the format's bank schema (attached by
         # set_bank_sources). The GPU slot cache stays one unified pool per bank.
-        self.bank_schema = _BANK_SCHEMAS[self.quant_format]
+        if self.layout is not None:
+            self.bank_schema = tuple(role for role, spec in self.layout.items() if not spec.resident)
+        else:
+            self.bank_schema = _BANK_SCHEMAS[self.quant_format]
         self.bank_sources: dict[str, list[torch.Tensor]] = {}
         self.bank_caches: dict[str, torch.Tensor] = {}
         # Mixed-GGUF size classes. A class owns a contiguous range in the
@@ -667,7 +679,7 @@ class OffloadMoeCache:
         per layer (independent allocations, so each layer can carry its own host
         attributes); each slot cache mirrors the bank's row shape and dtype as one
         unified GPU pool. The row layouts are produced by the weight loaders /
-        repackers (see ``_BANK_SCHEMAS`` and :mod:`freetoken.moe.nvfp4_backends`)
+        repackers (see ``_BANK_SCHEMAS`` and :mod:`freetoken.layers.quantization.moe.nvfp4`)
         -- the cache machinery is layout-agnostic and just moves rows.
 
         ``layer_residency`` labels each layer with a ``HostResidency`` value (default: all pinned).
@@ -676,12 +688,16 @@ class OffloadMoeCache:
         bounded decode staging and still compute on GPU. Prefill overlap remains
         incompatible because it requires direct registered source addresses.
         """
+        from freetoken.moe.legacy_format import canonical_role
         from freetoken.moe.host_banks import HostResidency
 
-        assert set(sources) == set(self.bank_schema), (
-            f"banks {sorted(sources)} do not match the {self.quant_format!r} "
-            f"schema {self.bank_schema}"
-        )
+        # loaders and FTW files may still name the banks the old way (gate_up_packed, ...)
+        by_role = {canonical_role(name): per_layer for name, per_layer in sources.items()}
+        if set(by_role) != {canonical_role(n) for n in self.bank_schema}:
+            raise AssertionError(
+                f"banks {sorted(sources)} do not match the {self.quant_format!r} schema {self.bank_schema}"
+            )
+        sources = {name: by_role[canonical_role(name)] for name in self.bank_schema}
         residency = layer_residency or [HostResidency.PINNED.value] * self.num_layers
         assert len(residency) == self.num_layers, (len(residency), self.num_layers)
         unpinned = frozenset(
@@ -734,6 +750,13 @@ class OffloadMoeCache:
             per_layer = sources[name]
             assert len(per_layer) == self.num_layers, (name, len(per_layer))
             head = per_layer[0]
+            if self.layout is not None:
+                spec = self.layout[name]
+                if tuple(head.shape[1:]) != tuple(spec.shape) or head.dtype != spec.dtype:
+                    raise ValueError(
+                        f"bank {name!r} rows are {tuple(head.shape[1:])} {head.dtype} but the expert kernel's layout "
+                        f"wants {tuple(spec.shape)} {spec.dtype}; the banks were packed for another kernel"
+                    )
             dtype = head.dtype
             row_numels = []
             for layer_id, source in enumerate(per_layer):
@@ -864,6 +887,19 @@ class OffloadMoeCache:
         )
 
     def _build_copy_plan(self) -> None:
+        self._build_fused_copy_plan()
+        if self._copy_fused_ok or self.device.type != "cuda" or not self.banks:
+            return
+        for name in self.bank_schema:
+            cache = self.bank_caches[name]
+            feat = math.prod(cache.shape[1:]) * cache.element_size()
+            if feat % 128:
+                raise RuntimeError(
+                    f"MoE bank {name!r} rows are {feat} bytes (not a multiple of 128): "
+                    f"only the fused multi-bank copy can move them, but it is disabled"
+                )
+
+    def _build_fused_copy_plan(self) -> None:
         """Precompute the fused multi-bank copy descriptor (base addrs + per-row bytes).
 
         Built once here (and on :meth:`rebuild`, which reallocates the slot caches);
@@ -1035,11 +1071,16 @@ class OffloadMoeCache:
                     f"mixed-GGUF size classes require at least {minimum} slots, "
                     f"got {cache_size}"
                 )
-        if self.quant_format == "nvfp4_marlin" and cache_size > MARLIN_MAX_CACHE_SIZE:
+        if self.max_slots is not None and cache_size > self.max_slots:
+            raise ValueError(
+                f"moe_cache_size={cache_size} exceeds the expert kernel's slot limit of {self.max_slots}; "
+                f"pass --moe-cache-size {self.max_slots} or less, or let the default kernel serve the experts"
+            )
+        if self.layout is None and self.quant_format == "nvfp4_marlin" and cache_size > MARLIN_MAX_CACHE_SIZE:
             raise ValueError(
                 f"moe_cache_size={cache_size} exceeds the marlin backend's slot limit of "
                 f"{MARLIN_MAX_CACHE_SIZE} (vLLM moe_align_block_size caps padded experts at "
-                "1024); reduce moe_cache_size or force --nvfp4-backend triton"
+                "1024); reduce moe_cache_size or force --quant-backend moe.nvfp4=triton"
             )
 
     def rebuild(self, cache_size: int) -> None:
@@ -3197,14 +3238,6 @@ class OffloadMoeCache:
 
 def iter_offload_moe_layers(model) -> Iterator:
     from freetoken.layers import BaseOP, OffloadMoELayer
-
-    # A model whose MoE blocks are bespoke nn.Modules (not OffloadMoELayer) declares its
-    # offload layers explicitly via this hook (e.g. DeepSeek-V4-Flash); attach_offload_moe_cache
-    # then sets .offload_cache on each yielded layer just like the OffloadMoELayer walk.
-    hook = getattr(model, "_iter_offload_moe_layers", None)
-    if hook is not None:
-        yield from hook()
-        return
 
     if isinstance(model, OffloadMoELayer):
         yield model

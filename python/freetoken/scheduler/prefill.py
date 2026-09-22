@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, List, Tuple
@@ -9,11 +10,13 @@ from freetoken.core import Batch, Req
 from freetoken.utils import align_down, div_ceil, init_logger
 
 from .counters import PrefillCounters
+from .mm import mm_chunk_end, mm_rows_after
 from .utils import PendingReq
 
 if TYPE_CHECKING:
     from freetoken.kvcache import BaseCacheHandle
     from freetoken.message import UserMsg
+    from freetoken.mm.encoder_cache import EncoderCache
 
     from .cache import CacheManager
     from .decode import DecodeManager
@@ -63,6 +66,11 @@ class PrefillAdder:
     reserved_size: int
     cache_manager: CacheManager
     table_manager: TableManager
+    encoder_cache: EncoderCache | None = None
+    # end a chunk before an image it would cut; only models whose image spans attend in both directions need it
+    keep_images_whole: bool = False
+    # the whole budget of this pass; token_budget shrinks as requests are admitted
+    pass_budget: int = 0
     # SWA-pool tokens charged to reqs admitted so far this pass. Mirrors reserved_size: swa is
     # allocated only in allocate_paged (after the pass), so swa_available_size does not decrement
     # across the admission loop -- without this, successive admits all see the full pool.
@@ -180,13 +188,15 @@ class PrefillAdder:
     # it modelled a lane as costing one page and a table slot, which every pass could
     # afford, so its count was always the queue depth it was meant to replace.
 
-    def _kv_gate_ok(self, estimated_len: int) -> bool:
+    def _kv_gate_ok(self, estimated_size: int) -> bool:
         """Whole-footprint admission gate for a FRESH prompt.
 
         ``owed(admitted set) + owed(this prompt) <= available_size`` -- see the long note in
         :meth:`_try_allocate_one`, which is the only caller that may act on a True.
+        ``estimated_size`` is a PAGE span from :meth:`_kv_reservation_size`, the same
+        currency ``reserved_size`` is charged in (upstream 46d2743).
         """
-        return estimated_len + self.reserved_size <= self.cache_manager.available_size
+        return estimated_size + self.reserved_size <= self.cache_manager.available_size
 
     def _swa_seat_ok(self, extend_len: int) -> bool:
         """Can the swa pool seat this fresh request's first chunk / one window?"""
@@ -211,6 +221,17 @@ class PrefillAdder:
         pages = max(0, self.cache_manager.available_size - self.reserved_pages) // ps
         return (div_ceil(cached_len, ps) + pages) * ps
 
+    def __post_init__(self) -> None:
+        if not self.pass_budget:
+            self.pass_budget = self.token_budget
+
+    def _kv_reservation_size(self, total_len: int, cached_len: int) -> int:
+        """Return the token-equivalent cost of the additional KV pages for a request."""
+        page_size = self.cache_manager.page_size
+        return (
+            div_ceil(total_len, page_size) - div_ceil(cached_len, page_size)
+        ) * page_size
+
     def _try_allocate_one(self, req: PendingReq):
         if self.table_manager.available_size == 0:
             return None
@@ -221,7 +242,9 @@ class PrefillAdder:
         cached_len = handle.cached_len
         # TODO: better estimate policy
         extend_len = req.input_len - cached_len
-        estimated_len = extend_len + req.output_len
+        estimated_size = self._kv_reservation_size(
+            req.input_len + req.output_len, cached_len
+        )
 
         # Charge the whole remaining footprint against what the pool can actually give.
         # ``reserved_size`` is every claim already standing on it: the growth the running
@@ -234,11 +257,13 @@ class PrefillAdder:
         # i.e. the admitted SET stays finishable, not merely each arrival at the instant it
         # arrives. That distinction is the whole of soak report T5: 14 prefills each passed
         # a gate that measured only itself, and between them owed 1.76x the pool.
-        if not self._kv_gate_ok(estimated_len):
+        # The charged quantity is the PAGE span, not the raw token count (upstream 46d2743):
+        # CacheManager allocates each request in whole pages.
+        if not self._kv_gate_ok(estimated_size):
             return None
         self.cache_manager.lock(handle)
         # Re-read: lock() moved the matched prefix out of ``evictable``, so the budget shrank.
-        if not self._kv_gate_ok(estimated_len):
+        if not self._kv_gate_ok(estimated_size):
             return self.cache_manager.unlock(handle)
 
         # Second currency (hybrid GDN): reserve 1 live + 2 ping-pong state slots; evict tree
@@ -346,9 +371,25 @@ class PrefillAdder:
                 if aligned <= 0:
                     return None
                 chunk_size = aligned
-            self.reserved_swa += (
-                div_ceil(cached_len + chunk_size, ps) - div_ceil(cached_len, ps)
-            ) * ps
+        align = self.cache_manager.prefill_chunk_align
+        if align > 1 and 0 < chunk_size < remain_len:
+            # An unaligned chunk end is correct, it just loses this prompt's snapshot boundaries --
+            # so keep it when the leftover budget cannot fill one whole unit instead of stalling
+            # the request until it gets a bigger turn.
+            aligned = align_down(cached_len + chunk_size, align) - cached_len
+            chunk_size = aligned if aligned > 0 else chunk_size
+        if self.keep_images_whole and pending_req.mm_items and chunk_size < remain_len:
+            # a cut image would attend within only the part already in the cache: end the chunk before it, decided last because the caps above only move the end earlier and would undo it
+            unit = math.lcm(self.cache_manager.page_size if self.cache_manager.swa_paged else 1, align if align > 1 else 1)
+            end = mm_chunk_end(pending_req.mm_items, cached_len, cached_len + chunk_size, unit)
+            cut = next((hi for item in pending_req.mm_items for lo, hi in item.offsets if lo < end < hi), None)
+            if cut is not None and self.token_budget < self.pass_budget and cut - cached_len <= self.pass_budget:
+                # other requests took part of this pass; a pass of its own holds the image whole
+                return None
+            chunk_size = end - cached_len
+        if self.cache_manager.swa_paged:
+            ps = self.cache_manager.page_size
+            self.reserved_swa += (div_ceil(cached_len + chunk_size, ps) - div_ceil(cached_len, ps)) * ps
         is_chunked = chunk_size < remain_len
         CLS = ChunkedReq if is_chunked else Req
         self.token_budget -= chunk_size
@@ -357,18 +398,18 @@ class PrefillAdder:
         # the in-flight prefills (see PrefillManager._standing_reservation), because the
         # adder is rebuilt per pass and would otherwise be blind to prompts admitted
         # earlier. Charging it a second time here would refuse the continuation's own peers.
+        # The charge is the PAGE span (upstream 46d2743): CacheManager allocates each
+        # request independently in whole pages, and charging raw tokens can admit several
+        # short requests against one page that allocate_paged() then needs one each of.
         if pending_req.chunked_req is None:
-            self.reserved_size += remain_len + pending_req.output_len
+            self.reserved_size += self._kv_reservation_size(
+                pending_req.input_len + pending_req.output_len, cached_len
+            )
         self.reserved_pages += self._page_span(cached_len, cached_len + chunk_size)
         # NOTE: update the tokens ids only; new pages will be allocated in the scheduler
         _slice = slice(cached_len, cached_len + chunk_size)
         device_ids = self.table_manager.token_pool[table_idx, _slice]
         device_ids.copy_(_maybe_pinned(pending_req.input_ids[_slice]), non_blocking=True)
-        if is_chunked and pending_req.mm_embeds is not None:
-            raise NotImplementedError(
-                "Multimodal prompts must fit in a single prefill chunk; increase "
-                "--max-extend-tokens or shrink the prompt."
-            )
         req = CLS(
             input_ids=pending_req.input_ids[: cached_len + chunk_size],
             table_idx=table_idx,
@@ -377,13 +418,15 @@ class PrefillAdder:
             uid=pending_req.uid,
             cache_handle=cache_handle,
             sampling_params=pending_req.sampling_params,
-            mm_embeds=pending_req.mm_embeds,
             session_id=pending_req.session_id,
             session_ttl_seconds=pending_req.session_ttl_seconds,
             hidden_states=pending_req.hidden_states,
             no_prefix_cache=pending_req.no_prefix_cache,
             pin_key=pending_req.pin_key,
         )
+        req.mm_items = pending_req.mm_items
+        req.mrope_positions_full = pending_req.mrope_positions_full
+        req.mrope_delta = pending_req.mrope_delta
         # Hybrid GDN per-request state slots (None for non-hybrid). On a fresh admit these are
         # freshly allocated; on a chunked continuation they are inherited from the prior chunk.
         req.linear_slot_idx = linear_slot_idx
@@ -434,7 +477,9 @@ class PrefillAdder:
         handle = self._match(pending_req).cuda_handle
         cached_len = handle.cached_len
         extend_len = pending_req.input_len - cached_len
-        if not self._kv_gate_ok(extend_len + pending_req.output_len):
+        if not self._kv_gate_ok(
+            self._kv_reservation_size(pending_req.input_len + pending_req.output_len, cached_len)
+        ):
             return False
         # 1 live + 2 ping-pong, as _try_allocate_one reserves. The scan does not escalate
         # into eviction or the session-lease spill the way reserve_mamba_slots does, so it
@@ -500,6 +545,8 @@ class PrefillManager:
     cache_manager: CacheManager
     table_manager: TableManager
     decode_manager: DecodeManager
+    encoder_cache: EncoderCache | None = None
+    keep_images_whole: bool = False
     pending_list: List[PendingReq] = field(default_factory=list)
     # Growable multi-agent mode shares one aggregate token budget across waiting agents. A
     # max_batch_seqs cap can serialize inefficient grouped GGUF prefills while rotation keeps
@@ -682,12 +729,14 @@ class PrefillManager:
                 req.uid,
                 req.input_ids,
                 req.sampling_params,
-                mm_embeds=req.mm_embeds,
                 session_id=req.session_id,
                 session_ttl_seconds=req.session_ttl_seconds,
                 hidden_states=req.hidden_states,
                 no_prefix_cache=req.no_prefix_cache,
                 pin_key=req.pin_key,
+                mm_items=req.mm_items,
+                mrope_positions_full=req.mrope_positions,
+                mrope_delta=req.mrope_delta,
             )
         )
 
@@ -734,6 +783,8 @@ class PrefillManager:
             table_manager=self.table_manager,
             match_memo=self.match_memo,
             counters=self.counters,
+            encoder_cache=self.encoder_cache,
+            keep_images_whole=self.keep_images_whole,
         )
         chunked_inflight = sum(
             1 for req in self.pending_list if req.chunked_req is not None
@@ -808,6 +859,12 @@ class PrefillManager:
                         spec is not None and bool(spec.pooling) and spec.directory is None,
                         getattr(req, "pin_key", None) or getattr(req, "session_id", None),
                     ))
+                    if pending_req.mm_items and self.encoder_cache is not None:
+                        # claim the rows every chunk of this request will gather; the entry outlives the chunks
+                        for item in pending_req.mm_items:
+                            self.encoder_cache.register(
+                                item.hash, req.uid, mm_rows_after(item, req.cache_handle.cached_len)
+                            )
                 log_new_tokens += req.extend_len
                 if not is_continuation:
                     log_cached_tokens += req.cache_handle.cached_len

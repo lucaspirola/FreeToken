@@ -215,7 +215,7 @@ def parse_config(hf_config: Any) -> ModelConfig:
         key_head_dim=int(hf_config.mamba_head_dim),
         value_head_dim=int(hf_config.ssm_state_size),
         conv_kernel_dim=int(hf_config.conv_kernel),
-        output_gate=True,
+        output_gate="silu",
         state_layout="mamba2",
         # Radix state snapshots land on multiples of the SSD chunk (128), not the
         # FLA/GDN 64: the chunk scan only materialises a state at its own boundaries.

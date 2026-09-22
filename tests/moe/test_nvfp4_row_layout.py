@@ -61,12 +61,16 @@ def _synthetic_spec(gated: bool, naming: str) -> Nvfp4ExpertSourceSpec:
         rf"^backbone\.layers\.(?P<layer>\d+)\.mixer\.experts\.(?P<expert>\d+)\."
         rf"(?P<proj>{proj_alt})\.(?P<kind>{kind_alt})$"
     )
+    # kind_map (upstream, landed by the S0 merge) canonicalises this checkpoint's
+    # on-disk kind names onto the three modelopt ones the loader addresses banks by.
+    # It is the identity for modelopt naming, so it is passed unconditionally.
     return Nvfp4ExpertSourceSpec(
         key_pattern=key_pattern,
         proj_to_role={_PROJ_OF_ROLE[r]: r for r in roles},
         layer_to_bank=lambda layer, config: layer,
         desc=f"synthetic {naming} ({'gated' if gated else 'ungated'})",
         gated=gated,
+        kind_map={kind_suffix[k]: k for k in _CANONICAL_KINDS},
     )
 
 
@@ -142,33 +146,23 @@ def test_row_layout_equivalence_modelopt(tmp_path, gated):
     _assert_rows_byte_equal(str(tmp_path), gated=gated, naming="modelopt")
 
 
-def test_row_layout_equivalence_compressed_tensors_gated_is_refused_today(tmp_path):
+def test_row_layout_equivalence_compressed_tensors_gated(tmp_path):
     """gated compressed-tensors (``weight_packed`` / ``weight_global_scale``
-    naming): the genuine finding.
+    naming) now LOADS, and lands byte-identical rows.
 
-    ``load_nvfp4_expert_source_banks``'s kind handling is hardcoded to
-    modelopt's three names (``kind == "weight_scale_2"`` / ``kind in
-    {"weight", "weight_scale"}`` / else-raise) -- it does not yet accept a
-    ``kind_map`` to canonicalise a different on-disk naming, because
-    ``Nvfp4ExpertSourceSpec`` has no ``kind_map`` field until the S0 merge
-    lands that upstream spec field. So this checkpoint, which
-    ``nvfp4_expert_row_layout`` and ``write_generic_nvfp4_checkpoint`` both
-    already handle correctly at the byte-layout level (the layout does not
-    depend on on-disk naming at all -- see
-    ``test_layout_is_naming_agnostic`` below), is refused by the loader today
-    with exactly the "unknown tensor kind" error the refactor plan (section
-    3.4) names. This is not a bug in ``nvfp4_expert_row_layout``: it is the
-    reason the plan defers ``kind_map`` wiring to after the merge.
+    Until the S0 merge this asserted a refusal: the loader's kind handling was
+    hardcoded to modelopt's three names because ``Nvfp4ExpertSourceSpec`` had no
+    ``kind_map`` field. The merge brings upstream's ``kind_map`` /
+    ``global_reciprocal`` spec fields and their ``_canon_kind`` / ``_ingest_global``
+    helpers, and S0 routes ``kind`` through ``_canon_kind`` at every comparison and
+    refusal site in both bank loaders. ``nvfp4_expert_row_layout`` never depended on
+    on-disk naming (``test_layout_is_naming_agnostic``), so canonicalisation in front
+    of the loader is all that was missing.
     """
     write_generic_nvfp4_checkpoint(
         str(tmp_path), LAYERS, EXPERTS, H, I, gated=True, naming="compressed_tensors",
     )
-    spec = _synthetic_spec(gated=True, naming="compressed_tensors")
-    config = _synthetic_config()
-    with pytest.raises(ValueError, match="unknown NVFP4 expert tensor kind"):
-        load_nvfp4_expert_source_banks(
-            str(tmp_path), config, spec, drop_page_cache=lambda _p: None, primary=False,
-        )
+    _assert_rows_byte_equal(str(tmp_path), gated=True, naming="compressed_tensors")
 
 
 def test_layout_is_naming_agnostic():
