@@ -88,7 +88,7 @@ def _scheduler(*, pending, cm=None, shrink_error=None):
         _sessions={},
         _last_data=None,
         stream=SimpleNamespace(synchronize=lambda: None),
-        _elastic_live_requests=lambda: [
+        _live_requests=lambda: [
             p.chunked_req for p in pending if p.chunked_req is not None
         ],
         _evict_growable_prefix_pages=lambda pages: (
@@ -97,9 +97,7 @@ def _scheduler(*, pending, cm=None, shrink_error=None):
         _release_soft_session_handle=lambda *a, **k: True,
     )
     obj._growable_handoff_demand_pages = Scheduler._growable_handoff_demand_pages.__get__(obj)
-    obj._elastic_retained_session_handles = (
-        Scheduler._elastic_retained_session_handles.__get__(obj)
-    )
+    obj._retained_session_handles = Scheduler._retained_session_handles.__get__(obj)
     obj.engine.stream = SimpleNamespace(synchronize=lambda: None)
     return obj, calls
 

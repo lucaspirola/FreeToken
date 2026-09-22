@@ -99,7 +99,6 @@ def _engine(pool: FakePool, moe: FakeArenaMoe, *, free_bytes_fn=lambda: (0, 0)) 
         moe_cache_size=moe.cache_size,
         tp_info=SimpleNamespace(size=1),
     )
-    engine._pending_graph_bs = None
     engine.graph_runner = SimpleNamespace(
         graph_bs_list=[1],
         destroy_cuda_graphs=lambda: pytest.fail(
@@ -149,7 +148,6 @@ def test_grow_funds_kv_via_set_usable_slots_never_rebuild():
         capacity, capacity, step, ROW_BYTES
     ) - arena_bytes_for_usable(moe.usable_calls[0], capacity, step, ROW_BYTES)
     assert freed >= 264 * MiB
-    assert engine._pending_graph_bs is None
     assert engine.config.moe_cache_size == 768
 
 
@@ -168,7 +166,6 @@ def test_grow_rollback_regrows_experts_on_failed_commit():
     assert moe.cache_size == 1024
     assert pool.committed_pages == 8
     assert engine.config.moe_cache_size == 1024
-    assert engine._pending_graph_bs is None
     assert getattr(engine, "_growable_transition_failed", False) is False
 
 
@@ -191,7 +188,6 @@ def test_shrink_regrows_experts_via_set_usable_slots_never_rebuild():
         832, capacity, step, ROW_BYTES
     ) - arena_bytes_for_usable(768, capacity, step, ROW_BYTES)
     assert grown <= 128 * MiB
-    assert engine._pending_graph_bs is None
     assert engine.config.moe_cache_size == 832
 
 

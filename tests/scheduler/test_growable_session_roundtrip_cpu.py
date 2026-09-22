@@ -1,4 +1,8 @@
-"""CPU integration bridge for elastic KV handoff state preservation.
+"""CPU integration bridge for growable-KV handoff state preservation: compaction, suffix
+shrink, session spill (RAM/disk) and restore of one hybrid session.
+
+Named ``test_elastic_session_roundtrip_cpu.py`` until refactor step S11; it never used
+``--elastic-initial-requests`` and covers mechanisms S11 keeps.
 
 This exercises real cache/tree/state/spill implementations. Physical commit changes are
 allocator-accounting stand-ins only; CUDA VMM mapping is intentionally not claimed here.

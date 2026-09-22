@@ -297,7 +297,7 @@ def test_one_long_continuation_does_not_reserve_the_pool_away_from_its_peers():
     free pages forwarded 12 tokens across two lanes instead of 24 across three.
     """
     cm, tm, _dm, pm = _build_managers(num_pages=84)
-    pm.interleave_chunks = True  # the elastic/multi-agent serving mode the soak runs
+    pm.interleave_chunks = True  # the multi-agent serving mode the soak runs
 
     prompts = [_pending(uid=i, first_token=i * 1000, length=3 * CHUNK) for i in range(3)]
     pm.pending_list = list(prompts)

@@ -4,7 +4,7 @@
 # Change the profile HERE, not in the unit, and never hand-type flags on another host:
 # this file IS the reference configuration (docs/nemotron.md "Default profile").
 #
-# Single-lane elastic profile: ONE session resident on the GPU at a time (max experts),
+# Single-lane profile: ONE session resident on the GPU at a time (max experts),
 # every other session checkpointed to RAM/disk and swapped back in on its turn.
 #   --linear-state-slots 13 = the 4-slot working set of that one lane + padding + 8 GDN
 #   snapshot slots (~80 MB each) so cold-session restores and prefix snapshots have

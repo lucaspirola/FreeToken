@@ -30,10 +30,6 @@ class EngineConfig:
     tp_info: DistributedInfo
     dtype: torch.dtype
     max_running_req: int = 4
-    # Optional smaller startup working set for elastic GDN serving. Admission still
-    # accepts max_running_req requests, but recurrent-state/graph resources start at
-    # this capacity and expand only when demand crosses it. Zero/None disables it.
-    elastic_initial_requests: int | None = None
     # In growable multi-agent mode, tune the prefill/decode time slices from measured
     # forward durations. The controller is active only while both phases are runnable.
     adaptive_scheduler: bool = True

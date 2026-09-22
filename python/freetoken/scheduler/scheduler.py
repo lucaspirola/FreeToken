@@ -58,7 +58,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_ELASTIC_INTERMEDIATE_SHRINK_GRACE_SECONDS = 2.0
 # How often the cumulative scheduler counters may be pushed to the frontend. A
 # diagnostic that /v1/stats polls at human cadence; anything faster spends messages on
 # a document nobody reads between polls.
@@ -114,11 +113,6 @@ def _auto_small_prompt_group_tokens(
     # 2,048 tokens for both Q4_K_M/INT4 and Q6_K/Q8_0.  Keep the imported
     # Blackwell crossover unchanged rather than extrapolating across GPUs.
     return 1536 if compute_capability == (8, 9) else 1280
-
-
-def _elastic_target_capacity(initial: int, maximum: int, demand: int) -> int:
-    """Smallest enabled request tier that can admit the current live demand."""
-    return max(initial, min(maximum, demand))
 
 
 # For overlap scheduling, we also need to cache some other data to avoid IMA
@@ -206,11 +200,8 @@ class Scheduler(SchedulerIOMixin):
             pin_prefix_min_tokens=getattr(config, "pin_prefix_min_tokens", 0),
             pin_prefix_max_tokens=getattr(config, "pin_prefix_max_tokens", 0),
             pin_prefix_max_slots=getattr(config, "pin_prefix_max_slots", -1),
-            # The concurrency the GDN pool was sized for (linear_state_pool.py): the
-            # elastic initial tier when elastic, else max_running_req.
-            pin_working_set_slots=PIN_WORKING_SET_SLOTS_PER_REQUEST * (
-                getattr(config, "elastic_initial_requests", None) or config.max_running_req
-            ),
+            # The concurrency the GDN pool was sized for (linear_state_pool.py).
+            pin_working_set_slots=PIN_WORKING_SET_SLOTS_PER_REQUEST * config.max_running_req,
         )
         # Second-currency demand signal. ``ensure_mamba_slots`` can only reach UNLOCKED radix
         # snapshots, and an idle automatic session lease holds its node locked for as long as
@@ -280,16 +271,11 @@ class Scheduler(SchedulerIOMixin):
         # sync and the return of engine.shrink_runtime_kv. A node compaction legitimately
         # skipped as locked stays safe only if nothing unlocks it before the physical
         # decommit it computed a ceiling against actually lands; a reentrant release in
-        # that window would hand such a node to evict_mamba/evict_full with a decommit or
-        # graph recapture still in flight. See _release_soft_session_handle.
+        # that window would hand such a node to evict_mamba/evict_full with a decommit
+        # still in flight. See _release_soft_session_handle.
         self._growable_shrink_in_flight = False
         self._growable_handoff_events = GrowableHandoffEvents()
         self._growable_handoff_pending: tuple[int, int] | None = None
-        self._elastic_capacity = (
-            config.elastic_initial_requests or config.max_running_req
-        )
-        self._elastic_resize_pending = False
-        self._elastic_shrink_candidate: tuple[int, float] | None = None
         # Chunked prefill and decode use different kernels, so a truly mixed batch is not yet
         # available. Time-slice a short decode burst between helper-prefill chunks: this bounds
         # an existing agent's stream latency while keeping the large prefill kernels efficient.
@@ -718,7 +704,6 @@ class Scheduler(SchedulerIOMixin):
         if getattr(self, "_growable_shrink_pending", False) and last_data is not None:
             last_data = self._last_data = self._drain_inflight(last_data)
         self._maybe_shrink_growable_kv()
-        self._maybe_resize_elastic_capacity()
 
         # Execute a queued cache rebuild once the scheduler is fully idle (the safe point):
         # no last batch to process, no pending prefill, no running decode. finished_reqs is
@@ -815,7 +800,6 @@ class Scheduler(SchedulerIOMixin):
             return
 
         self._maybe_shrink_growable_kv()
-        self._maybe_resize_elastic_capacity()
 
         # Non-overlap mode has no last_data to drain; execute a queued rebuild as soon as
         # the scheduler is idle (no pending prefill / running decode). Without this, a
@@ -1612,8 +1596,6 @@ class Scheduler(SchedulerIOMixin):
         req.table_idx = -1
         if getattr(getattr(self, "config", None), "kv_grow_step_tokens", 0):
             self._growable_shrink_pending = True
-        if getattr(getattr(self, "config", None), "elastic_initial_requests", None):
-            self._elastic_resize_pending = True
 
     def _close_session(
         self, session_id: str, *, discard_state: bool = True
@@ -1687,9 +1669,9 @@ class Scheduler(SchedulerIOMixin):
         if getattr(self, "_growable_shrink_in_flight", False):
             # A growable shrink has already computed its decommit ceiling against this
             # node's current lock state (compact_active_pages ran with it protected/
-            # represented); unlocking it before that ceiling's physical decommit and any
-            # graph recapture finish could hand evict_mamba/evict_full a node whose pages
-            # or GDN slot the shrink is mid-tearing-down or about to reuse. Defer instead:
+            # represented); unlocking it before that ceiling's physical decommit finishes
+            # could hand evict_mamba/evict_full a node whose pages or GDN slot the shrink
+            # is mid-tearing-down or about to reuse. Defer instead:
             # the caller (reserve_mamba_slots -> the same admission gates as an exhausted
             # pool) treats a refusal as ordinary backpressure, not a failure.
             logger.info_rank0(
@@ -2350,8 +2332,8 @@ class Scheduler(SchedulerIOMixin):
                     return
 
         # From here on, compact_active_pages computes a decommit ceiling against the
-        # CURRENT lock state and engine.shrink_runtime_kv physically tears down/recaptures
-        # against it. A node compaction protects/represents because it is locked stays safe
+        # CURRENT lock state and engine.shrink_runtime_kv physically decommits against
+        # it. A node compaction protects/represents because it is locked stays safe
         # only if nothing unlocks it before that ceiling's decommit actually lands, so no
         # reentrant, non-checkpointed session release (mamba_reclaim_hook, admission
         # pressure) may run until this method returns; see _release_soft_session_handle.
@@ -2379,10 +2361,10 @@ class Scheduler(SchedulerIOMixin):
                 best_target, math.ceil(occupied_pages / step) * step
             )
             compacted_target = cm.compact_active_pages(
-                self._elastic_live_requests(),
+                self._live_requests(),
                 compacted_target,
                 self.engine.kv_cache.copy_pages,
-                self._elastic_retained_session_handles(),
+                self._retained_session_handles(),
             )
             target = max(initial, math.ceil(compacted_target / step) * step)
             if target >= cm.committed_pages:
@@ -2517,8 +2499,9 @@ class Scheduler(SchedulerIOMixin):
             cm._free(indices)
         return len(indices) // cm.page_size
 
-    def _elastic_live_requests(self) -> list[Req]:
-        """Every request object that currently owns GDN slots (deduplicated)."""
+    def _live_requests(self) -> list[Req]:
+        """Every live request object -- running decode plus chunked-prefill continuations,
+        deduplicated. ``compact_active_pages`` remaps their KV pages."""
         reqs = list(self.decode_manager.running_reqs)
         reqs.extend(
             pending.chunked_req
@@ -2527,108 +2510,15 @@ class Scheduler(SchedulerIOMixin):
         )
         return list({id(req): req for req in reqs}.values())
 
-    def _elastic_retained_session_handles(self) -> list[object]:
-        """Every resident lease alias, including idle and explicit/protected sessions."""
+    def _retained_session_handles(self) -> list[object]:
+        """Every resident lease alias, including idle and explicit/protected sessions
+        (``compact_active_pages`` remaps their cached ``kv_indices`` aliases)."""
         handles = (
             lease.handle
             for lease in getattr(self, "_sessions", {}).values()
             if lease.handle is not None
         )
         return list({id(handle): handle for handle in handles}.values())
-
-    def _elastic_demand(self) -> int:
-        # Every pending item is one independent agent. A chunked continuation is not
-        # also in decode, so decode + pending is the exact admission demand here.
-        return len(self.decode_manager.running_reqs) + len(
-            self.prefill_manager.pending_list
-        )
-
-    def _remap_req_mamba_slots(self, req: Req, remap: dict[int, int]) -> None:
-        if req.linear_slot_idx is not None:
-            req.linear_slot_idx = remap[req.linear_slot_idx]
-        if req.mamba_ping_pong is not None:
-            req.mamba_ping_pong = tuple(remap[slot] for slot in req.mamba_ping_pong)
-        if req.mamba_restore_src is not None:
-            req.mamba_restore_src = remap[req.mamba_restore_src]
-        if req.spec_scratch_slot is not None:
-            req.spec_scratch_slot = remap[req.spec_scratch_slot]
-
-    @torch.inference_mode()
-    def _maybe_resize_elastic_capacity(self) -> None:
-        initial = getattr(
-            getattr(self, "config", None), "elastic_initial_requests", None
-        )
-        if initial is None:
-            return
-        demand = self._elastic_demand()
-        target = _elastic_target_capacity(
-            initial, self.config.max_running_req, demand
-        )
-        if target == self._elastic_capacity:
-            self._elastic_resize_pending = False
-            self._elastic_shrink_candidate = None
-            return
-
-        # Finishing requests are commonly staggered by a second or two. Avoid an
-        # expensive graph/state recapture for every transient intermediate tier;
-        # returning to the compact initial tier remains immediate.
-        if initial < target < self._elastic_capacity:
-            now = time.monotonic()
-            candidate = self._elastic_shrink_candidate
-            if candidate is None or candidate[0] != target:
-                self._elastic_shrink_candidate = (
-                    target,
-                    now + _ELASTIC_INTERMEDIATE_SHRINK_GRACE_SECONDS,
-                )
-                self._elastic_resize_pending = True
-                return
-            if now < candidate[1]:
-                self._elastic_resize_pending = True
-                return
-        else:
-            self._elastic_shrink_candidate = None
-
-        pool = self.engine.linear_state_pool
-        assert pool is not None
-        from freetoken.kvcache.linear_state_pool import linear_pool_slots_for_capacity
-
-        target_slots = linear_pool_slots_for_capacity(self.config, target)
-        # Pins are budgeted against the working set of the tier the pool is sized for;
-        # re-derive it for the target tier and let over-budget pins go before the shrink
-        # counts what it must evict (a pinned snapshot is locked and would defer it).
-        self.cache_manager.pin_working_set_slots = PIN_WORKING_SET_SLOTS_PER_REQUEST * target
-        self.cache_manager.enforce_pin_budget(pool_slots=target_slots)
-        if target < self._elastic_capacity:
-            # Unlocked snapshots are cache, not live agent state. Evict just enough
-            # to fit the compact pool; protected session snapshots postpone shrink.
-            overflow = max(0, len(pool.occupied_slots) - (target_slots - 1))
-            if overflow:
-                self.cache_manager.ensure_mamba_slots(pool.num_free_slots + overflow)
-            if len(pool.occupied_slots) > target_slots - 1:
-                self._elastic_resize_pending = True
-                logger.info_rank0(
-                    "Elastic shrink deferred: %d protected/live GDN slots exceed the "
-                    "%d-slot compact capacity",
-                    len(pool.occupied_slots),
-                    target_slots - 1,
-                )
-                return
-
-        occupied = sorted(pool.occupied_slots)
-        remap = {slot: i + 1 for i, slot in enumerate(occupied)}
-        self.engine.resize_elastic_capacity(target, remap)
-        self.cache_manager.remap_mamba_slots(remap)
-        for req in self._elastic_live_requests():
-            self._remap_req_mamba_slots(req, remap)
-        self._elastic_capacity = target
-        self._elastic_resize_pending = False
-        self._elastic_shrink_candidate = None
-        # The exact page-conservation check is idle-only: live requests own pages
-        # that are intentionally in neither the free list nor the radix tree.
-        # Elastic growth normally happens with active requests, so limit the
-        # full check to the truly idle shrink boundary.
-        if not self.prefill_manager.runnable and not self.decode_manager.runnable:
-            self.cache_manager.check_integrity()
 
     def _reply_rebuild(
         self, request_id: str, status: str, error: str | None = None
@@ -2835,20 +2725,6 @@ class Scheduler(SchedulerIOMixin):
                     f"KV grew {old_pages} -> {new_pages} tokens; "
                     f"MoE cache now {self.engine.moe_offload_cache.cache_size} slots"
                 )
-            # A growth event reallocates the expert cache and destroys every decode graph.
-            # Recapture only after the final geometry for this batch is known; doing this
-            # before aggregate growth would pad/replay through stale expert pointers.
-            if batch.is_decode:
-                self.engine.ensure_decode_graphs()
-        if (
-            batch.is_prefill
-            and self.config.kv_grow_step_tokens
-            and not any(isinstance(req, ChunkedReq) for req in batch.reqs)
-            and not self.prefill_manager.runnable
-        ):
-            # No queued prefill can immediately grow again. Rebuild once here so the first
-            # streamed token-to-token interval contains inference, not graph recapture.
-            self.engine.ensure_decode_graphs()
         self.engine.graph_runner.pad_batch(batch)
         self._forward_iter += 1
         if batch.is_decode:

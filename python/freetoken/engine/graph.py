@@ -78,12 +78,15 @@ class GraphCaptureBuffer:
 
 
 # Every batch size up to this gets its own decode graph when the dense rule applies; above
-# it the ladder stays sparse. Mirrors ``engine._DENSE_GRAPH_BS`` (the elastic path).
+# it the ladder stays sparse. Measured 2026-09-05 on Nemotron 3.5 Lightning at 12 lanes
+# with a 16-request pool: eager 82.2 ms/step, padding up to a bs-16 graph 88.0 ms (-6.7 %),
+# an exact graph ~2 ms less than eager; capture costs ~5 MiB and ~50 ms per graph
+# (benchmarks/results/nemotron35_lightning_5080_decode16_2026-09-05.md).
 _DENSE_GRAPH_BS = 16
 
 
 def _dense_small_graph_bs(offload_moe: bool) -> bool:
-    """Whether the small end of the non-elastic graph ladder is dense (1..16).
+    """Whether the small end of the decode graph ladder is dense (1..16).
 
     A padded row is NOT free on an **offload-MoE** model: it carries a hidden state, so it
     routes its own top-k experts and adds rows to every expert GEMV. On a dense model a

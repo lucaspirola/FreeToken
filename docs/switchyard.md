@@ -17,11 +17,15 @@ Automated checks live in `scripts/switchyard_e2e.py` (wrapper:
 
 ## 1. Launch FreeToken
 
-The serving profile (P2 — 16 concurrent requests, elastic KV, prefix cache, FP8 KV):
+A 16-lane serving profile (P2 — 16 concurrent requests, growable KV, prefix cache, FP8 KV).
+The production default is the single-lane profile in `scripts/serve-default.sh`
+([`docs/nemotron.md`](nemotron.md) "Launch profiles"); this line is the multi-lane alternative.
+It carried `--elastic-initial-requests 4` until refactor step S11 retired that flag
+(2026-09-23); without it the GDN state pool is sized for all 16 lanes up front.
 
 ```bash
 ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
-  --max-running-requests 16 --elastic-initial-requests 4 --kv-grow-step-tokens 65536 \
+  --max-running-requests 16 --kv-grow-step-tokens 65536 \
   --num-tokens 262144 --max-seq-len-override 131072 --kv-cache-dtype q8_0 \
   --attention-backend triton --moe-backend offload --moe-pageable-gpu --moe-cache-auto \
   --memory-ratio 0.85 --max-prefill-length 8192 --host-ram-reserve-gb 6 \
@@ -46,7 +50,7 @@ The serving-compliance half of that line:
 | `--kv-cache-dtype q8_0` | FP8 KV (FreeToken block scales; the checkpoint's `k_scale`/`v_scale` are ignored). Requires `--attention-backend triton`. |
 | `--pin-prefix-min-tokens N` (default 1024; 0 disables) | Prefix auto-pin (hybrid radix cache): a cached prefix at least `N` tokens long that requests from *two different sessions* match through is locked against eviction. A session's own next turn never pins. See §3a. |
 | `--pin-prefix-max-tokens N` (default 65536; 0 = the cap) | Pinned-KV budget, clamped at startup to 25% of the KV pool (`num_pages x page_size`; the clamp is logged). Over it the least-recently-matched pin is released first (`scheduler.prefix.pin_evictions`); a pin that does not fit even an empty ledger is refused (`pin_budget_refusals`). |
-| `--pin-prefix-max-slots N` (default -1 = auto) | Pinned GDN state-slot budget: every pinned snapshot holds one `LinearStatePool` slot. Auto = the pool's snapshot-cache slots minus 2, i.e. `pool_slots - 4 x concurrency - 3` (concurrency = `--elastic-initial-requests` when elastic, else `--max-running-requests`; re-derived on an elastic resize), so the 4-per-request working set is never touched. `0` disables snapshot pins (KV-only pins still possible). Same LRU release policy as the token budget. |
+| `--pin-prefix-max-slots N` (default -1 = auto) | Pinned GDN state-slot budget: every pinned snapshot holds one `LinearStatePool` slot. Auto = the pool's snapshot-cache slots minus 2, i.e. `pool_slots - 4 x --max-running-requests - 3`, so the 4-per-request working set is never touched. `0` disables snapshot pins (KV-only pins still possible). Same LRU release policy as the token budget. |
 
 Optional knobs that change the contract: `--no-context-preflight` (see §5),
 `--json-retry N` (see §4), `--hidden-states-dir DIR`, `--pooled-sink-dir DIR` (see §6).
@@ -227,18 +231,18 @@ prompt through a pinned path adds only the tokens and snapshots below it.
 
 **Budgets and release.** Two budgets, each charged with what a new pin adds on top of the
 nodes already locked: `--pin-prefix-max-slots` (state slots = mamba refs taken; default
-auto = `pool_slots - 4 x concurrency - 1 - 2`, i.e. the snapshot-cache part minus two,
-never the working set; re-derived when the elastic tier changes) and
+auto = `pool_slots - 4 x --max-running-requests - 1 - 2`, i.e. the snapshot-cache part minus
+two, never the working set) and
 `--pin-prefix-max-tokens` (KV). When a new pin would exceed either, the **least-recently
 matched** pin is released first (`pin_evictions`); a pin that does not fit even an empty
 ledger is refused whole (`pin_budget_refusals`) without releasing anything. Releasing a pin
 drops every lock no remaining pin needs (a released ancestor's snapshot stays locked while
 a deeper pin still resumes from it). Pins are also released by **`DELETE /v1/cache/pins`**
 (returns the released `pinned_prefixes` / `pinned_tokens`), by a cache rebuild (the tree is
-discarded), by an elastic shrink whose target pool cannot carry them, or by a restart.
+discarded), or by a restart.
 Nothing else can take a pinned node: `evict_full` walks only unlocked leaves, `evict_mamba`
 only unlocked snapshots, `split_at` copies the ref count (and the recorded sessions) to the
-root-side half, and an elastic resize remaps slot ids in place. **Pins still never starve
+root-side half. **Pins still never starve
 admission on purpose**: a reserve or allocate that fails only because too much is protected
 fails as it does for a session lease — the server logs one warning naming the pins and
 their slot budget. If `pinned_slots` sits at the budget while `prefix_tokens` stays at zero,
@@ -256,7 +260,7 @@ counted once per prompt on its first chunk (where `PromptAdmittedMsg` is built):
 | `pooled_sumless_misses`, `pooled_sumless_miss_tokens` | what the pooled gate itself costs: pooled prompts whose match was **shortened or lost** because the deepest live snapshot on their path carried no pooled sums, and the tokens that forced back through prefill (the difference between the match with and without the sums requirement). A pooled prompt that had no reuse point at all is NOT counted here — it would have missed anyway. Always 0 outside a pooled request on the hybrid radix. Overlaps `misses`/`hits`, which count the whole prompt. |
 | `miss_tokens` | sum of the **full prompt length** over misses: the tokens the prefill forwards for them, last token included (`match_req` never matches the last token, so a repeated prompt is a hit with `cached_tokens = prompt_tokens - 1`). The forwarded remainder of a hit is `prompt_tokens_total - hit_tokens - miss_tokens`. |
 | `pinned_prefixes`, `pinned_tokens`, `pinned_slots` | gauges: distinct pinned nodes, the distinct tokens their root paths cover, and the GDN state slots their snapshots (and locked snapshot ancestors) hold. |
-| `pin_evictions` | pins released least-recently-matched-first to fit a newer pin under `--pin-prefix-max-slots` / `--pin-prefix-max-tokens`, or on an elastic shrink. |
+| `pin_evictions` | pins released least-recently-matched-first to fit a newer pin under `--pin-prefix-max-slots` / `--pin-prefix-max-tokens`. |
 | `pin_budget_refusals` | pins that would not fit either budget even with every other pin released. |
 
 ---

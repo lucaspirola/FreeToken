@@ -57,7 +57,6 @@ from freetoken.kvcache.cache_status import _supports_swa_ratio
 from freetoken.kvcache.linear_state_pool import (
     _linear_pool_min_slots,
     _linear_pool_num_slots,
-    linear_pool_slots_for_capacity,
     state_pool_bytes,
 )
 
@@ -755,7 +754,6 @@ class Engine:
             gguf_mma_enabled=config.model_config.gguf_expert_types is not None,
             mrope=config.model_config.model_is_mrope,
         )
-        self._pending_graph_bs: list[int] | None = None
         if config.attention_backend.split(",")[0] == "triton":
             # Prefill runs on the first comma part; warm its autotune cache.
             self._warmup_prefill()
@@ -1508,128 +1506,6 @@ class Engine:
         return self.growable_kv.shrink_runtime_kv(target_pages)
 
     @torch.inference_mode()
-    def ensure_decode_graphs(self) -> None:
-        """Recapture once after the final prefill chunk, not once per 64K KV boundary."""
-        if self._pending_graph_bs is None:
-            return
-        graph_bs = self._pending_graph_bs
-        gc.collect()
-        free_min = self._sync_get_memory()[0]
-        self.graph_runner = GraphRunner(
-            stream=self.stream,
-            device=self.device,
-            model=self.model,
-            attn_backend=self.attn_backend,
-            cuda_graph_bs=graph_bs,
-            cuda_graph_max_bs=self.config.cuda_graph_max_bs,
-            free_memory=free_min,
-            max_seq_len=_page_table_width(self.max_seq_len, self.config.page_size),
-            vocab_size=self.config.model_config.vocab_size,
-            dummy_req=self.dummy_req,
-            moe_offload_cache=self.moe_offload_cache,
-            gguf_mma_enabled=self.config.model_config.gguf_expert_types is not None,
-            mrope=self.config.model_config.model_is_mrope,
-        )
-        self._pending_graph_bs = None
-
-    @torch.inference_mode()
-    def resize_elastic_capacity(
-        self, target_capacity: int, remap: dict[int, int]
-    ) -> tuple[int, int, int, int]:
-        """Resize live GDN state/graphs while preserving active and retained state.
-
-        Growable KV already owns the MoE/KV budget and runs at a no-forward-in-flight
-        scheduler boundary.  Elastic capacity adds GDN state as a third claimant:
-        graphs and expert slots are released first on growth; on shrink, compacted
-        GDN storage is released before expert residency is restored.
-        """
-        self.growable_kv._refuse_if_growable_transition_failed()
-        initial = self.config.elastic_initial_requests
-        if initial is None or self.linear_state_pool is None:
-            raise RuntimeError("elastic capacity is not enabled for this engine")
-        if not initial <= target_capacity <= self.config.max_running_req:
-            raise ValueError(
-                f"elastic capacity {target_capacity} outside [{initial}, "
-                f"{self.config.max_running_req}]"
-            )
-        target_slots = linear_pool_slots_for_capacity(self.config, target_capacity)
-        old_slots = self.linear_state_pool.num_slots
-        if target_slots == old_slots:
-            moe_size = self.moe_offload_cache.cache_size
-            return old_slots, old_slots, moe_size, moe_size
-
-        committed = int(getattr(self.kv_cache, "committed_pages", self.num_pages))
-        target_moe, _ = self.growable_kv._plan_growable_kv(committed, state_slots=target_slots)
-        # The generic growth planner permanently reserves 256 MiB for the next
-        # VMM commit.  At the original GDN capacity and original KV step, however,
-        # the exact startup geometry is already proven to fit and there is no
-        # in-flight commit to fund.  Restore that ceiling verbatim so a temporary
-        # burst of agents cannot leave a permanent expert-residency/decode toll.
-        initial_pages = min(
-            self.num_pages,
-            self.config.kv_grow_step_tokens // self.config.page_size,
-        )
-        if target_capacity == initial and committed <= initial_pages:
-            target_moe = self._growable_moe_ceiling
-        moe = self.moe_offload_cache
-        assert moe is not None
-        old_moe = moe.cache_size
-        graph_bs = _elastic_graph_batch_sizes(target_capacity)
-
-        torch.cuda.synchronize(self.device)
-        self.attn_backend.reset_capture()
-        self.graph_runner.destroy_cuda_graphs()
-        self._pending_graph_bs = None
-        growing = target_slots > old_slots
-        if growing and target_moe != old_moe:
-            moe.prefill_overlap = (
-                self._growable_moe_prefill_overlap and target_moe >= 2 * moe.num_experts
-            )
-            moe.rebuild(target_moe)
-        self.linear_state_pool.resize_preserve(target_slots, remap)
-        if not growing and target_moe != old_moe:
-            moe.prefill_overlap = (
-                self._growable_moe_prefill_overlap and target_moe >= 2 * moe.num_experts
-            )
-            moe.rebuild(target_moe)
-        object.__setattr__(self.config, "moe_cache_size", target_moe)
-
-        gc.collect()
-        free_min = self._sync_get_memory()[0]
-        self.graph_runner = GraphRunner(
-            stream=self.stream,
-            device=self.device,
-            model=self.model,
-            attn_backend=self.attn_backend,
-            cuda_graph_bs=graph_bs,
-            cuda_graph_max_bs=target_capacity,
-            free_memory=free_min,
-            max_seq_len=_page_table_width(self.max_seq_len, self.config.page_size),
-            vocab_size=self.config.model_config.vocab_size,
-            dummy_req=self.dummy_req,
-            moe_offload_cache=moe,
-            gguf_mma_enabled=self.config.model_config.gguf_expert_types is not None,
-            mrope=self.config.model_config.model_is_mrope,
-        )
-        logger.info_rank0(
-            "Elastic capacity %d -> %d requests: GDN slots %d -> %d, MoE slots %d -> %d",
-            self._elastic_capacity_for_slots(old_slots),
-            target_capacity,
-            old_slots,
-            target_slots,
-            old_moe,
-            target_moe,
-        )
-        return old_slots, target_slots, old_moe, target_moe
-
-    def _elastic_capacity_for_slots(self, slots: int) -> int:
-        initial = self.config.elastic_initial_requests or self.config.max_running_req
-        for capacity in range(initial, self.config.max_running_req + 1):
-            if linear_pool_slots_for_capacity(self.config, capacity) == slots:
-                return capacity
-        return self.config.max_running_req
-
-    @torch.inference_mode()
     def retune_pageable_layers(self, target: frozenset[int]) -> None:
         """Apply an idle-only host-residency swap and recapture decode graphs."""
         moe = self.moe_offload_cache
@@ -2190,53 +2066,6 @@ _DENSE_MOE_SETTINGS = {
 }
 
 
-# Every batch size up to this gets its own decode graph; above it the ladder goes sparse.
-# A padded row is NOT free on an offload-MoE model: it carries a hidden state, so it routes
-# its own top-k experts and adds rows to the expert GEMV. Measured 2026-09-05 on Nemotron
-# 3.5 Lightning at 12 lanes with a 16-request pool: running eagerly at 12 costs 82.2 ms per
-# step, padding up to a bs-16 graph costs 88.0 ms (-6.7 %), and an exact graph costs ~2 ms
-# LESS than eager -- so a sparse set is worse than no graph at all for every size that has
-# to pad. Capture cost is ~5 MiB and ~50 ms per graph, i.e. ~80 MiB for a dense set to 16
-# (~14 expert-cache slots). See
-# benchmarks/results/nemotron35_lightning_5080_decode16_2026-09-05.md.
-_DENSE_GRAPH_BS = 16
-_SPARSE_GRAPH_BS = (24, 32, 48, 64, 96, 128, 192, 256)
-
-
-def _elastic_graph_batch_sizes(capacity: int) -> list[int]:
-    """Decode graphs retained by the on-request Hybrid-GDN capacity tier.
-
-    Dense to ``_DENSE_GRAPH_BS`` so no batch in the common range ever pads or falls off the
-    graph, then a 1.33-1.5x ladder so graph memory does not grow linearly with a large
-    ceiling. **The tier's own capacity is always in the set**: ``can_use_cuda_graph`` gates
-    on ``max(sizes)``, so any size the ladder does not reach decodes eagerly -- and a
-    full-width batch is precisely what a saturated server runs.
-
-    Before 2026-09-05 this returned ``(1, 2, 3, 4, 8)`` for every tier, so on the 16-lane
-    Switchyard profile (``--max-running-requests 16 --elastic-initial-requests 4``) every
-    decode batch of 9-16 lanes ran eager: 314 of 427 decode batches (73.5 %) of the
-    ``13af13d`` soak, 421 of which were taken at elastic capacity 16.
-    """
-    # FREETOKEN_ELASTIC_GRAPH_MAX_BS caps the set, which is how the before/after of this
-    # fix is two runs of the SAME binary: =8 reproduces the pre-2026-09-05 CEILING, so a
-    # 9-16-lane batch decodes eagerly as it used to. The capture list is frozen at
-    # capacity-change time and cannot otherwise be varied inside a live process.
-    cap = capacity
-    raw = os.environ.get("FREETOKEN_ELASTIC_GRAPH_MAX_BS", "")
-    if raw.strip():
-        try:
-            cap = min(capacity, max(1, int(raw)))
-        except ValueError:
-            logger.warning_rank0(
-                f"FREETOKEN_ELASTIC_GRAPH_MAX_BS={raw!r} is not an integer; ignoring it"
-            )
-    if cap < 1:
-        return []
-    sizes = list(range(1, min(cap, _DENSE_GRAPH_BS) + 1))
-    sizes += [bs for bs in _SPARSE_GRAPH_BS if bs <= cap]
-    if cap not in sizes:
-        sizes.append(cap)
-    return sizes
 def _adjust_ftw_quant_backend(model_path: str, quant_backend: QuantBackend) -> QuantBackend:
     """--quant-backend with an FTW checkpoint's packed expert kernel filled in where the flag leaves that table automatic.
 
@@ -2310,41 +2139,6 @@ def _adjust_config(config: EngineConfig):
     has_linear_attention = getattr(model_config, "has_linear_attention", False)
     is_moe = getattr(model_config, "is_moe", False)
     expert_quant = getattr(model_config, "expert_quant", "none")
-
-    elastic_initial = getattr(config, "elastic_initial_requests", None)
-    if elastic_initial is not None:
-        if elastic_initial >= config.max_running_req:
-            raise ValueError(
-                "--elastic-initial-requests must be smaller than --max-running-requests"
-            )
-        if not config.kv_grow_step_tokens:
-            raise ValueError(
-                "--elastic-initial-requests requires --kv-grow-step-tokens so MoE "
-                "residency can fund and reclaim the extra GDN state"
-            )
-        # Hybrid-GDN's public default is ``radix`` and is resolved to the
-        # concrete ``hybrid_radix`` implementation later in this function.
-        # Validate the resolved value here so elastic startup works without
-        # requiring an internal cache-type spelling on the CLI.
-        if (
-            not has_linear_attention
-            or _resolve_cache_type(True, config.cache_type) != "hybrid_radix"
-        ):
-            raise ValueError(
-                "--elastic-initial-requests currently requires a hybrid-GDN model "
-                "with radix caching"
-            )
-        if config.linear_state_slots_override is not None:
-            raise ValueError(
-                "--elastic-initial-requests cannot be combined with "
-                "--linear-state-slots"
-            )
-        if config.cuda_graph_bs is None:
-            override(
-                "cuda_graph_bs",
-                _elastic_graph_batch_sizes(elastic_initial),
-            )
-        override("cuda_graph_max_bs", elastic_initial)
 
     if not is_moe:
         # A dense model has no routed experts: the MoE knobs are inert, and the offload family

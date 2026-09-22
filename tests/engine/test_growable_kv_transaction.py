@@ -133,13 +133,14 @@ def _controller(pool, moe):
             tp_info=SimpleNamespace(size=1),
         ),
         _growable_moe_prefill_overlap=True,
-        _pending_graph_bs=None,
         graph_runner=SimpleNamespace(
-            graph_bs_list=[1], destroy_cuda_graphs=lambda: None
+            graph_bs_list=[1],
+            destroy_cuda_graphs=lambda: pytest.fail("growable KV must never destroy graphs"),
         ),
-        attn_backend=SimpleNamespace(reset_capture=lambda: None),
+        attn_backend=SimpleNamespace(
+            reset_capture=lambda: pytest.fail("growable KV must never reset capture")
+        ),
         _sync_get_memory=lambda: (10**9, 10**9),
-        ensure_decode_graphs=lambda: setattr(engine, "_pending_graph_bs", None),
     )
     ctl = GrowableKvController(engine)
     # The budget planner and byte model are tested separately (test_cache_budget.py).
@@ -166,7 +167,6 @@ def test_non_arena_cache_is_refused_without_touching_kv_or_experts(direction):
     assert engine.moe_offload_cache.cache_size == 4
     assert engine.moe_offload_cache.rebuilds == []
     assert engine.config.moe_cache_size == 4
-    assert engine._pending_graph_bs is None
     assert getattr(ctl, "_growable_transition_failed", False) is False
 
 
@@ -241,7 +241,6 @@ def test_arena_grow_funds_kv_via_set_usable_slots_never_rebuild():
     assert target < capacity
     freed_bytes = (capacity - target) * 2 * MIB
     assert freed_bytes >= 256 * MIB  # covers at least the fixed VMM reserve
-    assert engine._pending_graph_bs is None
 
 
 def test_arena_shrink_regrows_experts_via_set_usable_slots_never_rebuild():
@@ -268,7 +267,6 @@ def test_arena_shrink_regrows_experts_via_set_usable_slots_never_rebuild():
     grown_bytes = (target - 768) * 2 * MIB
     released_bytes = (144 - 16) * 2 * MIB
     assert grown_bytes <= released_bytes
-    assert engine._pending_graph_bs is None
 
 
 def test_arena_grow_rollback_regrows_experts_on_failed_commit():
@@ -296,5 +294,4 @@ def test_arena_grow_rollback_regrows_experts_on_failed_commit():
     assert moe.cache_size == capacity
     assert engine.kv_cache.committed_pages == 8
     assert engine.config.moe_cache_size == capacity
-    assert engine._pending_graph_bs is None
     assert getattr(ctl, "_growable_transition_failed", False) is False

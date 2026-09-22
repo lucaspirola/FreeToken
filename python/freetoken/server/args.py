@@ -371,17 +371,6 @@ def parse_args(
     )
 
     parser.add_argument(
-        "--elastic-initial-requests",
-        type=_positive_int,
-        default=ServerArgs.elastic_initial_requests,
-        help=(
-            "Start hybrid-GDN recurrent state and decode graphs at this smaller "
-            "request capacity, then grow on demand through --max-running-requests "
-            "and shrink after the extra agents release their state."
-        ),
-    )
-
-    parser.add_argument(
         "--auto-session-grace-seconds",
         type=float,
         default=ServerArgs.auto_session_grace_seconds,

@@ -21,8 +21,9 @@ legacy branches). The S7 rewrites were mechanical:
 * ``self.<engine attribute>`` -> ``self.engine.<attribute>`` for the engine state the
   transaction reads or writes (``config``, ``device``, ``num_pages``, ``_pool_cls``,
   ``_baseline_free``, ``_weights_bytes``, ``linear_state_pool``, ``_growable_moe_ceiling``,
-  ``_growable_moe_prefill_overlap``, ``_pending_graph_bs``, ``_sync_get_memory``,
-  ``sync_all_ranks``; ``ensure_decode_graphs`` until S10).
+  ``_growable_moe_prefill_overlap``, ``_sync_get_memory``, ``sync_all_ranks``; also
+  ``_pending_graph_bs`` and ``ensure_decode_graphs``, which S10 and S11 deleted with the
+  legacy path and the retired resident-capacity resize).
 
 ``kv_cache``, ``graph_runner`` and ``attn_backend`` keep their spelling: they are
 properties that read the engine's CURRENT object, because the engine may replace
@@ -102,7 +103,6 @@ class GrowableKvController:
         target_pages: int,
         *,
         extra_vmm_reserve_bytes: int = 0,
-        state_slots: int | None = None,
     ) -> tuple[int, int]:
         """Return the largest affordable MoE cache and exact mapped KV bytes."""
         pool = self.kv_cache
@@ -117,9 +117,7 @@ class GrowableKvController:
         )
         fixed_cache_size += state_pool_bytes(
             self.engine.config,
-            state_slots
-            if state_slots is not None
-            else (
+            (
                 self.engine.linear_state_pool.num_slots
                 if getattr(self.engine, "linear_state_pool", None) is not None
                 else None
@@ -244,7 +242,7 @@ class GrowableKvController:
 
         Funds the KV commit by calling ``OffloadMoeCache.set_usable_slots``: bank
         buffer addresses never move, so the captured decode CUDA graphs stay valid
-        and ``_pending_graph_bs`` is never touched -- asserted below.
+        and the engine's graph runner is never replaced -- asserted below.
 
         Caller's responsibility (documented, not enforced beyond the sync
         already done by the caller): this must run at a no-forward-in-flight
@@ -281,7 +279,7 @@ class GrowableKvController:
         need = moe.residency.min_gpu_slots()
         cov_floor = -(-need // step_slots) * step_slots
         floor = max(floor, cov_floor)
-        pending_before = self.engine._pending_graph_bs
+        runner_before = self.engine.graph_runner
         target_moe = old_moe
         # Assigned only by the shrink branch below; the ledger add at the
         # pre-commit log must stay valid on the no-shrink path too (that path
@@ -403,8 +401,8 @@ class GrowableKvController:
                 old_overlap=old_overlap,
             )
             raise
-        assert self.engine._pending_graph_bs is pending_before, (
-            "expert-arena resize must never set/clear _pending_graph_bs"
+        assert self.engine.graph_runner is runner_before, (
+            "expert-arena resize must never replace the decode graphs"
         )
         logger.info_rank0(
             "Committed growable KV through %d tokens (%s physical); MoE slots %d -> %d",
@@ -441,7 +439,7 @@ class GrowableKvController:
         capacity, step_slots = arena_layout
         bank_row_bytes = moe.bank_row_bytes
         assert bank_row_bytes is not None
-        pending_before = self.engine._pending_graph_bs
+        runner_before = self.engine.graph_runner
         target_moe = old_moe
         try:
             pool.decommit_pages(target_pages)
@@ -472,8 +470,8 @@ class GrowableKvController:
                 old_overlap=old_overlap,
             )
             raise
-        assert self.engine._pending_graph_bs is pending_before, (
-            "expert-arena resize must never set/clear _pending_graph_bs"
+        assert self.engine.graph_runner is runner_before, (
+            "expert-arena resize must never replace the decode graphs"
         )
         logger.info_rank0(
             "Released growable KV %d -> %d tokens (%s returned); MoE slots %d -> %d",
