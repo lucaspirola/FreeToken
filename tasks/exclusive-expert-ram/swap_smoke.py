@@ -77,7 +77,12 @@ def main():
     failures = []
     with tempfile.TemporaryDirectory() as root:
         write_ckpt(root)
-        gpu = 16
+        # Under prefill_overlap the double buffer owns [0, 2E) outright, so
+        # set_usable_slots' floor is 2*E = 16 (see offload_cache.py's
+        # _mirror_prefill_base / the "floor" comment in set_usable_slots) --
+        # start above it so the arena-shrink check below still has room to
+        # shrink into and land above the floor.
+        gpu = 20
         cfg = types.SimpleNamespace(moe_layer_ids=list(range(L)))
         pool = MirrorExpertPool(root, L, E, plan_capacity(L, E, gpu),
                                 hidden_size=H, intermediate_size=ISZ,
@@ -93,6 +98,7 @@ def main():
         cache = OffloadMoeCache(
             num_layers=L, num_experts=E, cache_size=gpu, slot_capacity=gpu,
             arena_step_slots=4, device=dev, quant_format="nvfp4", cache_policy="lfu",
+            prefill_overlap=True,
         )
         cache.direct_device_banks = True
         cache.attach_mirror_pool(pool)
@@ -110,18 +116,39 @@ def main():
                     return False
             return True
 
-        # Prefill: every layer materialized, every expert byte-exact.
+        def check_view(flat, views, e, where):
+            for name, view in zip(cache.bank_schema, views):
+                got = view[e].view(torch.uint8).cpu()
+                want = golden[flat][name].view(torch.uint8).cpu()
+                if not torch.equal(got, want):
+                    failures.append(f"{where}: expert {flat} bank {name} mismatch")
+                    return False
+            return True
+
+        # Prefill: every layer assembled through the real overlap choreography
+        # (begin_prefill / prefetch_prefill_layer / wait_prefill_layer /
+        # release_prefill_layer -- see tests/moe/test_mirror_prefill.py's
+        # _sweep), every expert byte-exact. Under the bounded mirror
+        # materialize_layer is not a legal prefill path (it schedules a copy
+        # for every expert of the layer including already-resident ones,
+        # which would need the whole layer staged into the mirror at once);
+        # the buffer views wait_prefill_layer hands back are the only place
+        # prefill's bytes live, so the check reads those, not a cache slot.
+        cache.begin_prefill()
         for lid in range(L):
-            cache.materialize_layer(lid)
-            cache.copy_missing()
+            cache.prefetch_prefill_layer(lid)
+            cache.prefetch_prefill_layer(lid + 1)
+            views = cache.wait_prefill_layer(lid)
             torch.cuda.synchronize()
             for e in range(E):
-                check(lid * E + e, int(cache.slot_for_id[lid, e]), f"materialize({lid})")
+                check_view(lid * E + e, views, e, f"prefill({lid})")
+            cache.release_prefill_layer(lid)
             # No coverage assertion here: prefill deliberately drops displaced
             # experts (preserving them would need the whole model mirrored).
             # Coverage is re-established at the prefill -> decode boundary and
             # asserted per decode step below.
-        print(f"prefill: {L} layers materialized, "
+        torch.cuda.synchronize()
+        print(f"prefill: {L} layers assembled via overlap choreography, "
               f"faults={int(cache._mirror['stats'][3])}")
 
         # Decode: distinct experts per step so slot<->expert pairing is unambiguous.
@@ -143,7 +170,7 @@ def main():
         print(f"decode: {checked} expert rows verified over 40 routed steps")
 
         # Arena shrink: slots handed to the KV cache must not strand experts.
-        cache.set_usable_slots(12)
+        cache.set_usable_slots(16)
         if holes(cache):
             failures.append("coverage holes after arena shrink")
 

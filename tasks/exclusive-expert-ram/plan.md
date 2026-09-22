@@ -111,19 +111,25 @@ at all.
 
 ## Slot regions under the mirror
 
-    [0, 2E)            prefill double buffer -- prefill's alone
-    [2E, cache_size)   decode LRU residents
+    [0, 2E)            prefill double buffer
+    [2E, cache_size)   rest of the arena
 
-The baseline lets decode use the buffer slots between prefills, which is safe
-only because it holds the whole model in host RAM. Here, evicting an occupant
-to make room for a prefill layer would drop an expert's only copy.
+This used to read "prefill's alone": a victim floor fenced `[0, 2E)` out of
+decode admission entirely, because evicting an occupant to make room for a
+prefill layer would drop an expert's only copy. That floor was removed at
+commit `1ed6372` — it cost 256 of 2173 arena slots on Nemotron for no coverage
+benefit once the writeback exists (below). Decode now admits into the buffer
+region exactly like any other slot; warm start seats residents from slot 0,
+holding nothing back for prefill (`test_warm_start_seats_the_whole_arena`).
 
-Keeping decode out is **not** a matter of marking those slots unattractive.
-Under LFU the victim search ranks by owner frequency first and only breaks ties
-with usage, and an empty slot loads `other=-1` — the minimum possible — so a
-permanently empty region wins every admission. The floor is therefore a victim
-**candidate mask**, carried in a third element of the device-resident bounds
-tensor so it survives a CUDA graph capture.
+What keeps coverage instead: `_prefetch_split_mirror` writes an occupant back
+to its pool row (or recognises it already has one — a retained duplicate needs
+no D2H) before the buffer overwrites it, so the expert that was sitting in the
+buffer slot is never left without a copy. `test_decode_may_admit_into_the_prefill_buffer_and_prefill_still_covers`
+drives decode admissions into `[0, 2E)` on purpose, over a sweep of random
+routing, then runs a full prefill sweep over the result and checks every
+expert is still either a GPU resident or a pool row — the exact hole the old
+victim floor existed to close, now closed by the writeback instead.
 
 ## Prefill
 

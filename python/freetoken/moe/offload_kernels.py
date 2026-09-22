@@ -942,12 +942,16 @@ def _materialize_layer_sized_kernel_v2(
     overwritten = expert_mask & (old_id >= 0) & (~same_layer)
     tl.store(prior_ids_ptr + off, old_id, mask=expert_mask)
     # Prefill DROPS displaced experts (design: preserving them would need the
-    # whole model mirrored; the checkpoint is immutable so nothing is lost --
-    # _mirror_restore_coverage re-reads the complement at the prefill->decode
-    # boundary). Publishing them as victims would make the swap kernel write
-    # each one back into a free-stack row: a pop per victim with pushes only for
-    # mirror-sourced admissions, a net drain of ~90 rows per layer that ran the
-    # reserve dry mid-prefill (4017 starved writebacks on a 21K request).
+    # whole model mirrored; the checkpoint is immutable so nothing is lost).
+    # This kernel is unreachable under the bounded expert mirror -- the
+    # cache's materialize_layer raises before calling it, because prefill
+    # there runs exclusively through prefetch_prefill_layer /
+    # _prefetch_split_mirror instead, which never empties the mirror the way
+    # this whole-layer invalidation would. Publishing them as victims would
+    # make the swap kernel write each one back into a free-stack row: a pop
+    # per victim with pushes only for mirror-sourced admissions, a net drain
+    # of ~90 rows per layer that ran the reserve dry mid-prefill (4017
+    # starved writebacks on a 21K request).
     tl.store(victim_ids_ptr + off, -1, mask=expert_mask)
     tl.store(id_of_slot_ptr + global_slot, -1, mask=same_layer)
     tl.store(usage_ptr + global_slot, 0, mask=same_layer)

@@ -24,7 +24,6 @@ import types
 from freetoken.models.nemotron_h.weight import (
     NVFP4_EXPERT_SOURCE_SPEC as NEMOTRON_SPEC,
 )
-from freetoken.moe.offload_kernels import materialize_layer
 
 
 def main():
@@ -50,7 +49,7 @@ def main():
         c = OffloadMoeCache(num_layers=L, num_experts=E, cache_size=gpu,
                             slot_capacity=gpu, arena_step_slots=4,
                             device=dev, quant_format="nvfp4",
-                            cache_policy="lfu")
+                            cache_policy="lfu", prefill_overlap=True)
         c.direct_device_banks = True
         c.attach_mirror_pool(pool)
         c.mirror_warm_start()
@@ -128,33 +127,41 @@ def main():
         print(f"graph replay decode-only: {len(failures)} wrong experts over 60 replays")
 
         # Now the full pattern: eager prefill sweep, then replayed decode --
-        # this is where the live server corrupts.
+        # this is where the live server corrupts. The prefill sweep itself
+        # must go through the real overlap choreography (begin_prefill /
+        # prefetch_prefill_layer / wait_prefill_layer / release_prefill_layer
+        # -- see tests/moe/test_mirror_prefill.py's _sweep): materialize_layer
+        # is not a legal prefill path under the mirror (it schedules a copy
+        # for every expert of the layer including already-resident ones,
+        # which would need the whole layer staged into the mirror first).
+        #
+        # The old eager-vs-replay branch on a "_mirror_needs_coverage" flag
+        # is gone along with the flag itself: that flag stood for a
+        # batch-boundary coverage restore materialize_layer's whole-layer
+        # invalidation used to require. Under the overlap path, decode
+        # coverage is maintained by construction (ensure_experts's docstring
+        # in offload_cache.py) -- there is nothing to restore, so every
+        # step below is a plain graph replay. That keeps the boundary this
+        # script exists to race: g's replay still runs immediately after a
+        # real prefill sweep touched the mirror's residency maps through the
+        # copy stream, on statically captured addresses whose CONTENT this
+        # loop rewrites every step -- exactly the graphs-mode corruption
+        # this reproduces.
         for rnd in range(3):
+            c.begin_prefill()
             for lid in range(L):
-                c.materialize_layer(lid)
-                c.copy_missing()
-                torch.cuda.synchronize()
-            # Scheduler._forward now consumes the boundary flag at the batch
-            # boundary -- host code, ALWAYS runs, before the replay:
-            if getattr(c, "_mirror_needs_coverage", False):
-                c.mirror_warm_start()
-                c._mirror_needs_coverage = False
+                c.prefetch_prefill_layer(lid)
+                c.prefetch_prefill_layer(lid + 1)
+                c.wait_prefill_layer(lid)
+                c.release_prefill_layer(lid)
+            torch.cuda.synchronize()
             for step in range(20):
                 perm = torch.randperm(E, device=dev)[:6].to(torch.int32)
                 want = perm.tolist()
                 ids_buf.copy_(perm.reshape(1, 6).contiguous())
-                if c._mirror_needs_coverage:
-                    # host code runs between replays, like the real scheduler's
-                    # eager pre-step path
-                    c.ensure_experts(layer, ids_buf.clone())
-                    c.copy_missing()
-                    c._mirror_needs_coverage = False
-                    torch.cuda.synchronize()
-                    slots = ids_buf.reshape(-1).tolist()  # unchanged buffer
-                else:
-                    g.replay()
-                    torch.cuda.synchronize()
-                    slots = ids_buf.reshape(-1).tolist()
+                g.replay()
+                torch.cuda.synchronize()
+                slots = ids_buf.reshape(-1).tolist()
                 for e, sl in zip(want, slots):
                     got = c.bank_caches["gate_up_packed"][sl].view(torch.uint8).cpu()
                     if not torch.equal(got, golden[layer * E + e].view(torch.uint8).cpu()):
