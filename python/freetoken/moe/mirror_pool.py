@@ -98,6 +98,45 @@ def default_reserve_rows(num_experts: int) -> int:
     return 3 * num_experts
 
 
+_RESERVE_ROWS_ENV = "FREETOKEN_MIRROR_RESERVE_ROWS"
+
+
+def resolve_reserve_rows(num_experts: int, *, env: dict | None = None) -> int:
+    """Resolve the pool's reserve-row count from ``FREETOKEN_MIRROR_RESERVE_ROWS``.
+
+    This is the ONE place that env var is read. Call it once and pass the
+    same return value to both ``plan_capacity(reserve=...)`` and
+    ``MirrorExpertPool(reserve_rows=...)`` -- those two are required to agree
+    (see both docstrings), and resolving the env var independently for each
+    is exactly how they would drift apart.
+
+    Unset or empty -> ``default_reserve_rows(num_experts)``, i.e. today's
+    behaviour, byte-identical. Any other value must parse as a positive
+    integer row count; anything else (zero, negative, non-integer) raises
+    ``ValueError`` naming the variable -- a typo must fail loudly rather than
+    silently fall back to the default and produce a valid-looking arm sized
+    against the wrong reserve.
+    """
+    env = os.environ if env is None else env
+    raw = env.get(_RESERVE_ROWS_ENV)
+    if raw is None or not raw.strip():
+        return default_reserve_rows(num_experts)
+    stripped = raw.strip()
+    try:
+        value = int(stripped)
+    except ValueError:
+        raise ValueError(
+            f"{_RESERVE_ROWS_ENV}={raw!r} is not a valid integer row count "
+            "(must be a positive integer, e.g. \"128\")"
+        ) from None
+    if value <= 0:
+        raise ValueError(
+            f"{_RESERVE_ROWS_ENV}={raw!r} must be a positive integer row "
+            "count (0 or negative leaves the pool unable to cover anything)"
+        )
+    return value
+
+
 def prefill_buffer_slots(num_experts: int) -> int:
     """GPU slots the prefill double buffer physically occupies at the head of the cache.
 

@@ -131,7 +131,7 @@ def _resolve_swaps_kernel(
     d2d_src_ptr,          # int32 [plan]  GPU slot holding an already-resident expert
     d2d_dst_ptr,          # int32 [plan]  GPU slot it must appear in
     n_d2d_ptr,            # int64 [1]     device-to-device relocation count
-    stats_ptr,            # int64 [6]     swaps, free_evict, d2h, violations,
+    stats_ptr,            # int64 [7]     swaps, free_evict, d2h, violations,
                           #               starved, retained
     layer_id,
     num_experts,
@@ -360,9 +360,10 @@ def _writeback_buffer_kernel(
     vacated_ptr,           # int32 [count] flat expert id of every occupant found
                            #               here, written back or not
     n_vacated_ptr,         # int64 [1]
-    stats_ptr,             # int64 [6]    shared with resolve_swaps: swaps,
+    stats_ptr,             # int64 [7]    shared with resolve_swaps: swaps,
                            #              free_evict, d2h, violations, starved,
-                           #              retained
+                           #              retained, buffer_free_evict. This
+                           #              kernel bumps 2, 4 and 6 only.
     slot_start,            # first GPU slot of this buffer half
     count,                 # slots in this buffer half (== num_experts)
     BLOCK: tl.constexpr,
@@ -435,6 +436,10 @@ def _writeback_buffer_kernel(
     tl.store(n_d2h_ptr, n_d2h)
     tl.store(n_wb_ptr, n_wb)
     tl.store(n_vacated_ptr, n_vacated)
-    tl.store(stats_ptr + 1, tl.load(stats_ptr + 1) + free_evict)
+    # Slot 6, NOT slot 1: these evictions come from invalidating a prefill
+    # buffer half, not from a decode admission, so folding them into slot 1
+    # (whose denominator is `swaps`, bumped only by _resolve_swaps_kernel)
+    # makes free_eviction_rate exceed 1.0 and overstates what lever 1 bought.
+    tl.store(stats_ptr + 6, tl.load(stats_ptr + 6) + free_evict)
     tl.store(stats_ptr + 2, tl.load(stats_ptr + 2) + n_d2h)
     tl.store(stats_ptr + 4, tl.load(stats_ptr + 4) + starved)

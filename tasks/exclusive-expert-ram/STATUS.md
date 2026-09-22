@@ -149,7 +149,7 @@ probe pass 2, port 1920, 2026-09-22. Four baselines bracket the sweep.
 | baseline, whole model (x4) | 18.22-18.37 | ~194 / ~190 / ~179 | 0.64 / 2.86 / 9.46 | — |
 | auto pool (Phase 0) | 12.90 | 164.9 / 160.3 / 152.3 | 0.68 / 3.01 / 9.68 | 28.4% |
 | + lever 1 | 12.86 | 171.7 / 169.5 / 162.5 | 1.47 / 4.79 / 10.18 | 64.9% |
-| **+ forced retention** | 12.86-13.46 | **177.0 / 175.9 / 162.8** | **0.66 / 3.00 / 9.66** | **95.4%** |
+| **+ forced retention** | 12.86-13.46 | **177.0 / 175.9 / 162.8** | **0.66 / 3.00 / 9.66** | 95.4% (WRONG, see Correction) |
 
 **The decode gap to the whole model is 15-16% -> 7-9%**, TTFT is inside the
 +-5% gate (and better than the Phase 0 auto arm), residents are 2173 of 2173,
@@ -159,7 +159,7 @@ GiB more headroom (2.50 -> 3.84 GiB) -- which is what Phase 3's 1M proof needs.
 
 **Lever 1 also delivered most of lever 2.** Free evictions went 28.4% -> 64.9%
 from the write-back alone (it CREATES a RAM copy for experts that had none),
-then -> 95.4% with forced retention. Lever 2's own target was >50%, and only
+then -> 95.4% (WRONG, see the Correction section) with forced retention. Lever 2's own target was >50%, and only
 4.6% of evictions still pay a writeback, so teaching the LFU victim search to
 read `pool_row_of_id` must be re-priced against this arm before it is built.
 
@@ -218,6 +218,108 @@ so they return cold -- churn on top of the re-prefill. Needle and recall arms
 must therefore set `--kv-grow-step-tokens` at least as large as the biggest
 haystack, and any per-question timing taken without that is prefill-bound.
 
+## Lever 2 — prefer victims that already have a pool row
+
+Arms `nemotron-tiebreak-off` / `nemotron-tiebreak-on`, 2026-09-22, empty GPU
+(0 MiB), ratio 1.00, auto pool, KV q8_0/q8_0, two probe passes, **thinking OFF**,
+128 generated tokens. The only difference between the arms is
+`FREETOKEN_MIRROR_TIEBREAK`; the pool stays attached in both, so exactly one thing
+changes. Decode of record is pass 2.
+
+| | tie-break off | tie-break on |
+|---|---|---|
+| decode free-eviction rate | 53.4% | **74.1%** |
+| decode 8K / 32K / 80K tok/s | 170.3 / 168.3 / 162.6 | 177.7 / 174.6 / 158.6 |
+| TTFT 8K / 32K / 80K s | 0.71 / 4.33 / 9.79 | 0.68 / 3.02 / 12.14 |
+| swaps | 4617 | 4713 |
+| buffer free evictions | 1941 | 1792 |
+| retained rows | 2373 | 3208 |
+| host RAM GiB | 12.93 | 12.92 |
+| coverage faults / starved | 0 / 0 | 0 / 0 |
+
+**What it bought:** +20.7 percentage points of free evictions, clearing the plan's
+>50% target. Writebacks fall from ~2152 to ~1221, about 4.9 GiB of VRAM->RAM
+traffic avoided across the arm. Retained duplicates rise 2373 -> 3208, which is the
+mechanism: preferring copy-having victims leaves more experts holding a pool row.
+
+**What it did not buy, honestly:** decode is 8K +4.3%, 32K +3.7%, 80K **-2.5%**.
+Two of three up, one down, all within a few percent on a single arm pair. The
+eviction-rate change is far outside noise; the decode effect is not resolvable
+from one pair and is NOT claimed as a win. TTFT at 80K (9.79 -> 12.14) moved more
+than the +-5% gate, but TTFT at this size is the noisiest number in the harness
+and pass 1 is contaminated by the bank build -- it needs a repeat before it means
+anything.
+
+**Rejected approach:** a separate per-slot `has_copy` array maintained alongside
+the eviction, warm-start and seed paths. `pool_row_of_id` is already the
+authoritative device-resident residency map, so reading it directly leaves nothing
+to keep in sync -- one fewer invariant that can silently rot and serve wrong
+experts at zero fault count.
+
+**Design note that mattered:** the extra frequency bucket is added BEFORE the
+sentinel mask (`2147483647`). Applied after, it would increment the sentinel and
+overflow it negative, making masked-out slots the most attractive victims.
+
+### Correction to an earlier claim in this document
+
+An earlier revision of this file said lever 2 was worth "at most ~0.39 percentage
+points" and was effectively spent after lever 1. **That was wrong, and wrong
+because of the counter bug above:** the ceiling was computed against the inflated
+95.4% free-eviction rate, which left no headroom by construction. Against the true
+53.4%, lever 2 recovers 20.7 points.
+
+## Lever 4 — the reserve is now a knob (measurement pending)
+
+`FREETOKEN_MIRROR_RESERVE_ROWS` selects the pool's reserve; unset reproduces
+`default_reserve_rows` = 3 * num_experts = 384 on Nemotron (E = 128 experts per
+layer, 23 MoE layers, 2944 experts total) byte-identically. The value is resolved
+once, in one place, and passed to BOTH `plan_capacity(reserve=...)` and
+`MirrorExpertPool(reserve_rows=...)`: if only one of them got the override, the
+planner would size the pool against a different reserve than the pool enforces. A
+test fails if a future edit re-splits them. An invalid value raises instead of
+falling back, because a silent fallback produces a valid-looking arm sized against
+the wrong reserve -- a wrong number that looks right is worse than a crash.
+
+`measure.sh` gained `FT_RESERVE` (and `FT_TIEBREAK`), both stripped from the host's
+`serve.env` like every other knob the sweep owns: without the strip, a value left
+in the owner's file would apply to every arm and a 3E/2E/E sweep would be three
+identical arms wearing three names. Sweep still to run.
+
+## Correction (2026-09-22): the free-eviction rate was overstated
+
+**Every free-eviction rate measured after lever 1 landed is wrong, including the
+95.4% in commit `1ed6372` and the 77.5% in commit `67ec22a`.** Those commit
+messages cannot be rewritten; this section is the correction of record.
+
+`mirror_stats()` computes `free_eviction_rate = free_evictions / swaps`. Lever 1
+added `_writeback_buffer_kernel`, which evicts the occupants of a prefill-buffer
+half and incremented the shared `free_evictions` counter (stats slot 1) -- but a
+buffer invalidation is not an admission, so it never incremented `swaps`
+(slot 0, written only by `_resolve_swaps_kernel`). The numerator therefore
+counted two populations and the denominator one.
+
+It was caught because the rate went **above 1.0**: arm `nemotron-lever2` reported
+`free_eviction_rate 1.121` from `swaps 4713`, `free_evictions 5285`,
+`writebacks 1732` -- note `5285 + 1732 = 7017`, which cannot be reconciled with
+4713 swaps under any reading.
+
+Fixed by giving buffer evictions their own counter (stats slot 6, surfaced as
+`buffer_free_evictions`), so `free_eviction_rate` is decode-only and bounded by 1,
+and the prefill-buffer work is visible instead of hidden inside a decode metric.
+Two lever-1 tests asserted the old behaviour and were corrected; each now also
+asserts that a buffer invalidation leaves the decode counter untouched, which is
+the invariant that actually broke. The stats tensor grew 6 -> 7, which surfaced a
+second unpack site in `_mirror_assert_coverage` that the test suite caught.
+
+**What this does and does not invalidate.** Decode tok/s, TTFT, host RAM, arena
+slots, pool rows, coverage faults and starved write-backs are all measured
+independently and are unaffected -- every performance conclusion in this document
+stands. Only the free-eviction percentages are wrong. Phase 0's 29.7% predates
+lever 1 and is sound. Lever 1's qualitative claim (forced retention makes nearly
+all buffer evictions free) is confirmed by the D2H byte counts and the tests, not
+by the broken ratio. Corrected rates are re-measured in the
+`nemotron-tiebreak-off` / `nemotron-tiebreak-on` arms below.
+
 ## Phase 3 — 1M proven on Nemotron, and the teardown defect it exposed
 
 Arm `nemotron-1m-fixed`, 2026-09-22, commit of this section. Conditions: empty GPU
@@ -236,7 +338,8 @@ coverage floor 1440 of 2173 (733 slots / 3.84 GiB left for the growable KV).
 | 1M | 1322.79 | 2349.16 | 80.4 | 34.1 |
 
 Host RAM 12.94 GiB, peak 14.22 GiB. 0 coverage faults, 0 starved write-backs,
-exactly one CUDA-graph capture, 10417 swaps at a 77.5% free-eviction rate, and no
+exactly one CUDA-graph capture, 10417 swaps (free-eviction rate 77.5% as recorded,
+WRONG -- see the Correction section), and no
 `cuMemSetAccess` / `Traceback` / backend-worker-death line anywhere in the journal.
 
 **1M is proven.** The KV grew stepwise to the ceiling with the arena yielding slots

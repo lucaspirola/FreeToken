@@ -68,7 +68,7 @@ avail=$(awk '/MemAvailable/ {print int($2/1048576)}' /proc/meminfo)
 # own env file, built from the host's minus the knobs this sweep controls, so the
 # arm is what it says it is and the host's file is never edited.
 ARMENV="$OUT/$ARM.env"
-grep -vE '^[[:space:]]*export[[:space:]]+(FREETOKEN_MIRROR_EXPERT_RAM|FREETOKEN_MIRROR_HOST_ROWS|FREETOKEN_MODEL|FREETOKEN_MEMORY_RATIO)=' \
+grep -vE '^[[:space:]]*export[[:space:]]+(FREETOKEN_MIRROR_EXPERT_RAM|FREETOKEN_MIRROR_HOST_ROWS|FREETOKEN_MODEL|FREETOKEN_MEMORY_RATIO|FREETOKEN_MIRROR_RESERVE_ROWS|FREETOKEN_MIRROR_TIEBREAK)=' \
   "$HOME/.config/freetoken/serve.env" > "$ARMENV" 2>/dev/null || : > "$ARMENV"
 {
   echo "export FREETOKEN_MODEL=$MODEL"
@@ -79,6 +79,20 @@ grep -vE '^[[:space:]]*export[[:space:]]+(FREETOKEN_MIRROR_EXPERT_RAM|FREETOKEN_
   else
     echo "export FREETOKEN_MIRROR_EXPERT_RAM=1"
     echo "export FREETOKEN_MIRROR_HOST_ROWS=$ROWS"
+  fi
+  # Lever 4. Unset => the pool's own default (3 * num_experts), so an arm that
+  # does not ask for a reserve is byte-identical to before this line existed.
+  # Stripped from the host's file above like every other knob this sweep owns:
+  # without that, a reserve left in serve.env would silently apply to every arm
+  # and three "3E/2E/E" arms would all be the same reserve wearing three names.
+  if [ -n "${FT_RESERVE:-}" ]; then
+    echo "export FREETOKEN_MIRROR_RESERVE_ROWS=$FT_RESERVE"
+  fi
+  # Lever 2. FT_TIEBREAK=0 reproduces pre-lever-2 victim selection with the
+  # pool still attached, which is the only honest A/B for what the tie-break
+  # buys: detaching the pool instead would change three things at once.
+  if [ -n "${FT_TIEBREAK:-}" ]; then
+    echo "export FREETOKEN_MIRROR_TIEBREAK=$FT_TIEBREAK"
   fi
 } >> "$ARMENV"
 
@@ -299,6 +313,9 @@ try:
         rec["swaps"] = m.get("swaps")
         rec["retained_rows"] = m.get("retained_rows")
         rec["free_evict_rate"] = round(m.get("free_eviction_rate", 0), 3)
+        # Prefill-buffer invalidations, counted separately from decode swaps
+        # since 2026-09-22: folding them into free_evict_rate put it above 1.0.
+        rec["buffer_free_evictions"] = m.get("buffer_free_evictions", 0)
 except Exception:
     pass
 # One file per arm, and table.py builds the TSV from all of them. Appending

@@ -331,7 +331,14 @@ def test_writeback_skips_retained_duplicates():
             torch.cuda.synchronize()
 
             assert int(m["stats"][2].item()) == 0, "retained duplicates need no D2H"
-            assert int(m["stats"][1].item()) == E, "every occupant should free-evict"
+            # Slot 6, not slot 1: a buffer invalidation is not a decode
+            # admission, and counting it in slot 1 (whose denominator is
+            # `swaps`) drove free_eviction_rate above 1.0.
+            assert int(m["stats"][6].item()) == E, "every occupant should free-evict"
+            assert int(m["stats"][1].item()) == 0, (
+                "a buffer invalidation must not touch the decode free-eviction "
+                "counter -- that is what made free_eviction_rate exceed 1.0"
+            )
             assert (cache.id_of_slot[:E] == -1).all()
             assert int(slot_for_id[torch.tensor(flats, device="cuda")].eq(-1).all())
             assert int(m["free_count"].item()) == free_before, (
@@ -484,15 +491,19 @@ def test_admission_into_the_buffer_region_forces_retention():
             # Now invalidate buffer 0: the occupant this admission left in
             # slot 3 must be found already-mirrored (free_evict), not D2H'd.
             d2h_before = int(m["stats"][2].item())
-            free_evict_before = int(m["stats"][1].item())
+            free_evict_before = int(m["stats"][6].item())
+            decode_free_before = int(m["stats"][1].item())
             cache._invalidate_prefill_buffer(0)
             torch.cuda.synchronize()
 
             assert int(m["stats"][2].item()) == d2h_before, (
                 "the forced-retention occupant should cost zero D2H on eviction"
             )
-            assert int(m["stats"][1].item()) == free_evict_before + 1, (
+            assert int(m["stats"][6].item()) == free_evict_before + 1, (
                 "the forced-retention occupant should free-evict"
+            )
+            assert int(m["stats"][1].item()) == decode_free_before, (
+                "and it must not be counted as a decode free eviction"
             )
             assert cache.id_of_slot[target_slot].item() == -1
             assert int(slot_for_id[flat_new].item()) == -1

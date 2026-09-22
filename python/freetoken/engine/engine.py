@@ -945,14 +945,31 @@ class Engine:
                     else:
                         requested_residency.append(HostResidency.PINNED.value)
             if mirror:
-                from freetoken.moe.mirror_pool import MirrorExpertPool, plan_capacity
+                from freetoken.moe.mirror_pool import (
+                    MirrorExpertPool, plan_capacity, resolve_reserve_rows,
+                )
                 from freetoken.moe.expert_banks import ExpertBanks
+                # Resolved ONCE here and passed to BOTH plan_capacity and
+                # MirrorExpertPool below: they must agree on the reserve or
+                # the planner sizes the arena floor against a different
+                # number than the pool actually withholds (see
+                # resolve_reserve_rows / default_reserve_rows docstrings).
+                mirror_reserve_rows = resolve_reserve_rows(mc.num_experts)
+                logger.info_rank0(
+                    "Mirror pool: reserve resolved to %d rows%s",
+                    mirror_reserve_rows,
+                    (f" (FREETOKEN_MIRROR_RESERVE_ROWS="
+                     f"{os.environ['FREETOKEN_MIRROR_RESERVE_ROWS']!r})")
+                    if os.environ.get("FREETOKEN_MIRROR_RESERVE_ROWS", "").strip()
+                    else " (default: 3 * num_experts)",
+                )
                 # Size for the KV ceiling, where the GPU cache is smallest and
                 # the host side must be largest. Growing a pinned pool later
                 # costs ~762 ms/GiB (measured), a stall no request should pay.
                 capacity = mirror_rows if mirror_rows > 0 else plan_capacity(
                     mc.num_moe_layers, mc.num_experts,
                     self._mirror_final_gpu_slots(config),
+                    reserve=mirror_reserve_rows,
                 )
             else:
                 mirror_pool = None
@@ -964,6 +981,7 @@ class Engine:
                     intermediate_size=mc.moe_intermediate_size,
                     spec=mirror_spec, config=mc,
                     device=self.device,
+                    reserve_rows=mirror_reserve_rows,
                 )
                 # _grow_runtime_kv_arena consults the pool's coverage bound so
                 # the KV never grows past what the mirror can complement.

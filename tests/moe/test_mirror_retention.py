@@ -231,3 +231,198 @@ def _assert_same(got, want, what):
     g = got.cpu().contiguous().view(torch.uint8)
     w = want.cpu().contiguous().view(torch.uint8)
     assert torch.equal(g, w), f"{what} does not hold its own weights"
+
+
+# --- Lever 2: LFU victim tie-break toward candidates with a pool row -------
+#
+# These exercise ``_ensure_experts_sized_kernel_v2`` directly through a bare
+# ``OffloadMoeCache`` (no ``MirrorExpertPool``): the kernel only ever reads
+# ``cache._mirror["pool_row_of_id"]``, so a hand-built dict with just that key
+# is a faithful, much smaller stand-in for engineering exact ties.
+
+def _direct_cache(num_layers, num_experts, cache_size, device=torch.device("cuda")):
+    """``cache_size`` must be >= ``num_experts`` (single-layer coverage floor);
+    give it several layers so total ids (``num_layers * num_experts``) still
+    exceed ``cache_size`` and evictions are possible."""
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    return OffloadMoeCache(
+        num_layers=num_layers, num_experts=num_experts, cache_size=cache_size,
+        device=device, cache_policy="lfu",
+    )
+
+
+def _seat(cache, slot_of_expert: dict[int, int], usage: dict[int, int],
+          frequency: dict[int, int]) -> None:
+    """Directly engineer cache state: expert -> (slot, usage, frequency)."""
+    for expert, slot in slot_of_expert.items():
+        cache.id_of_slot[slot] = expert
+        cache.slot_for_id[0, expert] = slot
+        cache.usage[slot] = usage[expert]
+        cache.expert_frequency[0, expert] = frequency[expert]
+
+
+def _attach_fake_mirror(cache, pool_row_of_id) -> None:
+    """Minimal stand-in for ``OffloadMoeCache.attach_mirror_pool``.
+
+    ``ensure_experts`` only reads ``_mirror["pool_row_of_id"]`` (via the
+    kernel) and ``_mirror["prev_slot_of_id"]`` / ``_mirror_needs_coverage``
+    (its own bookkeeping, unrelated to Lever 2) -- so this fakes just enough
+    state to exercise the kernel without a real ``MirrorExpertPool``.
+    """
+    device = cache.slot_for_id.device
+    cache._mirror = {
+        "pool_row_of_id": torch.tensor(pool_row_of_id, dtype=torch.int32, device=device),
+        "prev_slot_of_id": cache.slot_for_id.view(-1).clone(),
+    }
+    cache._mirror_needs_coverage = False
+
+
+def test_tiebreak_evicts_the_candidate_with_a_pool_row():
+    """Equal frequency, equal usage, one candidate has a pool row: it goes.
+
+    If the tie-break were absent (or inverted), the copy-less expert 1 would
+    be an equally valid ``tl.argmin`` pick, or would be picked instead -- this
+    fails either way unless the copied candidate (expert 0) is the one
+    evicted.
+    """
+    # 2 layers x 4 experts = 8 flat ids sharing 4 slots (cache_size == num_experts
+    # is the coverage floor for a single layer; the second layer is what makes
+    # a miss -- and therefore an eviction -- possible at all).
+    device = torch.device("cuda")
+    cache = _direct_cache(num_layers=2, num_experts=4, cache_size=4, device=device)
+    _seat(
+        cache,
+        slot_of_expert={0: 0, 1: 1, 2: 2, 3: 3},
+        usage={0: 10, 1: 10, 2: 10, 3: 10},
+        frequency={0: 5, 1: 5, 2: 50, 3: 50},
+    )
+    # flat id = layer * num_experts + expert; layer 0 experts occupy 0..3.
+    _attach_fake_mirror(cache, [0, -1, -1, -1, -1, -1, -1, -1])
+    # A miss on layer 1 (not resident anywhere) forces one eviction among the
+    # tied layer-0 occupants.
+    ids = torch.tensor([[0]], dtype=torch.int32, device=device)
+    cache.ensure_experts(1, ids)
+    torch.cuda.synchronize()
+
+    n = int(cache.num_indices.item())
+    assert n == 1
+    evicted = int(cache.victim_ids[0].item())
+    assert evicted == 0, (
+        f"expected the pool-row-holding expert 0 evicted, got flat id {evicted}"
+    )
+
+
+def test_tiebreak_never_overrides_a_real_frequency_difference():
+    """A genuinely colder copy-less expert is still evicted over a hot copy.
+
+    Proves the pool-row bonus is one frequency bucket, not an absolute veto:
+    expert 0 (no pool row, frequency 0) is far colder than expert 1 (pool row,
+    frequency 100), so it must still be the one evicted despite losing the
+    tie-break bucket.
+    """
+    device = torch.device("cuda")
+    cache = _direct_cache(num_layers=2, num_experts=4, cache_size=4, device=device)
+    _seat(
+        cache,
+        slot_of_expert={0: 0, 1: 1, 2: 2, 3: 3},
+        usage={0: 10, 1: 10, 2: 10, 3: 10},
+        frequency={0: 0, 1: 100, 2: 200, 3: 200},
+    )
+    _attach_fake_mirror(cache, [-1, 0, -1, -1, -1, -1, -1, -1])
+    ids = torch.tensor([[0]], dtype=torch.int32, device=device)
+    cache.ensure_experts(1, ids)
+    torch.cuda.synchronize()
+
+    evicted = int(cache.victim_ids[0].item())
+    assert evicted == 0, (
+        f"the +1 tie-break bucket must not beat a real 100-count gap, got flat id {evicted}"
+    )
+
+
+def test_no_mirror_attached_matches_pre_lever2_behaviour():
+    """``HAS_MIRROR=False`` (no pool attached) must not change victim choice.
+
+    Runs the same random step sequence on two caches -- one with no mirror
+    object at all, one with a mirror attached but the tie-break knob forced
+    off (``FREETOKEN_MIRROR_TIEBREAK=False``, i.e. ``HAS_MIRROR`` computed
+    False despite the pool existing) -- and requires their full eviction
+    trace and end state to agree byte-for-byte. If the ``if HAS_MIRROR:``
+    gate leaked any effect when unset, this would drift.
+    """
+    import random
+
+    from freetoken.moe import offload_kernels as ok
+
+    device = torch.device("cuda")
+    # 3 layers x 4 experts = 12 flat ids sharing 4 slots (cache_size ==
+    # num_experts satisfies the single-layer coverage floor; the extra layers
+    # give real churn to compare traces over).
+    num_layers, num_experts, cache_size = 3, 4, 4
+    rng = random.Random(4242)
+    steps = [
+        (rng.randrange(num_layers),
+         sorted(rng.sample(range(num_experts), k=rng.randint(1, 3))))
+        for _ in range(60)
+    ]
+
+    baseline = _direct_cache(num_layers, num_experts, cache_size, device)
+    gated = _direct_cache(num_layers, num_experts, cache_size, device)
+    _attach_fake_mirror(
+        gated, [rng.choice([-1, 0]) for _ in range(num_layers * num_experts)]
+    )
+
+    prev = ok.FREETOKEN_MIRROR_TIEBREAK
+    ok.FREETOKEN_MIRROR_TIEBREAK = False
+    try:
+        for layer_id, experts in steps:
+            base_ids = torch.tensor([experts], dtype=torch.int32, device=device)
+            gated_ids = torch.tensor([experts], dtype=torch.int32, device=device)
+            baseline.ensure_experts(layer_id, base_ids)
+            gated.ensure_experts(layer_id, gated_ids)
+            torch.cuda.synchronize()
+            assert torch.equal(base_ids, gated_ids), (layer_id, experts)
+            n = int(baseline.num_indices.item())
+            assert n == int(gated.num_indices.item())
+            assert torch.equal(baseline.evict_slots[:n], gated.evict_slots[:n])
+            assert torch.equal(baseline.src_indices[:n], gated.src_indices[:n])
+            assert torch.equal(baseline.victim_ids[:n], gated.victim_ids[:n])
+    finally:
+        ok.FREETOKEN_MIRROR_TIEBREAK = prev
+
+    for attr in ("slot_for_id", "id_of_slot", "usage", "expert_frequency", "policy_steps"):
+        assert torch.equal(getattr(baseline, attr), getattr(gated, attr)), attr
+
+
+def test_free_eviction_rate_rises_with_the_pool_row_tiebreak():
+    """The tie-break must move the metric it exists for, on this geometry.
+
+    Same checkpoint, same deterministic decode run (``_decode``'s internal
+    ``torch.manual_seed``), same mirror capacity -- the only difference is
+    whether ``FREETOKEN_MIRROR_TIEBREAK`` lets the kernel prefer a pool-row
+    holder as victim. If lever 2 measured as nothing here, this must fail
+    rather than be loosened.
+    """
+    from freetoken.moe import offload_kernels as ok
+
+    rate = {}
+    with tempfile.TemporaryDirectory() as root:
+        write_nvfp4_checkpoint(root, LAYERS, EXPERTS, H, ISZ)
+        for tiebreak in (False, True):
+            cache, pool = _cache(root, _CAP_FULL)
+            prev = ok.FREETOKEN_MIRROR_TIEBREAK
+            ok.FREETOKEN_MIRROR_TIEBREAK = tiebreak
+            try:
+                _decode(cache)
+                st = cache.mirror_stats()
+                assert st["coverage_faults"] == 0
+                assert st["starved_writebacks"] == 0
+                rate[tiebreak] = st["free_eviction_rate"]
+            finally:
+                ok.FREETOKEN_MIRROR_TIEBREAK = prev
+                pool.close()
+
+    assert rate[True] > rate[False], (
+        f"the tie-break bought nothing on this geometry: "
+        f"{rate[False]:.4f} (off) -> {rate[True]:.4f} (on)"
+    )

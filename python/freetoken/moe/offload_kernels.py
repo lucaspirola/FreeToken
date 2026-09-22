@@ -31,6 +31,13 @@ _LFU_RECENCY_BONUS_OVERRIDE = os.getenv("FREETOKEN_LFU_RECENCY_BONUS")
 # OffloadMoeCache.usable_slots / lru_slot_range_device in offload_cache.py.
 FREETOKEN_EXPERT_ARENA = os.getenv("FREETOKEN_EXPERT_ARENA", "0").strip() == "1"
 
+# Lever 2: LFU victim tie-break preferring a candidate that already has a pool
+# row (mirror-attached only -- see _ensure_experts_sized_kernel_v2). On by
+# default whenever a mirror is attached; the knob exists so tests can
+# reproduce the pre-Lever-2 baseline (HAS_MIRROR forced off) for an A/B
+# comparison without detaching the mirror itself.
+FREETOKEN_MIRROR_TIEBREAK = os.getenv("FREETOKEN_MIRROR_TIEBREAK", "1").strip() == "1"
+
 
 def _lfu_recency_config(cache) -> tuple[int, int]:
     tokens = (
@@ -85,6 +92,13 @@ def _ensure_experts_sized_gpu(cache, layer_id, expert_ids, begin, end) -> None:
     if FREETOKEN_EXPERT_ARENA:
         block_e = triton.next_power_of_2(cache.num_experts)
         block_c = triton.next_power_of_2(cache.slot_capacity)
+        mirror = getattr(cache, "_mirror", None)
+        has_mirror = mirror is not None and FREETOKEN_MIRROR_TIEBREAK
+        # Lever 2 tie-break input. No mirror attached => dummy pointer, never
+        # dereferenced (HAS_MIRROR=False keeps the tl.load out of the kernel
+        # entirely), so any existing int32 device tensor works; reuse
+        # victim_ids to avoid an extra allocation on the hot path.
+        pool_row_of_id = mirror["pool_row_of_id"] if has_mirror else cache.victim_ids
         _ensure_experts_sized_kernel_v2[(1,)](
             expert_ids,
             cache.slot_for_id,
@@ -103,12 +117,14 @@ def _ensure_experts_sized_gpu(cache, layer_id, expert_ids, begin, end) -> None:
             cache.usable_slots,
             cache.victim_ids,
             cache.prior_ids,
+            pool_row_of_id,
             cache.num_experts,
             cache.slot_capacity,
             BLOCK_E=block_e,
             BLOCK_C=block_c,
             COLLECT_STATS=cache.collect_stats,
             POLICY_LFU=cache.cache_policy_id == 1,
+            HAS_MIRROR=has_mirror,
             LFU_RECENCY_CALLS=recency_tokens * cache.num_layers,
             LFU_RECENCY_BONUS=recency_bonus,
             num_warps=8 if block_c >= 2048 else 4,
@@ -599,7 +615,7 @@ def _ensure_experts_sized_kernel(
         tl.store(expert_ids_ptr + i, global_slot - class_begin)
 
 
-@triton.jit(do_not_specialize=["layer_id", "num_active"])
+@triton.jit(do_not_specialize=["layer_id", "num_active", "pool_row_of_id_ptr"])
 def _ensure_experts_sized_kernel_v2(
     expert_ids_ptr,
     slot_for_id_ptr,
@@ -619,6 +635,8 @@ def _ensure_experts_sized_kernel_v2(
     usable_ptr,  # [1] int32: usable-slot bound, device-resident (see OffloadMoeCache.usable_slots)
     victim_ids_ptr,  # [plan] int32: expert id displaced by each admission, -1 if none
     prior_ids_ptr,   # [plan] int32: slot's owner before this admission, -1 if empty
+    pool_row_of_id_ptr,  # int32 [L*E]: pool row holding each id, or -1 (mirror's residency
+                          # map -- see mirror_kernels.py). Dummy/unused when HAS_MIRROR=False.
     num_experts: tl.constexpr,
     cache_size: tl.constexpr,  # == slot_capacity: fixed arena size, not the live usable count
     BLOCK_E: tl.constexpr,
@@ -627,6 +645,7 @@ def _ensure_experts_sized_kernel_v2(
     POLICY_LFU: tl.constexpr,
     LFU_RECENCY_CALLS: tl.constexpr,
     LFU_RECENCY_BONUS: tl.constexpr,
+    HAS_MIRROR: tl.constexpr,
 ):
     """Gated (``FREETOKEN_EXPERT_ARENA=1``) twin of ``_ensure_experts_sized_kernel``.
 
@@ -637,6 +656,14 @@ def _ensure_experts_sized_kernel_v2(
     future in-place write to ``usable_ptr`` (shrink/grow) takes effect without
     recapturing the decode graph. At ``usable == cache_size`` (today's only case)
     this produces bit-identical results to the legacy kernel.
+
+    ``HAS_MIRROR`` (Lever 2): when set, LFU victim selection tie-breaks toward
+    candidates that already have a pool row (``pool_row_of_id[oid] >= 0``), so
+    more evictions are free (no VRAM->RAM writeback). This is a tie-break
+    within the existing min-frequency group, not a new policy: a copy-less
+    expert that is genuinely colder than every copied candidate is still
+    evicted. When ``HAS_MIRROR`` is False the pointer is never read and victim
+    choice is byte-identical to the pre-Lever-2 kernel.
     """
     class_begin = tl.load(bounds_ptr + 0)
     class_end = tl.load(bounds_ptr + 1)
@@ -709,6 +736,20 @@ def _ensure_experts_sized_kernel_v2(
                     LFU_RECENCY_BONUS,
                     0,
                 )
+            if HAS_MIRROR:
+                # Lever 2 tie-break: a candidate with no pool row (a free
+                # eviction would require a VRAM->RAM writeback first) gets one
+                # extra frequency bucket, so within a min-frequency LFU group
+                # the copy-having candidate is preferred. Reads
+                # pool_row_of_id directly -- it is already the authoritative
+                # device-resident residency map, so there is no second array
+                # to keep in sync on eviction/warm-start/seed paths.
+                has_copy = tl.load(
+                    pool_row_of_id_ptr + oid,
+                    mask=allowed & (oid >= 0),
+                    other=-1,
+                ) >= 0
+                owner_frequency += tl.where(has_copy, 0, 1)
             owner_frequency = tl.where(
                 owner_active | (~candidate), 2147483647, owner_frequency
             )
