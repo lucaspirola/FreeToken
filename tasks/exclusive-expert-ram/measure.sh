@@ -13,6 +13,10 @@
 #   FT_POST    command run while the server is STILL UP (recall.py, needles.py):
 #              sees FREETOKEN_URL/FREETOKEN_MODEL_NAME, output -> $ARM-post.txt
 #   FT_POST_TIMEOUT  seconds for FT_POST (default 3600)
+#   FT_VENV    serve THIS tree's python/ through an existing venv instead of letting
+#              `uv run` build one here (a fresh worktree has no .venv, and a sync is
+#              forbidden): sets UV_PROJECT_ENVIRONMENT=$FT_VENV, UV_NO_SYNC=1 and puts
+#              $REPO/python first on PYTHONPATH, so the code of record is this tree's.
 #   FT_KV      KV lane by name, recorded with the number so it is attributable:
 #              q8q8 (q8_0 K + q8_0 V, the default lane), q8q6, q6q5. Anything
 #              else is passed through verbatim as flags. Only these asymmetric
@@ -94,6 +98,11 @@ grep -vE '^[[:space:]]*export[[:space:]]+(FREETOKEN_MIRROR_EXPERT_RAM|FREETOKEN_
   if [ -n "${FT_TIEBREAK:-}" ]; then
     echo "export FREETOKEN_MIRROR_TIEBREAK=$FT_TIEBREAK"
   fi
+  if [ -n "${FT_VENV:-}" ]; then
+    echo "export UV_PROJECT_ENVIRONMENT=$FT_VENV"
+    echo "export UV_NO_SYNC=1"
+    echo "export PYTHONPATH=$REPO/python"
+  fi
 } >> "$ARMENV"
 
 systemctl --user reset-failed "$UNIT" 2>/dev/null || true
@@ -116,7 +125,7 @@ sync
 sleep 5
 avail_before=$(awk '/MemAvailable/ {print $2 * 1024}' /proc/meminfo)
 
-echo "[$ARM] starting: model=$(basename "$MODEL") rows=$ROWS ratio=$RATIO port=$PORT"
+echo "[$ARM] starting: model=$(basename "$MODEL") rows=$ROWS ratio=$RATIO port=$PORT code=$REPO@$(git -C "$REPO" rev-parse --short HEAD) venv=${FT_VENV:-uv-default}"
 systemd-run --user --unit="$UNIT" --property=OOMScoreAdjust=1000 \
   --setenv=PATH="$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/wsl/lib" \
   --setenv=FREETOKEN_HOST_ENV="$ARMENV" \
@@ -258,7 +267,8 @@ for pid in $(cat "$CGDIR/cgroup.procs" 2>/dev/null); do
 done
 gpu_used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)
 
-RATIO_USED="$RATIO" KV_USED="${KV:-q8q8}" python3 - "$ARM" "$MODEL" "$ROWS" "$mem_now" "$mem_peak" "$gpu_used" \
+CODE_USED="$(git -C "$REPO" rev-parse --short HEAD)$(git -C "$REPO" diff --quiet HEAD -- python || echo -dirty)" \
+  VENV_USED="${FT_VENV:-uv-default}" RATIO_USED="$RATIO" KV_USED="${KV:-q8q8}" python3 - "$ARM" "$MODEL" "$ROWS" "$mem_now" "$mem_peak" "$gpu_used" \
   "$OUT/$ARM-probe.jsonl" "$OUT/$ARM-stats.json" "$OUT/$ARM-record.json" \
   "$mem_file" "$mem_unevict" "$mem_cur" "$avail_before" "$avail_after" \
   "$rss_kb" "$lck_kb" "$avail_ready" "$pinned_ready" "$rss_ready" "$mem_shmem" <<'PY'
@@ -268,6 +278,9 @@ mfile, unevict, cur, av_before, av_after, rss_kb, lck_kb = sys.argv[10:17]
 av_ready, pinned_ready, rss_ready, shmem = sys.argv[17:21]
 gib = lambda b: round(int(b) / 2**30, 2)
 rec = {"arm": arm, "model": os.path.basename(model), "rows": rows,
+       # The code of record: a number not tied to a commit was "not measured in
+       # this tree". "-dirty" marks uncommitted edits under python/.
+       "commit": os.environ.get("CODE_USED", ""), "venv": os.environ.get("VENV_USED", ""),
        "ratio": os.environ.get("RATIO_USED", ""),
        # The KV lane this arm ran on. Without it a 256K Ornith row cannot be
        # told from the same arm on a cheaper lane.
