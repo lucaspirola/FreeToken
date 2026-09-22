@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# GPU checkpoint 1 of the reorganisation (plan 2026-09-22-refactor-plan-final.md, section 7.2),
-# run on the post-S0 commit. The OWNER runs this (plan 9.4: the owner starts servers for
-# checkpoints). Agents prepare it, read the results, and never start it.
+# GPU checkpoints of the reorganisation (plan 2026-09-22-refactor-plan-final.md, section 7.2).
+# Run by the orchestrating agent as a systemd transient unit (owner, checkpoint 1: "You run
+# it"), never from an agent shell.
 #
-#   tasks/exclusive-expert-ram/checkpoint1.sh            # all four arms, in order
-#   tasks/exclusive-expert-ram/checkpoint1.sh preflight  # only the checks, starts nothing
+#   tasks/exclusive-expert-ram/checkpoint1.sh [ck1|ck2]            # all four arms, in order
+#   tasks/exclusive-expert-ram/checkpoint1.sh [ck1|ck2] preflight  # only the checks
 #
-# Arms, serial, each alone on the GPU (measure.sh refuses otherwise):
+# Arms (named <label>-*), serial, each alone on the GPU (measure.sh refuses otherwise):
 #   ck1-whole        whole model in RAM, 8K/32K/80K, then needles 21K/120K + recall
 #                    21K/120K/240K: the correctness REFERENCE, re-recorded on this commit
 #   ck1-mirror-1m    record config (auto pool, reserve 2E=256), 8K + 1M, same needles/recall:
@@ -24,6 +24,8 @@ OUT="$HERE/results"
 export FT_VENV=/home/lucas/ai/FreeToken/.venv
 export FT_RATIO=1.00
 POST_TIMEOUT=10800
+CK="${1:-ck1}"
+case "$CK" in ck[0-9]) shift || true ;; *) CK=ck1 ;; esac
 
 die() { echo "checkpoint1: $*" >&2; exit 1; }
 
@@ -72,11 +74,12 @@ arm() {  # name, then env assignments
 
 preflight
 [ "${1:-}" = "preflight" ] && exit 0
+echo "checkpoint label: $CK"
 
-arm ck1-whole       FT_ROWS=0                                     FT_POST="${NEEDLES//\$ARM_NAME/ck1-whole}"
-arm ck1-mirror-1m   FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 1000000" FT_POST="${NEEDLES//\$ARM_NAME/ck1-mirror-1m}"
-arm ck1-mirror      FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 80000 713000"
-arm ck1-whole-close FT_ROWS=0
+arm $CK-whole       FT_ROWS=0                                     FT_POST="${NEEDLES//\$ARM_NAME/$CK-whole}"
+arm $CK-mirror-1m   FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 1000000" FT_POST="${NEEDLES//\$ARM_NAME/$CK-mirror-1m}"
+arm $CK-mirror      FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 80000 713000"
+arm $CK-whole-close FT_ROWS=0
 
 # R3 from acceptance.sh. Its R6 checks the production system unit freetoken-serve (down by
 # design during measurements) and read /proc/0/limits on checkpoint 1; for an arm only its
@@ -89,11 +92,11 @@ r6_arm() {
     [ "$(systemctl --user show -p DefaultLimitMEMLOCK --value)" = infinity ] &&
     echo "R6(arm) ok: no pageable fallback, no mlock failure, user DefaultLimitMEMLOCK=infinity"
 }
-for a in ck1-whole ck1-mirror-1m ck1-mirror ck1-whole-close; do
+for a in $CK-whole $CK-mirror-1m $CK-mirror $CK-whole-close; do
   printf '%s R3: ' "$a"
   FREETOKEN_LOG="$OUT/$a-journal.txt" bash "$REPO/benchmarks/switchyard_soak/checks/acceptance.sh" R3 \
     > "$OUT/$a-acceptance-R3.txt" 2>&1 && echo PASS || echo "FAIL (see $a-acceptance-R3.txt)"
   printf '%s R6(arm): ' "$a"
   r6_arm "$OUT/$a-journal.txt" > "$OUT/$a-acceptance-R6.txt" 2>&1 && echo PASS || echo "FAIL (see $a-acceptance-R6.txt)"
 done
-echo "checkpoint 1 arms done. The embedder stays stopped. Tell Claude; it compares the records."
+echo "checkpoint $CK arms done. The embedder stays stopped."
