@@ -118,18 +118,6 @@ def _arena_step_slots() -> int:
     return value if value > 0 else 8
 
 
-def _arena_chunk_boundaries(capacity: int, step_slots: int) -> list[int]:
-    """Local mirror of ``cache_budget._arena_chunk_boundaries`` (that helper is
-    private to cache_budget.py, which this task must not edit). Kept in exact
-    lockstep with its docstring contract: ascending usable-slot values that land
-    on a real commit/uncommit chunk boundary, the last one possibly partial."""
-    assert step_slots > 0
-    boundaries = [0]
-    while boundaries[-1] < capacity:
-        boundaries.append(min(boundaries[-1] + step_slots, capacity))
-    return boundaries
-
-
 def _flashinfer_available() -> bool:
     from freetoken.kernel.backend import is_flashinfer_installed
 
@@ -1962,7 +1950,10 @@ class Engine:
         pool = self.kv_cache
         moe = self.moe_offload_cache
         assert moe is not None
-        from freetoken.engine.cache_budget import arena_bytes_for_usable
+        from freetoken.engine.cache_budget import (
+            _arena_chunk_boundaries,
+            arena_bytes_for_usable,
+        )
 
         capacity, step_slots = arena_layout
         bank_row_bytes = moe.bank_row_bytes
