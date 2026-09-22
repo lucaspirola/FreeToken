@@ -24,6 +24,10 @@ from freetoken.models.nemotron_h.weight import (
     NVFP4_EXPERT_SOURCE_SPEC as NEMOTRON_SPEC,
 )
 from freetoken.moe.offload_cache import OffloadMoeCache
+from freetoken.moe.offload_cache import set_expert_arena
+
+# S7: the arena gate is a config value; publish the env the device test passes.
+set_expert_arena(os.environ["FREETOKEN_EXPERT_ARENA"] == "1")
 
 L, E, H, ISZ = 3, 8, 32, 32
 SUFFIX = {

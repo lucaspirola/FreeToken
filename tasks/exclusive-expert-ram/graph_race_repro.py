@@ -18,6 +18,10 @@ os.environ.setdefault("FREETOKEN_EXPERT_ARENA", "1")
 
 from swap_smoke import write_ckpt, L, E, H, ISZ
 from freetoken.moe.offload_cache import OffloadMoeCache
+from freetoken.moe.offload_cache import set_expert_arena
+
+# S7: the arena gate is a config value; publish the env the device test passes.
+set_expert_arena(os.environ["FREETOKEN_EXPERT_ARENA"] == "1")
 from freetoken.moe.mirror_pool import MirrorExpertPool, plan_capacity
 import types
 
