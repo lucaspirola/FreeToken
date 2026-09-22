@@ -78,11 +78,22 @@ arm ck1-mirror-1m   FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 1000000" FT_POST="$
 arm ck1-mirror      FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 80000 713000"
 arm ck1-whole-close FT_ROWS=0
 
+# R3 from acceptance.sh. Its R6 checks the production system unit freetoken-serve (down by
+# design during measurements) and read /proc/0/limits on checkpoint 1; for an arm only its
+# journal half applies, plus the memlock limit the user manager gives transient units.
+r6_arm() {
+  local j="$1" start
+  start=$(grep -n "ServerArgs(model_path" "$j" | tail -1 | cut -d: -f1)
+  ! tail -n +"$start" "$j" | grep -qi "settled pageable" &&
+    ! tail -n +"$start" "$j" | grep -qi "mlock.*fail" &&
+    [ "$(systemctl --user show -p DefaultLimitMEMLOCK --value)" = infinity ] &&
+    echo "R6(arm) ok: no pageable fallback, no mlock failure, user DefaultLimitMEMLOCK=infinity"
+}
 for a in ck1-whole ck1-mirror-1m ck1-mirror ck1-whole-close; do
-  for r in R3 R6; do
-    printf '%s %s: ' "$a" "$r"
-    FREETOKEN_LOG="$OUT/$a-journal.txt" bash "$REPO/benchmarks/switchyard_soak/checks/acceptance.sh" "$r" \
-      > "$OUT/$a-acceptance-$r.txt" 2>&1 && echo PASS || echo "FAIL (see $a-acceptance-$r.txt)"
-  done
+  printf '%s R3: ' "$a"
+  FREETOKEN_LOG="$OUT/$a-journal.txt" bash "$REPO/benchmarks/switchyard_soak/checks/acceptance.sh" R3 \
+    > "$OUT/$a-acceptance-R3.txt" 2>&1 && echo PASS || echo "FAIL (see $a-acceptance-R3.txt)"
+  printf '%s R6(arm): ' "$a"
+  r6_arm "$OUT/$a-journal.txt" > "$OUT/$a-acceptance-R6.txt" 2>&1 && echo PASS || echo "FAIL (see $a-acceptance-R6.txt)"
 done
 echo "checkpoint 1 arms done. The embedder stays stopped. Tell Claude; it compares the records."

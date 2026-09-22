@@ -1,0 +1,7 @@
+code: 4846b75 S0 fix: restore the nvfp4 and bf16 expert-bank providers the merge dropped
+preflight ok: GPU 0 MiB, MemAvailable 25 GiB, no server, no pytest
+code: 4846b75 S0 fix: restore the nvfp4 and bf16 expert-bank providers the merge dropped
+preflight ok: GPU 0 MiB, MemAvailable 25 GiB, no server, no pytest
+=== arm ck1-whole ===
+[ck1-whole] starting: model=NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 rows=0 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/reorg@4846b75 venv=/home/lucas/ai/FreeToken/.venv
+Running as unit: ft-measure-ck1-whole.service; invocation ID: 5d395bd2cad146c385dd7b2404a9f28b

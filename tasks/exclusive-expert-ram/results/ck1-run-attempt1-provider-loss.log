@@ -1,0 +1,49 @@
+code: 28655a0 checkpoint1.sh: only a real python -m pytest blocks preflight, not a worker queued on the lock
+stopping piro-board-embedder for the measurement (it is NOT restarted afterwards)
+preflight ok: GPU 0 MiB, MemAvailable 25 GiB, no server, no pytest
+code: 28655a0 checkpoint1.sh: only a real python -m pytest blocks preflight, not a worker queued on the lock
+preflight ok: GPU 0 MiB, MemAvailable 25 GiB, no server, no pytest
+=== arm ck1-whole ===
+[ck1-whole] starting: model=NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 rows=0 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/reorg@28655a0 venv=/home/lucas/ai/FreeToken/.venv
+Running as unit: ft-measure-ck1-whole.service; invocation ID: 8ab10650b52347e19eac12636dd168fe
+[ck1-whole] FAILED to start; last log:
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]:             ^^^^^^^^^^^^^^^^
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]:   File "/home/lucas/ai/FreeToken-wt/reorg/python/freetoken/moe/expert_banks.py", line 789, in _build
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]:     return _legacy_expert_banks(model_path, model_config, device, dtype, dummy, par, workers, chunk, decode_target, layer_sink)
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]:   File "/home/lucas/ai/FreeToken-wt/reorg/python/freetoken/moe/expert_banks.py", line 470, in _legacy_expert_banks
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]:     raise ValueError(
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]: ValueError: 'nvfp4' experts load through their MoE quant method; only ['gguf', 'laguna_int4', 'q4_0'] still have a format provider
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]: The above exception was the direct cause of the following exception:
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]: Traceback (most recent call last):
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]:   File "/usr/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]:     self.run()
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]:   File "/usr/lib/python3.12/multiprocessing/process.py", line 108, in run
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]:     self._target(*self._args, **self._kwargs)
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]:   File "/home/lucas/ai/FreeToken-wt/reorg/python/freetoken/server/launch.py", line 81, in _run_scheduler
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]:     scheduler = Scheduler(args)
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]:                 ^^^^^^^^^^^^^^^
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]:   File "/home/lucas/ai/FreeToken-wt/reorg/python/freetoken/scheduler/scheduler.py", line 167, in __init__
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]:     self.engine = Engine(config)
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]:                   ^^^^^^^^^^^^^^
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]:   File "/home/lucas/ai/FreeToken-wt/reorg/python/freetoken/engine/engine.py", line 564, in __init__
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]:     self._init_offload_moe_cache(config)
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]:   File "/home/lucas/ai/FreeToken-wt/reorg/python/freetoken/engine/engine.py", line 1103, in _init_offload_moe_cache
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]:     with _weight_load_context():
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]:   File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]:     self.gen.throw(value)
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]:   File "/home/lucas/ai/FreeToken-wt/reorg/python/freetoken/engine/engine.py", line 444, in _weight_load_context
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]:     raise WeightLoadError(f"{type(exc).__name__}: {exc}") from exc
+Sep 23 00:13:30 TESSERACT serve-default.sh[3414049]: freetoken.engine.engine.WeightLoadError: ValueError: 'nvfp4' experts load through their MoE quant method; only ['gguf', 'laguna_int4', 'q4_0'] still have a format provider
+Sep 23 00:13:31 TESSERACT serve-default.sh[3413942]: INFO:     127.0.0.1:46792 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+Sep 23 00:13:36 TESSERACT serve-default.sh[3413942]: INFO:     127.0.0.1:46794 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+Sep 23 00:13:40 TESSERACT serve-default.sh[3413942]: [2026-09-23|00:13:40|FrontendAPI] ERROR    Backend worker is gone and cannot be restarted; stopping the API server
+Sep 23 00:13:40 TESSERACT serve-default.sh[3413942]: INFO:     Shutting down
+Sep 23 00:13:40 TESSERACT serve-default.sh[3413942]: INFO:     Waiting for application shutdown.
+Sep 23 00:13:40 TESSERACT serve-default.sh[3413942]: INFO:     Application shutdown complete.
+Sep 23 00:13:40 TESSERACT serve-default.sh[3413942]: INFO:     Finished server process [3413942]
+Sep 23 00:13:40 TESSERACT serve-default.sh[3414048]: /usr/lib/python3.12/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 3 leaked semaphore objects to clean up at shutdown
+Sep 23 00:13:40 TESSERACT serve-default.sh[3414048]:   warnings.warn('resource_tracker: There appear to be %d '
+Sep 23 00:13:40 TESSERACT systemd[373]: ft-measure-ck1-whole.service: Main process exited, code=exited, status=143/n/a
+Sep 23 00:13:40 TESSERACT systemd[373]: ft-measure-ck1-whole.service: Failed with result 'exit-code'.
+Sep 23 00:13:40 TESSERACT systemd[373]: ft-measure-ck1-whole.service: Consumed 12.335s CPU time.
