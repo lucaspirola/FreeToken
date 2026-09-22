@@ -192,6 +192,11 @@ class EngineConfig:
     # Reserve the full KV virtual range but physically commit it in chunks, shrinking the
     # GPU expert cache at each boundary. Zero keeps the conventional eager allocation.
     kv_grow_step_tokens: int = 0
+    # Fixed-capacity VMM expert arena whose usable slot count shrinks/grows in place, so a
+    # growable-KV resize never rebuilds the expert cache or recaptures decode graphs. The
+    # engine publishes it to moe/offload_cache.py + offload_kernels.py at init. Resolved by
+    # server/args.py (--expert-arena; FREETOKEN_EXPERT_ARENA=1 is its alias).
+    expert_arena: bool = False
     # Tokenize each prompt frontend-side so an over-length one is answered with a 400
     # context_length_exceeded before it costs a queue slot (--no-context-preflight opts
     # out; FREETOKEN_CONTEXT_PREFLIGHT overrides both). The scheduler enforces the window

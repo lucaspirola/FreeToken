@@ -158,7 +158,22 @@ MARLIN_MAX_CACHE_SIZE = 992
 # arena_bytes_for_usable / usable_for_target_free_bytes byte model, which this
 # module's bank_row_bytes/arena_layout attributes feed). Default OFF: with the gate
 # unset, OffloadMoeCache behavior is byte-for-byte identical to before this change.
-FREETOKEN_EXPERT_ARENA = os.environ.get("FREETOKEN_EXPERT_ARENA", "0").strip() == "1"
+# A config value, not an import-time env read: the engine publishes
+# EngineConfig.expert_arena through set_expert_arena at init, before any cache is
+# built; server/args.py resolves --expert-arena and its FREETOKEN_EXPERT_ARENA alias.
+FREETOKEN_EXPERT_ARENA = False
+
+
+def set_expert_arena(enabled: bool) -> None:
+    """Publish the expert-arena gate to this module and to ``offload_kernels``.
+
+    Read by ``OffloadMoeCache.__post_init__`` and by the kernel launchers, which
+    must agree, so both module flags are set together.
+    """
+    global FREETOKEN_EXPERT_ARENA
+    from freetoken.moe import offload_kernels
+
+    FREETOKEN_EXPERT_ARENA = offload_kernels.FREETOKEN_EXPERT_ARENA = bool(enabled)
 
 
 

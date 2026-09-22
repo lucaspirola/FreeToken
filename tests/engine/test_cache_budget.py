@@ -731,6 +731,7 @@ def test_growable_moe_bytes_unchanged_for_legacy_cache_without_arena_attrs():
     attribute, so ``getattr(..., None)`` must fall through to the old uniform/mixed
     formula unchanged."""
     from freetoken.engine.engine import Engine
+    from freetoken.engine.growable_kv import GrowableKvController
 
     class LegacyMoeCache:
         num_experts = 4
@@ -752,12 +753,13 @@ def test_growable_moe_bytes_unchanged_for_legacy_cache_without_arena_attrs():
         prefill_overlap=False,
         fallback_per_expert_bytes=expert_bytes_per_slot(sources),
     )
-    assert engine._growable_moe_bytes(6) == expected
+    assert GrowableKvController(engine)._growable_moe_bytes(6) == expected
     assert expected == 6 * 512
 
 
 def test_growable_moe_bytes_uses_arena_model_when_attrs_present():
     from freetoken.engine.engine import Engine
+    from freetoken.engine.growable_kv import GrowableKvController
 
     class ArenaMoeCache:
         num_experts = 4
@@ -768,7 +770,7 @@ def test_growable_moe_bytes_uses_arena_model_when_attrs_present():
     engine.moe_offload_cache = ArenaMoeCache()
     engine._growable_moe_prefill_overlap = False
 
-    assert engine._growable_moe_bytes(5) == arena_bytes_for_usable(5, 10, 4, _HAND_ROWS)
+    assert GrowableKvController(engine)._growable_moe_bytes(5) == arena_bytes_for_usable(5, 10, 4, _HAND_ROWS)
 
 
 def test_adjust_config_rope_gate_exempts_dsv4():

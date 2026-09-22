@@ -687,6 +687,18 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--expert-arena",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Give the GPU expert cache a fixed-capacity VMM arena whose usable slot "
+            "count shrinks/grows in place, so --kv-grow-step-tokens resizes never "
+            "rebuild the cache or recapture decode graphs. Unset: on iff "
+            "FREETOKEN_EXPERT_ARENA=1 (the alias scripts/serve-default.sh exports)."
+        ),
+    )
+
+    parser.add_argument(
         "--attention-backend",
         "--attn",
         type=validate_attn_backend,
@@ -1553,6 +1565,12 @@ def parse_args(
 
     if kwargs.get("kv_grow_step_tokens") is None:
         kwargs["kv_grow_step_tokens"] = 0
+    # The expert arena: FREETOKEN_EXPERT_ARENA is --expert-arena's alias and is read HERE
+    # only (offload_cache.py / offload_kernels.py used to read it at import time).
+    if kwargs.get("expert_arena") is None:
+        kwargs["expert_arena"] = (
+            os.environ.get("FREETOKEN_EXPERT_ARENA", "0").strip() == "1"
+        )
     # Expert residency (moe/residency.py). The FREETOKEN_MIRROR_* environment
     # names resolve HERE and nowhere else: FREETOKEN_MIRROR_HOST_ROWS is
     # --moe-mirror-host-rows spelled for serve.env, FREETOKEN_MIRROR_EXPERT_RAM=1 is

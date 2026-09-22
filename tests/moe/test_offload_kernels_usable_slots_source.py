@@ -59,11 +59,14 @@ def test_gate_flag_exists_and_defaults_off():
         )
     ]
     assert assigns, "FREETOKEN_EXPERT_ARENA module-level flag not found"
-    # Must be derived from os.getenv(..., "0") (or equivalent falsy default) so the
-    # legacy host-scalar kernels are the default path.
-    call_src = ast.get_source_segment(src, assigns[0].value)
-    assert "os.getenv" in call_src
-    assert '"0"' in call_src or "'0'" in call_src
+    # Must default to off so the legacy host-scalar kernels are the default path, and
+    # must be a plain constant: the engine publishes EngineConfig.expert_arena at init
+    # (offload_cache.set_expert_arena); FREETOKEN_EXPERT_ARENA is an args.py alias, not
+    # an import-time env read (refactor step S7).
+    value = assigns[0].value
+    assert isinstance(value, ast.Constant) and value.value is False, (
+        ast.get_source_segment(src, value)
+    )
 
 
 def test_legacy_sized_kernels_unchanged_signature_keeps_host_scalars():

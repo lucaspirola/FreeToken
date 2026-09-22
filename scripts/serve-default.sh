@@ -12,7 +12,8 @@
 #   cold session restore" on every swap-in and fell back to a full re-prefill.
 # KV starts at one 64K step and grows on demand up to 1M tokens, funded from the on-GPU
 # expert cache only when VRAM actually runs out. The expert cache is a fixed-capacity VMM
-# arena (FREETOKEN_EXPERT_ARENA=1), so growing or shrinking it never reallocates buffers
+# arena (FREETOKEN_EXPERT_ARENA=1, the alias server/args.py resolves into --expert-arena),
+# so growing or shrinking it never reallocates buffers
 # and decode CUDA graphs are never recaptured; FREETOKEN_GROWABLE_OVERLAP=1 keeps overlap
 # scheduling on while KV is growable.
 #

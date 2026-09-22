@@ -75,7 +75,8 @@ it, and every failure mode is a way of breaking it.
 * `min_gpu_slots` = `total - capacity + reserve`, i.e. the GPU residents
   coverage needs. A saturated pool (`capacity >= total`) is exempt. The KV
   arena may not shrink the expert cache below it; `_grow_runtime_kv_arena`
-  folds it into the floor **before** the shrink, and adds the buffer region
+  (`engine/growable_kv.py` since reorg S7, reading it as
+  `moe.residency.min_gpu_slots()`) folds it into the floor **before** the shrink, and adds the buffer region
   below, because `min_gpu_slots` counts residents while the floor counts slots.
 * `prefill_buffer_slots(E)` = `2 * E`: the head of the cache, which the prefill
   double buffer owns outright under the mirror. See below.
@@ -148,7 +149,10 @@ prefill takes 0.34 s. It is the single largest thing that was wrong here.
 
 ## Hard requirements
 
-* **`FREETOKEN_EXPERT_ARENA=1`.** Only the gated `_v2` admission kernel
+* **The expert arena on** (`--expert-arena`, or its alias `FREETOKEN_EXPERT_ARENA=1`,
+  resolved by `server/args.py` into `EngineConfig.expert_arena` since reorg S7; the
+  engine publishes it with `offload_cache.set_expert_arena`, and scripts that build an
+  `OffloadMoeCache` directly must call that themselves). Only the gated `_v2` admission kernel
   publishes `victim_ids`/`prior_ids`, and the swap kernel needs the displaced
   expert's identity to know whether its bytes still exist. On the ungated
   kernel every writeback is skipped and coverage is lost with the fault

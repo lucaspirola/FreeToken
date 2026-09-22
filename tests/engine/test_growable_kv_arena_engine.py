@@ -1,11 +1,11 @@
 """Torch-backed exercise of the growable-KV expert-arena resize path (design step 5).
 
-``test_growable_kv_transaction_source.py`` extracts grow_runtime_kv/shrink_runtime_kv
-by AST and runs them against tiny stubs without ever importing ``freetoken.engine.engine``
-(the production module pulls in torch/model kernels). This file instead drives the REAL,
-non-extracted methods on a minimally-constructed ``Engine`` (``Engine.__new__``, bypassing
-``__init__``/model load/GPU allocation -- the same pattern ``test_cache_budget.py`` uses),
-so it also catches real attribute-path/decorator mistakes the AST extraction cannot see.
+``test_growable_kv_transaction.py`` drives ``GrowableKvController`` against a plain stub
+engine. This file instead enters through the REAL ``Engine.grow_runtime_kv`` /
+``shrink_runtime_kv`` delegations on a minimally-constructed ``Engine`` (``Engine.__new__``,
+bypassing ``__init__``/model load/GPU allocation -- the same pattern ``test_cache_budget.py``
+uses) with a real controller, so it also catches attribute-path/decorator mistakes between
+the engine and the controller (refactor step S7).
 
 ``_plan_growable_kv`` is a large, separately-tested budget planner; it is stubbed here
 exactly as the AST test stubs it, since the expert-arena resize only consumes its
@@ -22,6 +22,7 @@ import torch
 
 from freetoken.engine.cache_budget import arena_bytes_for_usable
 from freetoken.engine.engine import Engine
+from freetoken.engine.growable_kv import GrowableKvController
 from freetoken.moe.residency import WholeModelResidency
 
 MiB = 1024 * 1024
@@ -108,7 +109,8 @@ def _engine(pool: FakePool, moe: FakeArenaMoe, *, free_bytes_fn=lambda: (0, 0)) 
     engine.attn_backend = SimpleNamespace(
         reset_capture=lambda: pytest.fail("expert-arena resize must never reset capture")
     )
-    engine._plan_growable_kv = lambda pages, **kw: (0, pages * MiB)
+    engine.growable_kv = GrowableKvController(engine)
+    engine.growable_kv._plan_growable_kv = lambda pages, **kw: (0, pages * MiB)
     engine._sync_get_memory = free_bytes_fn
     engine.sync_all_ranks = lambda: None
     return engine
