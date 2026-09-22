@@ -8,12 +8,11 @@
 # the refactor added no GPU work; the checkpoint bundle (7.2) is too coarse to
 # see a 2-3% regression, this instrument is not.
 #
-# THE OWNER RUNS THIS (plan 9.4: "the owner starts and stops servers for
-# checkpoints"; CLAUDE.md: "Do not start the server from an agent shell"). This
-# script prepares, orchestrates and analyses; nothing about running it from an
-# agent shell is safe, because the harness can kill the shell mid-capture and
-# take the transient unit with it (systemd-run + a trap protects against a
-# clean exit, not a killed shell).
+# Launch it as a systemd transient unit itself (systemd-run --user ... instrument.sh run
+# ...), never from a plain agent shell: CLAUDE.md "Do not start the server from an agent
+# shell" -- the harness can kill the shell mid-capture and take the arm's unit with it.
+# (An earlier version said "THE OWNER RUNS THIS", citing the plan's agent-authored 9.4;
+# the owner chose on 2026-09-23 that the agent runs checkpoints.)
 #
 # Usage:
 #   instrument.sh run   --before /path/to/worktree/at/before-commit \
@@ -180,6 +179,10 @@ case "$CMD" in
 esac
 
 BEFORE_DIR=""; AFTER_DIR=""; LABEL=""; PORT=1920; SIZE=8000; DECODE_TOKENS=128
+# The arm's residency is pinned like measure.sh does (the host serve.env carries
+# FREETOKEN_MIRROR_* and would otherwise decide it): default = the record config,
+# auto pool (-1) with reserve 256 (2E), ratio 1.00. --rows 0 = whole model in RAM.
+ROWS=-1; RESERVE=256; RATIO=1.00
 NAME="nemotron-3.5-lightning"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -190,6 +193,8 @@ while [ $# -gt 0 ]; do
     --size) SIZE="$2"; shift 2 ;;
     --decode-tokens) DECODE_TOKENS="$2"; shift 2 ;;
     --model-name) NAME="$2"; shift 2 ;;
+    --rows) ROWS="$2"; shift 2 ;;
+    --reserve) RESERVE="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
@@ -208,7 +213,8 @@ preflight() {
     die "refusing: port $PORT is occupied"
   fi
   systemctl is-active --quiet freetoken-serve 2>/dev/null && die "the production unit freetoken-serve is running: ft-down first"
-  pgrep -f 'pytest' >/dev/null && die "a pytest is running (a worker?): wait for it"
+  # only a real pytest process, not a worker's shell queued on the host lock
+  pgrep -f '^[^ ]*python[0-9.]* -m pytest' >/dev/null && die "a pytest is running (a worker?): wait for it"
   if systemctl --user is-active --quiet piro-board-embedder 2>/dev/null; then
     echo "stopping piro-board-embedder for the measurement (it is NOT restarted afterwards)"
     systemctl --user stop piro-board-embedder
@@ -231,6 +237,18 @@ run_arm() {
 
   preflight
   systemctl --user reset-failed "$UNIT" 2>/dev/null || true
+  local ARMENV="$OUT/instrument-$LABEL-$SUFFIX.env"
+  grep -vE '^[[:space:]]*export[[:space:]]+(FREETOKEN_MIRROR_EXPERT_RAM|FREETOKEN_MIRROR_HOST_ROWS|FREETOKEN_MEMORY_RATIO|FREETOKEN_MIRROR_RESERVE_ROWS|FREETOKEN_MIRROR_TIEBREAK)=' \
+    "$HOME/.config/freetoken/serve.env" > "$ARMENV" 2>/dev/null || : > "$ARMENV"
+  {
+    echo "export FREETOKEN_MEMORY_RATIO=$RATIO"
+    if [ "$ROWS" = "0" ]; then
+      echo "export FREETOKEN_MIRROR_EXPERT_RAM=0"; echo "export FREETOKEN_MIRROR_HOST_ROWS=0"
+    else
+      echo "export FREETOKEN_MIRROR_EXPERT_RAM=1"; echo "export FREETOKEN_MIRROR_HOST_ROWS=$ROWS"
+      echo "export FREETOKEN_MIRROR_RESERVE_ROWS=$RESERVE"
+    fi
+  } >> "$ARMENV"
 
   echo "[$SUFFIX] starting worktree=$WT commit=$COMMIT port=$PORT"
   # nsys launch primes CUDA/NVTX injection into the process tree that
@@ -241,6 +259,7 @@ run_arm() {
   systemd-run --user --unit="$UNIT" --property=OOMScoreAdjust=1000 \
     --setenv=PATH="$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/wsl/lib" \
     --setenv=FREETOKEN_PORT="$PORT" \
+    --setenv=FREETOKEN_HOST_ENV="$ARMENV" \
     --setenv=UV_PROJECT_ENVIRONMENT="$FT_VENV_DEFAULT" \
     --setenv=UV_NO_SYNC=1 \
     --setenv=PYTHONPATH="$WT/python" \
