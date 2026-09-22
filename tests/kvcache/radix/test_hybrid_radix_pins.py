@@ -310,27 +310,6 @@ def test_the_token_budget_releases_lru_first_and_refuses_what_never_fits():
     assert (c["pin_evictions"], c["pin_budget_refusals"]) == (1, 1)
 
 
-def test_enforce_pin_budget_releases_pins_a_smaller_pool_cannot_carry():
-    """An elastic shrink re-derives the working set and enforces against the target pool."""
-    pool = _pool(num_slots=16)
-    cm = _cm(pool, min_tokens=4, working_set=4)              # budget 16 - 4 - 3 = 9
-    _insert(cm, pool, [1, 2, 3, 4, 5])
-    _insert(cm, pool, [7, 8, 9, 10, 11])
-    _admit(cm, [1, 2, 3, 4, 5], session="a")
-    _admit(cm, [1, 2, 3, 4, 5], session="b")
-    _admit(cm, [7, 8, 9, 10, 11], session="a")
-    _admit(cm, [7, 8, 9, 10, 11], session="b")
-    assert _ledger(cm) == (2, 10, 2)
-    assert cm.enforce_pin_budget() == 0                        # within the live budget
-    # Target tier: 1 request (4 slots) + 4 cache + padding = 9 slots -> budget 4 - 2 = 2.
-    assert cm.enforce_pin_budget(pool_slots=9) == 0
-    # Target 8 slots (cache 3) -> budget 1: the older pin goes.
-    assert cm.enforce_pin_budget(pool_slots=8) == 1
-    assert _ledger(cm) == (1, 5, 1) and cm.prefix_counters.pin_evictions == 1
-    assert _node(cm, [7, 8, 9, 10, 11]).mamba_ref_count == 1
-    cm.check_integrity()
-
-
 # --------------------------------------------------------------------------- ledger
 def test_re_matching_a_pinned_prefix_refreshes_it_without_a_second_lock():
     pool = _pool()

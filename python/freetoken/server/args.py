@@ -1217,9 +1217,9 @@ def parse_args(
         help=(
             "Prefix auto-pin threshold (hybrid radix cache only). A cached prefix at least "
             "this long that requests from two DIFFERENT sessions match through is locked "
-            "against eviction (a session's own next turn never pins). Released by a newer "
-            "pin over budget (LRU) or DELETE /v1/cache/pins. 0 disables pinning. "
-            "Default 1024."
+            "against eviction (under --pin-prefix-scope shared a session's own next turn "
+            "never pins). Released by a newer pin over budget (LRU) or DELETE "
+            "/v1/cache/pins. 0 disables pinning. Default 1024."
         ),
     )
 
@@ -1246,7 +1246,23 @@ def parse_args(
             "Total KV token budget for pinned prefixes. Over it the least-recently-matched "
             "pin is released first (scheduler.prefix.pin_evictions); a pin that does not "
             "fit even an empty ledger is refused (pin_budget_refusals). Clamped to 25%% of "
-            "the KV pool; 0 = that cap. Default 65536."
+            "the KV pool; 0 = that cap (refused with --pin-prefix-scope session). "
+            "Default 65536."
+        ),
+    )
+
+    parser.add_argument(
+        "--pin-prefix-scope",
+        choices=("shared", "session"),
+        dest="pin_prefix_scope",
+        default=ServerArgs.pin_prefix_scope,
+        help=(
+            "Which prefixes auto-pin (hybrid radix cache only). shared (default): a prefix "
+            "two DIFFERENT sessions match through. session: also the prefix a request with "
+            "a session key leaves in the cache when it finishes, so one agent re-reading its "
+            "own long prompt keeps it across the growable-KV shrink; such a pin holds its "
+            "whole KV path but only the deepest max(1, slot budget / 2) GDN snapshots. "
+            "Budgeted and released like any pin; requires --pin-prefix-max-tokens > 0."
         ),
     )
 
@@ -1416,6 +1432,13 @@ def parse_args(
         parser.error("--pin-prefix-max-tokens must be >= 0")
     if kwargs["pin_prefix_max_slots"] < -1:
         parser.error("--pin-prefix-max-slots must be >= -1 (-1 = auto)")
+    from freetoken.scheduler.cache import pin_prefix_scope_error
+
+    pin_scope_error = pin_prefix_scope_error(
+        kwargs["pin_prefix_scope"], kwargs["pin_prefix_max_tokens"]
+    )
+    if pin_scope_error is not None:
+        parser.error(pin_scope_error)
     if kwargs["trace_dir"] is not None:
         # Expanded once here so ~ and $VAR resolve against the server's own environment.
         # Unlike --hidden-states-dir this may not exist yet: nothing outside the server

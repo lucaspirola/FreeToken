@@ -200,6 +200,7 @@ class Scheduler(SchedulerIOMixin):
             pin_prefix_min_tokens=getattr(config, "pin_prefix_min_tokens", 0),
             pin_prefix_max_tokens=getattr(config, "pin_prefix_max_tokens", 0),
             pin_prefix_max_slots=getattr(config, "pin_prefix_max_slots", -1),
+            pin_prefix_scope=getattr(config, "pin_prefix_scope", "shared"),
             # The concurrency the GDN pool was sized for (linear_state_pool.py).
             pin_working_set_slots=PIN_WORKING_SET_SLOTS_PER_REQUEST * config.max_running_req,
         )

@@ -229,8 +229,8 @@ class PrefixCounters:
 
     The pin fields are gauges (``pinned_prefixes``, ``pinned_tokens``, ``pinned_slots`` --
     the GDN state slots the pinned snapshots hold) plus two counters: ``pin_evictions``
-    (pins released least-recently-matched-first to make room for a newer pin or after an
-    elastic resize) and ``pin_budget_refusals`` (a pin that would not fit even with every
+    (pins released least-recently-matched-first to make room for a newer pin) and
+    ``pin_budget_refusals`` (a pin that would not fit even with every
     other pin released): see ``CacheManager.pin_prefix``.
     """
 

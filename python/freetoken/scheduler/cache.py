@@ -152,8 +152,8 @@ class CacheManager:
         # (i.e. costs a state slot).
         self.pin_prefix_min_tokens = max(0, int(pin_prefix_min_tokens or 0))
         # State-slot budget: -1 = auto from the pool geometry (``pin_slot_budget``);
-        # ``pin_working_set_slots`` is 4 x the request concurrency the pool was sized for,
-        # updated by the scheduler on an elastic resize.
+        # ``pin_working_set_slots`` is 4 x the request concurrency the pool was sized for
+        # (``--max-running-requests``), fixed at construction.
         self.pin_prefix_max_slots = int(pin_prefix_max_slots)
         self.pin_working_set_slots = max(0, int(pin_working_set_slots or 0))
         # Budget cap: at most PIN_BUDGET_MAX_FRACTION of the pool, whatever the flag says
@@ -528,11 +528,6 @@ class CacheManager:
             return None
         return self.linear_state_pool.alloc(1)[0]
 
-    def remap_mamba_slots(self, remap: dict[int, int]) -> None:
-        if not self.is_hybrid:
-            return
-        self.prefix_cache.remap_mamba_slots(remap)
-
     def snapshot_toolcall_anchor(self, reqs: List[Req]) -> None:
         """Freeze each decoding request's GDN state at its tool-call anchor, into the ping-pong
         slot that is idle during decode (the kernel-side ×CHUNK track only runs on prefill
@@ -639,15 +634,14 @@ class CacheManager:
             max(0, pool.num_slots - pin_working_set_slots - 1 - PIN_SLOT_BUDGET_SPARE)
 
         so a full batch can still take its 4 slots per request and two cache slots stay
-        free for donations/restores. Re-read on every pin: an elastic resize changes both
-        terms.
+        free for donations/restores. ``pin_working_set_slots`` is fixed at construction;
+        ``pool.num_slots`` is re-read because a cache rebuild (``num_mamba_slots``) can
+        resize the pool (and drops the pins with the tree).
         """
-        pool = self.linear_state_pool
-        return self._slot_budget(pool.num_slots if pool is not None else 0)
-
-    def _slot_budget(self, pool_slots: int) -> int:
         if self.pin_prefix_max_slots >= 0:
             return self.pin_prefix_max_slots
+        pool = self.linear_state_pool
+        pool_slots = pool.num_slots if pool is not None else 0
         return max(0, pool_slots - self.pin_working_set_slots - 1 - PIN_SLOT_BUDGET_SPARE)
 
     def note_prompt_admitted(
@@ -739,8 +733,7 @@ class CacheManager:
         operator's release valve is ``DELETE /v1/cache/pins``; :meth:`rebuild` drops the
         pins with the tree. Nothing else can take a pinned node: ``evict_full`` walks only
         ``ref_count == 0`` leaves, ``evict_mamba`` only ``mamba_ref_count == 0`` snapshots,
-        ``split_at`` copies the ref count to the root-side half, and an elastic resize
-        remaps slot ids in place.
+        and ``split_at`` copies the ref count to the root-side half.
         """
         if node is None or node.is_root():
             return True
@@ -847,23 +840,6 @@ class CacheManager:
             return True
         return bool(self.pin_prefix_max_tokens
                     and c.pinned_tokens + new_tokens > self.pin_prefix_max_tokens)
-
-    def enforce_pin_budget(self, pool_slots: int | None = None) -> int:
-        """Release least-recently-matched pins until the budgets hold -- for an elastic
-        resize, against the pool size it is about to move to (``pool_slots``) and the
-        working set already set for that tier. Returns the number released."""
-        released = 0
-        c = self.prefix_counters
-        budget = self.pin_slot_budget if pool_slots is None else self._slot_budget(pool_slots)
-        while self._pins and (
-            c.pinned_slots > budget
-            or (self.pin_prefix_max_tokens and c.pinned_tokens > self.pin_prefix_max_tokens)
-        ):
-            victim = min(self._pins.values(), key=lambda p: p.last_match)
-            self._release_pin(victim.node)
-            self.prefix_counters.pin_evictions += 1
-            released += 1
-        return released
 
     @staticmethod
     def _root_path(node) -> list:

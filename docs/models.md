@@ -383,9 +383,10 @@ concern, not this checklist's.
   `--session-spill-dir off` to disable the cold tier.
   Closing a helper makes its pages evictable immediately, allowing the growable KV
   arena to decommit unused suffix segments and restore MoE residency.
-  Hybrid-GDN serving can also reserve only the normal four-agent recurrent-state and
-  graph footprint while admitting an eight-agent burst with
-  `--max-running-requests 8 --elastic-initial-requests 4`. Demand above four compacts
+  (Historical: `--elastic-initial-requests` was retired in S11 of the 2026-09 reorganisation;
+  single lane is the design. The measurement below is kept as a record.) Hybrid-GDN serving
+  could also reserve only the normal four-agent recurrent-state and graph footprint while
+  admitting an eight-agent burst with `--max-running-requests 8 --elastic-initial-requests 4`. Demand above four compacts
   and preserves live/session GDN states, trades MoE residency for 8-way state and
   graphs, then reverses the trade as soon as demand returns to four. An RTX 5080 Q4
   gate preserved all eight independent answers across 25 → 49 → 25 physical GDN
