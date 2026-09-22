@@ -237,10 +237,14 @@ def test_a_prefill_sweep_leaves_coverage_standing():
         cache, pool = _cache(root)
         try:
             _sweep(cache)
-            assert not cache._mirror_needs_coverage, (
-                "a sweep that needs the coverage restore is a sweep that "
-                "emptied the mirror -- the 19.3 GiB re-read is back"
-            )
+            # S2 deleted the batch-boundary coverage-restore flag this
+            # assertion used to check: the overlap path this sweep exercises
+            # never set it in the first place. What matters is what it stood
+            # for -- that the sweep leaves coverage standing -- checked
+            # directly below via the orphan scan; the one caller that used to
+            # raise the flag (materialize_layer) now raises a RuntimeError
+            # instead (see test_materialize_layer_raises_under_the_mirror
+            # below).
             base = cache._mirror_prefill_base()
             slots = cache.slot_for_id.view(-1).cpu().tolist()
             rows = cache._mirror["pool_row_of_id"].cpu().tolist()
@@ -548,5 +552,25 @@ def test_the_mirror_refuses_the_ungated_admission_kernel():
                     cache.attach_mirror_pool(pool)
             finally:
                 oc.FREETOKEN_EXPERT_ARENA = prev
+        finally:
+            pool.close()
+
+
+def test_materialize_layer_raises_under_the_mirror():
+    """S2: materialize_layer is not a supported prefill path under the mirror.
+
+    It used to be reachable and set a since-deleted coverage-restore flag for
+    a since-deleted batch-boundary restore. Under the mandatory overlap
+    (prefetch_prefill_layer -> _prefetch_split_mirror), that call site is
+    unreachable in the served configuration -- so a call arriving here means
+    something bypassed the overlap dispatch, and that must fail loudly
+    instead of quietly staging a layer the pool cannot actually hold in full.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        write_nvfp4_checkpoint(root, LAYERS, EXPERTS, H, ISZ)
+        cache, pool = _cache(root)
+        try:
+            with pytest.raises(RuntimeError, match="materialize_layer"):
+                cache.materialize_layer(0)
         finally:
             pool.close()

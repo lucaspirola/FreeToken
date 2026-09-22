@@ -1673,7 +1673,6 @@ class OffloadMoeCache:
                 or tuple(pool.schema_order) != tuple(self.bank_schema)):
             raise ValueError("mirror pool geometry/schema does not match cache")
         self._mirror_pool = pool
-        self._mirror_needs_coverage = False
         self.bank_sources = {name: list(pool.sources[name]) for name in self.bank_schema}
         self._variable_bank_rows.clear()
         self._size_class_enabled = False
@@ -1794,50 +1793,6 @@ class OffloadMoeCache:
             "feat_bytes": torch.tensor(feat_bytes, dtype=torch.int64, device=dev),
         }
         self._copy_fused_ok = False  # the mirror path drives the copies itself
-
-    def _mirror_restore_coverage(self) -> int:
-        """Re-mirror every expert the GPU does not hold (prefill -> decode).
-
-        Prefill trades coverage for a bounded pool; decode needs it back, or a
-        miss would have nowhere to read from. Rows come from the free stack and
-        from duplicates of GPU residents. Synchronous checkpoint reads, once per
-        transition, off the per-token path.
-        """
-        pool = self._mirror_pool
-        m = self._mirror
-        fwd = m["pool_row_of_id"].cpu().tolist()
-        inv = m["id_of_pool_row"].cpu().tolist()
-        live = set(f for f in self.id_of_slot[: self.cache_size].cpu().tolist()
-                   if f >= 0)
-        missing = [f for f in range(pool.total) if f not in live and fwd[f] < 0]
-        if not missing:
-            return 0
-        free = [r for r, owner in enumerate(inv) if owner < 0]
-        if len(free) < len(missing):
-            spare = [r for r, owner in enumerate(inv)
-                     if owner >= 0 and owner in live]
-            free.extend(spare[: len(missing) - len(free)])
-        if len(free) < len(missing):
-            raise RuntimeError(
-                f"mirror cannot restore decode coverage: {len(missing)} rows "
-                f"needed, {len(free)} available"
-            )
-        for flat, row in zip(missing, free):
-            old = inv[row]
-            if old >= 0:
-                fwd[old] = -1
-                pool.pool_row_of_id[old] = -1
-            pool._read_row(flat, row)
-            fwd[flat] = row
-            inv[row] = flat
-            pool.pool_row_of_id[flat] = row
-            pool.id_of_pool_row[row] = flat
-        m["pool_row_of_id"].copy_(torch.tensor(fwd, dtype=torch.int32))
-        m["id_of_pool_row"].copy_(torch.tensor(inv, dtype=torch.int32))
-        self._mirror_publish_free_rows()
-        logger.info_rank0("mirror re-established decode coverage: %d experts",
-                          len(missing))
-        return len(missing)
 
     def mirror_stats(self) -> dict:
         """Swap counters (swaps, free evictions, writebacks, coverage faults).
@@ -2758,18 +2713,13 @@ class OffloadMoeCache:
         self._pending_src_layer = layer_id
         self._pending_whole_layer = False
         if getattr(self, "_mirror", None) is not None:
-            # A prefill sweep clears every GPU resident except the last layer
-            # (the materialize kernel's same-layer invalidation spans the whole
-            # cache) and empties the mirror (each admission frees its source
-            # row). Incremental refilling cannot re-establish coverage then:
-            # it would need total - E mirror rows, more than the pool has. A
-            # full warm start is capacity-correct by construction -- it is the
-            # same arithmetic the pool was sized with -- at the cost of one
-            # checkpoint re-read (~4 s on this model) per prefill->decode
-            # transition, inside a prefill that takes tens of seconds.
-            if self._mirror_needs_coverage:
-                self.mirror_warm_start()
-                self._mirror_needs_coverage = False
+            # Decode coverage is maintained by construction under the mirror:
+            # prefill runs exclusively through the overlap path
+            # (prefetch_prefill_layer -> _prefetch_split_mirror), which never
+            # empties the mirror the way materialize_layer's whole-layer
+            # invalidation would -- so there is no batch-boundary restore to
+            # run here. (materialize_layer raises under the mirror; see
+            # its docstring.)
             # Entries linger from a longer previous step; the LRU kernel only
             # writes one per miss, so clear before it runs.
             self.victim_ids.fill_(-1)
@@ -2808,17 +2758,23 @@ class OffloadMoeCache:
         from freetoken.moe.offload_kernels import materialize_layer
 
         if getattr(self, "_mirror", None) is not None:
-            # materialize schedules a copy for EVERY expert of the layer,
-            # including ones already GPU-resident -- and a GPU-resident expert
-            # normally has no mirror row, so the swap kernel would see it as a
-            # coverage fault. Stage the whole layer into the mirror first; this
-            # is the prefill path, a host boundary, so the disk reads are off
-            # the decode critical path.
-            self._mirror_stage_layer(layer_id)
-            self._mirror_needs_coverage = True
-            self.victim_ids.fill_(-1)
-            self.prior_ids.fill_(-1)
-            self._mirror["prev_slot_of_id"].copy_(self.slot_for_id.view(-1))
+            # Not a supported path under the mirror. materialize schedules a
+            # copy for EVERY expert of the layer, including ones already
+            # GPU-resident, which would need staging the whole layer into the
+            # mirror first and then restoring decode coverage afterward (the
+            # bounded pool cannot hold "everything" at once) -- exactly the
+            # two duplicate coverage-restore paths this step deletes as dead
+            # and stale. Prefill under the mirror runs exclusively through
+            # the overlap path instead: prefetch_prefill_layer dispatches to
+            # _prefetch_split_mirror, which never reaches here. A call
+            # arriving here means that dispatch was bypassed -- loud and
+            # intended, not softened into a warning: continuing would either
+            # exhaust the pool or silently serve the wrong experts.
+            raise RuntimeError(
+                "materialize_layer is not supported under the bounded expert "
+                "mirror; prefill must go through prefetch_prefill_layer / "
+                "_prefetch_split_mirror instead"
+            )
         self._pending_src_layer = layer_id
         self._pending_whole_layer = True
         materialize_layer(self, layer_id)

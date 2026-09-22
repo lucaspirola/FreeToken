@@ -266,16 +266,17 @@ def _attach_fake_mirror(cache, pool_row_of_id) -> None:
     """Minimal stand-in for ``OffloadMoeCache.attach_mirror_pool``.
 
     ``ensure_experts`` only reads ``_mirror["pool_row_of_id"]`` (via the
-    kernel) and ``_mirror["prev_slot_of_id"]`` / ``_mirror_needs_coverage``
-    (its own bookkeeping, unrelated to Lever 2) -- so this fakes just enough
-    state to exercise the kernel without a real ``MirrorExpertPool``.
+    kernel) and ``_mirror["prev_slot_of_id"]`` (its own bookkeeping, unrelated
+    to Lever 2) -- so this fakes just enough state to exercise the kernel
+    without a real ``MirrorExpertPool``. (S2 deleted the batch-boundary
+    coverage-restore flag ``ensure_experts`` used to read; it reads nothing
+    else from the cache now.)
     """
     device = cache.slot_for_id.device
     cache._mirror = {
         "pool_row_of_id": torch.tensor(pool_row_of_id, dtype=torch.int32, device=device),
         "prev_slot_of_id": cache.slot_for_id.view(-1).clone(),
     }
-    cache._mirror_needs_coverage = False
 
 
 def test_tiebreak_evicts_the_candidate_with_a_pool_row():

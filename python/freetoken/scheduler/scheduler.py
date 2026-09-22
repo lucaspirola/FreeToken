@@ -3076,26 +3076,18 @@ class Scheduler(SchedulerIOMixin):
 
     def _forward(self, forward_input: ForwardInput) -> ForwardOutput:
         batch, sample_args, input_mapping, output_mapping = forward_input
-        # Bounded-mirror expert pool: a prefill sweep empties the mirror (each
-        # admission frees its source row) and clears every GPU resident except
-        # the last layer. Decode needs the coverage invariant back BEFORE the
-        # first decode step runs -- and a CUDA-graph replay never executes host
-        # code, so the cache's in-ensure_experts restore cannot fire inside
-        # forward_batch. This batch boundary is the host-visible point: run the
-        # restore eagerly here, then the replay reads a full pool. Cost: one
-        # checkpoint re-read (~4 s) per prefill->decode transition.
-        moe = self.engine.moe_offload_cache
-        if (
-            moe is not None
-            and not batch.is_prefill
-            and getattr(moe, "_mirror_needs_coverage", False)
-        ):
-            moe.mirror_warm_start()
-            moe._mirror_needs_coverage = False
-        # Same boundary, second job: surface a lost-coverage fault. The counters
-        # are written by a kernel that cannot raise, and a fault means the
+        # Bounded-mirror expert pool: prefill under the mirror runs
+        # exclusively through the overlap path (prefetch_prefill_layer ->
+        # _prefetch_split_mirror), which maintains the coverage invariant by
+        # construction and never empties the mirror the way a whole-layer
+        # materialize would -- so there is nothing to restore at this batch
+        # boundary (materialize_layer now raises under the mirror instead of
+        # being a second, stale restore path; see its docstring). The one job
+        # left here is to surface a lost-coverage fault: the counters are
+        # written by a kernel that cannot raise, and a fault means the
         # experts being multiplied are the wrong ones -- a loud failure here
         # beats a quietly wrong completion.
+        moe = self.engine.moe_offload_cache
         check = getattr(moe, "mirror_fault_check", None)
         if check is not None:
             check()
