@@ -62,6 +62,15 @@ export FREETOKEN_GROWABLE_OVERLAP="${FREETOKEN_GROWABLE_OVERLAP:-1}"
 
 mkdir -p "$CACHE"/{hidden-states,pooled-sink,spill,trace,logs}
 
+# Output cap: 65536, raised from 16384 on 2026-09-22. Measured on the needle
+# battery in this tree: a multi-hop question over a 20K haystack emitted 125119
+# characters of reasoning and hit finish_reason=length at exactly 16383
+# completion tokens, having already FOUND the fact but never reaching the
+# answer. The model card's own examples use max_tokens=16000 (README), which is
+# an example and not a ceiling: this model serves thinking ON by default and
+# reasoning is billed from the same budget as the answer, so a cap that merely
+# fits the answer truncates the thought that produces it. 65536 against a 1M
+# context; FREETOKEN_MAX_OUTPUT_TOKENS overrides it per host.
 exec uv run ft serve \
   --model "$MODEL" \
   --host 127.0.0.1 --port "${FREETOKEN_PORT:-1919}" \
@@ -77,7 +86,8 @@ exec uv run ft serve \
   --served-model-alias nemotron-3.5-lightning-judge \
   --served-model-alias nemotron-3.5-lightning-collect \
   --reasoning-parser nemotron_v3 --tool-call-parser qwen3_coder \
-  --force-nonempty-content --max-output-tokens 16384 \
+  --force-nonempty-content \
+  --max-output-tokens "${FREETOKEN_MAX_OUTPUT_TOKENS:-65536}" \
   --trace-dir "$CACHE/trace" \
   --hidden-states-dir "$CACHE/hidden-states" --hidden-states-max-tokens 4096 \
   --pooled-sink-dir "$CACHE/pooled-sink" --pin-prefix-min-tokens 1024 \
