@@ -275,8 +275,16 @@ From `tasks/exclusive-expert-ram/results/nemotron-reserve-2e-1m-{record.json,sta
 4. Correctness: `tasks/exclusive-expert-ram/needles.py` at 21K/120K with the raised thinking budget and `recall.py` at 21K/120K/240K; answers byte-identical to the whole-model reference **recorded on the same commit** (re-recorded once at checkpoint 1 after S0, then reused).
 5. S7 only: the `MoE slots a -> b` transition sequence in the 1M journal diffs clean against the record.
 
+**Known noise, measured 2026-09-23 [agent practice for reading it]:** an intermittent
+~2.5 s host-side delivery stall after the first token (GPU idle, tokens already computed)
+turns one probe's decode into 30-47 tok/s. It predates the reorg (3 of 152 probes on the
+frozen branch, 2 on exp/reorg). A single probe with that signature (decode window
+2.5-4 s where the size's steady window is < 1.7 s) is re-measured on the same commit,
+same config and order, before it counts as a regression; both readings are committed.
+Checkpoint 1's 1M pass 1 (30.7) re-measured at 79.0 (`83e5efb`).
+
 ### 7.3 The finer instrument (Phase C, because 7.2 cannot see a 2–3% regression)
-Before and after S6/S7, on the same commit pair, one 128-token decode at 8K under `torch.profiler` (or `nsys` if installed): the **count of kernel launches per decode step** and the **bytes moved per step** (`mirror_stats()` swaps/writebacks/retained, and `decode_miss_stats()`) must be identical. Identical launches plus identical bytes means no new GPU work; the remaining difference is Python outside the captured graph, which the graph replay never runs. File the two profiles under `results/instrument-<step>-{before,after}.txt`.
+Before and after S6/S7, on the same commit pair, one 128-token decode at 8K under `torch.profiler` (or `nsys` if installed): the **count of kernel launches per decode step** and the **bytes moved per step** (`mirror_stats()` swaps/writebacks/retained, and `decode_miss_stats()`) must be identical. Identical launches plus identical bytes means no new GPU work; the remaining difference is Python outside the captured graph, which the graph replay never runs. File the two profiles under `results/instrument-<step>-{before,after}.txt`. Compare them with `compare_traces.py` (whole-request per-kernel-name launch counts, memory-op counts and bytes, `/v1/stats` deltas): `instrument_analyze.py`'s per-step clustering does not separate steps on a real capture. S6/S7 result: IDENTICAL (`847a4b9`).
 
 ### 7.4 Revert rule
 A step whose checkpoint fails any of 7.2.3–7.2.5 is reverted on the branch (`git revert` of its commits, or reset of the lane's unmerged work) and re-attempted from the recorded failure, never patched forward under the checkpoint. (Agent-authored rule, see the provenance audit.) Applied case, 2026-09-23: checkpoint 1 on the S0 merge failed at boot because the merge silently dropped the `nvfp4`/`none` rows of `moe/expert_banks.py:_PROVIDERS`. That was fixed as a completion of the merge resolution (the fork's rows restored, a regression test added), not reverted: reverting the merge would undo G1 itself. The owner may overrule.
