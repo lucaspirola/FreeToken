@@ -538,10 +538,10 @@ async def _preflight(
             return GenerationError(f"could not encode request: {exc}")
         return None
     try:
-        input_ids = (await asyncio.to_thread(manager.tokenize, [msg]))[0]
+        (user_msg,) = await asyncio.to_thread(manager.tokenize, [msg])
     except Exception as exc:  # noqa: BLE001 -- mirror the worker's classification
         return GenerationError(f"could not encode request: {exc}")
-    prompt_tokens = int(input_ids.numel())
+    prompt_tokens = int(user_msg.input_ids.numel())
     if probe_limit is not None and prompt_tokens > probe_limit:
         return GenerationError(
             f"prompt is too long for a hidden-state probe: {prompt_tokens} tokens > "
