@@ -27,6 +27,17 @@ POST_TIMEOUT=10800
 
 die() { echo "checkpoint1: $*" >&2; exit 1; }
 
+# The host lock every agent worker takes around torch pytest (flock -w). Held for the whole
+# checkpoint, so no test suite can start beside a live arm, and an arm cannot start while a
+# suite runs (three concurrent torch suites coincided with the host going down once).
+LOCK=/home/lucas/.cache/freetoken/gpu-host.lock
+mkdir -p "$(dirname "$LOCK")"
+exec 9>"$LOCK"
+if ! flock -n 9; then
+  echo "waiting for a worker's test run to finish (host lock held) ..."
+  flock 9
+fi
+
 preflight() {
   [ -z "$(git -C "$REPO" status --porcelain -- python)" ] || die "python/ has uncommitted edits: commit first, a number must be tied to a commit"
   echo "code: $(git -C "$REPO" log --oneline -1)"
