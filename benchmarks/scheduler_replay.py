@@ -444,6 +444,11 @@ class _Msg:
         self.session_ttl_seconds = SESSION_TTL if session_id else None
         self.hidden_states = None
         self.no_prefix_cache = False
+        # fields UserMsg gained since (upstream multimodal, the prefix auto-pin key)
+        self.pin_key = None
+        self.mm_items = None
+        self.mrope_positions = None
+        self.mrope_delta = 0
 
 
 class _Lease:
