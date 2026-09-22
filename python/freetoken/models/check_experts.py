@@ -115,6 +115,7 @@ class ExpertConformanceReport:
     row_bytes: int
     total_bank_bytes: int
     num_experts_checked: int
+    experts_spanning_shards: list[tuple[int, int]]
     cache_type: str
     pin_prefix_honoured: bool
     arena_supports_format: bool
@@ -122,6 +123,15 @@ class ExpertConformanceReport:
 
     def render(self) -> str:
         gib = 1 << 30
+        n_span = len(self.experts_spanning_shards)
+        if n_span:
+            span_line = (
+                f"    experts spanning shards {n_span} of {self.num_experts_checked} "
+                "(loaders reassemble across shards; REFUSED by --expert-residency mirror, "
+                "which requires one shard per expert -- moe/mirror_pool.py:_scan_checkpoint)"
+            )
+        else:
+            span_line = f"    experts spanning shards 0 of {self.num_experts_checked}"
         lines = [
             f"OK  {self.model_path}",
             f"    architecture       {self.architecture}  (model_type={self.model_type!r})",
@@ -131,7 +141,8 @@ class ExpertConformanceReport:
             f"E={self.num_experts} moe_layers={self.num_moe_layers}",
             f"    experts checked    {self.num_experts_checked} "
             f"(= {self.num_moe_layers} layers x {self.num_experts} experts), "
-            "one shard each, tensors exactly as expected",
+            "tensors exactly as expected",
+            span_line,
             f"    row bytes          {self.row_bytes:,} "
             f"({self.row_bytes / (1 << 20):.3f} MiB/expert)",
             f"    total bank bytes   {self.total_bank_bytes:,} "
@@ -151,20 +162,27 @@ def check_expert_tensors(
     config,
     *,
     mechanism: str,
-) -> tuple[Nvfp4RowLayout, dict, int, int]:
+) -> tuple[Nvfp4RowLayout, dict, int, int, list[tuple[int, int]]]:
     """The header-only tensor conformance core, given an already-resolved spec.
 
     Split out of :func:`check_experts` so the S8 parametrised test
     (``tests/models/test_expert_source_conformance.py``) can run this exact
     logic -- key-pattern matching, ``kind_map`` canonicalisation, the expected-
-    tensor-set / shape / one-shard-per-expert checks, all against
-    :func:`nvfp4_expert_row_layout` -- for every model family's spec against a
-    small synthetic checkpoint, without needing a full, family-specific HF
-    ``config.json`` fixture for each one (:func:`check_experts` still builds
-    that real config for the two model families exercised end to end against
-    real checkpoints on disk).
+    tensor-set / shape checks, all against :func:`nvfp4_expert_row_layout` --
+    for every model family's spec against a small synthetic checkpoint,
+    without needing a full, family-specific HF ``config.json`` fixture for
+    each one (:func:`check_experts` still builds that real config for the two
+    model families exercised end to end against real checkpoints on disk).
 
-    Returns ``(layout, per_expert, num_moe_layers, expected_experts)``.
+    Returns ``(layout, per_expert, num_moe_layers, expected_experts,
+    experts_spanning_shards)``. An expert whose tensors land in more than one
+    safetensors shard is reported in the last element, not raised: it is a
+    routine consequence of where HF's sharder happened to cut, and the
+    loaders that actually read these checkpoints tolerate it (see the
+    ``experts_spanning_shards`` comment below). Only the bounded host mirror
+    reader (``moe/mirror_pool.py``) needs one shard per expert; a caller
+    that specifically means to serve under ``--expert-residency mirror``
+    should treat a non-empty list as that mode's own refusal.
     """
     gated = bool(getattr(config, "expert_gated", True))
     if spec.gated != gated:
@@ -263,12 +281,20 @@ def check_expert_tensors(
                 raise CheckFailed(
                     f"{model_path}: {name!r} has dtype {meta.get('dtype')!r}, expected {want_dtype!r}"
                 )
-        shards = shard_of_expert[key]
-        if len(shards) != 1:
-            raise CheckFailed(
-                f"{model_path}: layer {bank_layer} expert {expert} is split across "
-                f"shards {sorted(shards)} (expected exactly one shard per expert)"
-            )
+    # A checkpoint tensor landing in a different shard than its expert's other
+    # tensors is NOT a conformance failure in general: the two loaders that
+    # actually read these checkpoints (the serial/parallel paths in this
+    # module's own load_nvfp4_expert_source_banks*, and iter_nvfp4_expert_pieces)
+    # group tensors by (layer, expert) as they stream every shard, precisely so
+    # an expert split across a shard boundary (routine wherever HF's sharder
+    # happened to cut) still lands correctly -- see this module's docstring at
+    # ``iter_nvfp4_expert_pieces`` ("tensors of one expert may span shards, so
+    # they are grouped by (layer, expert) as they land"). Only the bounded host
+    # MIRROR reader (moe/mirror_pool.py:_scan_checkpoint) genuinely needs one
+    # shard per expert -- it opens one shard fd per expert row and raises
+    # ValueError if an expert's tensors don't share one -- so that is reported
+    # separately, scoped to that mode, not as a blanket refusal here.
+    experts_spanning_shards = sorted(key for key, shards in shard_of_expert.items() if len(shards) != 1)
 
     expected_experts = num_moe_layers * E
     if len(per_expert) != expected_experts:
@@ -277,7 +303,7 @@ def check_expert_tensors(
             f"tensors, expected {num_moe_layers} layers x {E} experts = {expected_experts}"
         )
 
-    return layout, per_expert, num_moe_layers, expected_experts
+    return layout, per_expert, num_moe_layers, expected_experts, experts_spanning_shards
 
 
 def check_experts(model_path: str) -> ExpertConformanceReport:
@@ -315,7 +341,7 @@ def check_experts(model_path: str) -> ExpertConformanceReport:
     I = config.moe_intermediate_size
     E = config.num_experts
 
-    layout, per_expert, num_moe_layers, expected_experts = check_expert_tensors(
+    layout, per_expert, num_moe_layers, expected_experts, experts_spanning_shards = check_expert_tensors(
         model_path, spec, config, mechanism=mechanism
     )
 
@@ -350,6 +376,7 @@ def check_experts(model_path: str) -> ExpertConformanceReport:
         row_bytes=layout.row_bytes,
         total_bank_bytes=layout.row_bytes * expected_experts,
         num_experts_checked=len(per_expert),
+        experts_spanning_shards=experts_spanning_shards,
         cache_type=cache_type,
         pin_prefix_honoured=pin_prefix_honoured,
         arena_supports_format=arena_supports_format,

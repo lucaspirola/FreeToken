@@ -95,23 +95,43 @@ def _synthetic_config(spec: Nvfp4ExpertSourceSpec) -> SimpleNamespace:
     )
 
 
-def _write_checkpoint(root: str, spec: Nvfp4ExpertSourceSpec, config) -> None:
+def _write_checkpoint(
+    root: str,
+    spec: Nvfp4ExpertSourceSpec,
+    config,
+    *,
+    split_experts: frozenset[tuple[int, int]] = frozenset(),
+) -> None:
     """A synthetic checkpoint keyed exactly by ``spec.key_template``, shaped by
-    ``nvfp4_expert_row_layout`` (the S5a single source of truth -- not a copy)."""
+    ``nvfp4_expert_row_layout`` (the S5a single source of truth -- not a copy).
+
+    ``split_experts``: (layer, expert) pairs whose ONE "down"-role tensor set
+    is written to a second shard while the rest of that expert's tensors stay
+    in the first -- a synthetic version of the routine case where HF's sharder
+    cuts a shard boundary in the middle of an expert (real in
+    Ornith-1.5-35B-A3B-NVFP4's checkpoint, see docs/models.md). Every other
+    expert's tensors stay in one shard.
+    """
     layout = nvfp4_expert_row_layout(H, I, gated=spec.gated, kind_map=spec.kind_map)
     role_to_proj = {role: proj for proj, role in spec.proj_to_role.items()}
     canon_to_disk = {canon: disk for disk, canon in (spec.kind_map or {}).items()}
     roles = ("gate", "up", "down") if spec.gated else ("up", "down")
 
     header: dict[str, dict] = {}
-    blob = bytearray()
-    off = 0
+    shard_of_key: dict[str, str] = {}
+    blobs: dict[str, bytearray] = {"model.safetensors": bytearray(), "model-2.safetensors": bytearray()}
+    offsets: dict[str, int] = {"model.safetensors": 0, "model-2.safetensors": 0}
     for layer in range(LAYERS):
         bank_layer = spec.layer_to_bank(layer, config)
         assert bank_layer == layer, (spec.desc, layer, bank_layer)
         for expert in range(EXPERTS):
             for role in roles:
                 proj = role_to_proj[role]
+                shard = (
+                    "model-2.safetensors"
+                    if (role == "down" and (layer, expert) in split_experts)
+                    else "model.safetensors"
+                )
                 for canon_kind in ("weight", "weight_scale", "weight_scale_2"):
                     on_disk_kind = canon_to_disk.get(canon_kind, canon_kind)
                     key = spec.key_template.format(
@@ -131,21 +151,27 @@ def _write_checkpoint(root: str, spec: Nvfp4ExpertSourceSpec, config) -> None:
                         salt = layer * 97 + expert * 13 + ord(role[0])
                         payload = bytes(((salt + k) % 251) + 1 for k in range(n))
                         shape = [rows, width]
+                    off = offsets[shard]
                     header[key] = {
                         "dtype": _CHECKPOINT_DTYPE_STR[canon_kind],
                         "shape": shape,
                         "data_offsets": [off, off + len(payload)],
                     }
-                    blob += payload
-                    off += len(payload)
+                    shard_of_key[key] = shard
+                    blobs[shard] += payload
+                    offsets[shard] += len(payload)
 
-    head = json.dumps(header).encode()
-    with open(os.path.join(root, "model.safetensors"), "wb") as f:
-        f.write(struct.pack("<Q", len(head)))
-        f.write(head)
-        f.write(blob)
+    for shard, blob in blobs.items():
+        if not blob and shard != "model.safetensors":
+            continue
+        shard_header = {k: v for k, v in header.items() if shard_of_key[k] == shard}
+        head = json.dumps(shard_header).encode()
+        with open(os.path.join(root, shard), "wb") as f:
+            f.write(struct.pack("<Q", len(head)))
+            f.write(head)
+            f.write(blob)
     with open(os.path.join(root, "model.safetensors.index.json"), "w") as f:
-        json.dump({"weight_map": {k: "model.safetensors" for k in header}}, f)
+        json.dump({"weight_map": shard_of_key}, f)
 
 
 @pytest.mark.parametrize("name,spec", _SPECS, ids=[n for n, _ in _SPECS])
@@ -153,12 +179,33 @@ def test_conformant_checkpoint_passes(tmp_path, name, spec):
     config = _synthetic_config(spec)
     _write_checkpoint(str(tmp_path), spec, config)
 
-    layout, per_expert, num_moe_layers, expected_experts = check_expert_tensors(
+    layout, per_expert, num_moe_layers, expected_experts, spanning = check_expert_tensors(
         str(tmp_path), spec, config, mechanism=name
     )
     assert num_moe_layers == LAYERS
     assert expected_experts == LAYERS * EXPERTS
     assert len(per_expert) == LAYERS * EXPERTS
+    assert spanning == []
+
+
+@pytest.mark.parametrize("name,spec", _SPECS, ids=[n for n, _ in _SPECS])
+def test_cross_shard_expert_is_reported_not_refused(tmp_path, name, spec):
+    """An expert split across two shards (routine wherever HF's sharder cuts --
+    real in Ornith-1.5-35B-A3B-NVFP4) must NOT refuse the checkpoint: the
+    loaders that actually read it (load_nvfp4_expert_source_banks* and
+    iter_nvfp4_expert_pieces) group tensors by (layer, expert) as they stream
+    every shard and tolerate this. Only the bounded host mirror reader needs
+    one shard per expert, so this is reported, not raised."""
+    config = _synthetic_config(spec)
+    split = frozenset({(0, 1)})
+    _write_checkpoint(str(tmp_path), spec, config, split_experts=split)
+
+    layout, per_expert, num_moe_layers, expected_experts, spanning = check_expert_tensors(
+        str(tmp_path), spec, config, mechanism=name
+    )
+    assert expected_experts == LAYERS * EXPERTS
+    assert len(per_expert) == LAYERS * EXPERTS  # every expert's tensors were still all found
+    assert spanning == [(0, 1)]
 
 
 @pytest.mark.parametrize("name,spec", _SPECS, ids=[n for n, _ in _SPECS])
