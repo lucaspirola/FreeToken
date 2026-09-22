@@ -679,10 +679,11 @@ def parse_args(
         default=None,
         help=(
             "Physically grow KV in fixed token increments while its CUDA virtual address "
-            "stays stable, surrendering MoE expert-cache space at each boundary. "
-            "For Ornith on a 16 GiB RTX 5080, use 65536 with Q4_0 KV and 131072 "
-            "with Q8_0 KV; the larger Q8_0 step avoids a costly intermediate "
-            "expert-cache rebuild and is validated through a 524288-token ceiling."
+            "stays stable, surrendering MoE expert-cache space at each boundary. Needs "
+            "the expert arena (--expert-arena, or FREETOKEN_EXPERT_ARENA=1): the expert "
+            "cache shrinks in place and decode CUDA graphs stay valid. Formats the arena "
+            "does not serve (marlin/b12x NVFP4, mixed-size-class GGUF) are refused at "
+            "startup."
         ),
     )
 

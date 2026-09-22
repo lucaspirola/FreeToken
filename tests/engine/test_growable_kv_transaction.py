@@ -58,9 +58,8 @@ class _Pool:
 class _Moe:
     num_experts = 2
     # None off the expert-arena gate (EngineConfig.expert_arena) -- the real OffloadMoeCache's
-    # arena_layout/bank_row_bytes properties return None there too (see
-    # offload_cache.py), which is exactly what routes grow_runtime_kv/
-    # shrink_runtime_kv into the legacy rebuild path these tests exercise.
+    # arena_layout/bank_row_bytes properties return None there too (see offload_cache.py).
+    # Since S10 there is no growable KV without the arena: grow/shrink refuse this cache.
     arena_layout = None
     bank_row_bytes = None
 
@@ -83,7 +82,7 @@ class _Moe:
 
     def set_usable_slots(self, size):
         raise AssertionError(
-            "legacy (non-arena) MoE cache must never take the set_usable_slots path"
+            "a non-arena MoE cache must never take the set_usable_slots path"
         )
 
 
@@ -150,77 +149,32 @@ def _controller(pool, moe):
     return ctl, engine
 
 
-def test_growth_commit_failure_restores_experts_config_and_graph_state():
-    ctl, engine = _controller(_Pool(8, fail_commit=True), _Moe(8))
-    executor = engine.moe_offload_cache.cpu_executor
-    banks = engine.moe_offload_cache.bank_sources
+@pytest.mark.parametrize("direction", ["grow", "shrink"])
+def test_non_arena_cache_is_refused_without_touching_kv_or_experts(direction):
+    # S10: the rebuild-and-recapture fallback is gone; a cache without the expert arena
+    # gets the "unsupported for this format" refusal before anything is mutated.
+    pool = _Pool(16 if direction == "shrink" else 8)
+    ctl, engine = _controller(pool, _Moe(4))
 
-    with pytest.raises(MemoryError, match="VMM commit"):
-        ctl.grow_runtime_kv(16)
+    with pytest.raises(RuntimeError, match="growable KV unsupported for this format"):
+        if direction == "grow":
+            ctl.grow_runtime_kv(16)
+        else:
+            ctl.shrink_runtime_kv(8)
 
-    assert engine.kv_cache.committed_pages == 8
-    assert engine.moe_offload_cache.cache_size == 8
-    assert engine.config.moe_cache_size == 8
-    assert engine._pending_graph_bs is None
-    assert engine.moe_offload_cache.rebuilds == [4, 8]
-    assert engine.moe_offload_cache.cpu_layer_ids == frozenset({0, 4})
-    assert engine.moe_offload_cache.cpu_executor is executor
-    assert engine.moe_offload_cache.bank_sources is banks
-
-
-def test_shrink_expert_failure_recommits_kv_before_propagating():
-    ctl, engine = _controller(_Pool(16), _Moe(4, fail_size=8))
-
-    with pytest.raises(MemoryError, match="expert allocation"):
-        ctl.shrink_runtime_kv(8)
-
-    assert engine.kv_cache.committed_pages == 16
+    assert pool.committed_pages == (16 if direction == "shrink" else 8)
     assert engine.moe_offload_cache.cache_size == 4
+    assert engine.moe_offload_cache.rebuilds == []
     assert engine.config.moe_cache_size == 4
     assert engine._pending_graph_bs is None
-    assert engine.moe_offload_cache.rebuilds == [8, 4]
+    assert getattr(ctl, "_growable_transition_failed", False) is False
 
 
-def test_post_graph_planning_failure_restores_graph_readiness():
-    ctl, engine = _controller(_Pool(8), _Moe(8))
-    graph_restores = []
-
-    def fail_memory_probe():
-        raise RuntimeError("injected post-teardown probe failure")
-
-    engine._sync_get_memory = fail_memory_probe
-    engine.ensure_decode_graphs = lambda: (
-        graph_restores.append(tuple(engine._pending_graph_bs)),
-        setattr(engine, "_pending_graph_bs", None),
-    )
-    with pytest.raises(RuntimeError, match="post-teardown probe"):
-        ctl.grow_runtime_kv(16)
-
-    assert graph_restores == [(1,)]
-    assert engine._pending_graph_bs is None
-    assert engine.kv_cache.committed_pages == 8
-    assert engine.moe_offload_cache.cache_size == 8
-
-
-def test_shrink_partial_graph_teardown_failure_restores_graph_readiness():
-    ctl, engine = _controller(_Pool(16), _Moe(4))
-    restores = []
-
-    def fail_reset():
-        raise RuntimeError("injected graph reset failure")
-
-    engine.attn_backend.reset_capture = fail_reset
-    engine.ensure_decode_graphs = lambda: (
-        restores.append(tuple(engine._pending_graph_bs)),
-        setattr(engine, "_pending_graph_bs", None),
-    )
-    with pytest.raises(RuntimeError, match="graph reset"):
-        ctl.shrink_runtime_kv(8)
-
-    assert restores == [(1,)]
-    assert engine._pending_graph_bs is None
-    assert engine.kv_cache.committed_pages == 16
-    assert engine.moe_offload_cache.cache_size == 4
+def test_non_arena_byte_model_is_refused():
+    ctl, _engine = _controller(_Pool(8), _Moe(4))
+    del ctl._growable_moe_bytes  # the real method, not the stub
+    with pytest.raises(RuntimeError, match="growable KV unsupported for this format"):
+        ctl._growable_moe_bytes(4)
 
 
 def test_explicit_and_implicit_cpu_splits_resolve_without_changing_cache_ownership():
@@ -237,12 +191,12 @@ def test_explicit_and_implicit_cpu_splits_resolve_without_changing_cache_ownersh
 
 def test_failed_rollback_poison_refuses_forward_before_model_execution():
     pool = _Pool(8, fail_commit=True)
-    ctl, engine = _controller(pool, _Moe(4))
+    ctl, engine = _controller(pool, _ArenaMoe(4, capacity=8, step=4))
     ctl._growable_transition_failed = False
 
     with pytest.raises(MemoryError, match="VMM commit"):
         ctl._rollback_growable_kv_transition(
-            old_pages=16, old_moe=4, old_overlap=True, recapture_graphs=False
+            old_pages=16, old_moe=4, old_overlap=True
         )
     assert ctl._growable_transition_failed is True
 

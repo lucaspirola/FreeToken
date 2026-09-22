@@ -49,7 +49,7 @@ from freetoken.utils import (
 
 from .config import EngineConfig
 from .graph import GraphRunner, get_free_memory
-from .growable_kv import GrowableKvController
+from .growable_kv import GROWABLE_KV_UNSUPPORTED, GrowableKvController
 from .sample import BatchSamplingArgs, FirstStepLogprobs, Sampler
 from freetoken.kvcache import create_kv_pool, resolve_pool_class
 from freetoken.kvcache.base import CacheRebuildRejected
@@ -130,6 +130,35 @@ def _arena_step_slots() -> int:
     except ValueError:
         value = 8
     return value if value > 0 else 8
+
+
+def _refuse_unsupported_growable_kv(config: EngineConfig, banks) -> None:
+    """``--kv-grow-step-tokens`` funds KV from the expert arena; refuse what it cannot serve.
+
+    Refactor step S10 removed the rebuild-and-recapture fallback these configurations used
+    to take. The formats come back when S12b moves them onto the arena.
+    """
+    from freetoken.engine.cache_budget import expert_slot_signatures
+
+    fmt = getattr(banks, "quant_format", "")
+    if fmt in ("nvfp4_marlin", "nvfp4_b12x"):
+        raise ValueError(
+            f"{GROWABLE_KV_UNSUPPORTED} (expert format {fmt!r}: tiled marlin/b12x banks; "
+            "use the triton NVFP4 backend or drop --kv-grow-step-tokens)"
+        )
+    if fmt == "gguf":
+        classes = len(set(expert_slot_signatures(banks.sources)))
+        if classes > 1:
+            raise ValueError(
+                f"{GROWABLE_KV_UNSUPPORTED} (GGUF experts with {classes} size classes; "
+                "drop --kv-grow-step-tokens)"
+            )
+    if not config.expert_arena:
+        raise ValueError(
+            "--kv-grow-step-tokens requires the expert arena: pass --expert-arena (or set "
+            "FREETOKEN_EXPERT_ARENA=1, as scripts/serve-default.sh does). The rebuild-based "
+            "fallback it used to take without one was removed (refactor step S10)."
+        )
 
 
 def _flashinfer_available() -> bool:
@@ -576,6 +605,8 @@ class Engine:
             self._init_offload_moe_cache(config)
         if config.kv_grow_step_tokens:
             assert self.moe_offload_cache is not None
+            if getattr(self.moe_offload_cache, "arena_layout", None) is None:
+                raise RuntimeError(GROWABLE_KV_UNSUPPORTED)
             # Growth may temporarily trade expert slots for KV. Preserve the startup ceiling
             # and requested overlap policy so teardown can spend released KV VRAM on experts
             # again instead of making the decode penalty permanent.
@@ -1048,9 +1079,10 @@ class Engine:
                 # value is planned here -- the initial usable count starts at the
                 # ceiling itself (capacity is always a valid chunk boundary; see
                 # ``_arena_chunk_boundaries``), and grow_runtime_kv shrinks it on
-                # demand as KV grows. Off config.expert_arena, OffloadMoeCache
-                # ignores these two kwargs entirely (collapses slot_capacity to
-                # cache_size), so this is a no-op with the gate off.
+                # demand as KV grows. The arena is the only growable-KV mechanism
+                # since S10, so a format or a config without it is refused here,
+                # at startup, not at the first 64K boundary of a request.
+                _refuse_unsupported_growable_kv(config, banks)
                 floor = (
                     2 * config.model_config.num_experts
                     if config.moe_prefill_overlap

@@ -84,6 +84,7 @@ ft serve --model ... --gpu GPU-9e8d7c6b  # the same card by UUID (a unique prefi
 | `--session-spill-persist` / `--no-session-spill-persist` | on | Keep checkpoints across restarts (startup adopts manifests matching this model + K/V layout, deletes the rest) or wipe them on exit |
 | `--auto-session-grace-seconds` | 0 (off) | Safety-net timer after which an idle auto-bound session may be checkpointed, and only while a request is queued or the pools are full; 0 keeps it resident until an admission needs the space |
 | `--host-ram-reserve-gb` | 3 | Minimum `MemAvailable` kept outside expert banks and RAM session checkpoints |
+| `--kv-grow-step-tokens` | off | Grow KV physically in steps of this many tokens up to `--num-tokens`, funding each step from the GPU expert cache. Needs `--expert-arena`; marlin/b12x NVFP4 and mixed-size-class GGUF experts are refused at startup |
 
 ### MoE offload
 
@@ -98,7 +99,7 @@ See [models.md](models.md#moe-strategies) for what each strategy does.
 | `--kv-reserve-tokens` | 8192 | KV token floor reserved before `--moe-cache-auto` fills experts |
 | `--expert-residency` | whole | Where expert bytes live off the GPU: `whole` pins every expert row in host RAM; `mirror` bounds host expert RAM to a pool of `--moe-mirror-host-rows` rows (native NVFP4, triton backend, single rank). Unset: `mirror` when `--moe-mirror-host-rows` or `FREETOKEN_MIRROR_HOST_ROWS` is non-zero or `FREETOKEN_MIRROR_EXPERT_RAM=1` (these env aliases are read by `server/args.py` only) |
 | `--moe-mirror-host-rows` | 0 | Mirror pool size in expert rows; 0 or -1 auto-sizes from the model geometry and the growable-KV ceiling. A non-zero value turns the mirror on unless `--expert-residency whole` is given (that combination is refused) |
-| `--expert-arena` / `--no-expert-arena` | off | Fixed-capacity VMM arena for the GPU expert cache: a `--kv-grow-step-tokens` resize shrinks/grows its usable slots in place, with no cache rebuild and no decode-graph recapture. Unset: on iff `FREETOKEN_EXPERT_ARENA=1` (the alias `scripts/serve-default.sh` exports; read by `server/args.py` only) |
+| `--expert-arena` / `--no-expert-arena` | off | Fixed-capacity VMM arena for the GPU expert cache: a `--kv-grow-step-tokens` resize shrinks/grows its usable slots in place, with no cache rebuild and no decode-graph recapture. Required by `--kv-grow-step-tokens` (the rebuild-based fallback was removed). Unset: on iff `FREETOKEN_EXPERT_ARENA=1` (the alias `scripts/serve-default.sh` exports; read by `server/args.py` only) |
 | `--moe-cpu-threads` | physical cores | CPU worker threads for the cpu/hybrid executor |
 | `--moe-cpu-layers` | all on GPU | With `offload`: which MoE layers decode on CPU (`3,7,11`, a count, a fraction, or `auto`). `auto` is for Windows/WSL only, where CUDA pinned memory is capped; every value needs an expert format the CPU executor serves (bf16, nvfp4, mxfp4), so fp8 experts cannot use it |
 | `--moe-pageable-gpu` | off | On WSL pin-quota overflow, asynchronously gather selected misses into mapped pinned staging; all expert math and CUDA graph replay remain on GPU |
