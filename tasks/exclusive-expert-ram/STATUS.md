@@ -422,15 +422,42 @@ WRONG -- see the Correction section), and no
 against the 1440 floor. The pool serves this in 12.94 GiB of host RAM, against
 ~18.3 GiB for the whole-model configuration at 80K.
 
-> **RETRACTED (2026-09-22).** An earlier revision of this section, and the message
-> of commit `67ec22a`, said the whole-model configuration "cannot reach this
-> context on this GPU at all". **That was never measured and is probably wrong.**
-> In whole-model mode every expert is pinned in host RAM, so coverage can never be
-> lost; the growable KV should shrink the arena and the model should still stream
-> its way to 1M, only slower. Every baseline arm on this branch ran 8K/32K/80K and
-> nothing else, so the claim was an argument wearing a measurement's clothes.
-> What is measured is the RAM: 12.94 GiB against ~18.3. Arm `nemotron-baseline-1m`
-> is queued to settle reachability, and this note stays until it does.
+> **RETRACTED AND DISPROVEN (2026-09-22).** An earlier revision of this section,
+> and the message of commit `67ec22a`, said the whole-model configuration "cannot
+> reach this context on this GPU at all". **That was never measured, and arm
+> `nemotron-baseline-1m` has now shown it is false.** Whole-model mode reaches 1M
+> without difficulty. The claim was an argument wearing a measurement's clothes:
+> every baseline arm before it ran 8K/32K/80K and nothing else. The real
+> comparison is below.
+
+### 1M, both configurations measured
+
+Arms `nemotron-baseline-1m` (rows=0, whole model) and `nemotron-reserve-2e-1m`
+(auto pool, reserve 2E, levers 1-4). Empty GPU, ratio 1.00, two passes,
+**thinking OFF**, 128 generated tokens.
+
+| | whole model | **pool, all levers** | delta |
+|---|---|---|---|
+| 1M reached | yes | yes | -- |
+| host RAM | 18.06 GiB | **12.26 GiB** | **-5.80 GiB (-32%)** |
+| TTFT 1M p1 / p2 | 1229.34 / 1482.77 s | 1162.74 / 1438.29 s | pool ~5% faster |
+| decode 1M p1 / p2 | 86.5 / 84.9 | 76.9 / 72.9 | pool 11-14% slower |
+
+So the pool's case at 1M is **32% less host RAM for 11-14% less decode**, with
+prefill slightly in the pool's favour -- it leaves more VRAM for the KV to grow
+into. Reachability is not part of the case, and saying otherwise was wrong.
+
+### This also kills a hypothesis about the pass-2 slowdown
+
+The baseline has no pool at all, yet its 1M TTFT degrades from 1229.34 to 1482.77
+on pass 2 (+21%) -- essentially the pool's +24% (1162.74 -> 1438.29). The "second
+large request is slower" effect is therefore **not** pool or arena churn: it is
+present, at the same magnitude, with the mirror entirely absent. That eliminates
+one of the three candidates and leaves the growable-KV/radix layer
+(`_evict_growable_prefix_pages`, radix-tree growth at a 1M-token tree) and VMM
+fragmentation across repeated commit/uncommit ladders. Decode degradation does
+differ (baseline 86.5 -> 84.9, -1.8%; pool 76.9 -> 72.9, -5.2%), so the decode
+component may still have a pool term; the TTFT component does not.
 A second, independent arm (`nemotron-1m-only`) measured 1,000,030 prompt tokens at
 TTFT 1125.64 s / 888.0 prefill tok/s / 76.5 decode tok/s — its pass 1 agrees with
 this arm's pass 1 (80.4) to within noise.
