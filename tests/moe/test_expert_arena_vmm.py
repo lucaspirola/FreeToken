@@ -16,7 +16,7 @@ import torch
 
 import freetoken.moe.offload_cache as offload_cache_module
 import freetoken.moe.offload_kernels as offload_kernels
-from freetoken.engine.cache_budget import arena_bytes_for_usable
+from freetoken.engine.cache_budget import _arena_chunk_boundaries, arena_bytes_for_usable
 from freetoken.kernel.vmm import allocation_granularity
 from freetoken.moe.offload_cache import OffloadMoeCache
 
@@ -297,9 +297,10 @@ def test_unaligned_row_bytes_keeps_slot_addressing_linear():
     # _NUM_EXPERTS (4) is below the floor's own chunk boundary; shrink to n=8, the
     # smallest real chunk boundary at/above the floor (2*4 or 4, either way < 8).
     n = _UNALIGNED_STEP
-    assert n in offload_cache_module.OffloadMoeCache._arena_chunk_boundaries(
-        _UNALIGNED_CAPACITY, _UNALIGNED_STEP
-    )
+    # S3: OffloadMoeCache no longer carries its own copy of this helper --
+    # it imports freetoken.engine.cache_budget._arena_chunk_boundaries (the
+    # single source of truth for the commit-ladder boundaries) instead.
+    assert n in _arena_chunk_boundaries(_UNALIGNED_CAPACITY, _UNALIGNED_STEP)
     # Write a distinct known pattern into every slot that stays resident after the shrink.
     pattern = {i: float(i + 1) for i in range(n)}
     for slot, value in pattern.items():

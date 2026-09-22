@@ -284,7 +284,8 @@ class OffloadMoeCache:
                 raise ValueError(f"arena_step_slots must be positive, got {step_slots}")
             self.slot_capacity = capacity
             self._arena_step_slots = step_slots
-            self._arena_boundaries = self._arena_chunk_boundaries(capacity, step_slots)
+            from freetoken.engine.cache_budget import _arena_chunk_boundaries
+            self._arena_boundaries = _arena_chunk_boundaries(capacity, step_slots)
             if self.cache_size not in self._arena_boundaries:
                 raise ValueError(
                     f"initial cache_size {self.cache_size} is not an expert-arena chunk "
@@ -586,20 +587,6 @@ class OffloadMoeCache:
         )
         self._direct_bank_allocations.append(allocation)
         return allocation.tensor
-
-    @staticmethod
-    def _arena_chunk_boundaries(capacity: int, step_slots: int) -> list[int]:
-        """Slot-count boundaries of the commit ladder: [0, step, 2*step, ..., capacity].
-
-        Mirrors ``freetoken.engine.cache_budget``'s private chunking helper exactly
-        (duplicated here rather than imported, since that module is a separate
-        ownership boundary); the two must never drift, or ``arena_bytes_for_usable``
-        would price a byte model this code does not actually implement.
-        """
-        boundaries = [0]
-        while boundaries[-1] < capacity:
-            boundaries.append(min(boundaries[-1] + step_slots, capacity))
-        return boundaries
 
     def _arena_chunk_ranges(
         self, row_bytes: int, granularity: int
@@ -1104,7 +1091,8 @@ class OffloadMoeCache:
             # fallback and is not expected to preserve a caller's slot_capacity/
             # arena_step_slots across the call.
             self._arena_step_slots = cache_size
-            self._arena_boundaries = self._arena_chunk_boundaries(cache_size, cache_size)
+            from freetoken.engine.cache_budget import _arena_chunk_boundaries
+            self._arena_boundaries = _arena_chunk_boundaries(cache_size, cache_size)
         self.usable_slots = torch.tensor(
             [cache_size], dtype=torch.int32, device=self.device
         )
