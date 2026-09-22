@@ -43,7 +43,9 @@ preflight() {
   echo "code: $(git -C "$REPO" log --oneline -1)"
   systemctl is-active --quiet freetoken-serve && die "the production unit freetoken-serve is running: ft-down first"
   systemctl --user list-units --state=active --no-legend 'ft-measure-*' | grep -q . && die "an ft-measure unit is still up"
-  pgrep -f 'pytest' >/dev/null && die "a pytest is running (a worker?): wait for it"
+  # A running python -m pytest (not a flock merely WAITING for the lock we hold, whose
+  # command line also contains 'pytest' -- matching that would abort on a queued worker).
+  pgrep -f '^[^ ]*python[0-9.]* -m pytest' >/dev/null && die "a pytest is running outside the host lock: find it"
   if systemctl --user is-active --quiet piro-board-embedder 2>/dev/null; then
     echo "stopping piro-board-embedder for the measurement (it is NOT restarted afterwards)"
     systemctl --user stop piro-board-embedder
