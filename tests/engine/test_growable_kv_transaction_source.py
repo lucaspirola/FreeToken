@@ -25,7 +25,10 @@ def _methods(*names: str):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names:
             node.decorator_list = []
             selected.append(node)
-    from freetoken.engine.engine import _arena_chunk_boundaries
+    # Single source since S3 (commit 7e5d1da): engine.py no longer carries its own copy.
+    # This test execs Engine methods lifted from the class body, so it must supply the
+    # same name the real module resolves - which is now cache_budget's.
+    from freetoken.engine.cache_budget import _arena_chunk_boundaries
 
     ns = {
         "math": math,
