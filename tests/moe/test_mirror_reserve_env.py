@@ -192,9 +192,21 @@ def test_engine_wires_one_resolved_value_to_both_call_sites():
     """
     import inspect
     from freetoken.engine.engine import Engine
+    from freetoken.moe.residency import build_residency
 
-    src = inspect.getsource(Engine._init_offload_moe_cache)
+    # S6 moves the pool construction from the engine into
+    # moe.residency.build_residency; until the engine calls it, both copies
+    # exist. Guard every source that constructs the pool, and require that
+    # build_residency always does.
+    sources = [inspect.getsource(build_residency)]
+    engine_src = inspect.getsource(Engine._init_offload_moe_cache)
+    if "MirrorExpertPool(" in engine_src:
+        sources.append(engine_src)
+    for src in sources:
+        _check_one_resolved_reserve(src)
 
+
+def _check_one_resolved_reserve(src: str) -> None:
     assert "resolve_reserve_rows(" in src, (
         "engine.py must resolve FREETOKEN_MIRROR_RESERVE_ROWS via "
         "resolve_reserve_rows()"

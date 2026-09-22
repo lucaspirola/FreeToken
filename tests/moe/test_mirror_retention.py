@@ -272,11 +272,17 @@ def _attach_fake_mirror(cache, pool_row_of_id) -> None:
     coverage-restore flag ``ensure_experts`` used to read; it reads nothing
     else from the cache now.)
     """
+    from freetoken.moe.residency import MirrorResidency
+
     device = cache.slot_for_id.device
-    cache._mirror = {
+    # A pool-less MirrorResidency bound to the cache: the two maps are all
+    # ensure_experts (before_ensure) and the admission kernel ever read.
+    residency = MirrorResidency(pool=None, cache=cache)
+    residency._mirror = {
         "pool_row_of_id": torch.tensor(pool_row_of_id, dtype=torch.int32, device=device),
         "prev_slot_of_id": cache.slot_for_id.view(-1).clone(),
     }
+    cache.residency = residency
 
 
 def test_tiebreak_evicts_the_candidate_with_a_pool_row():

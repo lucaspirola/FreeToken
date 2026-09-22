@@ -3116,19 +3116,19 @@ class Scheduler(SchedulerIOMixin):
         batch, sample_args, input_mapping, output_mapping = forward_input
         # Bounded-mirror expert pool: prefill under the mirror runs
         # exclusively through the overlap path (prefetch_prefill_layer ->
-        # _prefetch_split_mirror), which maintains the coverage invariant by
-        # construction and never empties the mirror the way a whole-layer
-        # materialize would -- so there is nothing to restore at this batch
-        # boundary (materialize_layer now raises under the mirror instead of
-        # being a second, stale restore path; see its docstring). The one job
-        # left here is to surface a lost-coverage fault: the counters are
-        # written by a kernel that cannot raise, and a fault means the
-        # experts being multiplied are the wrong ones -- a loud failure here
-        # beats a quietly wrong completion.
-        moe = self.engine.moe_offload_cache
-        check = getattr(moe, "mirror_fault_check", None)
-        if check is not None:
-            check()
+        # MirrorResidency._prefetch_split_mirror), which maintains the coverage
+        # invariant by construction and never empties the mirror the way a
+        # whole-layer materialize would -- so there is nothing to restore at
+        # this batch boundary (materialize_layer now raises under the mirror
+        # instead of being a second, stale restore path; see its docstring).
+        # The one job left here is to surface a lost-coverage fault: the
+        # counters are written by a kernel that cannot raise, and a fault means
+        # the experts being multiplied are the wrong ones -- a loud failure
+        # here beats a quietly wrong completion. Whole-model residency's
+        # fault_check is a no-op; a model without an offload cache has none.
+        residency = getattr(self.engine.moe_offload_cache, "residency", None)
+        if residency is not None:
+            residency.fault_check()
         profile = self.config.moe_collect_stats
         if profile:
             batch._profile_host_started = time.perf_counter()

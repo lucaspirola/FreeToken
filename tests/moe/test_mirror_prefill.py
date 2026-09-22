@@ -165,7 +165,7 @@ def test_warm_start_seats_the_whole_arena():
         write_nvfp4_checkpoint(root, LAYERS, EXPERTS, H, ISZ)
         cache, pool = _cache(root)
         try:
-            base = cache._mirror_prefill_base()
+            base = cache.residency._mirror_prefill_base()
             assert base == prefill_buffer_slots(EXPERTS) == 2 * EXPERTS
             # _GPU == TOTAL - complement, and warm start has nothing left to
             # hold back, so every slot -- including the buffer region -- is a
@@ -245,7 +245,7 @@ def test_a_prefill_sweep_leaves_coverage_standing():
             # raise the flag (materialize_layer) now raises a RuntimeError
             # instead (see test_materialize_layer_raises_under_the_mirror
             # below).
-            base = cache._mirror_prefill_base()
+            base = cache.residency._mirror_prefill_base()
             slots = cache.slot_for_id.view(-1).cpu().tolist()
             rows = cache._mirror["pool_row_of_id"].cpu().tolist()
             orphans = [flat for flat in range(TOTAL)
@@ -276,7 +276,7 @@ def test_decode_may_admit_into_the_prefill_buffer_and_prefill_still_covers():
         write_nvfp4_checkpoint(root, LAYERS, EXPERTS, H, ISZ)
         cache, pool = _cache(root)
         try:
-            base = cache._mirror_prefill_base()
+            base = cache.residency._mirror_prefill_base()
             torch.manual_seed(0)
             saw_buffer_admission = False
             for step in range(60):
@@ -328,7 +328,7 @@ def test_writeback_skips_retained_duplicates():
                 pool._read_row(flat, row)
                 m["pool_row_of_id"][flat] = row
                 m["id_of_pool_row"][row] = flat
-            cache._mirror_publish_free_rows()
+            cache.residency._mirror_publish_free_rows()
             free_before = int(m["free_count"].item())
 
             cache._invalidate_prefill_buffer(0)
@@ -378,7 +378,7 @@ def test_writeback_preserves_a_sole_copys_bytes():
                 for name, bank in cache.bank_caches.items():
                     bank[slot].copy_(golden[flat][name].to(cache.device))
                 # pool_row_of_id[flat] stays -1: this is a sole GPU copy.
-            cache._mirror_publish_free_rows()
+            cache.residency._mirror_publish_free_rows()
             free_before = int(m["free_count"].item())
             assert free_before >= E, "the reserve must cover a whole buffer half"
 
@@ -436,7 +436,7 @@ def test_admission_into_the_buffer_region_forces_retention():
             E = EXPERTS
             m = cache._mirror
             slot_for_id = cache.slot_for_id.view(-1)
-            base = cache._mirror_prefill_base()
+            base = cache.residency._mirror_prefill_base()
             assert base == 2 * E
 
             target_slot = 3  # inside buffer 0's region ([0, E))
