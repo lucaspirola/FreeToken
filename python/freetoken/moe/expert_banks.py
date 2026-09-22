@@ -156,7 +156,7 @@ def _v4_unsupported(quant):
     raise NotImplementedError(
         f"parallel expert reader not implemented for quant {quant!r} yet; "
         "add a load_*_expert_sources_parallel using freetoken.models.weight."
-        "iter_expert_tensors_parallel (only ds_fp4 implemented so far)"
+        "iter_expert_tensors_parallel"
     )
 
 
@@ -413,31 +413,6 @@ def _laguna_int4_banks(
     )
 
 
-def _dsfp4_banks(model_path, model_config, device, dtype, dummy, parallel=False, workers=8, chunk=_PARALLEL_CHUNK, decode_target="gpu", layer_sink=None) -> ExpertBanks:
-    args = model_config.dsv4_args
-    assert args is not None, "ds_fp4 expert banks require dsv4_args on the model config"
-    # DeepSeek-FP4: packed e2m1 + e8m0 per-32 block scales, no global scale -> 4 banks,
-    # no alphas. DeepSeek-V4's own grouped GEMV kernels read them via bank_views().
-    # Written as-loaded -> streamable (dummy fabricates in one shot; never streamed).
-    sink = None if dummy else layer_sink
-    if dummy:
-        from freetoken.models.deepseek_v4.weight import dummy_dsfp4_expert_sources
-
-        banks = dummy_dsfp4_expert_sources(args)
-    elif parallel:  # parallel: common chunked multi-threaded O_DIRECT reader
-        from freetoken.models.deepseek_v4.weight import load_dsfp4_expert_sources_parallel
-
-        banks = load_dsfp4_expert_sources_parallel(
-            model_path, args, workers=workers, chunk=chunk, layer_sink=sink
-        )
-    else:
-        from freetoken.models.deepseek_v4.weight import load_dsfp4_expert_sources
-
-        banks = load_dsfp4_expert_sources(model_path, args, layer_sink=sink)
-    return ExpertBanks(
-        "ds_fp4", {name: banks[name] for name in _BANK_SCHEMAS["ds_fp4"]}, streamed=sink is not None
-    )
-
 
 def _model_setup_override(model_config):
     architectures = getattr(model_config, "architectures", None)
@@ -456,8 +431,13 @@ def _model_setup_override(model_config):
         return None
 
 
-# ModelConfig.expert_quant -> provider
+# ModelConfig.expert_quant -> provider, for models whose offload layers bind no upstream
+# MoE quant method (Nemotron-H is one: its experts load through "nvfp4" here). The S0 merge
+# of upstream #418 dropped "none" and "nvfp4" from this table without a conflict (upstream
+# deleted the rows, the fork added gguf/laguna_int4 next to them); the boot refused Nemotron.
 _PROVIDERS = {
+    "none": _bf16_banks,
+    "nvfp4": _nvfp4_banks,
     "q4_0": _q4_0_banks,
     "gguf": _gguf_banks,
     "laguna_int4": _laguna_int4_banks,
