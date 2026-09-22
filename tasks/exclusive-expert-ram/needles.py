@@ -354,7 +354,11 @@ def run_size(target: int, rng: random.Random) -> dict:
 
 def main(sizes: list[str]) -> int:
     rng = random.Random(20260922)
-    report = {"url": URL, "model": NAME, "max_tokens": MAX_TOKENS, "sizes": []}
+    # Both budgets: a thinking question that returns finish_reason="length" was cut off
+    # by think_max_tokens, and its "correct": false says nothing about recall. Recording
+    # only max_tokens (the non-thinking budget) made the 2026-09-22 records unreadable.
+    report = {"url": URL, "model": NAME, "max_tokens": MAX_TOKENS,
+              "think_max_tokens": THINK_MAX_TOKENS, "sizes": []}
     hard_failure = 0
     for raw in sizes:
         res = run_size(int(raw), rng)
