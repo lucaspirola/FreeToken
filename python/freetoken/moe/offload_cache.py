@@ -7,6 +7,11 @@ from typing import Iterator
 
 import torch
 from flashlib.kernels.slot_cache import N_STATS, Stat
+from freetoken.moe.mirror_stats import (
+    MIRROR_STAT_COUNT,
+    mirror_fault_counts_from_vector,
+    mirror_stats_from_vector,
+)
 from freetoken.utils import div_ceil, init_logger
 
 # Fuse the per-bank expert copies into a single multi-bank launch (one per copy_missing
@@ -1777,13 +1782,13 @@ class OffloadMoeCache:
             # is issued (recycling one mid-step would corrupt a pending upload).
             "freed_rows": torch.zeros((plan,), dtype=torch.int32, device=dev),
             "n_freed": torch.zeros((1,), dtype=torch.int32, device=dev),
-            "stats": torch.zeros((7,), dtype=torch.int64, device=dev),
+            "stats": torch.zeros((MIRROR_STAT_COUNT,), dtype=torch.int64, device=dev),
             # Host-visible copy of the same counters, refreshed by a
             # non-blocking D2H after every swap. Reading `stats` directly costs
             # a device sync per step, which is why nothing read it and the
             # faults stayed silent; a pinned buffer costs nothing and may lag a
             # few steps, which is harmless for monotone counters.
-            "stats_host": torch.zeros((7,), dtype=torch.int64, pin_memory=True),
+            "stats_host": torch.zeros((MIRROR_STAT_COUNT,), dtype=torch.int64, pin_memory=True),
             "pool_ptrs": torch.tensor(pool_ptrs, dtype=torch.int64, device=dev),
             "cache_ptrs": torch.tensor(cache_ptrs, dtype=torch.int64, device=dev),
             "feat_bytes": torch.tensor(feat_bytes, dtype=torch.int64, device=dev),
@@ -1835,30 +1840,16 @@ class OffloadMoeCache:
         return len(missing)
 
     def mirror_stats(self) -> dict:
-        """Swap counters (swaps, free evictions, writebacks, coverage faults)."""
+        """Swap counters (swaps, free evictions, writebacks, coverage faults).
+
+        Unpacks the shared ``stats`` vector BY NAME through ``MirrorStat``
+        (``mirror_stats.py``), not by position -- see that module's docstring
+        for the two defects the positional form caused.
+        """
         if getattr(self, "_mirror", None) is None:
             return {}
-        (swaps, free_evict, d2h, violations, starved,
-         retained, buffer_evict) = self._mirror["stats"].tolist()
-        return {
-            "swaps": swaps,
-            "free_evictions": free_evict,
-            "writebacks": d2h,
-            "coverage_faults": violations,
-            "starved_writebacks": starved,
-            # Decode swaps only, so this cannot exceed 1. Invalidating a
-            # prefill-buffer half also evicts occupants, and lever 1 made most
-            # of those free -- but an invalidation is not an admission, so
-            # counting it here while `swaps` ignores it produced rates above
-            # 1.0 (measured 1.121 on arm nemotron-lever2, 2026-09-22). Those
-            # evictions are a separate population with their own counter.
-            "free_eviction_rate": (free_evict / swaps) if swaps else 0.0,
-            "buffer_free_evictions": buffer_evict,
-            # Admissions that kept their pool row as a duplicate. This is the
-            # mechanism that makes pool capacity worth host RAM: without it the
-            # free-eviction rate stays near zero at every capacity.
-            "retained_rows": retained,
-        }
+        stats = self._mirror["stats"]
+        return mirror_stats_from_vector(stats.tolist())
 
     def mirror_warm_start(self) -> dict:
         """Establish coverage at startup: fill the GPU, then mirror the rest.
@@ -1979,8 +1970,7 @@ class OffloadMoeCache:
         m = getattr(self, "_mirror", None)
         if m is None:
             return
-        (_swaps, _free, _d2h, violations, starved,
-         _retained, _buffer_free) = m["stats_host"].tolist()
+        violations, starved = mirror_fault_counts_from_vector(m["stats_host"].tolist())
         if violations or starved:
             raise RuntimeError(
                 f"bounded expert mirror lost coverage: {violations} admissions "

@@ -51,6 +51,8 @@ from __future__ import annotations
 import triton
 import triton.language as tl
 
+from freetoken.moe.mirror_stats import MirrorStat
+
 
 def resolve_swaps(cache, layer_id: int) -> None:
     """Translate this step's misses into mirror copy descriptors (device-side)."""
@@ -92,6 +94,12 @@ def resolve_swaps(cache, layer_id: int) -> None:
         cache.num_experts,
         retain_floor,
         buffer_slots,
+        SWAPS=MirrorStat.SWAPS,
+        FREE_EVICTIONS=MirrorStat.FREE_EVICTIONS,
+        WRITEBACKS=MirrorStat.WRITEBACKS,
+        VIOLATIONS=MirrorStat.VIOLATIONS,
+        STARVED=MirrorStat.STARVED,
+        RETAINED=MirrorStat.RETAINED,
         BLOCK=triton.next_power_of_2(max(plan, 1)),
     )
 
@@ -138,6 +146,12 @@ def _resolve_swaps_kernel(
     retain_floor,         # keep this many rows free; retain duplicates above it
     buffer_slots,         # slots < this are the prefill buffer region; an
                           # admission there always retains (see below)
+    SWAPS: tl.constexpr,          # stats_ptr offsets, from MirrorStat
+    FREE_EVICTIONS: tl.constexpr,
+    WRITEBACKS: tl.constexpr,
+    VIOLATIONS: tl.constexpr,
+    STARVED: tl.constexpr,
+    RETAINED: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     """One program: the miss count is <= top_k * batch (decode) or num_experts
@@ -276,12 +290,12 @@ def _resolve_swaps_kernel(
     tl.store(n_h2d_ptr, n_h2d)
     tl.store(n_d2h_ptr, n_d2h)
     tl.store(n_d2d_ptr, n_d2d)
-    tl.store(stats_ptr + 0, tl.load(stats_ptr + 0) + swaps)
-    tl.store(stats_ptr + 1, tl.load(stats_ptr + 1) + free_evict)
-    tl.store(stats_ptr + 2, tl.load(stats_ptr + 2) + n_d2h)
-    tl.store(stats_ptr + 3, tl.load(stats_ptr + 3) + violations)
-    tl.store(stats_ptr + 4, tl.load(stats_ptr + 4) + starved)
-    tl.store(stats_ptr + 5, tl.load(stats_ptr + 5) + retained)
+    tl.store(stats_ptr + SWAPS, tl.load(stats_ptr + SWAPS) + swaps)
+    tl.store(stats_ptr + FREE_EVICTIONS, tl.load(stats_ptr + FREE_EVICTIONS) + free_evict)
+    tl.store(stats_ptr + WRITEBACKS, tl.load(stats_ptr + WRITEBACKS) + n_d2h)
+    tl.store(stats_ptr + VIOLATIONS, tl.load(stats_ptr + VIOLATIONS) + violations)
+    tl.store(stats_ptr + STARVED, tl.load(stats_ptr + STARVED) + starved)
+    tl.store(stats_ptr + RETAINED, tl.load(stats_ptr + RETAINED) + retained)
 
 
 @triton.jit
@@ -339,6 +353,9 @@ def writeback_buffer_occupants(cache, slot_start: int, count: int) -> None:
         m["stats"],
         slot_start,
         count,
+        WRITEBACKS=MirrorStat.WRITEBACKS,
+        STARVED=MirrorStat.STARVED,
+        BUFFER_FREE_EVICTIONS=MirrorStat.BUFFER_FREE_EVICTIONS,
         BLOCK=triton.next_power_of_2(max(count, 1)),
     )
 
@@ -366,6 +383,9 @@ def _writeback_buffer_kernel(
                            #              kernel bumps 2, 4 and 6 only.
     slot_start,            # first GPU slot of this buffer half
     count,                 # slots in this buffer half (== num_experts)
+    WRITEBACKS: tl.constexpr,          # stats_ptr offsets, from MirrorStat
+    STARVED: tl.constexpr,
+    BUFFER_FREE_EVICTIONS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     """One program, serial: ``count`` is one expert layer's worth (<= a few
@@ -436,10 +456,11 @@ def _writeback_buffer_kernel(
     tl.store(n_d2h_ptr, n_d2h)
     tl.store(n_wb_ptr, n_wb)
     tl.store(n_vacated_ptr, n_vacated)
-    # Slot 6, NOT slot 1: these evictions come from invalidating a prefill
-    # buffer half, not from a decode admission, so folding them into slot 1
-    # (whose denominator is `swaps`, bumped only by _resolve_swaps_kernel)
-    # makes free_eviction_rate exceed 1.0 and overstates what lever 1 bought.
-    tl.store(stats_ptr + 6, tl.load(stats_ptr + 6) + free_evict)
-    tl.store(stats_ptr + 2, tl.load(stats_ptr + 2) + n_d2h)
-    tl.store(stats_ptr + 4, tl.load(stats_ptr + 4) + starved)
+    # BUFFER_FREE_EVICTIONS, NOT FREE_EVICTIONS: these evictions come from
+    # invalidating a prefill buffer half, not from a decode admission, so
+    # folding them into FREE_EVICTIONS (whose denominator is `swaps`, bumped
+    # only by _resolve_swaps_kernel) makes free_eviction_rate exceed 1.0 and
+    # overstates what lever 1 bought.
+    tl.store(stats_ptr + BUFFER_FREE_EVICTIONS, tl.load(stats_ptr + BUFFER_FREE_EVICTIONS) + free_evict)
+    tl.store(stats_ptr + WRITEBACKS, tl.load(stats_ptr + WRITEBACKS) + n_d2h)
+    tl.store(stats_ptr + STARVED, tl.load(stats_ptr + STARVED) + starved)
