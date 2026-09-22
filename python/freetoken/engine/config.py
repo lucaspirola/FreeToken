@@ -4,7 +4,7 @@ import copy
 import math
 from dataclasses import dataclass, field, replace
 from functools import cached_property
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Literal
 
 import torch
 from freetoken.distributed import DistributedInfo
@@ -30,10 +30,6 @@ class EngineConfig:
     tp_info: DistributedInfo
     dtype: torch.dtype
     max_running_req: int = 4
-    # Optional smaller startup working set for elastic GDN serving. Admission still
-    # accepts max_running_req requests, but recurrent-state/graph resources start at
-    # this capacity and expand only when demand crosses it. Zero/None disables it.
-    elastic_initial_requests: int | None = None
     # In growable multi-agent mode, tune the prefill/decode time slices from measured
     # forward durations. The controller is active only while both phases are runnable.
     adaptive_scheduler: bool = True
@@ -96,6 +92,15 @@ class EngineConfig:
     kv_reserve_tokens: int = 8192  # KV floor for --moe-cache-auto; small by design (MoE-priority)
     moe_cache_policy: str = "lru"
     moe_prefill_overlap: bool = True
+    # Where an expert's bytes live while it is not on the GPU (moe/residency.py):
+    # "whole" pins every expert row in host RAM; "mirror" bounds host expert RAM to
+    # a pool of moe_mirror_host_rows rows. Resolved by server/args.py (the
+    # FREETOKEN_MIRROR_EXPERT_RAM / FREETOKEN_MIRROR_HOST_ROWS aliases live there).
+    expert_residency: Literal["whole", "mirror"] = "whole"
+    # Bound host expert RAM to N mirror rows (0 = off / auto-size under
+    # expert_residency="mirror", -1 = auto-size from model geometry + KV ceiling).
+    # Native NVFP4 experts only.
+    moe_mirror_host_rows: int = 0
     # Prefill hit/miss split: serve cache-resident experts D2D during prefill
     # prefetch instead of re-streaming the full layer over PCIe. Needs CUDA >= 12.8
     # (cudaMemcpyBatchAsync); no-op unless moe_cache_size > 2 * num_experts.
@@ -183,6 +188,11 @@ class EngineConfig:
     # Reserve the full KV virtual range but physically commit it in chunks, shrinking the
     # GPU expert cache at each boundary. Zero keeps the conventional eager allocation.
     kv_grow_step_tokens: int = 0
+    # Fixed-capacity VMM expert arena whose usable slot count shrinks/grows in place, so a
+    # growable-KV resize never rebuilds the expert cache or recaptures decode graphs. The
+    # engine publishes it to moe/offload_cache.py + offload_kernels.py at init. Resolved by
+    # server/args.py (--expert-arena; FREETOKEN_EXPERT_ARENA=1 is its alias).
+    expert_arena: bool = False
     # Tokenize each prompt frontend-side so an over-length one is answered with a 400
     # context_length_exceeded before it costs a queue slot (--no-context-preflight opts
     # out; FREETOKEN_CONTEXT_PREFLIGHT overrides both). The scheduler enforces the window

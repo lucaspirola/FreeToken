@@ -56,17 +56,17 @@ from freetoken.moe.mirror_stats import MirrorStat
 
 def resolve_swaps(cache, layer_id: int) -> None:
     """Translate this step's misses into mirror copy descriptors (device-side)."""
-    m = cache._mirror
+    m = cache.residency._mirror
     plan = m["h2d_src"].numel()
     # Rows the free stack must keep for this launch's writebacks; retention
     # stops above it. See the kernel's `retain_floor`.
-    retain_floor = cache._mirror_pool.reserve_rows
+    retain_floor = cache.residency._mirror_pool.reserve_rows
     # Slots below this are the prefill double buffer's own region: an
     # admission landing there is forced to retain its source row (see
     # `buffer_slots` in the kernel) so that region's own eviction, in
     # `_writeback_buffer_kernel`, is always free. 0 when there is no mirror
     # overlap buffer, which makes the forced-retention branch unreachable.
-    buffer_slots = cache._mirror_prefill_base()
+    buffer_slots = cache.residency._mirror_prefill_base()
     _resolve_swaps_kernel[(1,)](
         cache.src_indices,
         cache.evict_slots,
@@ -106,7 +106,7 @@ def resolve_swaps(cache, layer_id: int) -> None:
 
 def publish_freed_rows(cache) -> None:
     """Fold rows freed this step into the free stack (after the copies)."""
-    m = cache._mirror
+    m = cache.residency._mirror
     _publish_freed_kernel[(1,)](
         m["freed_rows"],
         m["n_freed"],
@@ -333,8 +333,8 @@ def writeback_buffer_occupants(cache, slot_start: int, count: int) -> None:
     written into a free-stack row exactly as a decode eviction would do it.
     One launch per buffer half, not a Python loop over its slots.
     """
-    m = cache._mirror
-    wb = cache._mirror_writeback
+    m = cache.residency._mirror
+    wb = cache.residency._mirror_writeback
     _writeback_buffer_kernel[(1,)](
         cache.id_of_slot,
         cache.slot_for_id.view(-1),

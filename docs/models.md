@@ -86,6 +86,111 @@ kind handling is hardcoded to modelopt's three names and refuses that
 checkpoint today ("unknown NVFP4 expert tensor kind"), which is exactly why
 `kind_map` is deferred to the merge rather than retrofitted now.
 
+## Adding a model with NVFP4 routed experts: the checklist
+
+`python -m freetoken.models.check_experts <checkpoint_dir>` (S8, goal G4) is
+the conformance check for a new family's NVFP4 checkpoint. It reads
+`config.json` and the safetensors shard HEADERS only — never a tensor's
+bytes, never the GPU — so it runs in seconds even on a 16 GiB checkpoint. It
+either prints a report or refuses with the exact reason. This is the sequence
+it performs, and therefore the checklist for wiring up a new family:
+
+1. **Register the architecture.** `config.json`'s `architectures[0]` must be a
+   key in `freetoken.models.register._MODEL_REGISTRY`, resolving to a
+   `ModelSpec` naming the family's package and its `parse_config`.
+2. **Export an expert source spec**, by one of two mechanisms (the tool tries
+   both, in this order, and names which one it used):
+   - `<family>.nvfp4_expert_spec(model_path, config) -> Nvfp4ExpertSourceSpec`,
+     re-exported from the family's `__init__.py` so
+     `models.register._load_attr(spec.module, "nvfp4_expert_spec")` finds it.
+     This is what the general (non-mirror) expert loader
+     (`moe/expert_pieces.py`) actually calls, and the only mechanism that can
+     pick a checkpoint's quantization dialect at call time (compare
+     `glm5_next.weight._select_expert_source_spec`, which reads
+     `config.json`'s `quantization_config` to choose ModelOpt vs
+     compressed-tensors naming, or `qwen3_5_moe.weight.nvfp4_expert_spec`,
+     which reads the installed `QuantConfig`). Prefer this mechanism for a new
+     family.
+   - `NVFP4_EXPERT_SOURCE_SPEC` as a plain module-level constant on
+     `freetoken.models.<model_type>.weight`, resolved by
+     `models.nvfp4_banks.expert_source_spec(config)` straight from
+     `config.model_type` (no registry, no `model_path`). This is what the
+     bounded host mirror (`moe/mirror_pool.py`) resolves from a bare
+     `ModelConfig` when serving with `--expert-residency mirror`; only
+     `nemotron_h` and `qwen3_5_moe` export it today. A family that never
+     serves under the mirror does not need it.
+
+   Either way, the spec names:
+   - `key_pattern` — a compiled regex over the checkpoint's flat tensor name,
+     with named groups `layer`, `expert`, `proj`, `kind`;
+   - `key_template` — the same key shape as a `str.format()` template with the
+     same four `{layer}`/`{expert}`/`{proj}`/`{kind}` placeholders. A regex
+     can be matched but not rendered; the template is what a synthetic-
+     checkpoint writer (or a new model's own smoke test) uses to produce a
+     real on-disk key for a given tuple. Keep it in sync with `key_pattern` by
+     hand — nothing derives one from the other.
+   - `proj_to_role` — the checkpoint's projection names (`gate_proj`,
+     `up_proj`, ... or `w1`/`w2`/`w3`, ...) onto the canonical `gate`/`up`/
+     `down` roles;
+   - `layer_to_bank(layer, config)` — checkpoint layer index to MoE-layer
+     (bank) index, `None` for a non-expert layer;
+   - `gated` — must agree with `config.expert_gated` (the tool refuses if it
+     does not); `False` only for Nemotron-H's single ungated `up_proj`
+     followed by ReLU².
+   - `hidden_size_attr`, only if the expert input/output width differs from
+     the residual `hidden_size` (Nemotron-H: `expert_hidden_size`).
+   - `kind_map`, only if the checkpoint spells the three canonical tensor
+     kinds (`weight` / `weight_scale` / `weight_scale_2`) differently on disk
+     (a compressed-tensors export: `weight_packed` / `weight_scale` /
+     `weight_global_scale`) — maps the on-disk name to the canonical one.
+   - `global_reciprocal`, only if the checkpoint stores the QUANT-side global
+     scale (the bank keeps its reciprocal).
+3. **The tool then checks, per `(layer, expert)`:**
+   - every expected `(role, kind)` tensor (after `kind_map` canonicalisation)
+     is present, with no extra ones — the expected set comes from
+     `models.nvfp4_banks.nvfp4_expert_row_layout(H, I, gated=..., kind_map=...)`,
+     the single source of truth for the NVFP4 row layout (see above);
+   - each present tensor's on-disk shape and dtype match the layout's
+     `checkpoint_shape` / `checkpoint_dtype`;
+   - all of one expert's tensors live in exactly one safetensors shard (a
+     checkpoint sharded mid-expert cannot be streamed by the parallel
+     per-shard reader — this is a real failure mode: it is exactly why
+     Ornith's checkpoint failed this check the first time it was run, see
+     below).
+4. It reports `row_bytes` and the total bank bytes (`row_bytes * num_moe_layers
+   * num_experts`) from the same `nvfp4_expert_row_layout` call — the number
+   `FREETOKEN_PIN_BUDGET_GB` must cover.
+5. It reports the cache type the engine would resolve
+   (`engine.engine._resolve_cache_type`: any model with a linear-attention
+   group — Mamba-2, gated-delta-net, KDA — resolves `hybrid_radix` even when
+   `--cache-type radix` is requested; a model without one keeps `radix`) and
+   whether `--pin-prefix-*` would be honoured (only when the resolved cache is
+   `hybrid_radix`).
+6. It reports whether the expert arena's bank schema
+   (`moe.offload_cache._BANK_SCHEMAS["nvfp4"]`) matches the row layout's bank
+   names.
+
+A synthetic checkpoint corpus in `tests/models/test_expert_source_conformance.py`
+runs this whole sequence against **every** `Nvfp4ExpertSourceSpec` this tree
+exports — enumerated from code (every `freetoken.models.*.weight` module's
+attributes, not a hardcoded family list), so a new family's spec is covered by
+that test the moment its module imports. It asserts a conformant synthetic
+checkpoint passes and a checkpoint with a renamed tensor kind is refused,
+naming the kind.
+
+Both real checkpoints this fork tracks were run through the tool at S8
+(2026-09-22): Nemotron passes cleanly. **Ornith failed the one-shard-per-expert
+check** — `Ornith-1.5-35B-A3B-NVFP4`'s layer 18 expert 90 has its
+`gate_proj.weight` tensor in a different safetensors shard
+(`model-00001-of-00003.safetensors`) than its other five tensors
+(`model-00002-of-00003.safetensors`), a real HF sharder split landing mid-
+expert. This is a genuine conformance gap in that checkpoint export, not a
+bug in the check; it is unrelated to, and does not fix, the separate gap that
+the upstream merge left the fork's Qwen3.5 offload NVFP4 loader
+(`setup_offload_expert_banks` / `load_nvfp4_expert_sources*`) unrestored in
+`qwen3_5_moe/weight.py` (only `NVFP4_EXPERT_SOURCE_SPEC` came back) — S12's
+concern, not this checklist's.
+
 ## Notes
 
 - `ft checkpoint` conversion is optional — it pre-converts a checkpoint into
@@ -278,9 +383,10 @@ checkpoint today ("unknown NVFP4 expert tensor kind"), which is exactly why
   `--session-spill-dir off` to disable the cold tier.
   Closing a helper makes its pages evictable immediately, allowing the growable KV
   arena to decommit unused suffix segments and restore MoE residency.
-  Hybrid-GDN serving can also reserve only the normal four-agent recurrent-state and
-  graph footprint while admitting an eight-agent burst with
-  `--max-running-requests 8 --elastic-initial-requests 4`. Demand above four compacts
+  (Historical: `--elastic-initial-requests` was retired in S11 of the 2026-09 reorganisation;
+  single lane is the design. The measurement below is kept as a record.) Hybrid-GDN serving
+  could also reserve only the normal four-agent recurrent-state and graph footprint while
+  admitting an eight-agent burst with `--max-running-requests 8 --elastic-initial-requests 4`. Demand above four compacts
   and preserves live/session GDN states, trades MoE residency for 8-way state and
   graphs, then reverses the trade as soon as demand returns to four. An RTX 5080 Q4
   gate preserved all eight independent answers across 25 → 49 → 25 physical GDN

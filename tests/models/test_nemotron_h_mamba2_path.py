@@ -276,9 +276,9 @@ def test_track_snapshot_row_is_the_state_after_the_boundary(monkeypatch):
 @cuda_only
 def test_decode_out_buffer_is_stable_per_batch_size():
     """A captured decode graph bakes in the `out` address it saw, so the buffer for a
-    batch size must never be replaced -- not even by a later, WIDER eager decode (which
-    is exactly what an elastic capacity raise produces: batches above the largest
-    captured size run eagerly). A grow-only buffer would free the block those graphs
+    batch size must never be replaced -- not even by a later, WIDER eager decode (a
+    batch above the largest captured size runs eagerly). A grow-only buffer would free
+    the block those graphs
     still write to on every replay, silently corrupting whatever the allocator hands out
     next."""
     device = torch.device("cuda")

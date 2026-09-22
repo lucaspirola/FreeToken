@@ -1,11 +1,11 @@
 """Torch-backed exercise of the growable-KV expert-arena resize path (design step 5).
 
-``test_growable_kv_transaction_source.py`` extracts grow_runtime_kv/shrink_runtime_kv
-by AST and runs them against tiny stubs without ever importing ``freetoken.engine.engine``
-(the production module pulls in torch/model kernels). This file instead drives the REAL,
-non-extracted methods on a minimally-constructed ``Engine`` (``Engine.__new__``, bypassing
-``__init__``/model load/GPU allocation -- the same pattern ``test_cache_budget.py`` uses),
-so it also catches real attribute-path/decorator mistakes the AST extraction cannot see.
+``test_growable_kv_transaction.py`` drives ``GrowableKvController`` against a plain stub
+engine. This file instead enters through the REAL ``Engine.grow_runtime_kv`` /
+``shrink_runtime_kv`` delegations on a minimally-constructed ``Engine`` (``Engine.__new__``,
+bypassing ``__init__``/model load/GPU allocation -- the same pattern ``test_cache_budget.py``
+uses) with a real controller, so it also catches attribute-path/decorator mistakes between
+the engine and the controller (refactor step S7).
 
 ``_plan_growable_kv`` is a large, separately-tested budget planner; it is stubbed here
 exactly as the AST test stubs it, since the expert-arena resize only consumes its
@@ -22,6 +22,8 @@ import torch
 
 from freetoken.engine.cache_budget import arena_bytes_for_usable
 from freetoken.engine.engine import Engine
+from freetoken.engine.growable_kv import GrowableKvController
+from freetoken.moe.residency import WholeModelResidency
 
 MiB = 1024 * 1024
 GRANULE = 2 * MiB
@@ -64,6 +66,8 @@ class FakeArenaMoe:
         self.bank_row_bytes = ROW_BYTES
         self.num_experts = num_experts
         self.prefill_overlap = prefill_overlap
+        # The real cache's default residency: whole model in host RAM, floor 0.
+        self.residency = WholeModelResidency()
         self.usable_calls: list[int] = []
         self.rebuild_calls: list[int] = []
 
@@ -95,7 +99,6 @@ def _engine(pool: FakePool, moe: FakeArenaMoe, *, free_bytes_fn=lambda: (0, 0)) 
         moe_cache_size=moe.cache_size,
         tp_info=SimpleNamespace(size=1),
     )
-    engine._pending_graph_bs = None
     engine.graph_runner = SimpleNamespace(
         graph_bs_list=[1],
         destroy_cuda_graphs=lambda: pytest.fail(
@@ -105,7 +108,8 @@ def _engine(pool: FakePool, moe: FakeArenaMoe, *, free_bytes_fn=lambda: (0, 0)) 
     engine.attn_backend = SimpleNamespace(
         reset_capture=lambda: pytest.fail("expert-arena resize must never reset capture")
     )
-    engine._plan_growable_kv = lambda pages, **kw: (0, pages * MiB)
+    engine.growable_kv = GrowableKvController(engine)
+    engine.growable_kv._plan_growable_kv = lambda pages, **kw: (0, pages * MiB)
     engine._sync_get_memory = free_bytes_fn
     engine.sync_all_ranks = lambda: None
     return engine
@@ -144,7 +148,6 @@ def test_grow_funds_kv_via_set_usable_slots_never_rebuild():
         capacity, capacity, step, ROW_BYTES
     ) - arena_bytes_for_usable(moe.usable_calls[0], capacity, step, ROW_BYTES)
     assert freed >= 264 * MiB
-    assert engine._pending_graph_bs is None
     assert engine.config.moe_cache_size == 768
 
 
@@ -163,7 +166,6 @@ def test_grow_rollback_regrows_experts_on_failed_commit():
     assert moe.cache_size == 1024
     assert pool.committed_pages == 8
     assert engine.config.moe_cache_size == 1024
-    assert engine._pending_graph_bs is None
     assert getattr(engine, "_growable_transition_failed", False) is False
 
 
@@ -186,7 +188,6 @@ def test_shrink_regrows_experts_via_set_usable_slots_never_rebuild():
         832, capacity, step, ROW_BYTES
     ) - arena_bytes_for_usable(768, capacity, step, ROW_BYTES)
     assert grown <= 128 * MiB
-    assert engine._pending_graph_bs is None
     assert engine.config.moe_cache_size == 832
 
 

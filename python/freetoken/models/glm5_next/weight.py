@@ -62,6 +62,7 @@ _NVFP4_SOURCE_SPEC = Nvfp4ExpertSourceSpec(
         r"^model\.language_model\.layers\.(?P<layer>\d+)\.mlp\.experts\.(?P<expert>\d+)\."
         r"(?P<proj>gate_proj|up_proj|down_proj)\.(?P<kind>weight|weight_scale|weight_scale_2)$"
     ),
+    key_template="model.language_model.layers.{layer}.mlp.experts.{expert}.{proj}.{kind}",
     proj_to_role={"gate_proj": "gate", "up_proj": "up", "down_proj": "down"},
     layer_to_bank=_layer_to_bank,
     desc="GLM-5.3 NVFP4 experts",
@@ -77,6 +78,7 @@ _NVFP4_CT_SOURCE_SPEC = Nvfp4ExpertSourceSpec(
         r"(?P<proj>gate_proj|up_proj|down_proj)\."
         r"(?P<kind>weight_packed|weight_global_scale|weight_scale)$"
     ),
+    key_template="model.language_model.layers.{layer}.mlp.experts.{expert}.{proj}.{kind}",
     proj_to_role={"gate_proj": "gate", "up_proj": "up", "down_proj": "down"},
     layer_to_bank=_layer_to_bank,
     desc="GLM-5.3 NVFP4 experts (compressed-tensors)",

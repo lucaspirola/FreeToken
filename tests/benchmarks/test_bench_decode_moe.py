@@ -81,13 +81,13 @@ def test_server_arg_is_appended_verbatim_and_whitespace_split():
     cmd = bench.serve_cmd(
         _args(
             "--server-arg", "--host-ram-reserve-gb 3",
-            "--server-arg", "--elastic-initial-requests 4",
+            "--server-arg", "--max-running-requests 4",
         ),
         "offload",
         8000,
     )
     assert cmd[-4:] == [
-        "--host-ram-reserve-gb", "3", "--elastic-initial-requests", "4",
+        "--host-ram-reserve-gb", "3", "--max-running-requests", "4",
     ]
 
 

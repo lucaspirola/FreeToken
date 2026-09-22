@@ -94,3 +94,20 @@ def test_negative_pin_flags_are_a_startup_error(flag):
 def test_max_slots_below_auto_is_a_startup_error():
     with pytest.raises(SystemExit):
         _parse(["--pin-prefix-max-slots", "-2"])
+
+
+def test_pin_prefix_scope_defaults_to_shared_and_parses_session():
+    assert _parse([]).pin_prefix_scope == "shared"
+    args = _parse(["--pin-prefix-scope", "session", "--pin-prefix-max-tokens", "262144"])
+    assert (args.pin_prefix_scope, args.pin_prefix_max_tokens) == ("session", 262144)
+    # shared keeps accepting max-tokens 0 (= the 25% cap), as before S13
+    assert _parse(["--pin-prefix-max-tokens", "0"]).pin_prefix_scope == "shared"
+
+
+@pytest.mark.parametrize("argv", [
+    ["--pin-prefix-scope", "session", "--pin-prefix-max-tokens", "0"],   # unbounded session pins
+    ["--pin-prefix-scope", "private", "--pin-prefix-max-tokens", "8"],   # not a scope
+])
+def test_session_scope_without_a_finite_budget_is_a_startup_error(argv):
+    with pytest.raises(SystemExit):
+        _parse(argv)

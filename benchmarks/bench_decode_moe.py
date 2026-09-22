@@ -376,7 +376,7 @@ def serve_cmd(args: argparse.Namespace, backend: str, port: int) -> list[str]:
         cmd += ["--nvfp4-backend", args.nvfp4_backend]
     if getattr(args, "moe_collect_stats", False):
         cmd.append("--moe-collect-stats")
-    if args.gpu:
+    if getattr(args, "gpu", None):
         cmd += ["--gpu", args.gpu]
     if args.cache > 0:
         cmd += ["--moe-cache-size", str(args.cache)]

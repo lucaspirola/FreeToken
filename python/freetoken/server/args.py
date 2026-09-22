@@ -71,10 +71,6 @@ class ServerArgs(SchedulerConfig):
     # peak reset; see engine.cuda_memory for the allocator-counter scope.
     cuda_memory_telemetry: bool = False
     # Answer with the model's own reasoning when a turn produces reasoning but no visible
-    # Bound host expert RAM to N mirror rows (0 = off, -1 = auto-size from
-    # model geometry + KV ceiling). Native NVFP4 experts only.
-    moe_mirror_host_rows: int = 0  # 0 = off (default), -1 = auto-size from model geometry + KV ceiling
-
     # content and no tool call (--force-nonempty-content). Per request, a chat template
     # kwarg of the same name overrides it; thinking-off turns default to on.
     force_nonempty_content: bool = False
@@ -375,17 +371,6 @@ def parse_args(
     )
 
     parser.add_argument(
-        "--elastic-initial-requests",
-        type=_positive_int,
-        default=ServerArgs.elastic_initial_requests,
-        help=(
-            "Start hybrid-GDN recurrent state and decode graphs at this smaller "
-            "request capacity, then grow on demand through --max-running-requests "
-            "and shrink after the extra agents release their state."
-        ),
-    )
-
-    parser.add_argument(
         "--auto-session-grace-seconds",
         type=float,
         default=ServerArgs.auto_session_grace_seconds,
@@ -683,10 +668,23 @@ def parse_args(
         default=None,
         help=(
             "Physically grow KV in fixed token increments while its CUDA virtual address "
-            "stays stable, surrendering MoE expert-cache space at each boundary. "
-            "For Ornith on a 16 GiB RTX 5080, use 65536 with Q4_0 KV and 131072 "
-            "with Q8_0 KV; the larger Q8_0 step avoids a costly intermediate "
-            "expert-cache rebuild and is validated through a 524288-token ceiling."
+            "stays stable, surrendering MoE expert-cache space at each boundary. Needs "
+            "the expert arena (--expert-arena, or FREETOKEN_EXPERT_ARENA=1): the expert "
+            "cache shrinks in place and decode CUDA graphs stay valid. Formats the arena "
+            "does not serve (marlin/b12x NVFP4, mixed-size-class GGUF) are refused at "
+            "startup."
+        ),
+    )
+
+    parser.add_argument(
+        "--expert-arena",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Give the GPU expert cache a fixed-capacity VMM arena whose usable slot "
+            "count shrinks/grows in place, so --kv-grow-step-tokens resizes never "
+            "rebuild the cache or recapture decode graphs. Unset: on iff "
+            "FREETOKEN_EXPERT_ARENA=1 (the alias scripts/serve-default.sh exports)."
         ),
     )
 
@@ -1024,6 +1022,18 @@ def parse_args(
             "stops with an error naming this flag. Native NVFP4 experts only."
         ),
     )
+    parser.add_argument(
+        "--expert-residency",
+        choices=["whole", "mirror"],
+        default=None,
+        help=(
+            "Where expert bytes live while they are not on the GPU: 'whole' keeps "
+            "every expert row pinned in host RAM (default); 'mirror' bounds host "
+            "expert RAM to --moe-mirror-host-rows rows (auto-sized when 0 or -1). "
+            "Unset: 'mirror' when --moe-mirror-host-rows, FREETOKEN_MIRROR_HOST_ROWS "
+            "is non-zero or FREETOKEN_MIRROR_EXPERT_RAM=1, else 'whole'."
+        ),
+    )
 
     parser.add_argument(
         "--kv-reserve-tokens",
@@ -1207,9 +1217,9 @@ def parse_args(
         help=(
             "Prefix auto-pin threshold (hybrid radix cache only). A cached prefix at least "
             "this long that requests from two DIFFERENT sessions match through is locked "
-            "against eviction (a session's own next turn never pins). Released by a newer "
-            "pin over budget (LRU) or DELETE /v1/cache/pins. 0 disables pinning. "
-            "Default 1024."
+            "against eviction (under --pin-prefix-scope shared a session's own next turn "
+            "never pins). Released by a newer pin over budget (LRU) or DELETE "
+            "/v1/cache/pins. 0 disables pinning. Default 1024."
         ),
     )
 
@@ -1236,7 +1246,23 @@ def parse_args(
             "Total KV token budget for pinned prefixes. Over it the least-recently-matched "
             "pin is released first (scheduler.prefix.pin_evictions); a pin that does not "
             "fit even an empty ledger is refused (pin_budget_refusals). Clamped to 25%% of "
-            "the KV pool; 0 = that cap. Default 65536."
+            "the KV pool; 0 = that cap (refused with --pin-prefix-scope session). "
+            "Default 65536."
+        ),
+    )
+
+    parser.add_argument(
+        "--pin-prefix-scope",
+        choices=("shared", "session"),
+        dest="pin_prefix_scope",
+        default=ServerArgs.pin_prefix_scope,
+        help=(
+            "Which prefixes auto-pin (hybrid radix cache only). shared (default): a prefix "
+            "two DIFFERENT sessions match through. session: also the prefix a request with "
+            "a session key leaves in the cache when it finishes, so one agent re-reading its "
+            "own long prompt keeps it across the growable-KV shrink; such a pin holds its "
+            "whole KV path but only the deepest max(1, slot budget / 2) GDN snapshots. "
+            "Budgeted and released like any pin; requires --pin-prefix-max-tokens > 0."
         ),
     )
 
@@ -1406,6 +1432,13 @@ def parse_args(
         parser.error("--pin-prefix-max-tokens must be >= 0")
     if kwargs["pin_prefix_max_slots"] < -1:
         parser.error("--pin-prefix-max-slots must be >= -1 (-1 = auto)")
+    from freetoken.scheduler.cache import pin_prefix_scope_error
+
+    pin_scope_error = pin_prefix_scope_error(
+        kwargs["pin_prefix_scope"], kwargs["pin_prefix_max_tokens"]
+    )
+    if pin_scope_error is not None:
+        parser.error(pin_scope_error)
     if kwargs["trace_dir"] is not None:
         # Expanded once here so ~ and $VAR resolve against the server's own environment.
         # Unlike --hidden-states-dir this may not exist yet: nothing outside the server
@@ -1545,6 +1578,31 @@ def parse_args(
 
     if kwargs.get("kv_grow_step_tokens") is None:
         kwargs["kv_grow_step_tokens"] = 0
+    # The expert arena: FREETOKEN_EXPERT_ARENA is --expert-arena's alias and is read HERE
+    # only (offload_cache.py / offload_kernels.py used to read it at import time).
+    if kwargs.get("expert_arena") is None:
+        kwargs["expert_arena"] = (
+            os.environ.get("FREETOKEN_EXPERT_ARENA", "0").strip() == "1"
+        )
+    # Expert residency (moe/residency.py). The FREETOKEN_MIRROR_* environment
+    # names resolve HERE and nowhere else: FREETOKEN_MIRROR_HOST_ROWS is
+    # --moe-mirror-host-rows spelled for serve.env, FREETOKEN_MIRROR_EXPERT_RAM=1 is
+    # the plain on switch that auto-sizes (tasks/exclusive-expert-ram/measure.sh
+    # writes and strips both). Either one turns the mirror on unless
+    # --expert-residency says otherwise: the flag alone used to be silently inert.
+    explicit_rows = kwargs.get("moe_mirror_host_rows") or 0
+    rows = explicit_rows
+    if rows == 0:
+        rows = int(os.environ.get("FREETOKEN_MIRROR_HOST_ROWS", "0"))
+    env_on = os.environ.get("FREETOKEN_MIRROR_EXPERT_RAM", "0") == "1"
+    if kwargs.get("expert_residency") is None:
+        kwargs["expert_residency"] = "mirror" if (rows != 0 or env_on) else "whole"
+    elif kwargs["expert_residency"] == "whole" and explicit_rows != 0:
+        parser.error(
+            f"--expert-residency whole contradicts --moe-mirror-host-rows {explicit_rows}: "
+            "mirror rows size the bounded residency; drop one of the two"
+        )
+    kwargs["moe_mirror_host_rows"] = rows
     kwargs["auto_prefill_chunk"] = not explicit_prefill_chunk
     disabled = set(ENCODER_KINDS) if kwargs.pop("text_model_only") else set()
     disabled.update(kwargs.pop("mm_disable"))

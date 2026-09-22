@@ -45,6 +45,7 @@ _EXPERT_KEY_RE = re.compile(
 _EXPERT_RE = re.compile(r"\.mlp\.experts\.\d+\.")
 _NVFP4_SOURCE_SPEC = Nvfp4ExpertSourceSpec(
     key_pattern=_EXPERT_KEY_RE,
+    key_template="model.language_model.layers.{layer}.mlp.experts.{expert}.{proj}.{kind}",
     proj_to_role={"gate_proj": "gate", "up_proj": "up", "down_proj": "down"},
     layer_to_bank=lambda layer, config: layer,  # every layer is MoE
     desc="Qwen3.8-Flash-Next NVFP4 experts",

@@ -726,38 +726,28 @@ class _FakeRowTensor:
         return self._esize
 
 
-def test_growable_moe_bytes_unchanged_for_legacy_cache_without_arena_attrs():
-    """A legacy (non-arena) MoE offload cache has no ``bank_row_bytes``/``arena_layout``
-    attribute, so ``getattr(..., None)`` must fall through to the old uniform/mixed
-    formula unchanged."""
+def test_growable_moe_bytes_refuses_a_cache_without_arena_attrs():
+    """Since S10 the arena byte model is the only one: a MoE offload cache without
+    ``bank_row_bytes``/``arena_layout`` (no expert arena) has no growable KV."""
     from freetoken.engine.engine import Engine
+    from freetoken.engine.growable_kv import GrowableKvController
 
-    class LegacyMoeCache:
+    class NoArenaMoeCache:
         num_experts = 4
-        bank_sources = {"gate_up": [_FakeRowTensor(32 * 8, 2)]}  # row = 32*8*2 = 512 B
+        bank_sources = {"gate_up": [_FakeRowTensor(32 * 8, 2)]}
         # No bank_row_bytes / arena_layout attributes at all.
 
     engine = Engine.__new__(Engine)
-    engine.moe_offload_cache = LegacyMoeCache()
+    engine.moe_offload_cache = NoArenaMoeCache()
     engine._growable_moe_prefill_overlap = False
 
-    # Cross-check against the pure legacy formula directly (uniform fallback path).
-    from freetoken.engine.cache_budget import expert_bytes_per_slot, expert_cache_bytes
-
-    sources = LegacyMoeCache.bank_sources
-    expected = expert_cache_bytes(
-        6,
-        slot_signatures=(),
-        num_experts=4,
-        prefill_overlap=False,
-        fallback_per_expert_bytes=expert_bytes_per_slot(sources),
-    )
-    assert engine._growable_moe_bytes(6) == expected
-    assert expected == 6 * 512
+    with pytest.raises(RuntimeError, match="growable KV unsupported for this format"):
+        GrowableKvController(engine)._growable_moe_bytes(6)
 
 
 def test_growable_moe_bytes_uses_arena_model_when_attrs_present():
     from freetoken.engine.engine import Engine
+    from freetoken.engine.growable_kv import GrowableKvController
 
     class ArenaMoeCache:
         num_experts = 4
@@ -768,7 +758,7 @@ def test_growable_moe_bytes_uses_arena_model_when_attrs_present():
     engine.moe_offload_cache = ArenaMoeCache()
     engine._growable_moe_prefill_overlap = False
 
-    assert engine._growable_moe_bytes(5) == arena_bytes_for_usable(5, 10, 4, _HAND_ROWS)
+    assert GrowableKvController(engine)._growable_moe_bytes(5) == arena_bytes_for_usable(5, 10, 4, _HAND_ROWS)
 
 
 def test_adjust_config_rope_gate_exempts_dsv4():

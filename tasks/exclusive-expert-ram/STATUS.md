@@ -640,6 +640,21 @@ model residency and KV growth are separate numbers. The full curve is being
 re-measured on that basis -- two baselines, first and last, so host drift under
 a 15-minute sweep is visible rather than assumed.
 
+## Code layout after the reorganisation (exp/reorg S6/S7, 2026-09-23)
+
+Behaviour is unchanged; where things live is not:
+
+* The mirror is `MirrorResidency` in `moe/residency.py` (S6). Selection is
+  `--expert-residency {whole,mirror}`; `FREETOKEN_MIRROR_EXPERT_RAM` /
+  `FREETOKEN_MIRROR_HOST_ROWS` are aliases resolved in `server/args.py` only, with the
+  engine's former rule, so `measure.sh`'s write/strip logic is unchanged.
+* The growable-KV transaction (`grow_runtime_kv`, `shrink_runtime_kv`, the arena
+  branches, planner and rollback) is `GrowableKvController` in `engine/growable_kv.py`
+  (S7); `Engine.grow_runtime_kv` / `shrink_runtime_kv` delegate. The log line
+  `Committed growable KV through N tokens ...; MoE slots a -> b` is byte-identical.
+* The arena gate is `EngineConfig.expert_arena` (`--expert-arena`, alias
+  `FREETOKEN_EXPERT_ARENA=1`), no longer an import-time env read.
+
 ## Not yet done
 
 Work is tracked as the phases of `~/.claude/plans/steady-baking-bird.md`

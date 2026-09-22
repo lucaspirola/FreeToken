@@ -53,9 +53,11 @@ only, I=1856) plus one shared expert.
   `model_max_length` is 262,144 — treat 262K as the served ceiling and pin the
   working window with `--max-seq-len-override`.
 - **Concurrency**: the 47 MiB state fits many slots, so Lightning is *not*
-  `single_stream_only`: up to 16 concurrent requests, with
-  `--elastic-initial-requests` starting the recurrent-state/graph working set
-  small and growing it on demand.
+  `single_stream_only`: up to 16 concurrent requests. The default profile still
+  runs one session at a time (single lane, see "Launch profiles"); the other
+  sessions queue and spill. (`--elastic-initial-requests`, which started the
+  recurrent-state/graph working set small and grew it on demand, was retired in
+  refactor step S11 on 2026-09-23.)
 - **WSL pin quota**: the CUDA host-registration budget is 0.4 × RAM. Below the
   15.4 GiB of banks, the overflow layers need `--moe-pageable-gpu` (which disables
   the decode CUDA graphs). Raising `FREETOKEN_PIN_BUDGET_GB` to ≥ 17 (backed by a
@@ -148,7 +150,11 @@ ft serve --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   --num-tokens 65536 --memory-ratio 0.85 --max-prefill-length 8192 --host-ram-reserve-gb 6
 ```
 
-P2 — serving profile (16 concurrent, elastic KV, prefix cache, quantized KV):
+P2 — serving profile (16 concurrent, growable KV, prefix cache, quantized KV). **Historical:**
+this is the line the 2026-09-04/05 numbers below were measured on. Its
+`--elastic-initial-requests 4` was retired in refactor step S11 (2026-09-23) and no longer
+parses; a fixed 16-lane launch drops that flag, which sizes the GDN state pool for
+`--max-running-requests` up front (see the next paragraphs).
 
 ```
 FREETOKEN_PIN_BUDGET_GB=17 \
@@ -182,34 +188,34 @@ identical-prefix probe after each generation that must hit by construction:
 | wall clock | 427 s | 281 s |
 | decode | 41.7 tok/s | 43.0-43.4 tok/s |
 
-Dropping it forces dropping `--elastic-initial-requests` too (the engine refuses the
-combination: "requires --kv-grow-step-tokens so MoE residency can fund and reclaim the extra
-GDN state"), which sizes the GDN state pool for `--max-running-requests` up front — Mamba
-slots 24 → 96 and about **1.5 GiB more resident host RAM**. That is the real cost; the
-expert-cache/decode penalty did not materialise. Keep the P2 line for multi-agent session
-serving where KV is genuinely idle between turns and worth borrowing back; drop the flag for
-prefix-reuse-heavy batch work (replay, evaluation, teacher forcing). Host RAM to launch is
+Dropping it forced dropping `--elastic-initial-requests` too (historical: the engine refused
+the combination, "requires --kv-grow-step-tokens so MoE residency can fund and reclaim the
+extra GDN state"), which sizes the GDN state pool for `--max-running-requests` up front — Mamba
+slots 24 → 96 and about **1.5 GiB more resident host RAM**. That was the real cost; the
+expert-cache/decode penalty did not materialise. Since S11 every launch sizes the pool that
+way. Keep `--kv-grow-step-tokens` for multi-agent session serving where KV is genuinely idle
+between turns and worth borrowing back; drop it for prefix-reuse-heavy batch work (replay,
+evaluation, teacher forcing). Host RAM to launch is
 ~26.9 GiB free, since the loader's own torch/CUDA init consumes ~2.8 GiB before the expert-bank
 preflight reads MemAvailable.
 
-**Decode CUDA graphs on this profile (fixed 2026-09-05).** `--elastic-initial-requests`
-recaptures the decode graphs at every capacity tier, and the tier's set used to stop at 8
+**Decode CUDA graphs on this profile (fixed 2026-09-05; historical, the elastic graph set was
+deleted with the flag in S11).** `--elastic-initial-requests` recaptured the decode graphs at every capacity tier, and the tier's set used to stop at 8
 (`_elastic_graph_batch_sizes` returned `(1,2,3,4,8)`); `can_use_cuda_graph` gates on the
 largest captured size, so **every decode batch of 9-16 lanes ran eager** — 314 of the 427
 decode batches of the `13af13d` soak, 421 of which were taken at elastic capacity 16. The
-set is now **dense to 16** (then a 1.33-1.5x ladder, with the tier's capacity always
+set was then made **dense to 16** (then a 1.33-1.5x ladder, with the tier's capacity always
 appended), because on an offload-MoE model a *padded* row is not free — it routes its own
 top-6 experts — and padding a 12-lane batch up to a bs-16 graph measured **6.7 % slower than
 running it eagerly**, while an exact graph is **7.4 % faster**. The dense set costs 80 MiB
 and under a second per resize and does not shrink the expert cache (976 slots either way).
 Full study: `benchmarks/results/nemotron35_lightning_5080_decode16_2026-09-05.md`.
 
-Check it in any server log: `Start capturing CUDA graphs with sizes:` must reach the number
-`Elastic capacity ... -> N requests` last reported, with no gaps below 16.
-`FREETOKEN_ELASTIC_GRAPH_MAX_BS` caps the set for an A/B (`=8` is the old ceiling).
+The `Elastic capacity ... -> N requests` log line and the `FREETOKEN_ELASTIC_GRAPH_MAX_BS`
+A/B knob went with it (S11).
 
-**The non-elastic ladder too (2026-09-05).** Without `--elastic-initial-requests` the graph set
-came from `_determine_cuda_graph_bs`, which still built `[1, 2, 4] + range(8, max_bs + 1, 8)`, so
+**The decode graph ladder (2026-09-05).** Without `--elastic-initial-requests` (and, since S11,
+always) the graph set comes from `_determine_cuda_graph_bs`, which still built `[1, 2, 4] + range(8, max_bs + 1, 8)`, so
 at `--cuda-graph-max-bs 16` a 12-lane batch replayed the bs-16 graph with four dummy rows — and a
 dummy row routes its own top-6 experts. `_determine_cuda_graph_bs` now unions
 `range(1, min(max_bs, 16) + 1)` into the ladder **for offload-MoE models only**
@@ -217,7 +223,7 @@ dummy row routes its own top-6 experts. `_determine_cuda_graph_bs` now unions
 the historical list byte-for-byte, and that is pinned by a test. Three alternating repeats of each
 arm out of **one binary** at 12 lanes: sparse `[1,2,4,8,16]` **140.43** tok/s aggregate (event-gap
 p50 83.0–87.0 ms) against dense `[1..16]` **150.90** (77.2–79.3 ms) — **1.074x**, every dense run
-above every sparse run, the same 1.074x the elastic tier measures at 12 lanes. Cost: 11 extra
+above every sparse run, the same 1.074x the retired elastic tier measured at 12 lanes. Cost: 11 extra
 graphs, ~80 MiB, ~0.8 s of startup. `FREETOKEN_GRAPH_DENSE_BS=0|1` forces either arm.
 `benchmarks/results/nemotron35_lightning_5080_misc_tickets_2026-09-05.md` §1.
 

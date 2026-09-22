@@ -66,6 +66,7 @@ def _synthetic_spec(gated: bool, naming: str) -> Nvfp4ExpertSourceSpec:
     # It is the identity for modelopt naming, so it is passed unconditionally.
     return Nvfp4ExpertSourceSpec(
         key_pattern=key_pattern,
+        key_template="backbone.layers.{layer}.mixer.experts.{expert}.{proj}.{kind}",
         proj_to_role={_PROJ_OF_ROLE[r]: r for r in roles},
         layer_to_bank=lambda layer, config: layer,
         desc=f"synthetic {naming} ({'gated' if gated else 'ungated'})",

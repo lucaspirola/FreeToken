@@ -129,7 +129,7 @@ def test_sealed_normal_loop_only_receives_same_operation_retry_without_mutation(
         send_result=lambda values: replies.extend(values),
         _expire_sessions=forbidden, _release_due_soft_sessions=forbidden,
         _enforce_session_host_reserve=forbidden, _only_idle_sessions=forbidden,
-        _maybe_shrink_growable_kv=forbidden, _maybe_resize_elastic_capacity=forbidden,
+        _maybe_shrink_growable_kv=forbidden,
         _schedule_next_batch=forbidden, _forward=forbidden,
     )
     scheduler._process_one_msg = Scheduler._process_one_msg.__get__(scheduler)

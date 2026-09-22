@@ -35,6 +35,7 @@ _NVFP4_EXPERT_KEY_RE = re.compile(
 )
 _NVFP4_SOURCE_SPEC = Nvfp4ExpertSourceSpec(
     key_pattern=_NVFP4_EXPERT_KEY_RE,
+    key_template="model.language_model.layers.{layer}.experts.{expert}.{proj}.{kind}",
     proj_to_role={"gate_proj": "gate", "up_proj": "up", "down_proj": "down"},
     layer_to_bank=lambda layer, config: layer,  # every layer is MoE (no dense prefix)
     desc="Gemma4 NVFP4 experts",

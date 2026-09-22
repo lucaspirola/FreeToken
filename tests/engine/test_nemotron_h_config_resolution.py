@@ -7,8 +7,8 @@ is resident:
 - the Marlin NVFP4 MoE kernel, which hard-codes a gated [2I, H] gate_up bank, must be
   refused at config time rather than mis-shaping banks after the load;
 - dropping ``single_stream_only`` (Super forced it; Lightning's 47 MiB SSM state does
-  not) must leave the multi-request knobs alone -- 16 running requests and the elastic
-  decode-graph set sized to the *initial* capacity, not the ceiling.
+  not) must leave the multi-request knobs alone -- 16 running requests and a decode-graph
+  ceiling of 16.
 """
 
 from __future__ import annotations
@@ -124,7 +124,7 @@ def test_other_nvfp4_backends_pass_config_time(backend):
     assert config.nvfp4_backend == backend
 
 
-# --- multi-request / elastic knobs -------------------------------------------------
+# --- multi-request knobs -----------------------------------------------------------
 
 
 def test_multi_stream_model_keeps_its_running_request_ceiling():
@@ -147,37 +147,6 @@ def test_single_stream_only_still_collapses_to_one(caplog):
     assert config.max_running_req == 1
     assert config.cuda_graph_bs == [1]
     assert config.cuda_graph_max_bs == 1
-
-
-def test_elastic_start_sizes_graphs_to_the_initial_capacity():
-    from freetoken.engine.engine import _adjust_config
-
-    config = _config(
-        max_running_req=16,
-        elastic_initial_requests=4,
-        kv_grow_step_tokens=65536,
-        num_token_override=262144,
-    )
-    _adjust_config(config)
-    # Admission still accepts 16; only the recurrent-state/graph working set starts at 4.
-    assert config.max_running_req == 16
-    assert config.cuda_graph_bs == [1, 2, 3, 4]
-    assert config.cuda_graph_max_bs == 4
-    assert config.cache_type == "hybrid_radix"
-
-
-def test_elastic_initial_must_be_below_the_ceiling():
-    from freetoken.engine.engine import _adjust_config
-
-    with pytest.raises(ValueError, match="must be smaller than"):
-        _adjust_config(
-            _config(
-                max_running_req=4,
-                elastic_initial_requests=4,
-                kv_grow_step_tokens=65536,
-                num_token_override=262144,
-            )
-        )
 
 
 if __name__ == "__main__":

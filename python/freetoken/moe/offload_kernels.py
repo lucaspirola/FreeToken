@@ -29,7 +29,10 @@ _LFU_RECENCY_BONUS_OVERRIDE = os.getenv("FREETOKEN_LFU_RECENCY_BONUS")
 # read from device memory is re-read on every replay, which is what lets a future
 # step shrink/grow the usable slot count without recapturing decode graphs. See
 # OffloadMoeCache.usable_slots / lru_slot_range_device in offload_cache.py.
-FREETOKEN_EXPERT_ARENA = os.getenv("FREETOKEN_EXPERT_ARENA", "0").strip() == "1"
+# A config value, not an import-time env read: the engine publishes
+# EngineConfig.expert_arena here at init (offload_cache.set_expert_arena);
+# server/args.py resolves --expert-arena and its FREETOKEN_EXPERT_ARENA alias.
+FREETOKEN_EXPERT_ARENA = False
 
 # Lever 2: LFU victim tie-break preferring a candidate that already has a pool
 # row (mirror-attached only -- see _ensure_experts_sized_kernel_v2). On by

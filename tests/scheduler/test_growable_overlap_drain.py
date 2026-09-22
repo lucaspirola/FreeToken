@@ -101,7 +101,6 @@ def _base_overlap_stub(calls: list) -> _SchedulerStub:
     obj._process_one_msg = lambda msg: None
     obj._execute_pending_durable_checkpoint = lambda: None
     obj._execute_pending_rebuild = lambda: None
-    obj._maybe_resize_elastic_capacity = lambda: None
     obj._publish_scheduler_counters = lambda **kw: None
     obj._flush_abort_acks = lambda: calls.append(("flush_abort_acks",))
     obj._process_last_data = lambda last_data: calls.append(("process_last_data", last_data))

@@ -82,7 +82,7 @@ def _two_locked_hybrid_sessions():
 
     # Exercise the exact hole from the diagnosis: compaction runs with only A represented
     # (a live ``reqs`` entry would carry A's own handle; B is idle, so a caller that forgot
-    # to pass it as a retained handle -- the state ``_elastic_retained_session_handles``
+    # to pass it as a retained handle -- the state ``_retained_session_handles``
     # closed at the scheduler layer -- leaves B's cache_handle.kv_indices alias out of the
     # remap). The tree's own node.value is unconditionally walked and stays correct; the
     # separate ``kv_indices`` tensor cached on the lease's handle is the one at risk.

@@ -32,7 +32,12 @@ from freetoken.models.weight import ftw_lacks_vision
 from freetoken.moe import is_offload_moe_strategy
 from freetoken.moe.expert_banks import load_expert_banks
 from freetoken.moe.host_banks import PinFailed
-from freetoken.moe.offload_cache import OffloadMoeCache, attach_offload_moe_cache
+from freetoken.moe.offload_cache import (
+    OffloadMoeCache,
+    attach_offload_moe_cache,
+    set_expert_arena,
+)
+from freetoken.moe.residency import build_residency
 from freetoken.utils import (
     align_ceil,
     init_logger,
@@ -44,6 +49,7 @@ from freetoken.utils import (
 
 from .config import EngineConfig
 from .graph import GraphRunner, get_free_memory
+from .growable_kv import GROWABLE_KV_UNSUPPORTED, GrowableKvController
 from .sample import BatchSamplingArgs, FirstStepLogprobs, Sampler
 from freetoken.kvcache import create_kv_pool, resolve_pool_class
 from freetoken.kvcache.base import CacheRebuildRejected
@@ -51,7 +57,6 @@ from freetoken.kvcache.cache_status import _supports_swa_ratio
 from freetoken.kvcache.linear_state_pool import (
     _linear_pool_min_slots,
     _linear_pool_num_slots,
-    linear_pool_slots_for_capacity,
     state_pool_bytes,
 )
 
@@ -115,7 +120,7 @@ def _arena_step_slots() -> int:
     Small values keep the resize granularity fine (less wasted expert-cache
     headroom per KV growth step); large values reduce the number of independent
     VMM commit/uncommit calls per resize. Only consulted when
-    ``FREETOKEN_EXPERT_ARENA=1`` and ``kv_grow_step_tokens`` are both set --
+    ``config.expert_arena`` and ``kv_grow_step_tokens`` are both set --
     ``OffloadMoeCache`` ignores ``arena_step_slots`` entirely off that gate.
     """
     raw = os.environ.get("FREETOKEN_ARENA_STEP_SLOTS", "8").strip()
@@ -124,6 +129,35 @@ def _arena_step_slots() -> int:
     except ValueError:
         value = 8
     return value if value > 0 else 8
+
+
+def _refuse_unsupported_growable_kv(config: EngineConfig, banks) -> None:
+    """``--kv-grow-step-tokens`` funds KV from the expert arena; refuse what it cannot serve.
+
+    Refactor step S10 removed the rebuild-and-recapture fallback these configurations used
+    to take. The formats come back when S12b moves them onto the arena.
+    """
+    from freetoken.engine.cache_budget import expert_slot_signatures
+
+    fmt = getattr(banks, "quant_format", "")
+    if fmt in ("nvfp4_marlin", "nvfp4_b12x"):
+        raise ValueError(
+            f"{GROWABLE_KV_UNSUPPORTED} (expert format {fmt!r}: tiled marlin/b12x banks; "
+            "use the triton NVFP4 backend or drop --kv-grow-step-tokens)"
+        )
+    if fmt == "gguf":
+        classes = len(set(expert_slot_signatures(banks.sources)))
+        if classes > 1:
+            raise ValueError(
+                f"{GROWABLE_KV_UNSUPPORTED} (GGUF experts with {classes} size classes; "
+                "drop --kv-grow-step-tokens)"
+            )
+    if not config.expert_arena:
+        raise ValueError(
+            "--kv-grow-step-tokens requires the expert arena: pass --expert-arena (or set "
+            "FREETOKEN_EXPERT_ARENA=1, as scripts/serve-default.sh does). The rebuild-based "
+            "fallback it used to take without one was removed (refactor step S10)."
+        )
 
 
 def _flashinfer_available() -> bool:
@@ -553,6 +587,9 @@ class Engine:
         self._post_weights_free = post_weights_free
         self.moe_offload_cache = None
         self.cpu_moe_executor = None
+        # The growable-KV transaction (engine/growable_kv.py). Always present: its poison
+        # check guards every forward, rebuild and resize.
+        self.growable_kv = GrowableKvController(self)
         # Host-side auxiliary stores (qwen4_exp's pinned PLE table): after the weights so a
         # load failure is not masked, before the MoE offload cache so the bank residency
         # planning sees the pin quota the table already spent.
@@ -560,10 +597,15 @@ class Engine:
         if hasattr(self.model, "load_host_tables"):
             with _weight_load_context():
                 self._host_tables_bytes = int(self.model.load_host_tables(config) or 0)
+        # Publish the expert-arena gate before any OffloadMoeCache exists or any offload
+        # kernel launches: both read it (it used to be an import-time env constant).
+        set_expert_arena(config.expert_arena)
         if is_offload_moe_strategy(config.moe_strategy):
             self._init_offload_moe_cache(config)
         if config.kv_grow_step_tokens:
             assert self.moe_offload_cache is not None
+            if getattr(self.moe_offload_cache, "arena_layout", None) is None:
+                raise RuntimeError(GROWABLE_KV_UNSUPPORTED)
             # Growth may temporarily trade expert slots for KV. Preserve the startup ceiling
             # and requested overlap policy so teardown can spend released KV VRAM on experts
             # again instead of making the decode penalty permanent.
@@ -607,7 +649,7 @@ class Engine:
             config, self.num_pages, device=self.device, dtype=self.dtype
         )
         if config.kv_grow_step_tokens:
-            final_moe, final_kv_bytes = self._plan_growable_kv(self.num_pages)
+            final_moe, final_kv_bytes = self.growable_kv._plan_growable_kv(self.num_pages)
             logger.info_rank0(
                 "Growable-KV ceiling validated: %d tokens, %s physical, planned final "
                 "MoE cache %d slots",
@@ -712,7 +754,6 @@ class Engine:
             gguf_mma_enabled=config.model_config.gguf_expert_types is not None,
             mrope=config.model_config.model_is_mrope,
         )
-        self._pending_graph_bs: list[int] | None = None
         if config.attention_backend.split(",")[0] == "triton":
             # Prefill runs on the first comma part; warm its autotune cache.
             self._warmup_prefill()
@@ -884,79 +925,8 @@ class Engine:
         # Otherwise load_expert_banks gives the model module a setup hook first, then
         # falls back to per-quant providers, and the engine wires the banks into cache.
         cache_factory = getattr(self.model, "make_offload_moe_cache", None)
-        # Bounded host mirror. --moe-mirror-host-rows is the flag (0 off,
-        # -1 auto-size, >0 explicit rows); FREETOKEN_MIRROR_HOST_ROWS is the
-        # same knob spelled for serve.env, and FREETOKEN_MIRROR_EXPERT_RAM=1
-        # is the plain on switch that auto-sizes. Either one turns it on: the
-        # flag alone used to be silently inert, which is worse than both.
-        mirror_rows = config.moe_mirror_host_rows or 0
-        if mirror_rows == 0:
-            mirror_rows = int(os.environ.get("FREETOKEN_MIRROR_HOST_ROWS", "0"))
-        mirror = (mirror_rows != 0
-                  or os.environ.get("FREETOKEN_MIRROR_EXPERT_RAM", "0") == "1")
-        if mirror:
-            mc = config.model_config
-            from freetoken.models.nvfp4_banks import expert_source_spec
-
-            mirror_spec = expert_source_spec(mc)
-            if (
-                cache_factory is not None or config.moe_strategy != "offload"
-                or config.moe_pageable_gpu or config.moe_cpu_layers is not None
-                or config.use_dummy_weight or config.tp_info.size != 1
-                or mc.expert_quant != "nvfp4" or config.nvfp4_backend != "triton"
-            ):
-                raise ValueError(
-                    "mirror expert RAM requires native NVFP4 experts, the triton "
-                    "backend and single-rank GPU offload"
-                )
-            if mirror_spec is None:
-                raise ValueError(
-                    f"mirror expert RAM has no expert source spec for model type "
-                    f"{mc.model_type!r}: it cannot locate expert rows in this "
-                    f"checkpoint. Export NVFP4_EXPERT_SOURCE_SPEC from that "
-                    f"model's weight module once its layout is verified."
-                )
-            if mirror_spec.gated != bool(mc.expert_gated):
-                raise ValueError(
-                    f"mirror expert RAM: spec says gated={mirror_spec.gated} but "
-                    f"the config says expert_gated={mc.expert_gated}; the row "
-                    f"layout would be half the size it should be"
-                )
-            # Decode CUDA graphs stay ON -- that is the whole point: a mirror
-            # miss is a plain H2D, exactly what the baseline captures.
-            #
-            # Prefill overlap stays ON too, and must. Turning it off (as this
-            # branch first did, on the grounds that the double buffer streams a
-            # layer "straight from the host banks", which the mirror does not
-            # have) sends prefill through materialize_layer, which reinstalls
-            # the layer into the LRU slots and invalidates every other
-            # resident. That empties the mirror, so coverage has to be rebuilt
-            # from the checkpoint at every prefill->decode transition: 19.3 GiB
-            # of disk per request, measured as 8.0 s of TTFT on an 8K prompt
-            # whose baseline prefill is 0.34 s, and 74.7 s at 80K against 9.8 s.
-            # The premise was wrong in the first place: a layer's rows do not
-            # have to come from the host banks. Coverage says every expert is a
-            # GPU resident or has a pool row, so the buffer is assembled from
-            # those two places with no disk at all
-            # (OffloadMoeCache._prefetch_split_mirror). The buffer region no
-            # longer needs to be exclusive to prefill either -- a decode
-            # resident there is written back before a fill overwrites it
-            # (_invalidate_prefill_buffer) -- so only the pool-capacity
-            # estimate in _mirror_final_gpu_slots still prices
-            # prefill_buffer_slots(num_experts) as unavailable to decode; the
-            # arena's coverage floor no longer does.
-            # Graphs stay ON. The graphs-mode corruption is not a race: a
-            # pure replay never runs host code, so the prefill->decode boundary
-            # warm start (host + disk, in ensure_experts) could never fire
-            # after any post-capture prefill, leaving decode against an empty
-            # mirror. The restore is now driven by the scheduler's batch
-            # boundary (Scheduler._forward), which is always host-visible,
-            # before the replay is admitted.
-            logger.info_rank0(
-                "Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode "
-                "graphs enabled, prefill overlap on (layers assembled from "
-                "resident slots + pool rows, no disk)"
-            )
+        mc = config.model_config
+        residency = build_residency(config, mc, self)
         if cache_factory is not None and config.moe_cache_auto:
             raise ValueError(
                 "--moe-cache-auto is not supported for models with a custom "
@@ -988,7 +958,7 @@ class Engine:
             pageable_gpu_layer_ids = _auto_pageable_gpu_layers(
                 config, config.model_config.num_moe_layers
             )
-        if not config.moe_pageable_gpu and not mirror:
+        if not config.moe_pageable_gpu and not residency.bounded:
             # Upstream 477c860 refuses a plain offload boot whose banks exceed a known
             # pin budget instead of silently locking layers for CPU decode. The two
             # fork-only profiles below own their own residency plan, so they keep it.
@@ -1051,53 +1021,8 @@ class Engine:
                         requested_residency.append(HostResidency.LOCKED.value)
                     else:
                         requested_residency.append(HostResidency.PINNED.value)
-            if mirror:
-                from freetoken.moe.mirror_pool import (
-                    MirrorExpertPool, plan_capacity, resolve_reserve_rows,
-                )
-                from freetoken.moe.expert_banks import ExpertBanks
-                # Resolved ONCE here and passed to BOTH plan_capacity and
-                # MirrorExpertPool below: they must agree on the reserve or
-                # the planner sizes the arena floor against a different
-                # number than the pool actually withholds (see
-                # resolve_reserve_rows / default_reserve_rows docstrings).
-                mirror_reserve_rows = resolve_reserve_rows(mc.num_experts)
-                logger.info_rank0(
-                    "Mirror pool: reserve resolved to %d rows%s",
-                    mirror_reserve_rows,
-                    (f" (FREETOKEN_MIRROR_RESERVE_ROWS="
-                     f"{os.environ['FREETOKEN_MIRROR_RESERVE_ROWS']!r})")
-                    if os.environ.get("FREETOKEN_MIRROR_RESERVE_ROWS", "").strip()
-                    else " (default: 3 * num_experts)",
-                )
-                # Size for the KV ceiling, where the GPU cache is smallest and
-                # the host side must be largest. Growing a pinned pool later
-                # costs ~762 ms/GiB (measured), a stall no request should pay.
-                capacity = mirror_rows if mirror_rows > 0 else plan_capacity(
-                    mc.num_moe_layers, mc.num_experts,
-                    self._mirror_final_gpu_slots(config),
-                    reserve=mirror_reserve_rows,
-                )
-            else:
-                mirror_pool = None
-            if mirror:
-                mirror_pool = MirrorExpertPool(
-                    config.model_path, mc.num_moe_layers, mc.num_experts, capacity,
-                    hidden_size=(getattr(mc, mirror_spec.hidden_size_attr)
-                                 if mirror_spec.hidden_size_attr else mc.hidden_size),
-                    intermediate_size=mc.moe_intermediate_size,
-                    spec=mirror_spec, config=mc,
-                    device=self.device,
-                    reserve_rows=mirror_reserve_rows,
-                )
-                # _grow_runtime_kv_arena consults the pool's coverage bound so
-                # the KV never grows past what the mirror can complement.
-                self._mirror_pool_ref = mirror_pool
-                banks = ExpertBanks("nvfp4", {
-                    name: [torch.empty((mc.num_experts, *tail), dtype=dtype, device="meta")]
-                    * mc.num_moe_layers
-                    for name, (tail, dtype) in mirror_pool.shapes.items()
-                })
+            if residency.bounded:
+                banks = residency.placeholder_banks(mc)
             else:
                 try:
                     with _weight_load_context():
@@ -1152,9 +1077,10 @@ class Engine:
                 # value is planned here -- the initial usable count starts at the
                 # ceiling itself (capacity is always a valid chunk boundary; see
                 # ``_arena_chunk_boundaries``), and grow_runtime_kv shrinks it on
-                # demand as KV grows. Off FREETOKEN_EXPERT_ARENA, OffloadMoeCache
-                # ignores these two kwargs entirely (collapses slot_capacity to
-                # cache_size), so this is a no-op with the gate off.
+                # demand as KV grows. The arena is the only growable-KV mechanism
+                # since S10, so a format or a config without it is refused here,
+                # at startup, not at the first 64K boundary of a request.
+                _refuse_unsupported_growable_kv(config, banks)
                 floor = (
                     2 * config.model_config.num_experts
                     if config.moe_prefill_overlap
@@ -1223,79 +1149,7 @@ class Engine:
             cache.direct_device_banks = bool(config.kv_grow_step_tokens)
             # before set_bank_sources: the residency validation and the copy plan's skip of non-pinned layers key on the CPU-layer set
             cache.cpu_layer_ids = cpu_layer_ids
-            if mirror_pool is not None:
-                cache.attach_mirror_pool(mirror_pool)
-                # Coverage must hold before the first forward: fill the GPU cache
-                # and give the mirror the complement.
-                cache.mirror_warm_start()
-                # The pinned pool IS the host RAM this profile costs, and how
-                # much of it is duplicates is what decides the writeback rate,
-                # so both belong in the log rather than in a benchmark's notes.
-                # mirror_warm_start seats residents from slot 0 now (the
-                # buffer region is no longer excluded), so every arena slot
-                # counts as a resident here.
-                _residents = cache.cache_size
-                _complement = max(mirror_pool.total - _residents, 0)
-                _dupes = max(mirror_pool.capacity - _complement
-                             - mirror_pool.reserve_rows, 0)
-                logger.info_rank0(
-                    "Mirror pool: %d rows pinned (%.2f GiB), %d cover the "
-                    "complement of %d GPU residents, %d reserved, up to %d "
-                    "duplicates (a duplicate makes its expert's next eviction "
-                    "free of any host traffic)",
-                    mirror_pool.capacity,
-                    getattr(mirror_pool, "pool_bytes", 0) / 2**30,
-                    _complement, _residents, mirror_pool.reserve_rows, _dupes,
-                )
-                # How much of the expert arena the growable KV may still take.
-                # The coverage floor is the mirror's, so a pool too small for
-                # the configured context ceiling shows up HERE -- at startup,
-                # in slots and GiB -- instead of 30 s into the request that
-                # cannot be funded. Measured on Nemotron at 1700 rows: floor
-                # 1888 against a 1923-slot arena, i.e. 35 slots = 0.18 GiB of
-                # slack, and an 80K prompt needs 0.46 GiB. That server died
-                # mid-request with "growable KV refused an unsafe VMM commit"
-                # and could not be restarted.
-                # Both of these were wrong the first time and the except
-                # below swallowed it, so the line never printed: the arena step
-                # is the RESOLVED ``_arena_step_slots`` (the dataclass field of
-                # the same name is None until __post_init__ resolves it, which
-                # silently made the floor a 1-slot rounding), and
-                # ``bank_row_bytes`` is a LIST of per-bank row bytes, one entry
-                # per arena VMM allocation -- multiplying a list by the slot
-                # count repeats the list and then raises on the division.
-                # ``arena_layout`` is the public accessor for the pair.
-                try:
-                    _layout = cache.arena_layout
-                    _step = max(int(_layout[1]) if _layout else 1, 1)
-                    # No prefill_buffer_slots term: the double buffer's slots
-                    # are candidates for decode residents now (a resident
-                    # there is written back before a prefill fill overwrites
-                    # it), so they no longer need to be priced out of the
-                    # floor as dead space. Measured on Nemotron: this drops
-                    # the floor by 256 of 2173 arena slots.
-                    _need = mirror_pool.min_gpu_slots
-                    _cov_floor = -(-_need // _step) * _step
-                    _slack = cache.cache_size - _cov_floor
-                    _row = sum(cache.bank_row_bytes or ())
-                    logger.info_rank0(
-                        "Mirror pool: the coverage floor is %d of %d arena "
-                        "slots, leaving %d slots (%.2f GiB) the growable KV "
-                        "may still take%s",
-                        _cov_floor, cache.cache_size, _slack,
-                        max(_slack, 0) * _row / 2**30,
-                        "" if _slack > 0 else
-                        " -- the arena is AT its floor, so KV cannot grow at "
-                        "all: raise --moe-mirror-host-rows",
-                    )
-                except Exception:             # diagnosis must never fail a load
-                    # WARNING, not debug: this handler silently hid two real
-                    # bugs in the block above for a whole measurement round.
-                    logger.warning_rank0("mirror arena-slack log skipped",
-                                         exc_info=True)
-            else:
-                cache.set_bank_sources(banks.sources, layer_residency=banks.layer_residency)
-                cache.set_alphas(banks.gate_up_alpha, banks.down_alpha)
+            residency.attach(cache, banks)
             if cache.pageable_gpu:
                 cache.prepare_pageable_staging(
                     config.max_running_req * config.model_config.num_experts_per_tok
@@ -1488,7 +1342,7 @@ class Engine:
         re-capture. Does NOT reload weights or host expert banks. The caller (scheduler) must
         guarantee no in-flight prefill/decode.
         """
-        self._refuse_if_growable_transition_failed()
+        self.growable_kv._refuse_if_growable_transition_failed()
         config = self.config
         if (
             moe_cache_size is None
@@ -1644,830 +1498,12 @@ class Engine:
             mrope=config.model_config.model_is_mrope,
         )
 
-    def _growable_moe_bytes(self, cache_size: int) -> int:
-        """Exact GPU bytes for one growable mixed/uniform expert-cache geometry.
-
-        When ``moe`` exposes a VMM arena (``arena_layout`` / ``bank_row_bytes``, set by a
-        fixed-capacity-arena expert cache), byte counts are NOT linear in ``cache_size``:
-        shrinking releases whole 2 MiB granules per independent bank/layer allocation, and
-        each allocation's row size rounds up to a different granule remainder (see
-        ``freetoken.engine.cache_budget.arena_bytes_for_usable``). Legacy (non-arena) MoE
-        caches keep the old uniform/mixed-signature formula unchanged -- detected via
-        ``getattr(..., None)`` so callers without the attribute are unaffected.
-        """
-        from freetoken.engine.cache_budget import (
-            arena_bytes_for_usable,
-            expert_bytes_per_slot,
-            expert_cache_bytes,
-            expert_slot_signatures,
-        )
-
-        moe = self.moe_offload_cache
-        assert moe is not None, "growable KV requires the MoE offload cache"
-        bank_row_bytes = getattr(moe, "bank_row_bytes", None)
-        arena_layout = getattr(moe, "arena_layout", None)
-        if bank_row_bytes is not None and arena_layout is not None:
-            capacity, step_slots = arena_layout
-            return arena_bytes_for_usable(
-                cache_size, capacity, step_slots, bank_row_bytes
-            )
-        sources = moe.bank_sources
-        return expert_cache_bytes(
-            cache_size,
-            slot_signatures=expert_slot_signatures(sources),
-            num_experts=moe.num_experts,
-            prefill_overlap=(
-                self._growable_moe_prefill_overlap and cache_size >= 2 * moe.num_experts
-            ),
-            fallback_per_expert_bytes=expert_bytes_per_slot(sources),
-        )
-
-    def _mirror_final_gpu_slots(self, config) -> int:
-        """GPU slots left for experts once the KV arena reaches its ceiling.
-
-        ``_plan_growable_kv`` answers this exactly but needs the MoE cache to
-        exist, and the mirror must be sized before that. This reproduces the
-        same budget arithmetic from config alone: total budget minus the KV
-        ceiling, divided by the bytes one expert slot costs.
-        """
-        from freetoken.engine.cache_budget import (
-            expert_bytes_per_slot,
-            net_cache_budget_bytes,
-        )
-        from freetoken.moe.mirror_pool import nvfp4_bank_shapes
-
-        from freetoken.models.nvfp4_banks import expert_source_spec
-
-        mc = config.model_config
-        spec = expert_source_spec(mc)
-        hidden = (getattr(mc, spec.hidden_size_attr) if spec and spec.hidden_size_attr
-                  else mc.hidden_size)
-        shapes = nvfp4_bank_shapes(
-            hidden, mc.moe_intermediate_size,
-            gated=bool(getattr(spec, "gated", False)),
-        )
-        sources = {
-            name: [torch.empty((mc.num_experts, *tail), dtype=dtype, device="meta")]
-            for name, (tail, dtype) in shapes.items()
-        }
-        per_slot = expert_bytes_per_slot(sources)
-        cache_per_page, fixed_cache_size, _tok, _res = self._pool_cls.kv_cost(config)
-        budget = net_cache_budget_bytes(
-            config.memory_ratio,
-            self._baseline_free,
-            self._weights_bytes,
-            fixed_cache_size,
-        )
-        # The mirror is built before the KV pool exists, so take the ceiling
-        # from config (--num-tokens / --num-pages, the growable KV target)
-        # rather than self.num_pages, which is set later.
-        ceiling_tokens = config.num_token_override or (
-            (config.num_page_override or 0) * config.page_size
-        )
-        kv_ceiling = cache_per_page * (ceiling_tokens // config.page_size)
-        slots = int(max(budget - kv_ceiling, 0) // per_slot)
-        total = mc.num_moe_layers * mc.num_experts
-        # ``slots`` counts every cache slot the budget affords, but not all of
-        # them hold a decode resident, and the pool must be sized against the
-        # residents. Two model-generic terms re-price it:
-        #   * the prefill double buffer, which under the mirror owns the head
-        #     of the cache outright (prefill_buffer_slots), plus
-        #   * four arena chunks of release granularity (FREETOKEN_ARENA_STEP_
-        #     SLOTS, default 8) so chunk-boundary overshoot stays covered.
-        # Getting this wrong is not a slow path but a dead request: measured on
-        # this host, a plan of 1552 against an actual floor of 1152 at the 1M
-        # ceiling left the mirror unable to cover the complement, and the 600K
-        # request died mid-flight. A model that cannot fit complement + reserve
-        # in host RAM fails LOUDLY at startup (MirrorExpertPool.load_initial
-        # raises) instead of dying mid-request hours later.
-        from freetoken.moe.mirror_pool import prefill_buffer_slots
-
-        step = _arena_step_slots()
-        conservative = max(
-            slots - prefill_buffer_slots(mc.num_experts) - 4 * step, mc.num_experts
-        )
-        return max(min(conservative, total), mc.num_experts)
-
-    def _plan_growable_kv(
-        self,
-        target_pages: int,
-        *,
-        extra_vmm_reserve_bytes: int = 0,
-        state_slots: int | None = None,
-    ) -> tuple[int, int]:
-        """Return the largest affordable MoE cache and exact mapped KV bytes."""
-        pool = self.kv_cache
-        moe = self.moe_offload_cache
-        assert moe is not None, "growable KV requires the MoE offload cache"
-        from freetoken.engine.cache_budget import (
-            net_cache_budget_bytes,
-        )
-
-        _cache_per_page, fixed_cache_size, _page_tokens, _min_reserve = (
-            self._pool_cls.kv_cost(self.config)
-        )
-        fixed_cache_size += state_pool_bytes(
-            self.config,
-            state_slots
-            if state_slots is not None
-            else (
-                self.linear_state_pool.num_slots
-                if getattr(self, "linear_state_pool", None) is not None
-                else None
-            ),
-        )
-        budget = net_cache_budget_bytes(
-            self.config.memory_ratio,
-            self._baseline_free,
-            self._weights_bytes,
-            fixed_cache_size,
-        )
-        # A VMM growth step must make the new physical allocation resident before it
-        # can expose the mapping.  In particular, WSL/DXG needs more live headroom
-        # than the final pool-byte identity alone implies; with only memory_ratio's
-        # nominal slack, cuMemSetAccess can fail even though MoE released exactly as
-        # many bytes as KV is about to consume.  Keep a small, permanent commit
-        # cushion instead of discovering that condition by poisoning the CUDA
-        # context midway through a long prompt.
-        budget -= 256 * 1024 * 1024 + extra_vmm_reserve_bytes
-        if budget <= 0:
-            raise RuntimeError(
-                "growable KV has no budget after its 256 MiB VMM safety margin"
-            )
-        kv_bytes = pool.mapped_bytes_for_pages(target_pages)
-        maximum = self._growable_moe_ceiling
-        desired_overlap = self._growable_moe_prefill_overlap
-
-        def overlap_at(size: int) -> bool:
-            return desired_overlap and size >= 2 * moe.num_experts
-
-        minimum = moe.num_experts
-        while minimum <= maximum:
-            current_overlap = moe.prefill_overlap
-            try:
-                moe.prefill_overlap = overlap_at(minimum)
-                moe.validate_rebuild(minimum)
-                break
-            except ValueError:
-                minimum += 1
-            finally:
-                moe.prefill_overlap = current_overlap
-        if minimum > maximum:
-            raise RuntimeError(
-                f"MoE cache ceiling {maximum} has no valid growable-KV floor"
-            )
-        if self._growable_moe_bytes(minimum) + kv_bytes > budget:
-            need = self._growable_moe_bytes(minimum) + kv_bytes
-            raise RuntimeError(
-                f"KV growth to {target_pages} tokens cannot fit even with the minimum "
-                f"MoE cache ({minimum} slots): need {mem_GB(need)}, budget {mem_GB(budget)}"
-            )
-
-        lo, hi = minimum, maximum
-        while lo < hi:
-            mid = (lo + hi + 1) // 2
-            if self._growable_moe_bytes(mid) + kv_bytes <= budget:
-                lo = mid
-            else:
-                hi = mid - 1
-        return lo, kv_bytes
-
-    def _rollback_growable_kv_transition(
-        self,
-        *,
-        old_pages: int,
-        old_moe: int,
-        old_overlap: bool,
-        recapture_graphs: bool,
-    ) -> None:
-        """Best-effort rollback for an interrupted MoE/KV ownership transfer.
-
-        Ordinary allocation failures are recoverable: MHA VMM commits are reversible and
-        the expert banks remain resident on the host across ``OffloadMoeCache.rebuild``.
-        A CUDA context error is not recoverable; mark the engine poisoned and re-raise so the
-        scheduler cannot resume against a half-built cache.
-        """
-        pool = self.kv_cache
-        moe = self.moe_offload_cache
-        assert moe is not None
-        try:
-            current_pages = int(pool.committed_pages)
-            # When growth got as far as the KV commit, return those mappings before asking
-            # the old, larger expert geometry to fit again.
-            if current_pages > old_pages:
-                pool.decommit_pages(old_pages)
-            if moe.cache_size != old_moe:
-                moe.prefill_overlap = old_overlap
-                if moe.arena_layout is not None:
-                    # Arena mode (design step 5): the failed transition only ever
-                    # called set_usable_slots, never rebuild, so undo it the same
-                    # way -- buffer addresses never moved, no recapture needed.
-                    moe.set_usable_slots(old_moe)
-                else:
-                    moe.rebuild(old_moe)
-            else:
-                moe.prefill_overlap = old_overlap
-            # Shrink frees KV before growing experts. Restore the (smaller) old expert cache
-            # first, then recommit the exact recorded VMM suffix.
-            if int(pool.committed_pages) < old_pages:
-                pool.commit_pages(old_pages)
-            object.__setattr__(self.config, "moe_cache_size", old_moe)
-            if recapture_graphs:
-                self.ensure_decode_graphs()
-        except Exception:
-            self._growable_transition_failed = True
-            logger.exception(
-                "Growable KV rollback failed; engine is not safe to resume"
-            )
-            raise
-
-    def _refuse_if_growable_transition_failed(self) -> None:
-        if getattr(self, "_growable_transition_failed", False):
-            raise RuntimeError(
-                "growable KV/MoE rollback failed; engine restart is required"
-            )
-
-    def _grow_runtime_kv_arena(
-        self,
-        *,
-        old_pages: int,
-        target_pages: int,
-        old_moe: int,
-        old_overlap: bool,
-        kv_bytes: int,
-        arena_layout: tuple[int, int],
-    ) -> tuple[int, int]:
-        """``grow_runtime_kv``'s expert-arena branch (design step 5).
-
-        Funds the KV commit by calling ``OffloadMoeCache.set_usable_slots``
-        instead of ``rebuild``: bank buffer addresses never move, so decode CUDA
-        graphs are never destroyed/recaptured for a resize. ``recapture`` is
-        therefore always ``False`` and ``_pending_graph_bs`` is never touched --
-        asserted below instead of being threaded through as a parameter.
-
-        Caller's responsibility (documented, not enforced beyond the sync
-        already done by the caller): this must run at a no-forward-in-flight
-        scheduler boundary, exactly like the legacy rebuild path, because
-        ``set_usable_slots`` mutates slot bookkeeping with plain (non-graph)
-        ops on the current stream and a shrink physically unmaps pages.
-        """
-        pool = self.kv_cache
-        moe = self.moe_offload_cache
-        assert moe is not None
-        from freetoken.engine.cache_budget import (
-            arena_bytes_for_usable,
-            usable_for_target_free_bytes,
-        )
-
-        capacity, step_slots = arena_layout
-        bank_row_bytes = moe.bank_row_bytes
-        assert bank_row_bytes is not None
-        floor = 2 * moe.num_experts if moe.prefill_overlap else moe.num_experts
-        # A bounded host mirror puts a second, higher floor under the arena:
-        # every expert the GPU drops must have a pool row outside the pool's
-        # writeback/staging reserve. The pool derives that slot count itself
-        # (min_gpu_slots); round it UP to chunk granularity, because a partial
-        # chunk is not releasable and a floor below a chunk boundary would let
-        # the shrink land under it.
-        mirror_pool = getattr(self, "_mirror_pool_ref", None)
-        cov_floor = 0
-        if mirror_pool is not None:
-            # No prefill_buffer_slots term: those slots are candidates for
-            # decode residents now (_invalidate_prefill_buffer writes one
-            # back before a prefill fill overwrites it), so they are no
-            # longer dead space the floor must additionally protect --
-            # min_gpu_slots alone already counts every resident the pool's
-            # capacity guarantees coverage for.
-            need = mirror_pool.min_gpu_slots
-            cov_floor = -(-need // step_slots) * step_slots
-        floor = max(floor, cov_floor)
-        pending_before = self._pending_graph_bs
-        target_moe = old_moe
-        # Assigned only by the shrink branch below; the ledger add at the
-        # pre-commit log must stay valid on the no-shrink path too (that path
-        # runs whenever free VRAM already covers the commit -- i.e. the whole-
-        # model-in-RAM profile, which never shrinks the arena).
-        released_bytes = 0
-        try:
-            commit_bytes = kv_bytes - pool.mapped_bytes_for_pages(old_pages)
-            required_free = commit_bytes + 256 * 1024 * 1024
-            desired_free = required_free + 128 * 1024 * 1024
-            live_free_before = self._sync_get_memory()[0]
-            if live_free_before < desired_free:
-                extra_needed = desired_free - live_free_before
-                # usable_for_target_free_bytes prices a shrink FROM full capacity;
-                # old_moe (the cache's current usable count) may already be below
-                # capacity from an earlier growth step, so add back the bytes
-                # already given up between capacity and old_moe (the "deficit")
-                # to translate "extra_needed more, from here" into "this much,
-                # from capacity" before calling it.
-                capacity_bytes = arena_bytes_for_usable(
-                    capacity, capacity, step_slots, bank_row_bytes
-                )
-                old_bytes = arena_bytes_for_usable(
-                    old_moe, capacity, step_slots, bank_row_bytes
-                )
-                deficit_from_capacity = capacity_bytes - old_bytes
-                target_moe = usable_for_target_free_bytes(
-                    extra_needed + deficit_from_capacity,
-                    capacity,
-                    step_slots,
-                    bank_row_bytes,
-                )
-                target_moe = max(target_moe, floor)
-                if target_moe >= old_moe:
-                    pool_rows = getattr(mirror_pool, "capacity", None)
-                    hint = (
-                        " (bounded expert mirror cannot cover the complement: "
-                        f"raise --moe-mirror-host-rows above {pool_rows})"
-                        if mirror_pool is not None else ""
-                    )
-                    raise RuntimeError(
-                        "growable KV live-memory guard could not fund the next "
-                        f"VMM commit from the expert arena{hint}"
-                    )
-                # Byte accounting, not the driver reading: on this WSL2 host
-                # cudaMemGetInfo can pin at 0 while the arena's VMM unmaps are
-                # real (EXCLUSIVE-DIAG showed set_usable_slots 2175->2056, i.e.
-                # 0.58 GiB actually uncommitted, with mem_get_info still 0.00
-                # in-process). set_usable_slots returns the EXACT bytes it
-                # uncommitted and commit_pages maps the exact KV suffix, so
-                # trust the ledger; keep mem_get_info as an advisory log line.
-                released_bytes = moe.set_usable_slots(target_moe)
-                object.__setattr__(self.config, "moe_cache_size", target_moe)
-                logger.info_rank0(
-                    "Growable-KV arena shrink: %d -> %d slots, %s uncommitted "
-                    "(driver-reported free %s)",
-                    old_moe, target_moe, mem_GB(released_bytes),
-                    mem_GB(torch.cuda.mem_get_info(self.device)[0]),
-                )
-            live_free = self._sync_get_memory()[0]
-            live_free = max(live_free, live_free_before + released_bytes)
-            logger.info_rank0(
-                "Growable-KV pre-commit (arena): %s free (driver %s), %s commit, "
-                "%s required (allocator %s allocated / %s reserved)",
-                mem_GB(live_free),
-                mem_GB(torch.cuda.mem_get_info(self.device)[0]),
-                mem_GB(commit_bytes),
-                mem_GB(required_free),
-                mem_GB(torch.cuda.memory_allocated(self.device)),
-                mem_GB(torch.cuda.memory_reserved(self.device)),
-            )
-            if live_free < required_free:
-                # The release estimate rounds conservatively: four 600K-class
-                # runs died with "need 0.46 GiB, have 0.42/0.37/0.17/0.08"
-                # where "have" was exactly what the estimate produced, while
-                # the arena still held releasable rows above the coverage
-                # floor. Top up: shrink a chunk further (mirroring the real
-                # release into the ledger), re-sync, and re-check -- instead
-                # of refusing the commit with releasable rows still sitting
-                # above the floor.
-                while live_free < required_free and target_moe > floor:
-                    target_moe = max(target_moe - step_slots, floor)
-                    released_bytes += moe.set_usable_slots(target_moe)
-                    object.__setattr__(self.config, "moe_cache_size", target_moe)
-                    live_free = max(live_free, live_free_before + released_bytes)
-                    logger.info_rank0(
-                        "Growable-KV arena top-up: %d slots, %s released total "
-                        "(need %s, have %s)",
-                        target_moe, mem_GB(released_bytes),
-                        mem_GB(required_free), mem_GB(live_free),
-                    )
-                if live_free < required_free:
-                    # Say WHY there is nothing left to release. When a mirror
-                    # is attached and the arena has been driven onto its floor,
-                    # the binding constraint is the pool's coverage floor, not
-                    # VRAM -- and the fix is a bigger pool, which this message
-                    # is the only place the operator will hear about.
-                    at_floor = mirror_pool is not None and target_moe <= floor
-                    hint = (
-                        f" (expert arena is at its coverage floor of {floor} "
-                        f"slots for a {mirror_pool.capacity}-row mirror; it "
-                        f"released {mem_GB(released_bytes)} and has no more to "
-                        f"give: raise --moe-mirror-host-rows, or serve a "
-                        f"shorter context)"
-                        if at_floor else ""
-                    )
-                    raise RuntimeError(
-                        "growable KV refused an unsafe VMM commit: "
-                        f"need {mem_GB(required_free)} free, have "
-                        f"{mem_GB(live_free)}{hint}"
-                    )
-            pool.commit_pages(target_pages)
-            if self.config.tp_info.size > 1:
-                self.sync_all_ranks()
-        except Exception:
-            self._rollback_growable_kv_transition(
-                old_pages=old_pages,
-                old_moe=old_moe,
-                old_overlap=old_overlap,
-                recapture_graphs=False,
-            )
-            raise
-        assert self._pending_graph_bs is pending_before, (
-            "expert-arena resize must never set/clear _pending_graph_bs"
-        )
-        logger.info_rank0(
-            "Committed growable KV through %d tokens (%s physical); MoE slots %d -> %d",
-            target_pages,
-            mem_GB(kv_bytes),
-            old_moe,
-            target_moe,
-        )
-        return old_pages, target_pages
-
-    def _shrink_runtime_kv_arena(
-        self,
-        *,
-        old_pages: int,
-        target_pages: int,
-        old_moe: int,
-        old_overlap: bool,
-        kv_bytes: int,
-        old_kv_bytes: int,
-        arena_layout: tuple[int, int],
-    ) -> tuple[int, int]:
-        """``shrink_runtime_kv``'s expert-arena branch (design step 5): regrow
-        experts with ``set_usable_slots`` up to the largest chunk boundary the
-        released KV bytes fund. No rebuild, no recapture (see
-        ``_grow_runtime_kv_arena`` for the shared reasoning)."""
-        pool = self.kv_cache
-        moe = self.moe_offload_cache
-        assert moe is not None
-        from freetoken.engine.cache_budget import (
-            _arena_chunk_boundaries,
-            arena_bytes_for_usable,
-        )
-
-        capacity, step_slots = arena_layout
-        bank_row_bytes = moe.bank_row_bytes
-        assert bank_row_bytes is not None
-        pending_before = self._pending_graph_bs
-        target_moe = old_moe
-        try:
-            pool.decommit_pages(target_pages)
-            released = old_kv_bytes - kv_bytes
-            old_bytes = arena_bytes_for_usable(
-                old_moe, capacity, step_slots, bank_row_bytes
-            )
-            budget_bytes = old_bytes + released
-            for boundary in _arena_chunk_boundaries(capacity, step_slots):
-                if boundary < old_moe:
-                    continue
-                if (
-                    arena_bytes_for_usable(
-                        boundary, capacity, step_slots, bank_row_bytes
-                    )
-                    <= budget_bytes
-                ):
-                    target_moe = boundary
-            if target_moe != old_moe:
-                moe.set_usable_slots(target_moe)
-                object.__setattr__(self.config, "moe_cache_size", target_moe)
-            if self.config.tp_info.size > 1:
-                self.sync_all_ranks()
-        except Exception:
-            self._rollback_growable_kv_transition(
-                old_pages=old_pages,
-                old_moe=old_moe,
-                old_overlap=old_overlap,
-                recapture_graphs=False,
-            )
-            raise
-        assert self._pending_graph_bs is pending_before, (
-            "expert-arena resize must never set/clear _pending_graph_bs"
-        )
-        logger.info_rank0(
-            "Released growable KV %d -> %d tokens (%s returned); MoE slots %d -> %d",
-            old_pages,
-            target_pages,
-            mem_GB(old_kv_bytes - kv_bytes),
-            old_moe,
-            target_moe,
-        )
-        return old_pages, target_pages
-
-    @torch.inference_mode()
+    # Growable KV lives in engine/growable_kv.py; the scheduler keeps calling these two.
     def grow_runtime_kv(self, required_pages: int) -> tuple[int, int]:
-        """Commit the next KV suffix at a safe batch boundary and fund it from MoE slots.
+        return self.growable_kv.grow_runtime_kv(required_pages)
 
-        The KV tensors keep their virtual addresses, so existing K/V remains valid. When the
-        expert cache must shrink, its pointers do change; only then are decode graphs torn down
-        and recaptured. The growable scheduler runs without scheduler/forward overlap, making
-        this method's entry a no-forward-in-flight boundary.
-        """
-        self._refuse_if_growable_transition_failed()
-        pool = self.kv_cache
-        old_pages = int(getattr(pool, "committed_pages", self.num_pages))
-        if required_pages <= old_pages:
-            return old_pages, old_pages
-        step = self.config.kv_grow_step_tokens // self.config.page_size
-        target_pages = min(self.num_pages, math.ceil(required_pages / step) * step)
-        if target_pages <= old_pages:
-            return old_pages, old_pages
-
-        moe = self.moe_offload_cache
-        assert moe is not None, "growable KV requires the MoE offload cache"
-        old_moe = moe.cache_size
-        old_overlap = moe.prefill_overlap
-        target_moe, kv_bytes = self._plan_growable_kv(target_pages)
-
-        torch.cuda.synchronize(self.device)
-        if self.config.tp_info.size > 1:
-            self.sync_all_ranks()
-        arena_layout = moe.arena_layout
-        if arena_layout is not None:
-            # Design step 5: fund the KV commit from the expert-arena's committed
-            # chunks instead of moe.rebuild -- see _grow_runtime_kv_arena. Slot
-            # buffer addresses never move, so decode CUDA graphs are never touched.
-            return self._grow_runtime_kv_arena(
-                old_pages=old_pages,
-                target_pages=target_pages,
-                old_moe=old_moe,
-                old_overlap=old_overlap,
-                kv_bytes=kv_bytes,
-                arena_layout=arena_layout,
-            )
-        recapture = target_moe < moe.cache_size
-        recapture_graphs = recapture and self._pending_graph_bs is None
-        try:
-            if recapture and self._pending_graph_bs is None:
-                self._pending_graph_bs = list(self.graph_runner.graph_bs_list)
-                self.attn_backend.reset_capture()
-                self.graph_runner.destroy_cuda_graphs()
-            commit_bytes = kv_bytes - pool.mapped_bytes_for_pages(old_pages)
-            required_free = commit_bytes + 256 * 1024 * 1024
-            live_free_before = self._sync_get_memory()[0]
-            expected_free = (
-                live_free_before
-                + self._growable_moe_bytes(old_moe)
-                - self._growable_moe_bytes(target_moe)
-            )
-            # Pick the final geometry before allocating it. Rebuilding a second time can
-            # strand the first replacement in a partially occupied CUDA allocator segment,
-            # so the nominally released bytes never make it back to the driver.
-            desired_free = required_free + 128 * 1024 * 1024
-            if expected_free < desired_free:
-                shortage = desired_free - expected_free
-                target_moe, _ = self._plan_growable_kv(
-                    target_pages,
-                    extra_vmm_reserve_bytes=shortage + 64 * 1024 * 1024,
-                )
-                if target_moe >= old_moe:
-                    raise RuntimeError(
-                        "growable KV live-memory guard could not fund the next VMM commit"
-                    )
-                if not recapture:
-                    recapture_graphs = self._pending_graph_bs is None
-                    if self._pending_graph_bs is None:
-                        self._pending_graph_bs = list(self.graph_runner.graph_bs_list)
-                        self.attn_backend.reset_capture()
-                        self.graph_runner.destroy_cuda_graphs()
-                    recapture = True
-        except Exception:
-            self._rollback_growable_kv_transition(
-                old_pages=old_pages,
-                old_moe=old_moe,
-                old_overlap=old_overlap,
-                recapture_graphs=recapture_graphs,
-            )
-            raise
-        try:
-            if recapture:
-                moe.prefill_overlap = (
-                    self._growable_moe_prefill_overlap and target_moe >= 2 * moe.num_experts
-                )
-                moe.rebuild(target_moe)
-                object.__setattr__(self.config, "moe_cache_size", target_moe)
-            live_free = self._sync_get_memory()[0]
-            logger.info_rank0(
-                "Growable-KV pre-commit: %s free, %s commit, %s required "
-                "(allocator %s allocated / %s reserved)",
-                mem_GB(live_free),
-                mem_GB(commit_bytes),
-                mem_GB(required_free),
-                mem_GB(torch.cuda.memory_allocated(self.device)),
-                mem_GB(torch.cuda.memory_reserved(self.device)),
-            )
-            if live_free < required_free:
-                raise RuntimeError(
-                    "growable KV refused an unsafe VMM commit: "
-                    f"need {mem_GB(required_free)} free, have {mem_GB(live_free)}"
-                )
-            pool.commit_pages(target_pages)
-            if self.config.tp_info.size > 1:
-                self.sync_all_ranks()
-        except Exception:
-            self._rollback_growable_kv_transition(
-                old_pages=old_pages,
-                old_moe=old_moe,
-                old_overlap=old_overlap,
-                recapture_graphs=recapture_graphs,
-            )
-            raise
-        logger.info_rank0(
-            "Committed growable KV through %d tokens (%s physical); MoE slots %d -> %d",
-            target_pages,
-            mem_GB(kv_bytes),
-            old_moe,
-            target_moe,
-        )
-        return old_pages, target_pages
-
-    @torch.inference_mode()
     def shrink_runtime_kv(self, target_pages: int) -> tuple[int, int]:
-        """Decommit a free KV suffix and regrow the expert cache from the released VRAM."""
-        self._refuse_if_growable_transition_failed()
-        pool = self.kv_cache
-        old_pages = int(getattr(pool, "committed_pages", self.num_pages))
-        if target_pages >= old_pages:
-            return old_pages, old_pages
-        step = self.config.kv_grow_step_tokens // self.config.page_size
-        initial = min(self.num_pages, step)
-        target_pages = max(initial, math.ceil(target_pages / step) * step)
-        if target_pages >= old_pages:
-            return old_pages, old_pages
-
-        moe = self.moe_offload_cache
-        assert moe is not None, "growable KV requires the MoE offload cache"
-        old_moe = moe.cache_size
-        old_overlap = moe.prefill_overlap
-        target_moe, kv_bytes = self._plan_growable_kv(target_pages)
-        old_kv_bytes = pool.mapped_bytes_for_pages(old_pages)
-
-        torch.cuda.synchronize(self.device)
-        if self.config.tp_info.size > 1:
-            self.sync_all_ranks()
-        arena_layout = moe.arena_layout
-        if arena_layout is not None:
-            # Design step 5: regrow experts by mapping arena chunks back in --
-            # see _shrink_runtime_kv_arena. No rebuild, no recapture.
-            return self._shrink_runtime_kv_arena(
-                old_pages=old_pages,
-                target_pages=target_pages,
-                old_moe=old_moe,
-                old_overlap=old_overlap,
-                kv_bytes=kv_bytes,
-                old_kv_bytes=old_kv_bytes,
-                arena_layout=arena_layout,
-            )
-        recapture = target_moe != old_moe
-        recapture_graphs = recapture and self._pending_graph_bs is None
-        # Free KV first so expert-cache expansion never needs old and new geometries resident
-        # simultaneously. Stable virtual addresses keep all surviving KV views valid.
-        try:
-            if recapture and self._pending_graph_bs is None:
-                self._pending_graph_bs = list(self.graph_runner.graph_bs_list)
-                self.attn_backend.reset_capture()
-                self.graph_runner.destroy_cuda_graphs()
-            pool.decommit_pages(target_pages)
-            if recapture:
-                moe.prefill_overlap = (
-                    self._growable_moe_prefill_overlap and target_moe >= 2 * moe.num_experts
-                )
-                moe.rebuild(target_moe)
-                object.__setattr__(self.config, "moe_cache_size", target_moe)
-            if self.config.tp_info.size > 1:
-                self.sync_all_ranks()
-        except Exception:
-            self._rollback_growable_kv_transition(
-                old_pages=old_pages,
-                old_moe=old_moe,
-                old_overlap=old_overlap,
-                recapture_graphs=recapture_graphs,
-            )
-            raise
-        logger.info_rank0(
-            "Released growable KV %d -> %d tokens (%s returned); MoE slots %d -> %d",
-            old_pages,
-            target_pages,
-            mem_GB(old_kv_bytes - kv_bytes),
-            old_moe,
-            target_moe,
-        )
-        return old_pages, target_pages
-
-    @torch.inference_mode()
-    def ensure_decode_graphs(self) -> None:
-        """Recapture once after the final prefill chunk, not once per 64K KV boundary."""
-        if self._pending_graph_bs is None:
-            return
-        graph_bs = self._pending_graph_bs
-        gc.collect()
-        free_min = self._sync_get_memory()[0]
-        self.graph_runner = GraphRunner(
-            stream=self.stream,
-            device=self.device,
-            model=self.model,
-            attn_backend=self.attn_backend,
-            cuda_graph_bs=graph_bs,
-            cuda_graph_max_bs=self.config.cuda_graph_max_bs,
-            free_memory=free_min,
-            max_seq_len=_page_table_width(self.max_seq_len, self.config.page_size),
-            vocab_size=self.config.model_config.vocab_size,
-            dummy_req=self.dummy_req,
-            moe_offload_cache=self.moe_offload_cache,
-            gguf_mma_enabled=self.config.model_config.gguf_expert_types is not None,
-            mrope=self.config.model_config.model_is_mrope,
-        )
-        self._pending_graph_bs = None
-
-    @torch.inference_mode()
-    def resize_elastic_capacity(
-        self, target_capacity: int, remap: dict[int, int]
-    ) -> tuple[int, int, int, int]:
-        """Resize live GDN state/graphs while preserving active and retained state.
-
-        Growable KV already owns the MoE/KV budget and runs at a no-forward-in-flight
-        scheduler boundary.  Elastic capacity adds GDN state as a third claimant:
-        graphs and expert slots are released first on growth; on shrink, compacted
-        GDN storage is released before expert residency is restored.
-        """
-        self._refuse_if_growable_transition_failed()
-        initial = self.config.elastic_initial_requests
-        if initial is None or self.linear_state_pool is None:
-            raise RuntimeError("elastic capacity is not enabled for this engine")
-        if not initial <= target_capacity <= self.config.max_running_req:
-            raise ValueError(
-                f"elastic capacity {target_capacity} outside [{initial}, "
-                f"{self.config.max_running_req}]"
-            )
-        target_slots = linear_pool_slots_for_capacity(self.config, target_capacity)
-        old_slots = self.linear_state_pool.num_slots
-        if target_slots == old_slots:
-            moe_size = self.moe_offload_cache.cache_size
-            return old_slots, old_slots, moe_size, moe_size
-
-        committed = int(getattr(self.kv_cache, "committed_pages", self.num_pages))
-        target_moe, _ = self._plan_growable_kv(committed, state_slots=target_slots)
-        # The generic growth planner permanently reserves 256 MiB for the next
-        # VMM commit.  At the original GDN capacity and original KV step, however,
-        # the exact startup geometry is already proven to fit and there is no
-        # in-flight commit to fund.  Restore that ceiling verbatim so a temporary
-        # burst of agents cannot leave a permanent expert-residency/decode toll.
-        initial_pages = min(
-            self.num_pages,
-            self.config.kv_grow_step_tokens // self.config.page_size,
-        )
-        if target_capacity == initial and committed <= initial_pages:
-            target_moe = self._growable_moe_ceiling
-        moe = self.moe_offload_cache
-        assert moe is not None
-        old_moe = moe.cache_size
-        graph_bs = _elastic_graph_batch_sizes(target_capacity)
-
-        torch.cuda.synchronize(self.device)
-        self.attn_backend.reset_capture()
-        self.graph_runner.destroy_cuda_graphs()
-        self._pending_graph_bs = None
-        growing = target_slots > old_slots
-        if growing and target_moe != old_moe:
-            moe.prefill_overlap = (
-                self._growable_moe_prefill_overlap and target_moe >= 2 * moe.num_experts
-            )
-            moe.rebuild(target_moe)
-        self.linear_state_pool.resize_preserve(target_slots, remap)
-        if not growing and target_moe != old_moe:
-            moe.prefill_overlap = (
-                self._growable_moe_prefill_overlap and target_moe >= 2 * moe.num_experts
-            )
-            moe.rebuild(target_moe)
-        object.__setattr__(self.config, "moe_cache_size", target_moe)
-
-        gc.collect()
-        free_min = self._sync_get_memory()[0]
-        self.graph_runner = GraphRunner(
-            stream=self.stream,
-            device=self.device,
-            model=self.model,
-            attn_backend=self.attn_backend,
-            cuda_graph_bs=graph_bs,
-            cuda_graph_max_bs=target_capacity,
-            free_memory=free_min,
-            max_seq_len=_page_table_width(self.max_seq_len, self.config.page_size),
-            vocab_size=self.config.model_config.vocab_size,
-            dummy_req=self.dummy_req,
-            moe_offload_cache=moe,
-            gguf_mma_enabled=self.config.model_config.gguf_expert_types is not None,
-            mrope=self.config.model_config.model_is_mrope,
-        )
-        logger.info_rank0(
-            "Elastic capacity %d -> %d requests: GDN slots %d -> %d, MoE slots %d -> %d",
-            self._elastic_capacity_for_slots(old_slots),
-            target_capacity,
-            old_slots,
-            target_slots,
-            old_moe,
-            target_moe,
-        )
-        return old_slots, target_slots, old_moe, target_moe
-
-    def _elastic_capacity_for_slots(self, slots: int) -> int:
-        initial = self.config.elastic_initial_requests or self.config.max_running_req
-        for capacity in range(initial, self.config.max_running_req + 1):
-            if linear_pool_slots_for_capacity(self.config, capacity) == slots:
-                return capacity
-        return self.config.max_running_req
+        return self.growable_kv.shrink_runtime_kv(target_pages)
 
     @torch.inference_mode()
     def retune_pageable_layers(self, target: frozenset[int]) -> None:
@@ -2501,7 +1537,7 @@ class Engine:
         )
 
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
-        self._refuse_if_growable_transition_failed()
+        self.growable_kv._refuse_if_growable_transition_failed()
         assert torch.cuda.current_stream() == self.stream
         if batch.mm_gather_plan:
             self._run_mm_encoder(batch)
@@ -2545,7 +1581,7 @@ class Engine:
         (``--speculative ngram`` refuses a sampling request), so it needs no sampler.
         Always eager -- CUDA graphs are captured for one-token decode batches only.
         """
-        self._refuse_if_growable_transition_failed()
+        self.growable_kv._refuse_if_growable_transition_failed()
         assert torch.cuda.current_stream() == self.stream
         assert batch.is_prefill and batch.size == 1, "verify batch is one extend request"
         assert batch.logits_indices is not None, "verify batch must keep every logits row"
@@ -3030,53 +2066,6 @@ _DENSE_MOE_SETTINGS = {
 }
 
 
-# Every batch size up to this gets its own decode graph; above it the ladder goes sparse.
-# A padded row is NOT free on an offload-MoE model: it carries a hidden state, so it routes
-# its own top-k experts and adds rows to the expert GEMV. Measured 2026-09-05 on Nemotron
-# 3.5 Lightning at 12 lanes with a 16-request pool: running eagerly at 12 costs 82.2 ms per
-# step, padding up to a bs-16 graph costs 88.0 ms (-6.7 %), and an exact graph costs ~2 ms
-# LESS than eager -- so a sparse set is worse than no graph at all for every size that has
-# to pad. Capture cost is ~5 MiB and ~50 ms per graph, i.e. ~80 MiB for a dense set to 16
-# (~14 expert-cache slots). See
-# benchmarks/results/nemotron35_lightning_5080_decode16_2026-09-05.md.
-_DENSE_GRAPH_BS = 16
-_SPARSE_GRAPH_BS = (24, 32, 48, 64, 96, 128, 192, 256)
-
-
-def _elastic_graph_batch_sizes(capacity: int) -> list[int]:
-    """Decode graphs retained by the on-request Hybrid-GDN capacity tier.
-
-    Dense to ``_DENSE_GRAPH_BS`` so no batch in the common range ever pads or falls off the
-    graph, then a 1.33-1.5x ladder so graph memory does not grow linearly with a large
-    ceiling. **The tier's own capacity is always in the set**: ``can_use_cuda_graph`` gates
-    on ``max(sizes)``, so any size the ladder does not reach decodes eagerly -- and a
-    full-width batch is precisely what a saturated server runs.
-
-    Before 2026-09-05 this returned ``(1, 2, 3, 4, 8)`` for every tier, so on the 16-lane
-    Switchyard profile (``--max-running-requests 16 --elastic-initial-requests 4``) every
-    decode batch of 9-16 lanes ran eager: 314 of 427 decode batches (73.5 %) of the
-    ``13af13d`` soak, 421 of which were taken at elastic capacity 16.
-    """
-    # FREETOKEN_ELASTIC_GRAPH_MAX_BS caps the set, which is how the before/after of this
-    # fix is two runs of the SAME binary: =8 reproduces the pre-2026-09-05 CEILING, so a
-    # 9-16-lane batch decodes eagerly as it used to. The capture list is frozen at
-    # capacity-change time and cannot otherwise be varied inside a live process.
-    cap = capacity
-    raw = os.environ.get("FREETOKEN_ELASTIC_GRAPH_MAX_BS", "")
-    if raw.strip():
-        try:
-            cap = min(capacity, max(1, int(raw)))
-        except ValueError:
-            logger.warning_rank0(
-                f"FREETOKEN_ELASTIC_GRAPH_MAX_BS={raw!r} is not an integer; ignoring it"
-            )
-    if cap < 1:
-        return []
-    sizes = list(range(1, min(cap, _DENSE_GRAPH_BS) + 1))
-    sizes += [bs for bs in _SPARSE_GRAPH_BS if bs <= cap]
-    if cap not in sizes:
-        sizes.append(cap)
-    return sizes
 def _adjust_ftw_quant_backend(model_path: str, quant_backend: QuantBackend) -> QuantBackend:
     """--quant-backend with an FTW checkpoint's packed expert kernel filled in where the flag leaves that table automatic.
 
@@ -3150,41 +2139,6 @@ def _adjust_config(config: EngineConfig):
     has_linear_attention = getattr(model_config, "has_linear_attention", False)
     is_moe = getattr(model_config, "is_moe", False)
     expert_quant = getattr(model_config, "expert_quant", "none")
-
-    elastic_initial = getattr(config, "elastic_initial_requests", None)
-    if elastic_initial is not None:
-        if elastic_initial >= config.max_running_req:
-            raise ValueError(
-                "--elastic-initial-requests must be smaller than --max-running-requests"
-            )
-        if not config.kv_grow_step_tokens:
-            raise ValueError(
-                "--elastic-initial-requests requires --kv-grow-step-tokens so MoE "
-                "residency can fund and reclaim the extra GDN state"
-            )
-        # Hybrid-GDN's public default is ``radix`` and is resolved to the
-        # concrete ``hybrid_radix`` implementation later in this function.
-        # Validate the resolved value here so elastic startup works without
-        # requiring an internal cache-type spelling on the CLI.
-        if (
-            not has_linear_attention
-            or _resolve_cache_type(True, config.cache_type) != "hybrid_radix"
-        ):
-            raise ValueError(
-                "--elastic-initial-requests currently requires a hybrid-GDN model "
-                "with radix caching"
-            )
-        if config.linear_state_slots_override is not None:
-            raise ValueError(
-                "--elastic-initial-requests cannot be combined with "
-                "--linear-state-slots"
-            )
-        if config.cuda_graph_bs is None:
-            override(
-                "cuda_graph_bs",
-                _elastic_graph_batch_sizes(elastic_initial),
-            )
-        override("cuda_graph_max_bs", elastic_initial)
 
     if not is_moe:
         # A dense model has no routed experts: the MoE knobs are inert, and the offload family

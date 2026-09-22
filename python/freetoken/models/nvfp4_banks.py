@@ -19,6 +19,15 @@ DropPageCache = Callable[[str], None]
 @dataclass(frozen=True)
 class Nvfp4ExpertSourceSpec:
     key_pattern: re.Pattern[str]
+    # ``key_pattern`` as a str.format() template with the same four named groups
+    # (layer, expert, proj, kind) instead of regex syntax: a regex can be matched
+    # but not rendered, and a synthetic-checkpoint writer (S8's conformance test)
+    # needs to go the other way -- produce a real on-disk key for a given
+    # (layer, expert, proj, kind) tuple. Kept beside key_pattern, not derived from
+    # it, because deriving a template from a compiled regex is itself lossy
+    # (alternations like ``(?P<kind>weight|weight_scale|weight_scale_2)`` have no
+    # single rendering) and every spec author already knows the literal shape.
+    key_template: str
     proj_to_role: dict[str, str]
     layer_to_bank: LayerToBank
     desc: str

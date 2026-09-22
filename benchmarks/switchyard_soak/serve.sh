@@ -23,7 +23,7 @@ export FREETOKEN_SCHEDULER_INVARIANT="${FREETOKEN_SCHEDULER_INVARIANT:-warn}"
 exec uv run ft serve \
   --model ~/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   --host 127.0.0.1 --port "${SOAK_PORT:-1919}" \
-  --max-running-requests 16 --elastic-initial-requests 4 --kv-grow-step-tokens 65536 \
+  --max-running-requests 16 --kv-grow-step-tokens 65536 \
   --num-tokens 262144 --max-seq-len-override 131072 --kv-cache-dtype q8_0 \
   --attention-backend triton --moe-backend offload --moe-cache-auto \
   --moe-cache-policy lfu \

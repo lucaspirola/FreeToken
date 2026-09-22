@@ -61,7 +61,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--moe-pageable-gpu", action="store_true")
     parser.add_argument("--moe-collect-stats", action="store_true")
     parser.add_argument("--max-prefill-sequences", type=int)
-    parser.add_argument("--elastic-initial-requests", type=int)
     parser.add_argument("--server-timeout", type=float, default=1800)
     parser.add_argument(
         "--agent-stagger",
@@ -130,10 +129,6 @@ def serve_cmd(args: argparse.Namespace, port: int) -> list[str]:
         command.append("--moe-collect-stats")
     if args.max_prefill_sequences is not None:
         command.extend(("--max-prefill-sequences", str(args.max_prefill_sequences)))
-    if args.elastic_initial_requests is not None:
-        command.extend(
-            ("--elastic-initial-requests", str(args.elastic_initial_requests))
-        )
     return command
 
 
