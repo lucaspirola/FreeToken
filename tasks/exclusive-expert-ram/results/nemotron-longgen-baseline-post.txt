@@ -1,0 +1,1 @@
+tokens=25152 finish=stop ttft=0.333 first=161.9 last=170.4 ratio=1.053 reasoning_chars=64953

@@ -360,6 +360,61 @@ the wrong reserve -- a wrong number that looks right is worse than a crash.
 in the owner's file would apply to every arm and a 3E/2E/E sweep would be three
 identical arms wearing three names. Sweep still to run.
 
+## Phase 7 — long generation: the workload this branch had never run
+
+Arms `nemotron-longgen-{pool,baseline}`, 2026-09-22, empty GPU (0 MiB), ratio 1.00,
+8K prompt, `--max-tokens 65536`, **thinking ON** (the served default), temperature 0.
+Pool arm = all levers, reserve 2E. Every other number in this document decodes 128
+tokens; this is the first that does not.
+
+| | pool (all levers) | whole model |
+|---|---|---|
+| tokens / answer chars | 25,152 / 35,461 | 25,152 / 35,461 |
+| answer head+tail SHA | ba2c316cc502 / 924c75664f7d | **identical** |
+| finish reason | stop (EOS) | stop (EOS) |
+| reasoning chars | 64,953 | 64,953 |
+| first -> last 1K window | 140.1 -> 153.2 (+9.4%) | 161.9 -> 170.4 (+5.3%) |
+| within +-10% gate | yes | yes |
+| starved / coverage faults | 0 / 0 | 0 / 0 |
+| host RAM | 12.47 GiB | 18.10 GiB |
+
+**Decode does not decay.** The last full 1K-token window is FASTER than the first
+on both arms: the warm start's advantage fades and the steady-state policy is
+slightly quicker. The gate was built to catch a cliff at token 30K; there is none.
+
+**The cap raise was necessary, not housekeeping.** This answer is 25,152 tokens.
+Under the previous `--max-output-tokens 16384` it would have been truncated
+mid-answer. See commit `8a16cf3`.
+
+**Correctness, with its limit stated.** Head, tail, exact answer length (35,461
+chars) and exact token count (25,152) are identical between pool and whole model
+at temperature 0. `long_gen.py` stores only the first and last 600 characters, so
+this is not a full byte-diff of 35K characters -- it is head + tail + both lengths.
+Storing the whole answer is the obvious improvement if a stronger claim is ever
+needed.
+
+### The 128-token probes measure the warm start, not the policy
+
+Counters sampled during the pool run:
+
+| at token | swaps | free-eviction rate | faults | starved |
+|---|---|---|---|---|
+| 0 | 2,113 | 0.733 | 0 | 0 |
+| 4,151 | 37,584 | 0.633 | 0 | 0 |
+| 12,322 | 114,033 | 0.634 | 0 | 0 |
+| 25,152 | 235,044 | **0.639** | 0 | 0 |
+
+**Steady-state free evictions are 63.9%, not the 74.1% the short probes report.**
+The rate starts at 0.733 -- the warm start's seeded duplicates -- and settles
+within the first few thousand tokens. 128 tokens never gets past those duplicates,
+so every short-probe rate on this branch describes a transient. The lever 2 A/B
+(53.4% vs 74.1%) stands as a comparison, since both sides were measured
+identically, but **63.9% is the number to quote for sustained work**.
+
+235,044 swaps across a 25K-token decode with zero coverage faults and zero starved
+write-backs, at the reduced 2E reserve: the strongest evidence that 2E is safe
+rather than merely un-stressed.
+
 ## Correction (2026-09-22): the free-eviction rate was overstated
 
 **Every free-eviction rate measured after lever 1 landed is wrong, including the
