@@ -205,12 +205,30 @@ real LRU eviction (`scheduler.py:2344, 2473-2489`) before decommitting.
 Measured: `cached_tokens` 19840 at a 19927-token haystack (under the 65536
 floor) and **0** at 112298 (above it), ~17 s of re-prefill per question.
 
-`--pin-prefix-max-tokens` does NOT fix this and did nothing at all here:
-pinning is gated on `pinning_enabled = is_hybrid and pin_prefix_min_tokens > 0`
+`--pin-prefix-max-tokens` does NOT fix this and did nothing at all here, but
+**not because the cache resolves to plain, non-hybrid radix** -- an earlier
+version of this paragraph said that and it was wrong, and the error propagated
+into an architecture review and from there to the owner. Nemotron-H builds its
+Mamba layers as `LinearGatedDeltaGroupConfig` (`models/nemotron_h/config.py:204`),
+so `has_linear_attention` is true and `_resolve_cache_type` (`engine/engine.py`,
+formerly `:2520-2525`) resolves Nemotron to the hybrid cache type, not the plain
+one. The `ServerArgs(...)` line in every 1M journal prints the *requested*
+`cache_type` (the CLI default, plain radix); the `Resolved config: ...` line a
+few lines later prints the *actual* one (hybrid). Both are present, for
+example, in `tasks/exclusive-expert-ram/results/nemotron-reserve-2e-1m-journal.txt`:
+line 3's `ServerArgs(` shows the requested plain value, line 10's
+`Resolved config:` shows `cache_type='hybrid_radix'`. So
+`pinning_enabled = is_hybrid and pin_prefix_min_tokens > 0`
 (`scheduler/cache.py:579-581`) with `is_hybrid = (type == "hybrid_radix")`
-(`cache.py:93`), and this model resolves to `cache_type='radix'`. Even under a
-hybrid cache the auto-pin only fires for a prefix shared by two session keys,
-never one session repeating its own haystack.
+(`cache.py:93`) is TRUE on this model, and `--pin-prefix-*` flags ARE honoured.
+What actually makes the flag do nothing here is *policy*, not a broken gate:
+`note_prompt_admitted` pins only via `_shared_pin_target`, which requires two
+distinct session keys sharing the prefix on the node (`scheduler/cache.py:610-663`).
+A single agent re-reading its own haystack never satisfies that, regardless of
+cache type. (An earlier plan step, "refuse pin flags on Nemotron," was built on
+the false claim above and is **withdrawn** -- `scripts/serve-default.sh` keeps
+`--pin-prefix-min-tokens 1024`. A single-session pin scope is tracked
+separately as plan step S13.)
 
 Each commit/release cycle also swings the expert arena (MoE slots 2088 <-> 2048
 per question) and invalidates the shrunk slots (`offload_cache.py:1281-1283`),

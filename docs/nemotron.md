@@ -132,6 +132,13 @@ probe (167 tok/s at 80K, 148 tok/s at 256K); the extra slots only pay off as a h
 hit rate on varied real traffic, which is not what the probe measures.
 Numbers: `benchmarks/results/nemotron35_lightning_5080_single_lane_2026-09-17.md`.
 Operations for agents: `CLAUDE.md`.
+Cache type: the requested `cache_type='radix'` on the `ServerArgs(` line resolves at startup
+to `cache_type='hybrid_radix'` (`Resolved config:` line, e.g.
+`tasks/exclusive-expert-ram/results/nemotron-reserve-2e-1m-journal.txt:10`), because
+Nemotron-H's Mamba layers are `LinearGatedDeltaGroupConfig`
+(`python/freetoken/models/nemotron_h/config.py:204`); `--pin-prefix-*` is therefore
+honoured on Nemotron, not inert (`tasks/exclusive-expert-ram/STATUS.md`'s corrected
+Lever-1 section).
 
 P1 — bring-up profile (single stream, no quantized KV):
 
