@@ -1,0 +1,13 @@
+[1m[2026-09-23|06:32:15][0m [32mINFO    [0m benchbw: measuring hardware ceilings on cuda:0 ...
+[1m[2026-09-23|06:32:16][0m [32mINFO    [0m benchbw: dtype nvfp4 real kernels ...
+
+  host TESSERACT   gpu cuda:0 (NVIDIA GeForce RTX 5080)   cpu 16c/16t
+  ceilings: CPU STREAM read 109.9  |  PCIe linear H2D 56.4  D2H 37.0  GB/s   (threshold 2.0x)
+
+  per-dtype (tuning — what the runtime backend pick matches on)
+    format      expert       CPU-MoE   PCIe-gather  CPU/PCIe  backend
+    nvfp4      7.61 MB     92.1 GB/s     50.1 GB/s     1.84x  offload
+       overlapped: CPU-MoE 61.3 + PCIe 42.7 GB/s -> hybrid fetches 41.0% of misses
+
+  saved: /home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/ornith-s12a/roofline-bw.json
+

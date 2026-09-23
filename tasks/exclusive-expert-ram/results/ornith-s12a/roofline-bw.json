@@ -1,0 +1,40 @@
+{
+  "version": 4,
+  "timestamp": "2026-09-23T06:32:24+04:00",
+  "epoch": 1790130744,
+  "host": "TESSERACT",
+  "gpu": {
+    "index": 0,
+    "name": "NVIDIA GeForce RTX 5080",
+    "uuid": "GPU-c76baf0d-4fac-7600-fab3-fcb65af9cd8b"
+  },
+  "cpu": {
+    "physical_cores": 16,
+    "threads_used": 16
+  },
+  "threshold": 2.0,
+  "ceilings": {
+    "cpu_stream_read_gbs": 109.9,
+    "pcie_linear_h2d_gbs": 56.44,
+    "pcie_linear_d2h_gbs": 37.04
+  },
+  "dtypes": {
+    "nvfp4": "offload"
+  },
+  "dtype_kernels": {
+    "nvfp4": {
+      "expert_bytes": 7974912,
+      "synth_experts": 128,
+      "cpu_moe_gbs": 92.09,
+      "cpu_moe_isa": "avx2+vnni(nvfp4-w4a8)",
+      "isa_sweep": null,
+      "pcie_gather_gbs": 50.13,
+      "cpu_moe_overlap_gbs": 61.33,
+      "pcie_gather_overlap_gbs": 42.66,
+      "ratio": 1.837,
+      "recommended": "offload",
+      "note": null
+    }
+  },
+  "workloads": {}
+}

@@ -1,0 +1,9 @@
+NVFP4 prefill grouped GEMM @ H=2048 I=512 E=256 top-8 act=silu gated=True; ceilings 123 (cuBLAS) / 118 (tl.dot) TFLOP/s
+
+M=8192  routed rows=65536  distinct experts=256  padded rows @BLOCK_M=32: 69888 (+6.6%)  pair 412 GFLOP
+    weight floor: 432 MiB of routed expert banks read once = 0.472 ms at 960 GB/s
+    BLOCK_M=  16  padded rows   67632 (+   3.2%)  M-blocks   4227
+    BLOCK_M=  32  padded rows   69888 (+   6.6%)  M-blocks   2184
+    BLOCK_M=  64  padded rows   74240 (+  13.3%)  M-blocks   1160
+  variant      M/N/KB/G/w/s                  ms   TFLOP/s  %tl.dot    %HBM
+  tree         32/64/64/1/4/3            17.991      22.9    19.4%    2.6%

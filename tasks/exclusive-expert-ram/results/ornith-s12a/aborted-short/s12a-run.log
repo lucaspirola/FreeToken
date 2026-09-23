@@ -1,0 +1,6 @@
+preflight ok: GPU 0 MiB, MemAvailable 25 GiB, code d720e1a S13 control: with nothing pinned, session spill keeps A across a 961K handoff and B completes
+[ornith-s12a] starting: model=Ornith-1.5-35B-A3B-NVFP4 rows=0 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/reorg@d720e1a venv=/home/lucas/ai/FreeToken/.venv
+Running as unit: ft-measure-ornith-s12a.service; invocation ID: 550f04319b014b6f9bc3e8299ea4aac1
+[ornith-s12a] ready after 119s
+Sep 23 06:11:31 TESSERACT serve-default.sh[74686]: [2026-09-23|06:11:31|core|rank=0] INFO     Allocating 262144 tokens for KV cache, K + V = 2.66 GiB
+[ornith-s12a] measuring
