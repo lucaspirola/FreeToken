@@ -17,6 +17,7 @@
 #              `uv run` build one here (a fresh worktree has no .venv, and a sync is
 #              forbidden): sets UV_PROJECT_ENVIRONMENT=$FT_VENV, UV_NO_SYNC=1 and puts
 #              $REPO/python first on PYTHONPATH, so the code of record is this tree's.
+#   FT_ENVS    extra NAME=value exports for this arm only (A/B knobs)
 #   FT_KV      KV lane by name, recorded with the number so it is attributable:
 #              q8q8 (q8_0 K + q8_0 V, the default lane), q8q6, q6q5. Anything
 #              else is passed through verbatim as flags. Only these asymmetric
@@ -98,6 +99,10 @@ grep -vE '^[[:space:]]*export[[:space:]]+(FREETOKEN_MIRROR_EXPERT_RAM|FREETOKEN_
   if [ -n "${FT_TIEBREAK:-}" ]; then
     echo "export FREETOKEN_MIRROR_TIEBREAK=$FT_TIEBREAK"
   fi
+  # FT_ENVS: extra "NAME=value" words exported into THIS arm only (e.g. an
+  # A/B that forces the pre-fix extend tile via FREETOKEN_EXTEND_*); recorded in
+  # the arm's .env beside its record so the number stays attributable.
+  for kv in ${FT_ENVS:-}; do echo "export $kv"; done
   if [ -n "${FT_VENV:-}" ]; then
     echo "export UV_PROJECT_ENVIRONMENT=$FT_VENV"
     echo "export UV_NO_SYNC=1"

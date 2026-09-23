@@ -1,0 +1,12 @@
+OK  /home/lucas/ai/models/Ornith-1.5-35B-A3B-NVFP4
+    architecture       Qwen3_5MoeForConditionalGeneration  (model_type='qwen3_5_moe')
+    expert source spec 'Qwen3.5 NVFP4 experts (modelopt)'  via freetoken.models.qwen3_5_moe.nvfp4_expert_spec()
+    gated              True
+    H=2048 I=512 E=256 moe_layers=40
+    experts checked    10240 (= 40 layers x 256 experts), tensors exactly as expected
+    experts spanning shards 2 of 10240 (loaders reassemble across shards; REFUSED by --expert-residency mirror, which requires one shard per expert -- moe/mirror_pool.py:_scan_checkpoint)
+    row bytes          1,775,616 (1.693 MiB/expert)
+    total bank bytes   18,182,307,840 (16.934 GiB)
+    cache type         hybrid_radix (--cache-type radix requested; the engine resolves hybrid_radix for any model with a linear-attention group)
+    --pin-prefix-*     honoured
+    expert arena       supports nvfp4
