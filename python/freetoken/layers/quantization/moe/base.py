@@ -71,6 +71,13 @@ class BankSpec:
     dtype: torch.dtype
     # GPU-resident per-expert vector (marlin / b12x alphas) instead of a host bank
     resident: bool = False
+    # The bank holds the checkpoint's own NVFP4 row bytes, unchanged: gate then up
+    # fused on the output rows, the F32 global broadcast to one F16 per row. Only such
+    # banks can be served from the RAM saver's pool, which reads rows straight off disk
+    # (moe/mirror_pool.py:resolve_cache_schema). A kernel claims it only when
+    # tests/moe/test_mirror_pool.py proves its pack() byte-identical to the pool's rows;
+    # equal shapes are not enough (a swizzled tile can have the same shape).
+    raw_row: bool = False
 
 
 @dataclass

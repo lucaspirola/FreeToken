@@ -771,7 +771,7 @@ def gguf_expert_row_extents(model_path: str, config: ModelConfig):
     fd_size = {fd: file_size}
     shard_fds = {model_path: fd}
 
-    records: dict[int, tuple[int, list[tuple[int, int, str, int, int]]]] = {}
+    records: dict[int, tuple[tuple[int, list[tuple[int, int, str, int, int]]], ...]] = {}
     for layer, (gate_type, down_type) in enumerate(types):
         half = I * gguf_row_bytes(H, gate_type)
         payload = H * gguf_row_bytes(I, down_type)
@@ -807,11 +807,11 @@ def gguf_expert_row_extents(model_path: str, config: ModelConfig):
             offsets[role] = off
         for e in range(E):
             flat = layer * E + e
-            records[flat] = (fd, [
+            records[flat] = ((fd, [
                 (offsets["gate"] + e * half, half, "gate_up", 0, 0),
                 (offsets["up"] + e * half, half, "gate_up", half, 0),
                 (offsets["down"] + e * payload, payload, "down", 0, 0),
-            ])
+            ]),)
 
     # Every expert tensor in a served block (< num_layers) must have been
     # visited above -- not fewer (already raised, a missing tensor for a

@@ -1,0 +1,20 @@
+== ck3-mirror-1m (5f0a213) vs nemotron-reserve-2e-1m (None)
+  decode_1000k          89.9 vs    72.9  123.3%  ok   total 1088.3 s, ttft 1086.92 s
+  decode_1000k_p1       76.4 vs    76.9   99.3%  ok   total 924.8 s, ttft 923.14 s
+  decode_8k            176.3 vs   170.7  103.3%  ok   total 1.7 s, ttft 1.03 s
+  decode_8k_p1         183.8 vs   177.0  103.8%  ok   total 0.9 s, ttft 0.19 s
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            11.79 (record 12.26)  free_evict_rate 0.617 (record 0.565)
+  ram 12.26 +/- 0.6  ok
+== ck3-mirror (5f0a213) vs nemotron-reserve-2e (None)
+  decode_713k          113.3 vs   107.6  105.3%  ok   total 487.7 s, ttft 486.59 s
+  decode_713k_p1        34.1 vs    91.7   37.2%  BELOW   total 436.5 s, ttft 432.78 s
+  decode_80k           181.8 vs   154.1  118.0%  ok   total 11.4 s, ttft 10.74 s
+  decode_80k_p1        161.4 vs   154.8  104.3%  ok   total 95.9 s, ttft 95.09 s
+  decode_8k            176.7 vs   172.1  102.7%  ok   total 1.6 s, ttft 0.9 s
+  decode_8k_p1         185.5 vs   180.3  102.9%  ok   total 0.9 s, ttft 0.19 s
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            11.83 (record 12.24)  free_evict_rate 0.625 (record 0.618)
+1 point(s) outside the band

@@ -130,6 +130,7 @@ class ExpertConformanceReport:
     cache_type: str
     pin_prefix_honoured: bool
     arena_supports_format: bool
+    mirror_status: str
     layout: Nvfp4RowLayout = field(repr=False)
 
     def render(self) -> str:
@@ -138,8 +139,8 @@ class ExpertConformanceReport:
         if n_span:
             span_line = (
                 f"    experts spanning shards {n_span} of {self.num_experts_checked} "
-                "(loaders reassemble across shards; REFUSED by --expert-residency mirror, "
-                "which requires one shard per expert -- moe/mirror_pool.py:_scan_checkpoint)"
+                "(every reader reassembles across shards, the mirror pool included: "
+                "one read group per shard -- moe/mirror_pool.py:_scan_checkpoint)"
             )
         else:
             span_line = f"    experts spanning shards 0 of {self.num_experts_checked}"
@@ -163,6 +164,7 @@ class ExpertConformanceReport:
             "model with a linear-attention group)",
             f"    --pin-prefix-*     {'honoured' if self.pin_prefix_honoured else 'ignored (cache is not hybrid_radix)'}",
             f"    expert arena       {'supports' if self.arena_supports_format else 'does NOT support'} nvfp4",
+            f"    --expert-residency mirror  {self.mirror_status}",
         ]
         return "\n".join(lines)
 
@@ -427,10 +429,9 @@ def check_expert_tensors(
     safetensors shard is reported in the last element, not raised: it is a
     routine consequence of where HF's sharder happened to cut, and the
     loaders that actually read these checkpoints tolerate it (see the
-    ``experts_spanning_shards`` comment below). Only the bounded host mirror
-    reader (``moe/mirror_pool.py``) needs one shard per expert; a caller
-    that specifically means to serve under ``--expert-residency mirror``
-    should treat a non-empty list as that mode's own refusal.
+    ``experts_spanning_shards`` comment below), the bounded host mirror
+    reader (``moe/mirror_pool.py``) included: it reads a spanning expert as
+    one group per shard.
     """
     gated = bool(getattr(config, "expert_gated", True))
     if spec.gated != gated:
@@ -537,11 +538,10 @@ def check_expert_tensors(
     # an expert split across a shard boundary (routine wherever HF's sharder
     # happened to cut) still lands correctly -- see this module's docstring at
     # ``iter_nvfp4_expert_pieces`` ("tensors of one expert may span shards, so
-    # they are grouped by (layer, expert) as they land"). Only the bounded host
-    # MIRROR reader (moe/mirror_pool.py:_scan_checkpoint) genuinely needs one
-    # shard per expert -- it opens one shard fd per expert row and raises
-    # ValueError if an expert's tensors don't share one -- so that is reported
-    # separately, scoped to that mode, not as a blanket refusal here.
+    # they are grouped by (layer, expert) as they land"). The bounded host
+    # MIRROR reader (moe/mirror_pool.py:_scan_checkpoint) handles it too: it
+    # keeps one read group per shard an expert spans. The count is reported
+    # because it is a fact about the checkpoint, not a refusal.
     experts_spanning_shards = sorted(key for key, shards in shard_of_expert.items() if len(shards) != 1)
 
     expected_experts = num_moe_layers * E
@@ -631,6 +631,27 @@ def _check_nvfp4_experts(hf_config, model_path: str) -> ExpertConformanceReport:
         layout.bank_shapes
     )
 
+    # S12d: the bounded mirror pool (moe/mirror_pool.py) reads exactly this
+    # checkpoint's raw ModelOpt NVFP4 rows -- the same layout just verified
+    # tensor by tensor above -- and (offload_cache.attach_residency ->
+    # MirrorExpertPool.adopt_cache_schema / resolve_cache_schema) can rename
+    # its banks to match ANY kernel's names, as long as that kernel's
+    # non-resident banks are the same (shape, dtype) per role, position for
+    # position. Every kernel-method model built on these rows qualifies
+    # generically -- no per-model name list to keep in sync (G4) -- but only
+    # under a backend that keeps the rows raw: Marlin and flashinfer b12x
+    # pre-tile them for their own GEMM and fold the global scale into a
+    # GPU-resident alpha (a different bank count), so ``--nvfp4-backend
+    # triton`` (the mirror residency gate already requires it,
+    # moe/residency.py:build_residency) is the one this checkpoint's rows can
+    # actually be mirrored under; this check has no GPU and cannot itself run
+    # ``select_nvfp4_backend``, so it names the requirement rather than a verdict.
+    mirror_status = (
+        "mirror OK for these raw NVFP4 rows, served ONLY under "
+        "--nvfp4-backend triton (Marlin/b12x pre-tile the banks and are "
+        "refused by name at attach time -- moe/mirror_pool.py:resolve_cache_schema)"
+    )
+
     return ExpertConformanceReport(
         model_path=model_path,
         architecture=architecture,
@@ -649,6 +670,7 @@ def _check_nvfp4_experts(hf_config, model_path: str) -> ExpertConformanceReport:
         cache_type=cache_type,
         pin_prefix_honoured=pin_prefix_honoured,
         arena_supports_format=arena_supports_format,
+        mirror_status=mirror_status,
         layout=layout,
     )
 

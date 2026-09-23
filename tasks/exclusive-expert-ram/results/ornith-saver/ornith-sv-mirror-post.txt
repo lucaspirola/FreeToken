@@ -1,0 +1,7 @@
+[21000 -> 17647 tok] 7/7  codes=ok multihop=ok counting=ok ordering=ok contradiction=ok arithmetic=ok negative=ok
+  WARNING: prefix cache MISSED at 120000 (cached 0 of 99207 prompt tokens). Every question re-prefilled the haystack; raise --pin-prefix-max-tokens above the haystack size.
+[120000 -> 99207 tok] 6/7  codes=ok multihop=ok counting=FAIL ordering=ok contradiction=ok arithmetic=ok negative=ok
+wrote /home/lucas/ai/FreeToken-wt/reorg-mirror/tasks/exclusive-expert-ram/results/ornith-saver/ornith-sv-mirror-needles.json
+{"target": 21000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 17394, "completion_tokens": 25, "seconds": 1.8, "planted": ["ZULU-2188", "ROMEO-6864", "KILO-3647"], "recalled": ["ZULU-2188", "ROMEO-6864", "KILO-3647"], "all_three": true, "answer": "ZULU-2188\nROMEO-6864\nKILO-3647"}
+{"target": 120000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 98935, "completion_tokens": 25, "seconds": 20.7, "planted": ["ROMEO-1813", "TANGO-6789", "ZULU-5364"], "recalled": ["ROMEO-1813", "TANGO-6789", "ZULU-5364"], "all_three": true, "answer": "ROMEO-1813, TANGO-6789, ZULU-5364"}
+{"target": 240000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 197993, "completion_tokens": 26, "seconds": 73.7, "planted": ["SIERRA-6523", "SIERRA-1067", "ROMEO-9011"], "recalled": ["SIERRA-6523", "SIERRA-1067", "ROMEO-9011"], "all_three": true, "answer": "SIERRA-6523, SIERRA-1067, ROMEO-9011"}

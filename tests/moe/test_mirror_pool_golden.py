@@ -49,10 +49,11 @@ def _records_digest(pool: MirrorExpertPool) -> str:
     checkpoint layout _scan_checkpoint computed."""
     h = hashlib.sha256()
     for flat in sorted(pool._records):
-        _fd, pieces = pool._records[flat]
         h.update(str(flat).encode())
-        for off, length, bank, dst, broadcast in pieces:
-            h.update(f"|{off},{length},{bank},{dst},{broadcast}".encode())
+        # One group per shard; single-shard records hash exactly as before groups existed.
+        for _fd, pieces in pool._records[flat]:
+            for off, length, bank, dst, broadcast in pieces:
+                h.update(f"|{off},{length},{bank},{dst},{broadcast}".encode())
     return h.hexdigest()
 
 
@@ -136,6 +137,7 @@ def test_mirror_final_gpu_slots_is_unchanged():
         num_experts=EXPERTS,
         num_moe_layers=LAYERS,
         model_type="nemotron_h",
+        linear_attention_group=lambda: None,
     )
     config = SimpleNamespace(
         model_config=mc,
@@ -155,3 +157,47 @@ def test_mirror_final_gpu_slots_is_unchanged():
     # assertion is that the NVFP4 branch still reaches that same cap through
     # the same arithmetic, not the exact number itself.
     assert slots == LAYERS * EXPERTS
+
+
+def test_mirror_final_gpu_slots_prices_what_the_ceiling_plan_prices(monkeypatch):
+    """The estimate that sizes the pool must subtract what
+    ``GrowableKV._plan_growable_kv`` subtracts -- the linear-state pool and the
+    VMM commit cushion -- or the pool is sized for an arena the ceiling plan
+    never grants. Ornith (0.80 GiB of GatedDeltaNet state) died at 250K on
+    exactly that: floor 4848, plan 4720."""
+    import freetoken.kvcache.linear_state_pool as lsp
+    from freetoken.engine.cache_budget import expert_bytes_per_slot
+    from freetoken.engine.growable_kv import VMM_COMMIT_CUSHION_BYTES
+    from freetoken.moe.mirror_pool import nvfp4_bank_shapes
+
+    total = LAYERS * EXPERTS
+    shapes = nvfp4_bank_shapes(H, I, gated=False)
+    per_slot = expert_bytes_per_slot({
+        n: [torch.empty((EXPERTS, *tail), dtype=dt, device="meta")]
+        for n, (tail, dt) in shapes.items()
+    })
+    mc = SimpleNamespace(
+        expert_quant="nvfp4", hidden_size=H, expert_hidden_size=H,
+        moe_intermediate_size=I, num_experts=EXPERTS, num_moe_layers=LAYERS,
+        model_type="nemotron_h",
+    )
+    config = SimpleNamespace(model_config=mc, memory_ratio=1.0,
+                             num_token_override=0, num_page_override=0, page_size=16)
+    # A budget that affords total - 4 slots after the cushion and the margin,
+    # so neither the num_experts floor nor the total cap is what answers
+    # (with 3 slots of state it still stays above num_experts).
+    margin = max(4 * 8, -(-VMM_COMMIT_CUSHION_BYTES // per_slot))
+    budget = VMM_COMMIT_CUSHION_BYTES + (total - 4 + margin) * per_slot
+    engine = SimpleNamespace(
+        _pool_cls=SimpleNamespace(kv_cost=lambda config: (1, 0, 1, 0)),
+        _baseline_free=budget, _weights_bytes=0,
+    )
+    monkeypatch.setenv("FREETOKEN_ARENA_STEP_SLOTS", "8")
+    monkeypatch.setattr(lsp, "state_pool_bytes", lambda config, num_slots=None: 0)
+    base = MirrorResidency._mirror_final_gpu_slots(engine, config)
+    assert base == total - 4
+    assert base - 3 > EXPERTS
+    state_slots = 3
+    monkeypatch.setattr(lsp, "state_pool_bytes",
+                        lambda config, num_slots=None: state_slots * per_slot)
+    assert MirrorResidency._mirror_final_gpu_slots(engine, config) == base - state_slots

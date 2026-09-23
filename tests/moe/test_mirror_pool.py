@@ -17,6 +17,11 @@ import torch
 
 import types
 
+from freetoken.layers.quantization.moe.base import MoEConfig
+from freetoken.layers.quantization.moe.nvfp4 import (
+    MarlinNvfp4MoEKernel,
+    TritonNvfp4MoEKernel,
+)
 from freetoken.models.nemotron_h.weight import (
     NVFP4_EXPERT_SOURCE_SPEC as NEMOTRON_SPEC,
 )
@@ -160,8 +165,13 @@ def test_load_initial_refuses_to_break_coverage(checkpoint):
 G_LAYERS, G_EXPERTS, G_H, G_I = 2, 4, 32, 32
 
 
-def _write_gated_checkpoint(root):
+def _write_gated_checkpoint(root, split="none"):
     """Qwen3.5/Ornith-shaped NVFP4 checkpoint: three projections, gate|up fused.
+
+    ``split`` shards it the way real checkpoints end up: "none" (one file),
+    "middle" (cut at the middle tensor, as HF's size-based sharder does -- the
+    expert straddling the cut spans two files, which is how Ornith ships), or
+    "by_role" (every expert's down_proj in a second file: every expert spans).
 
     The loader packs gate into the first I output rows of the gate_up banks and
     up into the next I (models/nvfp4_banks.py). The mirror must land on exactly
@@ -174,6 +184,13 @@ def _write_gated_checkpoint(root):
     }
     header, blob, off = {}, bytearray(), 0
     expected = {}
+    # Every expert's raw per-projection tensors, straight off the checkpoint --
+    # unfused, exactly the pieces TritonNvfp4MoEKernel.pack() itself consumes
+    # (moe/expert_pieces.py's "gate"/"gate_scale"/"gate_global" naming). Kept
+    # so a test can feed the SAME source bytes to the kernel's own pack() and
+    # to the mirror pool, and compare their outputs, instead of asserting
+    # against a fusion this file recomputes by hand.
+    raw_pieces = {}
 
     def _bytes(shape, seed):
         n = 1
@@ -216,23 +233,69 @@ def _write_gated_checkpoint(root):
             expected[(flat, "down_scale")] = rows[("down_proj", "weight_scale")]
             expected[(flat, "down_global")] = torch.full(
                 (G_H,), rows[("down_proj", "global")], dtype=torch.float16)
+            # Reinterpret (not cast!) the raw scale bytes as fp8_e4m3, the dtype
+            # safetensors' own get_tensor() would hand pack() for an F8_E4M3
+            # entry: a plain .copy_() between differently-DTYPED tensors casts
+            # values (111 (uint8) -> 111.0 clamped into e4m3), which is not
+            # what a real checkpoint read ever does.
+            raw_pieces[flat] = {
+                "gate": rows[("gate_proj", "weight")].unsqueeze(0),
+                "gate_scale": rows[("gate_proj", "weight_scale")].unsqueeze(0)
+                    .view(torch.float8_e4m3fn),
+                "gate_global": torch.tensor(
+                    [[rows[("gate_proj", "global")]]], dtype=torch.float32),
+                "up": rows[("up_proj", "weight")].unsqueeze(0),
+                "up_scale": rows[("up_proj", "weight_scale")].unsqueeze(0)
+                    .view(torch.float8_e4m3fn),
+                "up_global": torch.tensor(
+                    [[rows[("up_proj", "global")]]], dtype=torch.float32),
+                "down": rows[("down_proj", "weight")].unsqueeze(0),
+                "down_scale": rows[("down_proj", "weight_scale")].unsqueeze(0)
+                    .view(torch.float8_e4m3fn),
+                "down_global": torch.tensor(
+                    [[rows[("down_proj", "global")]]], dtype=torch.float32),
+            }
 
-    head = json.dumps(header).encode()
-    with open(os.path.join(root, "model.safetensors"), "wb") as f:
-        f.write(struct.pack("<Q", len(head)))
-        f.write(head)
-        f.write(blob)
+    keys = list(header)
+    if split == "none":
+        shard_of = {k: 0 for k in keys}
+    elif split == "middle":
+        shard_of = {k: int(i >= len(keys) // 2) for i, k in enumerate(keys)}
+    elif split == "by_role":
+        shard_of = {k: int(".down_proj." in k) for k in keys}
+    else:
+        raise ValueError(split)
+    names = (["model.safetensors"] if split == "none" else
+             ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"])
+    for si, name in enumerate(names):
+        sub, part, pos = {}, bytearray(), 0
+        for k in keys:
+            if shard_of[k] != si:
+                continue
+            lo, hi = header[k]["data_offsets"]
+            sub[k] = dict(header[k], data_offsets=[pos, pos + hi - lo])
+            part += blob[lo:hi]
+            pos += hi - lo
+        head = json.dumps(sub).encode()
+        with open(os.path.join(root, name), "wb") as f:
+            f.write(struct.pack("<Q", len(head)))
+            f.write(head)
+            f.write(part)
     with open(os.path.join(root, "model.safetensors.index.json"), "w") as f:
-        json.dump({"weight_map": {k: "model.safetensors" for k in header}}, f)
+        json.dump({"weight_map": {k: names[shard_of[k]] for k in keys}}, f)
     with open(os.path.join(root, "config.json"), "w") as f:
         json.dump({"layers_block_type": ["moe"] * G_LAYERS}, f)
-    return expected
+    return expected, raw_pieces
 
 
-def test_gated_rows_match_the_checkpoint(tmp_path):
-    """Ornith's layout reads byte-exact through the shipped Qwen3.5 spec."""
+@pytest.mark.parametrize("split", ["none", "middle", "by_role"])
+def test_gated_rows_match_the_checkpoint(tmp_path, split):
+    """Ornith's layout reads byte-exact through the shipped Qwen3.5 spec, also
+    when experts span safetensors shards (Ornith's real checkpoint has two such
+    experts; the pool used to refuse it: "requires each expert's tensors in one
+    shard")."""
     root = str(tmp_path)
-    expected = _write_gated_checkpoint(root)
+    expected, _raw = _write_gated_checkpoint(root, split)
     total = G_LAYERS * G_EXPERTS
     pool = MirrorExpertPool(
         root, G_LAYERS, G_EXPERTS, total, hidden_size=G_H, intermediate_size=G_I,
@@ -264,3 +327,87 @@ def test_a_model_without_a_published_spec_is_refused(tmp_path):
     with pytest.raises(ValueError, match="expert source spec"):
         MirrorExpertPool(root, G_LAYERS, G_EXPERTS, G_LAYERS * G_EXPERTS,
                          hidden_size=G_H, intermediate_size=G_I, reserve_rows=0)
+
+
+# --------------------------------------------------------------------------
+# The GENERIC kernel-method path (Ornith): the pool's raw rows must be
+# byte-identical to what the kernel's OWN pack() produces from the same
+# checkpoint bytes, and the pool must adopt that kernel's bank names to be
+# attachable at all (moe/offload_cache.py:attach_residency ->
+# adopt_cache_schema / resolve_cache_schema).
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("split", ["none", "middle", "by_role"])
+def test_gated_rows_match_the_triton_kernel_pack(tmp_path, split):
+    """The mirror pool's raw NVFP4 rows equal TritonNvfp4MoEKernel.pack()'s own
+    output for the SAME checkpoint bytes -- proof, not assumption, that the
+    pool can serve a kernel-method model's cache (Ornith) once
+    ``adopt_cache_schema`` has renamed its banks to that kernel's names.
+
+    Also exercises ``adopt_cache_schema`` itself, end to end, against the real
+    kernel's real ``layout()`` -- not a hand-rolled shape dict.
+    """
+    root = str(tmp_path)
+    _expected, raw_pieces = _write_gated_checkpoint(root, split)
+    total = G_LAYERS * G_EXPERTS
+    pool = MirrorExpertPool(
+        root, G_LAYERS, G_EXPERTS, total, hidden_size=G_H, intermediate_size=G_I,
+        spec=QWEN_SPEC, config=types.SimpleNamespace(), reserve_rows=0,
+    )
+    try:
+        cfg = MoEConfig(num_experts=G_EXPERTS, hidden=G_H, intermediate=G_I, top_k=1)
+        kernel = TritonNvfp4MoEKernel()
+        layout = kernel.layout(cfg)
+        bank_schema = tuple(role for role, spec in layout.items() if not spec.resident)
+        assert bank_schema != tuple(pool.schema_order), (
+            "the kernel's own bank names must differ from the pool's raw-row "
+            "names for this to be the interesting case (gate_up vs "
+            "gate_up_packed, down vs down_packed)"
+        )
+        pool.adopt_cache_schema(bank_schema, layout)
+        assert tuple(pool.schema_order) == bank_schema
+        # Production order: attach (the rename) comes before the warm start reads any
+        # row, and later coverage refills read rows too -- so rows are read AFTER it.
+        pool.load_initial(set())
+
+        for flat in range(total):
+            row = pool.pool_row_of_id[flat]
+            assert row >= 0
+            out = {
+                name: torch.empty((1, *spec.shape), dtype=spec.dtype)
+                for name, spec in layout.items() if not spec.resident
+            }
+            kernel.pack(raw_pieces[flat], cfg, out)
+            for name in bank_schema:
+                got = pool.banks[name][row]
+                want = out[name][0]
+                if got.dtype == torch.float16:
+                    assert torch.equal(got.cpu(), want.cpu()), (flat, name)
+                else:
+                    assert torch.equal(got.view(torch.uint8).cpu(),
+                                       want.view(torch.uint8).cpu()), (flat, name)
+    finally:
+        pool.close()
+
+
+def test_marlin_layout_pool_cannot_attach(tmp_path):
+    """Marlin's pre-tiled banks are not raw checkpoint rows: adopt_cache_schema
+    must refuse them, by name, instead of attaching a pool that would serve
+    the wrong bytes."""
+    root = str(tmp_path)
+    _write_gated_checkpoint(root)
+    total = G_LAYERS * G_EXPERTS
+    pool = MirrorExpertPool(
+        root, G_LAYERS, G_EXPERTS, total, hidden_size=G_H, intermediate_size=G_I,
+        spec=QWEN_SPEC, config=types.SimpleNamespace(), reserve_rows=0,
+    )
+    try:
+        pool.load_initial(set())
+        cfg = MoEConfig(num_experts=G_EXPERTS, hidden=G_H, intermediate=G_I, top_k=1)
+        layout = MarlinNvfp4MoEKernel().layout(cfg)
+        bank_schema = tuple(role for role, spec in layout.items() if not spec.resident)
+        with pytest.raises(ValueError, match="not a raw checkpoint-row layout"):
+            pool.adopt_cache_schema(bank_schema, layout)
+    finally:
+        pool.close()

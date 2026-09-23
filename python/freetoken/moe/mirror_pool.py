@@ -185,6 +185,88 @@ def plan_capacity(num_layers: int, num_experts: int, final_gpu_slots: int,
     return min(max(total - final_gpu_slots, 0) + reserve, total)
 
 
+def resolve_cache_schema(pool, bank_schema: tuple, layout) -> dict:
+    """The {cache_bank_name: pool_bank_name} mapping this pool can serve ``bank_schema``
+    under, or a ``ValueError`` naming why it cannot.
+
+    The common case -- a checkpoint's own loader and this pool agree on names,
+    because both come from the fixed ``nvfp4``/``gguf`` bank-name tuples in
+    ``offload_cache._BANK_SCHEMAS`` -- needs nothing more than identity and is
+    returned first, unconditionally, so a model on that path (Nemotron-H,
+    every GGUF family) is byte-for-byte unaffected by anything below.
+
+    A kernel-method model (``layout`` is the method's own ``BankSpec`` dict,
+    ``offload_cache.OffloadMoeCache.layout``) may bind its NVFP4 banks to
+    different NAMES for the exact same raw ModelOpt row bytes -- the Triton
+    inline-dequant kernel calls its packed-weight bank ``"gate_up"``,
+    ``nvfp4_bank_shapes`` (what this pool reads off disk) calls the same bytes
+    ``"gate_up_packed"``. Rather than special-case that one kernel by name
+    (which would fail the next kernel-method model that reuses the same raw
+    layout under yet another name, or silently "match" one that does not),
+    this generalizes on the one thing that actually decides whether a GPU miss
+    can be served from this pool's rows: position for position, is the cache's
+    non-resident bank the same ``(shape, dtype)`` as the pool's own raw NVFP4
+    row for that role? The exact byte content is not re-derived here -- it is
+    proven once per gating/shard combination this repo ships, in
+    tests/moe/test_mirror_pool.py, against the real kernel's own ``pack()`` --
+    but the shape/dtype match is the runtime-checkable proxy for it, and any
+    layout that fails it (Marlin, b12x: pre-tiled for their GEMM, globals
+    folded into a GPU-resident alpha instead of a bank, so the bank *count*
+    already differs) is refused by name instead of silently mismatched.
+    """
+    own = tuple(pool.schema_order)
+    target = tuple(bank_schema)
+    if own == target:
+        return dict(zip(own, own))
+    if pool.quant_format != "nvfp4":
+        raise ValueError(
+            f"mirror pool geometry/schema does not match cache: this "
+            f"{pool.quant_format!r} pool serves banks {own}, the cache "
+            f"expects {target}"
+        )
+    if layout is None:
+        raise ValueError(
+            "mirror pool geometry/schema does not match cache: this NVFP4 "
+            f"pool serves banks {own}, the cache expects {target} with no "
+            "kernel layout to check them against (a kernel-method model must "
+            "pass its method's layout() into the cache)"
+        )
+    if len(own) != len(target):
+        raise ValueError(
+            f"mirror pool cannot serve this cache's {len(target)}-bank "
+            f"layout {target} with its {len(own)} raw NVFP4 banks {own} -- "
+            "a different bank count is not a raw checkpoint-row layout (e.g. "
+            "Marlin/b12x pre-tile the weights and fold the global scale into "
+            "a GPU-resident alpha instead of a bank)"
+        )
+    mapping = {}
+    for pool_name, cache_name in zip(own, target):
+        want_tail, want_dtype = pool.shapes[pool_name]
+        spec = layout.get(cache_name)
+        if spec is None or spec.resident:
+            raise ValueError(
+                f"mirror pool cannot serve cache bank {cache_name!r}: it is "
+                "not a non-resident row bank in this layout"
+            )
+        if not getattr(spec, "raw_row", False):
+            raise ValueError(
+                f"mirror pool cannot serve cache bank {cache_name!r}: the kernel "
+                "does not declare it a raw checkpoint row (BankSpec.raw_row), and "
+                "a matching shape alone does not prove the bytes are the same"
+            )
+        if tuple(spec.shape) != tuple(want_tail) or spec.dtype != want_dtype:
+            raise ValueError(
+                f"mirror pool cannot serve cache bank {cache_name!r}: its "
+                f"layout gives shape {tuple(spec.shape)} dtype {spec.dtype}, "
+                f"but the raw NVFP4 checkpoint row for this role is "
+                f"{tuple(want_tail)} {want_dtype} -- {cache_name!r} is not a "
+                "raw checkpoint row (pre-tiled kernel banks, e.g. Marlin, "
+                "cannot be served by the mirror pool)"
+            )
+        mapping[cache_name] = pool_name
+    return mapping
+
+
 class MirrorExpertPool:
     """Fixed-size pinned host mirror; swaps rows with the GPU cache, never disk."""
 
@@ -257,7 +339,8 @@ class MirrorExpertPool:
         }
         self._shard_fds: dict[str, int] = {}
         self._fd_size: dict[int, int] = {}
-        self._records: dict[int, tuple[int, list[tuple[int, int]]]] = {}
+        # flat id -> ((fd, pieces), ...): one read group per shard the expert spans.
+        self._records: dict[int, tuple[tuple[int, list[tuple]], ...]] = {}
         self._scratch = None
         self._sview = None
         self._closed = False
@@ -277,7 +360,7 @@ class MirrorExpertPool:
             scratch_bytes = max(
                 sum(end - start for start, end in
                     _regions_of([(off, length) for off, length, *_rest in pieces]))
-                for _fd, pieces in self._records.values()
+                for groups in self._records.values() for _fd, pieces in groups
             )
             self._scratch = mmap.mmap(-1, scratch_bytes)
             self._sview = memoryview(self._scratch)
@@ -355,6 +438,36 @@ class MirrorExpertPool:
             else max(self.total - self.capacity + self.reserve_rows, 0)
         )
 
+    def adopt_cache_schema(self, bank_schema, layout) -> None:
+        """Rename this pool's banks to the attaching cache's names, if it can serve them.
+
+        Called once, from ``OffloadMoeCache.attach_residency``, with the cache's
+        own final ``bank_schema``/``layout``. ``resolve_cache_schema`` decides
+        whether this pool's raw NVFP4 rows are what ``bank_schema`` names (it
+        raises ``ValueError`` naming the exact mismatch otherwise); a positive
+        answer is metadata-only here -- ``self.banks``' tensors, and every byte
+        already read into them, move to their new dict key unchanged, so a
+        rename can never be the reason a served row differs from what
+        ``load_initial``/``_read_row`` wrote.
+        """
+        mapping = resolve_cache_schema(self, bank_schema, layout)
+        if tuple(bank_schema) == tuple(self.schema_order):
+            return  # already named exactly as the cache expects
+        self.banks = {name: self.banks[mapping[name]] for name in bank_schema}
+        self.sources = {name: self.sources[mapping[name]] for name in bank_schema}
+        self.shapes = {name: self.shapes[mapping[name]] for name in bank_schema}
+        self.row_bytes = {name: self.row_bytes[mapping[name]] for name in bank_schema}
+        self.schema_order = tuple(bank_schema)
+        # The scan's read records name their destination bank; a rename that left
+        # them on the old names would make every later _read_row (warm start,
+        # coverage refill) miss its bank.
+        cache_of = {pool_name: cache_name for cache_name, pool_name in mapping.items()}
+        self._records = {
+            flat: tuple((fd, [(off, length, cache_of[bank], dst, broadcast)
+                              for off, length, bank, dst, broadcast in pieces])
+                        for fd, pieces in groups)
+            for flat, groups in self._records.items()
+        }
 
     # ------------------------------------------------------------------
     # Checkpoint scan + startup fill (the only disk contact)
@@ -453,40 +566,50 @@ class MirrorExpertPool:
                     f"{spec.desc}: layer {bank_layer} expert {expert} does not "
                     f"carry exactly {sorted(expected_roles)}"
                 )
-            shards = {weight_map[key] for key, _r, _k in entries}
-            if len(shards) != 1:
-                raise ValueError("mirror pool requires each expert's tensors in one shard")
-            shard = next(iter(shards))
-            if shard not in headers:
-                path = os.path.join(model_path, shard)
-                with open(path, "rb") as f:
-                    n = struct.unpack("<Q", f.read(8))[0]
-                    header = json.loads(f.read(n))
-                fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
-                self._shard_fds[shard] = fd
-                self._fd_size[fd] = os.fstat(fd).st_size
-                headers[shard] = (8 + n, header)
-            data_start, header = headers[shard]
-            fd = self._shard_fds[shard]
-            pieces = []
-            # Sorted so a row's reads walk the file forward, and so the record is
-            # deterministic regardless of weight_map iteration order.
-            for key, role, kind in sorted(entries, key=lambda e: (e[1], e[2])):
-                entry = header[key]
-                off, end_off = entry["data_offsets"]
-                bank, dst, broadcast, shape = self._row_layout(role, kind)
-                expected = 4 if broadcast else shape[0] * shape[1]
-                if (entry["dtype"] != _KIND_DTYPE[kind]
-                        or end_off - off != expected or off < 0
-                        or data_start + end_off > self._fd_size[fd]
-                        or (not broadcast and entry["shape"] != shape)):
-                    raise ValueError(f"unsupported or corrupt native NVFP4 tensor: {key}")
-                pieces.append((data_start + off, end_off - off, bank, dst, broadcast))
-            self._records[bank_layer * self.num_experts + expert] = (fd, pieces)
+            # One read group per shard the expert's tensors live in. HF's size-based
+            # sharder cuts wherever the byte budget runs out, so an expert can
+            # straddle two files (Ornith ships two such experts); each group is
+            # read on its own and lands in its own bank bytes, so the row is the
+            # same whichever file each tensor came from.
+            groups = []
+            for shard in sorted({weight_map[key] for key, _r, _k in entries}):
+                if shard not in headers:
+                    path = os.path.join(model_path, shard)
+                    with open(path, "rb") as f:
+                        n = struct.unpack("<Q", f.read(8))[0]
+                        header = json.loads(f.read(n))
+                    fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
+                    self._shard_fds[shard] = fd
+                    self._fd_size[fd] = os.fstat(fd).st_size
+                    headers[shard] = (8 + n, header)
+                data_start, header = headers[shard]
+                fd = self._shard_fds[shard]
+                pieces = []
+                # Sorted so a row's reads walk the file forward, and so the record is
+                # deterministic regardless of weight_map iteration order.
+                for key, role, kind in sorted(entries, key=lambda e: (e[1], e[2])):
+                    if weight_map[key] != shard:
+                        continue
+                    entry = header[key]
+                    off, end_off = entry["data_offsets"]
+                    bank, dst, broadcast, shape = self._row_layout(role, kind)
+                    expected = 4 if broadcast else shape[0] * shape[1]
+                    if (entry["dtype"] != _KIND_DTYPE[kind]
+                            or end_off - off != expected or off < 0
+                            or data_start + end_off > self._fd_size[fd]
+                            or (not broadcast and entry["shape"] != shape)):
+                        raise ValueError(f"unsupported or corrupt native NVFP4 tensor: {key}")
+                    pieces.append((data_start + off, end_off - off, bank, dst, broadcast))
+                groups.append((fd, pieces))
+            self._records[bank_layer * self.num_experts + expert] = tuple(groups)
 
     def _read_row(self, flat: int, row: int) -> None:
         """Read expert ``flat`` from the checkpoint into pool row ``row``."""
-        fd, pieces = self._records[flat]
+        for fd, pieces in self._records[flat]:
+            self._read_group(flat, row, fd, pieces)
+
+    def _read_group(self, flat: int, row: int, fd: int, pieces) -> None:
+        """One shard's share of expert ``flat``: read its extents, scatter to ``row``."""
         regions = _regions_of([(off, length) for off, length, _b, _d, _bc in pieces])
         size = self._fd_size[fd]
         cursors, cursor = [], 0

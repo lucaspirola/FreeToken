@@ -49,13 +49,15 @@ class TritonNvfp4MoEKernel(MoEKernel):
 
     def layout(self, cfg: MoEConfig) -> dict[str, BankSpec]:
         i, h = cfg.intermediate, cfg.hidden
+        # raw_row: pack() below copies the checkpoint rows unchanged, proven byte-identical
+        # to the mirror pool's rows by test_gated_rows_match_the_triton_kernel_pack.
         return {
-            "gate_up": BankSpec((2 * i, h // 2), torch.uint8),
-            "gate_up_scale": BankSpec((2 * i, h // GROUP), FP8),
-            "gate_up_global": BankSpec((2 * i,), torch.float16),
-            "down": BankSpec((h, i // 2), torch.uint8),
-            "down_scale": BankSpec((h, i // GROUP), FP8),
-            "down_global": BankSpec((h,), torch.float16),
+            "gate_up": BankSpec((2 * i, h // 2), torch.uint8, raw_row=True),
+            "gate_up_scale": BankSpec((2 * i, h // GROUP), FP8, raw_row=True),
+            "gate_up_global": BankSpec((2 * i,), torch.float16, raw_row=True),
+            "down": BankSpec((h, i // 2), torch.uint8, raw_row=True),
+            "down_scale": BankSpec((h, i // GROUP), FP8, raw_row=True),
+            "down_global": BankSpec((h,), torch.float16, raw_row=True),
         }
 
     def pack(self, pieces, cfg: MoEConfig, out):
