@@ -308,12 +308,15 @@ rec = {"arm": arm, "model": os.path.basename(model), "rows": rows,
        "current_gib": gib(cur),
        "peak_current_gib": gib(peak), "gpu_mib": gpu}
 try:
-    # Two passes per size. Pass 1 pays the one-off growable-KV commit and the
-    # decode-graph recapture that follows it; whether that stall lands before or
-    # after the first token decides whether it is charged to TTFT or to decode,
-    # which is how one arm read 127.7 tok/s and the next 46.4 for the same total
-    # wall clock. Pass 2 needs no growth, so it is the steady number; pass 1 is
-    # kept beside it as _p1 rather than discarded.
+    # The probe above runs with PROBE_PASSES=2: every size once (pass 1), then every
+    # size again with a "p2 " prompt prefix so it misses pass 1's prefix cache
+    # (pass 2). Each JSON line is keyed by the prompt_tokens the server REPORTED,
+    # floored to thousands (not the requested size; 0k if usage was missing).
+    # Pass-2 lines fill decode_/ttft_/total_{k}k; pass-1 lines and lines with no
+    # "pass" field fill the same keys suffixed _p1, so a PROBE_PASSES=1 run records
+    # only _p1 keys. Missing values are recorded as 0. Why: pass 1 is where a growable-KV commit and its
+    # graph recapture land (see scripts/probe_decode.py), so the unsuffixed pass-2
+    # number is the one compared across arms and _p1 is kept beside it.
     for line in open(probe):
         d = json.loads(line)
         k = d["prompt_tokens"] // 1000

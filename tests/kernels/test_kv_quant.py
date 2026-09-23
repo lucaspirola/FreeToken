@@ -336,6 +336,60 @@ def test_store_kernel_handles_an_all_zero_head(spec):
     assert torch.isfinite(ks[0]).all() and (ks[0] > 0).all()
 
 
+def _degenerate_blocks(device: str) -> torch.Tensor:
+    """``[1, 2, 4 * BLOCK]`` bf16 whose blocks are: all zero; ~1e-30 (every value
+    nonzero); ~1e-30 with a run of zeros; ordinary randn. ``1e-30 / 448`` underflows
+    the fp16 scale to 0, so the tiny blocks divide by zero (x/0 = inf, 0/0 = NaN)."""
+    g = torch.Generator(device="cpu").manual_seed(7)
+    tiny = torch.randn(2, BLOCK, generator=g) * 1e-30
+    mixed = tiny.clone()
+    mixed[:, 8:16] = 0.0
+    blocks = torch.stack(
+        (torch.zeros(2, BLOCK), tiny, mixed, torch.randn(2, BLOCK, generator=g)), dim=1
+    )
+    x = blocks.flatten(-2).unsqueeze(0).to(torch.bfloat16)
+    assert (x[..., BLOCK : 2 * BLOCK] != 0).all(), "tiny block must survive bf16"
+    return x.to(device)
+
+
+def test_fp8_reference_has_no_nan_on_zero_and_underflowing_blocks():
+    x = _degenerate_blocks("cpu")
+    q, scales = FP8_E4M3.quantize(x.float())
+    # The tiny blocks' scale underflows to 0; the zero block keeps its 1.0 fallback.
+    assert scales[0, :, 0].eq(1.0).all() and scales[0, :, 1:3].eq(0).all()
+    assert not q.float().isnan().any()
+    back = FP8_E4M3.dequantize(q.float(), scales)
+    assert torch.isfinite(back).all()
+    assert back[..., : 3 * BLOCK].eq(0).all()
+
+
+@cuda_only
+def test_fp8_store_kernel_matches_reference_on_zero_and_underflowing_blocks():
+    """The kernel saturates the scale-0 quotient to +-448 (NaN -> -448 via fmax);
+    the reference must store the same codes, not e4m3 NaNs."""
+    from freetoken.kernel.triton.kv_quant import store_kv_quant
+
+    x = _degenerate_blocks("cuda")
+    heads, head_dim = x.shape[1:]
+    indices = torch.zeros(1, device="cuda", dtype=torch.int32)
+    kc = torch.empty(2, heads, head_dim, device="cuda", dtype=FP8_E4M3.storage_dtype)
+    vc = torch.empty_like(kc)
+    ks = torch.empty(2, heads, head_dim // BLOCK, device="cuda", dtype=torch.float16)
+    vs = torch.empty_like(ks)
+    store_kv_quant(kc, ks, vc, vs, indices, x, x, FP8_E4M3)
+
+    want_q, want_s = FP8_E4M3.quantize(x.float())
+    for cache, scale in ((kc, ks), (vc, vs)):
+        got_q = cache[:1].float()
+        assert not got_q.isnan().any() and not want_q.float().isnan().any()
+        torch.testing.assert_close(scale[:1], want_s, rtol=0, atol=0)
+        torch.testing.assert_close(got_q, want_q.float(), rtol=0, atol=0)
+        got = FP8_E4M3.dequantize(got_q, scale[:1])
+        want = FP8_E4M3.dequantize(want_q.float(), want_s)
+        assert torch.isfinite(got).all() and torch.isfinite(want).all()
+        torch.testing.assert_close(got, want, rtol=0, atol=0)
+
+
 # --------------------------------------------------------------------------------------
 # Attention over a quantized pool.
 #
