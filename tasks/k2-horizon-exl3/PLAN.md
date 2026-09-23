@@ -110,3 +110,9 @@ Credentials: none found on disk for vast.ai or Spheron. The only candidate is th
   - So this model loses a lot between 8 and 5 bpw and then flattens; that is consistent with the router's sensitivity.
   - **Their port is unpublished** ("will be linked here when they are published"), so ours is currently the only loadable public port.
   - Their metrics are directly comparable to what our validation run computes (top-1 and KL vs BF16 on held-out text). Add the BF16-in-exllamav3 ceiling to our run if it is cheap.
+- Owner 2026-09-23: "clear the claude session likn in the repo". Done: `super_squash_history`, 5 commits -> 1 (a9bd0ca). The current files carry no claude.ai link (verified by download + grep).
+- Owner 2026-09-23 on the vcruz305 numbers: "agreed with the 2.5bpw, but my reading is that we might just drop it: a 15% loss defeats the purpose, doesn't it?"
+  - My reading [agent]: top-1 disagreement is not a 15% accuracy loss, but a mean KLD of 0.108 at 4 bpw is high for EXL3.
+  - Their curve is flat from 5.0 to 2.5 bpw (85.8 -> 83.7%) after a cliff from 8.0 (96.4%). That points to a structural error floor (routing flips, fp16 router weights or activations, MoVA), not weight precision.
+  - Decide after OUR validation run, whose per-layer routing agreement and KL can locate the floor. If it is the router, keeping routers/value experts in higher precision may remove it.
+  - Owner's call pending: continue after the validation, or drop.
