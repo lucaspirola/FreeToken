@@ -44,6 +44,14 @@ logger = init_logger(__name__)
 
 # Until S12b re-implements them on the arena, formats the expert arena does not serve have
 # no growable KV. The engine raises this at startup; the controller re-checks it.
+# Live VRAM every growable-KV commit must leave free on top of the pages it maps
+# (WSL/DXG needs it for cuMemSetAccess; see _plan_growable_kv). One constant,
+# because the runtime check, the ceiling plan and the mirror pool's sizing
+# estimate (residency._mirror_final_gpu_slots) must all price the same cushion:
+# the estimate once omitted it and sized Ornith's pool for an arena 128 slots
+# bigger than the ceiling plan allowed -- the 250K request died on the commit.
+VMM_COMMIT_CUSHION_BYTES = 256 * 1024 * 1024
+
 GROWABLE_KV_UNSUPPORTED = (
     "growable KV unsupported for this format: --kv-grow-step-tokens funds KV from the "
     "expert arena (--expert-arena, alias FREETOKEN_EXPERT_ARENA=1), which this expert "
@@ -274,7 +282,7 @@ class GrowableKvController:
         # many bytes as KV is about to consume.  Keep a small, permanent commit
         # cushion instead of discovering that condition by poisoning the CUDA
         # context midway through a long prompt.
-        budget -= 256 * 1024 * 1024 + extra_vmm_reserve_bytes
+        budget -= VMM_COMMIT_CUSHION_BYTES + extra_vmm_reserve_bytes
         if budget <= 0:
             raise RuntimeError(
                 "growable KV has no budget after its 256 MiB VMM safety margin"
@@ -458,7 +466,7 @@ class GrowableKvController:
         released_bytes = 0
         try:
             commit_bytes = kv_bytes - pool.mapped_bytes_for_pages(old_pages)
-            required_free = commit_bytes + 256 * 1024 * 1024
+            required_free = commit_bytes + VMM_COMMIT_CUSHION_BYTES
             desired_free = required_free + 128 * 1024 * 1024
             live_free_before = self.engine._sync_get_memory()[0]
             if live_free_before < desired_free:

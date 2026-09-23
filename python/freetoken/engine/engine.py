@@ -665,6 +665,26 @@ class Engine:
                 mem_GB(final_kv_bytes),
                 final_moe,
             )
+            # A bounded mirror pool was sized (before the cache existed) for
+            # an estimated final arena; the plan above is the real one. If
+            # the pool's coverage floor sits above it, the arena cannot
+            # shrink far enough to fund the ceiling and the request that
+            # reaches it dies mid-flight on "growable KV refused an unsafe
+            # VMM commit" -- as Ornith's 250K request did when the estimate
+            # left out the linear-state pool. Fail the load here instead.
+            _need = self.moe.residency.min_gpu_slots()
+            if _need and getattr(self.moe, "class_arena_layouts", None) is None:
+                _step = self.moe.arena_layout[1]
+                _need = -(-_need // _step) * _step
+            if _need > final_moe:
+                _pool = self.moe.residency.pool
+                raise RuntimeError(
+                    f"mirror pool too small for the KV ceiling: its coverage "
+                    f"floor is {_need} arena slots but the ceiling plan leaves "
+                    f"{final_moe}; raise --moe-mirror-host-rows to at least "
+                    f"{_pool.capacity + _need - final_moe} (now "
+                    f"{_pool.capacity}) or lower --num-tokens"
+                )
 
         # ======================= Linear (GatedDeltaNet) state initialization ========================
         linear_group = config.model_config.linear_attention_group()

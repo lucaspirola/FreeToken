@@ -1087,13 +1087,26 @@ class MirrorResidency:
             for name, (tail, dtype) in shapes.items()
         }
         per_slot = expert_bytes_per_slot(sources)
+        from freetoken.engine.growable_kv import VMM_COMMIT_CUSHION_BYTES
+        from freetoken.kvcache.linear_state_pool import state_pool_bytes
+
+        # The SAME budget arithmetic as GrowableKV._plan_growable_kv, which
+        # decides the arena's real size at the ceiling once the cache exists:
+        # the KV family's fixed cost PLUS the sibling linear-state pool, minus
+        # the VMM commit cushion. This estimate once omitted the last two and
+        # a conservative prefill-buffer term happened to cover them on
+        # Nemotron (floor 1440 vs plan 1552); on Ornith (30 GatedDeltaNet
+        # layers x 13 state slots = 0.80 GiB of state) it did not: the pool
+        # was sized for a 4848-slot arena, the ceiling plan said 4720, and the
+        # 250K request died on "growable KV refused an unsafe VMM commit".
         cache_per_page, fixed_cache_size, _tok, _res = engine._pool_cls.kv_cost(config)
+        fixed_cache_size += state_pool_bytes(config)
         budget = net_cache_budget_bytes(
             config.memory_ratio,
             engine._baseline_free,
             engine._weights_bytes,
             fixed_cache_size,
-        )
+        ) - VMM_COMMIT_CUSHION_BYTES
         # The mirror is built before the KV pool exists, so take the ceiling
         # from config (--num-tokens / --num-pages, the growable KV target)
         # rather than self.num_pages, which is set later.
@@ -1103,27 +1116,27 @@ class MirrorResidency:
         kv_ceiling = cache_per_page * (ceiling_tokens // config.page_size)
         slots = int(max(budget - kv_ceiling, 0) // per_slot)
         total = mc.num_moe_layers * mc.num_experts
-        # ``slots`` counts every cache slot the budget affords, but not all of
-        # them hold a decode resident, and the pool must be sized against the
-        # residents. Two model-generic terms re-price it:
-        #   * the prefill double buffer, which under the mirror owns the head
-        #     of the cache outright (prefill_buffer_slots), plus
+        # One margin below the plan, the larger of:
         #   * four arena chunks of release granularity (FREETOKEN_ARENA_STEP_
-        #     SLOTS, default 8) so chunk-boundary overshoot stays covered.
-        # Getting this wrong is not a slow path but a dead request: measured on
-        # this host, a plan of 1552 against an actual floor of 1152 at the 1M
-        # ceiling left the mirror unable to cover the complement, and the 600K
-        # request died mid-flight. A model that cannot fit complement + reserve
-        # in host RAM fails LOUDLY at startup (MirrorExpertPool.load_initial
-        # raises) instead of dying mid-request hours later.
-        from freetoken.moe.mirror_pool import prefill_buffer_slots
+        #     SLOTS, default 8) so chunk-boundary overshoot stays covered, and
+        #   * one more commit cushion in BYTES: the plan's budget is read at
+        #     startup, and what is allocated after it (graph pools, allocator
+        #     slack) is not priced -- on Ornith the live free VRAM at the
+        #     ceiling step ran 0.03 GiB below the plan. Bytes, not slots, so a
+        #     model with small experts gets as much slack as one with large.
+        # The prefill double buffer is NOT subtracted any more: it no longer
+        # owns the head of the arena under the mirror (a resident there is
+        # written back before a fill), and the arena's coverage floor already
+        # dropped that term (MirrorResidency.attach).
+        # Getting this wrong is not a slow path but a dead request, so the
+        # engine also checks the built pool's floor against the real ceiling
+        # plan at startup (Engine, "Growable-KV ceiling validated") and fails
+        # the load there instead of mid-request.
         from freetoken.engine.engine import _arena_step_slots
 
         step = _arena_step_slots()
-        conservative = max(
-            slots - prefill_buffer_slots(mc.num_experts) - 4 * step, mc.num_experts
-        )
-        return max(min(conservative, total), mc.num_experts)
+        margin = max(4 * step, -(-VMM_COMMIT_CUSHION_BYTES // per_slot))
+        return max(min(slots - margin, total), mc.num_experts)
 
 
 def build_residency(config, mc, engine) -> ExpertResidency:
@@ -1212,10 +1225,9 @@ def build_residency(config, mc, engine) -> ExpertResidency:
     # (OffloadMoeCache._prefetch_split_mirror). The buffer region no
     # longer needs to be exclusive to prefill either -- a decode
     # resident there is written back before a fill overwrites it
-    # (_invalidate_prefill_buffer) -- so only the pool-capacity
-    # estimate in _mirror_final_gpu_slots still prices
-    # prefill_buffer_slots(num_experts) as unavailable to decode; the
-    # arena's coverage floor no longer does.
+    # (_invalidate_prefill_buffer) -- so neither the arena's coverage
+    # floor nor the pool-capacity estimate (_mirror_final_gpu_slots)
+    # prices prefill_buffer_slots(num_experts) as unavailable to decode.
     # Graphs stay ON. The graphs-mode corruption is not a race: a
     # pure replay never runs host code, so the prefill->decode boundary
     # warm start (host + disk, in ensure_experts) could never fire
