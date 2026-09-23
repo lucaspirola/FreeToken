@@ -157,3 +157,24 @@ Outputs: `validation/summary.{md,json}` in pirola/K2-Horizon-MoVA-36B-A4B-exl3-4
 - Owner 2026-09-23: "local overlay is off, but wait for my go. approved both fixed rerun of needle and a new conversion tuned for tool calls."
   - Guard3 (S12c) stays held until the owner's go.
   - Approved spend [agent estimates given]: the fixed needle/KV rerun (~$1.5) and the tool-call-tuned conversion (~$8-10).
+
+## Rerun result (job 6ab3969351992417dfcd68cd, rtx-pro-6000, 23m08s, ~$1.06; COMPLETED)
+
+Outputs: `validation/rerun/summary.{md,json}`. Fixes vs the first run: cache detach between arms, 512 tokens at low reasoning effort, haystack sizes calibrated to real token counts.
+
+- **Needles on our 4.0 bpw, 8K-256K real tokens (8,075 / 31,893 / 64,115 / 128,349 / 255,229): the Bravo code is correct in every KV arm at every size (fp16, k8v8, k6v5, k4v4).**
+  - Distractor (site Delta, never planted): correct at every size.
+    - The scorer marked 256K false only because the reasoning quoted the planted Alpha code while concluding "I was not given it." The model's answer is correct.
+  - Answer text identical to fp16:
+    - k8v8 and k6v5 from 32K up;
+    - k4v4 from 32K to 128K.
+    - At 8K every quantized arm skipped fp16's short reasoning (same answer).
+    - At 256K k4v4's text diverges (same answer).
+  - First-answer-token KL vs fp16:
+    - k8v8 1e-5–0.14;
+    - k6v5 3e-4–0.42;
+    - k4v4 0.02–0.95.
+  - For the 256K design (KV256K.md): K6/V5 keeps the answers, and K8/V8 is near-exact.
+- **Ceiling, BF16 weights run through exllamav3** (same wikitext 16,384 positions, fp32-activation reference): **97.36% top-1, KL 0.0049**, PPL 7.157. vcruz305's ceiling: 97.71% / 0.0030.
+  - The two ports' numerics agree, so the gap at 4.0 bpw (ours 93.90% vs their 84.81%) comes from the quantization, not from the port.
+  - Our 4.0 bpw keeps 96.4% of the ceiling's top-1.
