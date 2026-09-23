@@ -25,7 +25,7 @@ from freetoken.utils import init_logger
 
 from ..registry import LayerKind, register_method
 from ..scheme import NVFP4_GROUP as GROUP, QuantKind
-from .base import BankSpec, ExpertView, fused_global, fused_piece, gated_epilogue_reason, global_rows, limit_or_inf, MoEConfig, MoEKernel, MoEMethod
+from .base import BankSpec, ExpertView, fused_global, fused_piece, gated_epilogue_reason, global_rows, limit_or_inf, MoEConfig, MoEKernel, MoEMethod, write_fused_global, write_fused_piece
 
 logger = init_logger(__name__)
 
@@ -59,9 +59,13 @@ class TritonNvfp4MoEKernel(MoEKernel):
         }
 
     def pack(self, pieces, cfg: MoEConfig, out):
-        out["gate_up"].copy_(fused_piece(pieces, "gate_up"))
-        out["gate_up_scale"].copy_(fused_piece(pieces, "gate_up_scale"))
-        out["gate_up_global"].copy_(fused_global(pieces, cfg.intermediate))
+        # Direct writes into the destination bank slices (write_fused_piece/_global),
+        # not fused_piece's torch.cat + copy_: the intermediate cat buffer allocation
+        # dominated the generic pack path's per-expert-batch cost (~92% of build_expert_banks
+        # wall time under cProfile). Byte-identical to the old cat-then-copy code.
+        write_fused_piece(out["gate_up"], pieces, "gate_up")
+        write_fused_piece(out["gate_up_scale"], pieces, "gate_up_scale")
+        write_fused_global(out["gate_up_global"], pieces, cfg.intermediate)
         out["down"].copy_(pieces["down"])
         out["down_scale"].copy_(pieces["down_scale"])
         out["down_global"].copy_(global_rows(pieces["down_global"], cfg.hidden))

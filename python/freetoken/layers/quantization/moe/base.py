@@ -91,6 +91,26 @@ def fused_piece(pieces: dict[str, torch.Tensor], role: str) -> torch.Tensor:
     return torch.cat([pieces["gate" + suffix], pieces["up" + suffix]], dim=1)
 
 
+def write_fused_piece(out: torch.Tensor, pieces: dict[str, torch.Tensor], role: str) -> None:
+    """Write a gate_up-family piece straight into its destination bank slice ``out``.
+
+    Equivalent to ``out.copy_(fused_piece(pieces, role))``, but for the split (separate
+    gate / up pieces) case it writes each half directly into ``out``'s two row-halves
+    instead of first allocating and filling an intermediate ``torch.cat`` buffer -- the
+    allocation + extra copy dominated the generic pack path's per-expert cost (see
+    ``base.py`` module history / the profiling that motivated this). Byte-identical to
+    ``fused_piece`` for every input; the already-fused branch (``role in pieces``) is
+    unchanged (a single copy either way).
+    """
+    if role in pieces:
+        out.copy_(pieces[role])
+        return
+    suffix = role[len("gate_up"):]
+    half = out.shape[1] // 2
+    out[:, :half].copy_(pieces["gate" + suffix])
+    out[:, half:].copy_(pieces["up" + suffix])
+
+
 def global_rows(piece: torch.Tensor, rows: int) -> torch.Tensor:
     """Per-expert global scale as one fp16 value per output row (a scalar per expert is broadcast)."""
     flat = piece.reshape(piece.shape[0], -1).to(torch.float16)
@@ -104,6 +124,15 @@ def fused_global(pieces: dict[str, torch.Tensor], half_rows: int) -> torch.Tenso
     if "gate_up_global" in pieces:
         return global_rows(pieces["gate_up_global"], 2 * half_rows)
     return torch.cat([global_rows(pieces["gate_global"], half_rows), global_rows(pieces["up_global"], half_rows)], dim=1)
+
+
+def write_fused_global(out: torch.Tensor, pieces: dict[str, torch.Tensor], half_rows: int) -> None:
+    """Write the gate_up_global piece straight into ``out``, without an intermediate cat (see ``write_fused_piece``)."""
+    if "gate_up_global" in pieces:
+        out.copy_(global_rows(pieces["gate_up_global"], 2 * half_rows))
+        return
+    out[:, :half_rows].copy_(global_rows(pieces["gate_global"], half_rows))
+    out[:, half_rows:].copy_(global_rows(pieces["up_global"], half_rows))
 
 
 def limit_or_inf(layer: Any) -> float:
