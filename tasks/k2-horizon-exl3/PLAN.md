@@ -208,3 +208,11 @@ Outputs: `validation/rerun/summary.{md,json}`. Fixes vs the first run: cache det
 - Owner 2026-09-23: "don't relaunch with a strict time cap, use something like many hours".
   - A 155-min relaunch (6ab3b7fa..., cancelled before it ran; no cost) was replaced by **6ab3b81051992417dfcd7213: timeout 8h, sc_measure cap raised 70 -> 240 min**, resuming after S2.
   - Expected remaining ~2h10m (~$6); the 8h cap is only a hang guard.
+- **Premise check (report_old.md, job 6ab3b810..., 2026-09-23 ~11:37Z).** OLD uniform 4.0 bpw -hq vs BF16 fp32 on 134 held-out BF16-sampled rows (69,622 response positions); KL is top-64 + tail bucket:
+  - prose: 97.29% top-1 / KL 0.0249 / p99 0.186;
+  - tool rows: 97.80% / 0.0274 / 0.266;
+  - inside tool-call blocks: 99.45% / 0.0464 / 0.319;
+  - tool-call blocks fully argmax-exact: 79.69% of 64.
+  - The "75.7% tool-call XML" figure from validation was an artifact of one short prompt's prompt tokens. On generated tool calls the old quant is as good as on prose.
+  - The residual gap is KL inside call blocks (~1.9x prose) and 20% of blocks with at least one teacher-forced argmax flip. Not yet checked: whether those flips are benign formatting.
+  - **Decision [agent]: continue.** The recipe run also tests the sensitivity allocation's general gain. Remaining ~$4-5. The owner was told and may cancel.
