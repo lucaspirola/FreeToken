@@ -84,3 +84,4 @@ Credentials: none found on disk for vast.ai or Spheron. The only candidate is th
   - Autotune and lazy allocation must be warmed before graph capture.
   - One shared barrier buffer means one compute stream.
   - The prefill full-layer stream moves 13.4 GB per forward.
+- Owner 2026-09-23: "validation run on the rtx pro 6000 approved" (the ~$1.50-2 run: BF16 original vs EXL3 on all 48 layers, plus golden reference outputs saved to the repo).
