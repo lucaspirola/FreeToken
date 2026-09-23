@@ -228,10 +228,13 @@ class PrefixCounters:
     them). They overlap ``misses`` / ``miss_tokens``, which count the whole prompt.
 
     The pin fields are gauges (``pinned_prefixes``, ``pinned_tokens``, ``pinned_slots`` --
-    the GDN state slots the pinned snapshots hold) plus two counters: ``pin_evictions``
-    (pins released least-recently-matched-first to make room for a newer pin) and
+    the GDN state slots the pinned snapshots hold) plus three counters: ``pin_evictions``
+    (pins released least-recently-matched-first to make room for a newer pin),
     ``pin_budget_refusals`` (a pin that would not fit even with every
-    other pin released): see ``CacheManager.pin_prefix``.
+    other pin released): see ``CacheManager.pin_prefix`` -- and ``pin_admission_releases``
+    (pins released least-recently-matched-first to free pages a FRESH request needs to be
+    admitted at all, e.g. a session-scope pin outliving the soft-session release that would
+    otherwise have freed its prefix): see ``CacheManager.release_pins_for_admission``.
     """
 
     hits: int = 0
@@ -247,6 +250,7 @@ class PrefixCounters:
     pinned_slots: int = 0
     pin_evictions: int = 0
     pin_budget_refusals: int = 0
+    pin_admission_releases: int = 0
 
     def note_admitted(
         self, prompt_tokens: int, cached_len: int, *, pooled: bool = False,
@@ -282,6 +286,7 @@ class PrefixCounters:
             "pinned_slots": self.pinned_slots,
             "pin_evictions": self.pin_evictions,
             "pin_budget_refusals": self.pin_budget_refusals,
+            "pin_admission_releases": self.pin_admission_releases,
         }
 
 

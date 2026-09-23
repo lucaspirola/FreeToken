@@ -4,7 +4,7 @@ import re
 import time
 from types import SimpleNamespace
 
-from freetoken.scheduler.counters import SpillCounters
+from freetoken.scheduler.counters import PrefixCounters, SpillCounters
 from freetoken.scheduler.scheduler import Scheduler, SessionLease
 
 
@@ -278,10 +278,16 @@ class _SessionCache(_Cache):
     def __init__(self) -> None:
         super().__init__()
         self.free = 0
+        # No pins in these tests: the pin half of the admission-pressure release
+        # (CacheManager.release_pins_for_admission) has nothing to free.
+        self.prefix_counters = PrefixCounters()
 
     @property
     def available_size(self):
         return self.free
+
+    def release_pins_for_admission(self, _needed: int) -> bool:
+        return False
 
     def match_req(self, _req):
         return SimpleNamespace(cuda_handle=SimpleNamespace(cached_len=0))

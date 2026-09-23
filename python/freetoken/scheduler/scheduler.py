@@ -2049,6 +2049,17 @@ class Scheduler(SchedulerIOMixin):
         refused or not) spill idle conversations more eagerly than any measurement asks for.
         The lock delta is the term §Y5b's evidence names; the reservation term is left for a
         run that shows it costing something.
+
+        A pin (``CacheManager.pin_prefix`` / ``_pin_session_prefix``) survives every release
+        above: it locks the tree directly, not through a session lease, so a session-scope
+        pin left standing after its own session's soft protection is gone can starve a
+        later, unrelated fresh request forever even though its footprint fits the pool once
+        the pin is gone (measured 2026-09-23, s13b-session). Once the candidate leases are
+        exhausted and the request is still short, :meth:`CacheManager.release_pins_for_admission`
+        gets the same treatment -- least-recently-matched pins released one at a time, only
+        as many as it takes -- counted in its own ledger (``pin_admission_releases``) so it
+        stays distinguishable from a soft-session release. A request whose own footprint
+        already fits is never charged: this only runs once ``pressured()`` is still true.
         """
         candidates = sorted(
             (
@@ -2061,9 +2072,10 @@ class Scheduler(SchedulerIOMixin):
             ),
             key=lambda item: item[0],
         )
-        if not candidates:  # cheap gate: skip the prefix match when nothing can be freed
-            return False
         cm = self.cache_manager
+        if not candidates and not cm.prefix_counters.pinned_prefixes:
+            # cheap gate: skip the prefix match when nothing can be freed either way
+            return False
         lock_delta = 0
         if cached_len is None:
             try:
@@ -2108,6 +2120,10 @@ class Scheduler(SchedulerIOMixin):
             released |= self._release_soft_session_handle(
                 sid, "admission pressure", require_checkpoint=True
             )
+        if needed > cm.available_size - lock_delta:
+            # Every reclaimable idle lease is gone (or there were none) and the request is
+            # still KV-short: try what a pin is holding out of the evictable pool next.
+            released |= cm.release_pins_for_admission(needed + lock_delta)
         return released
 
     def _invalidate_match_memo(self) -> None:

@@ -882,6 +882,41 @@ class CacheManager:
             del self._pin_locked[n]
         self._recount_pins()
 
+    def release_pins_for_admission(self, needed: int) -> bool:
+        """Release pins least-recently-matched first, only as many as it takes for
+        ``needed`` tokens to fit ``available_size``.
+
+        The companion to the soft-session admission-pressure release
+        (``Scheduler._reclaim_soft_sessions_for_pending``): that release hands a whole idle
+        conversation's prefix back to the evictable pool, but a PIN survives it -- a pin
+        locks the tree directly (``inc_lock``), not through a session lease, so releasing
+        the lease's soft protection frees nothing a pin already holds. Under
+        ``session`` scope a producer's own pin (``_pin_session_prefix``) can therefore
+        outlive its session's release and permanently starve a later, unrelated request
+        whose own footprint would otherwise fit the pool once the pin is gone (measured
+        2026-09-23, s13b-session: a 104,934-token pin left 961,390 pool tokens
+        unreachable; ``fresh_admits_deferred`` reached 106,632 in 20 minutes with the GPU
+        idle, no error, no refusal).
+
+        Stops the moment ``needed`` fits ``available_size``, or when there is nothing left
+        to release: a request that still cannot fit then falls through to the caller's
+        existing refusal/deferral path unchanged, exactly as it does today with no pins to
+        release. A request whose own footprint already fits is never charged: the caller
+        checks pressure first and only calls this when it is genuinely short.
+        """
+        released = False
+        while self._pins and needed > self.available_size:
+            before_tokens = self.prefix_counters.pinned_tokens
+            victim = min(self._pins.values(), key=lambda p: p.last_match)
+            self._release_pin(victim.node)
+            self.prefix_counters.pin_admission_releases += 1
+            released = True
+            logger.info(
+                "Released prefix pin (admission pressure): %d tokens now evictable",
+                before_tokens - self.prefix_counters.pinned_tokens,
+            )
+        return released
+
     def _recount_pins(self) -> None:
         c = self.prefix_counters
         c.pinned_prefixes = len(self._pins)

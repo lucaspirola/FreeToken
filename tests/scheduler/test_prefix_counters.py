@@ -31,7 +31,7 @@ def test_the_document_has_every_field_and_the_pin_gauges_start_at_zero():
         "pooled_hits": 0, "pooled_hit_tokens": 0,
         "pooled_sumless_misses": 0, "pooled_sumless_miss_tokens": 0,
         "pinned_prefixes": 0, "pinned_tokens": 0, "pinned_slots": 0,
-        "pin_evictions": 0, "pin_budget_refusals": 0,
+        "pin_evictions": 0, "pin_budget_refusals": 0, "pin_admission_releases": 0,
     }
 
 
