@@ -1,0 +1,47 @@
+[ornith-startup-cold] waiting for /root/gpu.lock
+preflight ok: GPU 2 MiB, MemAvailable 239 GiB, code bf63101 measure.sh FT_LAUNCHER=nohup: run an arm on a host without systemd
+[ornith-startup-cold] starting: model=Ornith-1.5-35B-A3B-NVFP4 rows=0 ratio=1.00 port=1920 code=/root/FreeToken-reorg@bf63101 venv=/root/venv launcher=nohup
+[ornith-startup-cold] server pgid=10919 log=/root/FreeToken-reorg/tasks/exclusive-expert-ram/results/ornith-startup-cold-server.log
+[ornith-startup-cold] FAILED to start; last log:
+  File "/root/FreeToken-reorg/python/freetoken/moe/host_banks.py", line 163, in pin
+    host_register(self.addr, len(self._buf))
+  File "/root/FreeToken-reorg/python/freetoken/kernel/pinned.py", line 50, in host_register
+    _load_pinned_extension().host_register(addr, nbytes)
+    ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-reorg/python/freetoken/kernel/pinned.py", line 21, in _load_pinned_extension
+    raise ImportError(
+ImportError: freetoken.kernel._pinned_tensor is not installed. Reinstall FreeToken so the pinned tensor CUDA extension is built at install time.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/usr/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/root/FreeToken-reorg/python/freetoken/server/launch.py", line 81, in _run_scheduler
+    scheduler = Scheduler(args)
+                ^^^^^^^^^^^^^^^
+  File "/root/FreeToken-reorg/python/freetoken/scheduler/scheduler.py", line 161, in __init__
+    self.engine = Engine(config)
+                  ^^^^^^^^^^^^^^
+  File "/root/FreeToken-reorg/python/freetoken/engine/engine.py", line 609, in __init__
+    self._init_offload_moe_cache(config)
+  File "/root/FreeToken-reorg/python/freetoken/engine/engine.py", line 1057, in _init_offload_moe_cache
+    with _weight_load_context():
+  File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+    self.gen.throw(value)
+  File "/root/FreeToken-reorg/python/freetoken/engine/engine.py", line 483, in _weight_load_context
+    raise WeightLoadError(f"{type(exc).__name__}: {exc}") from exc
+freetoken.engine.engine.WeightLoadError: ImportError: freetoken.kernel._pinned_tensor is not installed. Reinstall FreeToken so the pinned tensor CUDA extension is built at install time.
+INFO:     127.0.0.1:47574 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:47584 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-23|21:17:50|FrontendAPI] ERROR    Backend worker is gone and cannot be restarted; stopping the API server
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [10932]
+/usr/lib/python3.12/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 3 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+ornith-startup-cold measure exit 1
+grow ab box done

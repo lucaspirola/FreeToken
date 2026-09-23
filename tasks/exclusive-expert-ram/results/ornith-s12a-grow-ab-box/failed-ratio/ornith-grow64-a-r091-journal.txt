@@ -1,0 +1,157 @@
+[1m[2026-09-23|21:37:42][0m [33mWARNING [0m --moe-backend is deprecated; use --moe-strategy
+[1m[2026-09-23|21:37:42][0m [32mINFO    [0m Parsed arguments:
+ServerArgs(model_path='/root/models/Ornith-1.5-35B-A3B-NVFP4', tp_info=DistributedInfo(rank=0, size=1), dtype=torch.bfloat16, max_running_req=1, adaptive_scheduler=True, auto_session_grace_seconds=0.0, session_spill_dir='/root/.cache/freetoken/spill', session_spill_ram_gb=1.0, session_spill_disk_gb=50.0, session_spill_limit_gb=50.0, session_spill_persist=True, session_spill_state_stride=65536, session_spill_capture_states=None, attention_backend='triton', moe_strategy='offload', quant_backend=None, ple_backend='disk', nvfp4_backend='triton', expert_load='auto', host_ram_reserve_gb=0.0, moe_cache_size=0, moe_cache_rate=None, moe_cache_auto=True, kv_reserve_tokens=8192, moe_cache_policy='lfu', moe_prefill_overlap=True, expert_residency='whole', moe_mirror_host_rows=0, moe_prefill_hit_d2d=False, moe_extend_cache_tokens=64, moe_collect_stats=False, moe_pageable_profile='off', moe_cpu_threads=0, moe_cpu_layers=None, moe_pageable_gpu=False, moe_hybrid_max_fetch=-1, cuda_graph_bs=None, cuda_graph_max_bs=None, page_size=1, memory_ratio=0.91, linear_state_cache_ratio=2.0, swa_full_tokens_ratio=0.2, swa_num_pages_override=None, distributed_timeout=60.0, use_dummy_weight=False, use_pynccl=True, max_seq_len_override=262144, rope_yarn_factor=None, rope_yarn_original_context=None, linear_state_slots_override=13, num_page_override=None, num_token_override=262144, kv_cache_dtype='q8_0', kv_cache_dtype_k=None, kv_cache_dtype_v=None, kv_grow_step_tokens=65536, expert_arena=True, context_preflight=True, json_retry=1, hidden_states_dir='/root/.cache/freetoken/hidden-states', hidden_states_max_tokens=4096, pooled_sink_dir='/root/.cache/freetoken/pooled-sink', mm=MultimodalConfig(disabled_encoders=frozenset(), embed_cache_device='cpu', encoder_weights='host', image_min_tokens=None, image_max_tokens=None, processor_kwargs={}), max_extend_tokens=8192, auto_prefill_chunk=False, max_prefill_seqs=None, cache_type='radix', pin_prefix_min_tokens=1024, pin_prefix_max_tokens=65536, pin_prefix_max_slots=-1, pin_prefix_scope='shared', speculative=None, spec_ngram_n=8, spec_draft_len=8, spec_adaptive=True, offline_mode=False, decode_log_interval=40, special_token_ckpt=False, _unique_suffix='.pid=20049', server_host='127.0.0.1', server_port=1920, num_tokenizer=0, silent_output=False, shell_mode=False, served_model_name='ornith', served_model_aliases=('nemotron-3.5-lightning-judge', 'nemotron-3.5-lightning-collect'), strict_model_name=False, tool_call_parser='qwen3_coder', reasoning_parser='nemotron_v3', sampling_defaults='model', max_output_tokens=65536, enable_cache_report=True, cuda_memory_telemetry=False, force_nonempty_content=True, allowed_media_domains='', allowed_local_media_path='', cors_origins='tauri://localhost,http://tauri.localhost,http://localhost:1420', trace_dir='/root/.cache/freetoken/trace', trace_include_text=False, gpu=(), gpu_assigned=None)
+[1m[2026-09-23|21:37:42|FrontendAPI][0m [32mINFO    [0m Default sampling config (source=model): temperature=1.0, top_k=20, top_p=0.95
+INFO:     Started server process [20049]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:1920 (Press CTRL+C to quit)
+INFO:     127.0.0.1:41204 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+/root/FreeToken-reorg/python/freetoken/engine/engine.py:1756: FutureWarning: torch.cuda._set_allocator_settings is deprecated. Use torch._C._accelerator_setAllocatorSettings instead.
+  torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+[1m[2026-09-23|21:37:46|core|rank=0][0m [32mINFO    [0m Enabled expandable_segments (override via PYTORCH_ALLOC_CONF)
+[1m[2026-09-23|21:37:46|core|rank=0][0m [32mINFO    [0m Resolved config: moe_strategy='offload', attention_backend='triton', cache_type='hybrid_radix', page_size=1
+[1m[2026-09-23|21:37:46|core|rank=0][0m [32mINFO    [0m Free memory before loading model: 15.14 GiB
+Loading weights:   0%|          | 0/3 [00:00<?, ?it/s]INFO:     127.0.0.1:36008 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+Loading weights:  33%|███▎      | 1/3 [00:01<00:03,  1.67s/it]Loading weights:  67%|██████▋   | 2/3 [00:02<00:01,  1.30s/it]INFO:     127.0.0.1:36014 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+Loading weights: 100%|██████████| 3/3 [00:05<00:00,  1.91s/it]Loading weights: 100%|██████████| 3/3 [00:05<00:00,  1.78s/it]
+[1m[2026-09-23|21:37:54|core|rank=0][0m [32mINFO    [0m MoE experts: nvfp4 via triton
+[1m[2026-09-23|21:37:54|core|rank=0][0m [32mINFO    [0m expert banks: slow path (parallel build)
+Loading experts (parallel):   0%|          | 0.00/21.8G [00:00<?, ?B/s]INFO:     127.0.0.1:57772 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:57776 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+Loading experts (parallel):  43%|████▎     | 9.32G/21.8G [00:10<00:14, 919MB/s]INFO:     127.0.0.1:57704 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:57718 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+Loading experts (parallel):  85%|████████▌ | 18.6G/21.8G [00:20<00:03, 992MB/s]INFO:     127.0.0.1:56524 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+Loading experts (parallel): 100%|██████████| 21.8G/21.8G [00:24<00:00, 962MB/s]                                                                               ninja: no work to do.
+[1m[2026-09-23|21:38:20|core|rank=0][0m [32mINFO    [0m --moe-cache-auto resolved moe_cache_size=5686 num_pages=73282 (prefill_overlap=True)
+[1m[2026-09-23|21:38:21|core|rank=0][0m [32mINFO    [0m Multimodal enabled: QwenVLMMProcessor, encoders ['vision'] on host, serving ['image']
+[1m[2026-09-23|21:38:22|core|rank=0][0m [32mINFO    [0m Allocating 262144 tokens for KV cache, K + V = 2.66 GiB
+[1m[2026-09-23|21:38:22|core|rank=0][0m [32mINFO    [0m Growable-KV ceiling validated: 262144 tokens, 2.73 GiB physical, planned final MoE cache 4320 slots
+[1m[2026-09-23|21:38:22|core|rank=0][0m [32mINFO    [0m Triton decode launch: kv_splits=64 block_n=64 warps=4 (q_heads=16 kv_heads=2 head_dim=256 quant=q8_0 sms=84)
+[1m[2026-09-23|21:38:22|core|rank=0][0m [32mINFO    [0m Triton extend launch: block_m=32 block_n=32 warps=4 stages=1 (head_dim=256 sm=12.0)
+[1m[2026-09-23|21:38:22|core|rank=0][0m [32mINFO    [0m Free memory after initialization: 1.30 GiB
+[1m[2026-09-23|21:38:22|core|rank=0][0m [32mINFO    [0m Start capturing CUDA graphs with sizes: [1]
+[1m[2026-09-23|21:38:22|core|rank=0][0m [32mINFO    [0m Free GPU memory before capturing CUDA graphs: 1.30 GiB
+Preparing for capturing CUDA graphs...:   0%|          | 0/1 [00:00<?, ?batch/s]Capturing graphs: bs = 1   | avail_mem = 1.30 GiB:   0%|          | 0/1 [00:00<?, ?batch/s]INFO:     127.0.0.1:56528 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+Capturing graphs: bs = 1   | avail_mem = 1.30 GiB: 100%|██████████| 1/1 [00:02<00:00,  2.32s/batch]Capturing graphs: bs = 1   | avail_mem = 1.30 GiB: 100%|██████████| 1/1 [00:02<00:00,  2.32s/batch]
+[1m[2026-09-23|21:38:24|core|rank=0][0m [32mINFO    [0m Free GPU memory after capturing CUDA graphs: 1.30 GiB
+[1m[2026-09-23|21:38:25|core|rank=0][0m [32mINFO    [0m Prefill warmup complete for lengths [80, 128] in 1.410 s
+[1m[2026-09-23|21:38:25|core|rank=0][0m [32mINFO    [0m Cold session tier enabled: RAM 1.00 GiB, disk 50.00 GiB, retained 50.00 GiB total (persistent), host reserve 0.00 GiB
+[1m[2026-09-23|21:38:26|core|rank=0][0m [32mINFO    [0m Scheduler loop: overlap (kv_grow_step_tokens=65536, growable_overlap=True)
+[1m[2026-09-23|21:38:26|core|rank=0][0m [32mINFO    [0m Scheduler is idle, waiting for new reqs...
+[1m[2026-09-23|21:38:26|FrontendAPI][0m [32mINFO    [0m API server is ready to serve on 127.0.0.1:1920
+[1m[2026-09-23|21:38:29|core|rank=0][0m [32mINFO    [0m Prefill batch, #new-seq: 1, #new-token: 11, #cached-token: 0, token usage: 0.00, #mamba-slot: 0/12, mamba usage: 0.00, #running-req: 0, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 3.61 instant, 3.61 average
+[1m[2026-09-23|21:38:29|core|rank=0][0m [32mINFO    [0m Scheduler is idle, waiting for new reqs...
+INFO:     127.0.0.1:60940 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60950 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[1m[2026-09-23|21:38:33|core|rank=0][0m [32mINFO    [0m Prefill batch, #new-seq: 1, #new-token: 8009, #cached-token: 0, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 2366.53 instant, 2366.53 average
+[1m[2026-09-23|21:38:33|core|rank=0][0m [32mINFO    [0m Decode batch, #running-req: 1, #token: 8050, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 5.81, #queue-req: 0
+[1m[2026-09-23|21:38:33|core|rank=0][0m [32mINFO    [0m Scheduler is idle, waiting for new reqs...
+INFO:     127.0.0.1:32920 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[1m[2026-09-23|21:38:54|core|rank=0][0m [32mINFO    [0m Prefill batch, #new-seq: 1, #new-token: 9, #cached-token: 8000, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 0.43 instant, 0.43 average
+[1m[2026-09-23|21:38:54|core|rank=0][0m [32mINFO    [0m Decode batch, #running-req: 1, #token: 8027, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 1.93, #queue-req: 0
+[1m[2026-09-23|21:38:54|core|rank=0][0m [32mINFO    [0m Decode batch, #running-req: 1, #token: 8067, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 155.58, #queue-req: 0
+[1m[2026-09-23|21:38:54|core|rank=0][0m [32mINFO    [0m Scheduler is idle, waiting for new reqs...
+INFO:     127.0.0.1:32922 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[1m[2026-09-23|21:38:54|core|rank=0][0m [32mINFO    [0m Prefill batch, #new-seq: 1, #new-token: 9, #cached-token: 8000, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 13.76 instant, 13.76 average
+[1m[2026-09-23|21:38:55|core|rank=0][0m [32mINFO    [0m Decode batch, #running-req: 1, #token: 8044, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 80.46, #queue-req: 0
+[1m[2026-09-23|21:38:55|core|rank=0][0m [32mINFO    [0m Decode batch, #running-req: 1, #token: 8084, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 161.41, #queue-req: 0
+[1m[2026-09-23|21:38:55|core|rank=0][0m [32mINFO    [0m Decode batch, #running-req: 1, #token: 8124, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 149.84, #queue-req: 0
+[1m[2026-09-23|21:38:55|core|rank=0][0m [32mINFO    [0m Scheduler is idle, waiting for new reqs...
+INFO:     127.0.0.1:32938 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[1m[2026-09-23|21:38:58|core|rank=0][0m [32mINFO    [0m Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.25, #mamba-slot: 3/12, mamba usage: 0.25, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2507.10 instant, 2507.10 average
+[1m[2026-09-23|21:38:59|core|rank=0][0m [32mINFO    [0m Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.38, #mamba-slot: 3/12, mamba usage: 0.25, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 8356.73 instant, 3857.05 average
+[1m[2026-09-23|21:39:00|core|rank=0][0m [32mINFO    [0m Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.49, #mamba-slot: 3/12, mamba usage: 0.25, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 7037.98 instant, 4541.21 average
+[1m[2026-09-23|21:39:00|core|rank=0][0m [32mINFO    [0m Prefill batch, #new-seq: 1, #new-token: 7446, #cached-token: 0, token usage: 0.49, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 112895.31 instant, 5845.85 average
+[1m[2026-09-23|21:39:00|core|rank=0][0m [32mINFO    [0m Decode batch, #running-req: 1, #token: 32050, token usage: 0.49, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 8.05, #queue-req: 0
+[1m[2026-09-23|21:39:00|core|rank=0][0m [32mINFO    [0m Decode batch, #running-req: 1, #token: 32090, token usage: 0.49, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 148.04, #queue-req: 0
+[1m[2026-09-23|21:39:01|core|rank=0][0m [32mINFO    [0m Decode batch, #running-req: 1, #token: 32130, token usage: 0.49, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 150.12, #queue-req: 0
+[1m[2026-09-23|21:39:01|core|rank=0][0m [32mINFO    [0m Scheduler is idle, waiting for new reqs...
+INFO:     127.0.0.1:44952 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[1m[2026-09-23|21:39:03|core|rank=0][0m [32mINFO    [0m Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.25, #mamba-slot: 3/12, mamba usage: 0.25, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2873.74 instant, 2873.74 average
+[1m[2026-09-23|21:39:04|core|rank=0][0m [32mINFO    [0m Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.38, #mamba-slot: 3/12, mamba usage: 0.25, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 8352.40 instant, 4276.20 average
+[1m[2026-09-23|21:39:05|core|rank=0][0m [32mINFO    [0m Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.50, #mamba-slot: 3/12, mamba usage: 0.25, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 7092.29 instant, 4928.51 average
+[1m[2026-09-23|21:39:06|core|rank=0][0m [32mINFO    [0m Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.62, #mamba-slot: 3/12, mamba usage: 0.25, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 6202.97 instant, 5195.37 average
+[1m[2026-09-23|21:39:08|core|rank=0][0m [32mINFO    [0m Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.75, #mamba-slot: 3/12, mamba usage: 0.25, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 5516.09 instant, 5256.50 average
+[1m[2026-09-23|21:39:09|core|rank=0][0m [32mINFO    [0m Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.88, #mamba-slot: 3/12, mamba usage: 0.25, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 4852.22 instant, 5184.50 average
+[1m[2026-09-23|21:39:11|core|rank=0][0m [32mINFO    [0m Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 3/12, mamba usage: 0.25, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 3958.09 instant, 4964.74 average
+[1m[2026-09-23|21:39:12|core|rank=0][0m [32mINFO    [0m Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 3/12, mamba usage: 0.25, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 47954.77 instant, 5591.30 average
+[1m[2026-09-23|21:39:12|core|rank=0][0m [32mINFO    [0m Growable-KV pre-commit (arena): 1.27 GiB free (driver 1.27 GiB), 0.66 GiB commit, 0.91 GiB required (allocator 3.51 GiB allocated / 3.61 GiB reserved)
+[1m[2026-09-23|21:39:12|core|rank=0][0m [32mINFO    [0m Committed growable KV through 131072 tokens (1.41 GiB physical); MoE slots 5686 -> 5686
+[1m[2026-09-23|21:39:12|core|rank=0][0m [32mINFO    [0m KV grew 65536 -> 131072 tokens; MoE cache now 5686 slots
+Process freetoken-TP0-scheduler:
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/usr/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/root/FreeToken-reorg/python/freetoken/server/launch.py", line 116, in _run_scheduler
+    scheduler.run_forever()
+  File "/root/venv/lib/python3.12/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-reorg/python/freetoken/scheduler/scheduler.py", line 865, in run_forever
+    data = self.overlap_loop(data)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-reorg/python/freetoken/scheduler/scheduler.py", line 760, in overlap_loop
+    ongoing_data = (forward_input, self._forward(forward_input))
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-reorg/python/freetoken/scheduler/scheduler.py", line 3034, in _forward
+    forward_output = self.engine.forward_batch(batch, sample_args)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-reorg/python/freetoken/engine/engine.py", line 1580, in forward_batch
+    logits = self.graph_runner.replay(batch) if use_graph else self.model.forward()
+                                                               ^^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-reorg/python/freetoken/models/qwen3_5_moe/model.py", line 118, in forward
+    output = self.model.forward(get_global_ctx().batch.input_ids)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-reorg/python/freetoken/models/qwen3_5_moe/model.py", line 95, in forward
+    x, residual = layer.forward(x, residual)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-reorg/python/freetoken/utils/torch_utils.py", line 33, in wrapper
+    return fn(self, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-reorg/python/freetoken/models/qwen3_5_moe/model.py", line 71, in forward
+    hidden = self.linear_attn.forward(hidden) if self._is_linear else self.self_attn.forward(hidden)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-reorg/python/freetoken/models/qwen3_5_moe/gdn.py", line 190, in forward
+    result = gdn_prefill_chunk_fla(
+             ^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-reorg/python/freetoken/models/qwen3_5_moe/gdn_kernels.py", line 33, in gdn_prefill_chunk_fla
+    o, _, h = chunk_gated_delta_rule(
+              ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/venv/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py", line 1263, in _fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-reorg/python/freetoken/kernel/fla/chunk.py", line 240, in chunk_gated_delta_rule
+    o, h = ChunkGatedDeltaRuleFunction.apply(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/venv/lib/python3.12/site-packages/torch/autograd/function.py", line 596, in apply
+    return super().apply(*args, **kwargs)  # type: ignore[misc]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-reorg/python/freetoken/kernel/fla/utils.py", line 178, in wrapper
+    return fn(*contiguous_args, **contiguous_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/venv/lib/python3.12/site-packages/torch/amp/autocast_mode.py", line 481, in decorate_fwd
+    return fwd(*args, **kwargs)  # pyrefly: ignore [not-callable]
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-reorg/python/freetoken/kernel/fla/chunk.py", line 109, in forward
+    g, o, A, w, h, v_new = chunk_gated_delta_rule_fwd(
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-reorg/python/freetoken/kernel/fla/chunk.py", line 48, in chunk_gated_delta_rule_fwd
+    w, u, A = chunk_gated_delta_rule_fwd_intra(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-reorg/python/freetoken/kernel/fla/chunk_fwd.py", line 390, in chunk_gated_delta_rule_fwd_intra
+    A = torch.zeros(B, T, H, BT, device=k.device, dtype=k.dtype)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 32.00 MiB. GPU 0 has a total capacity of 15.47 GiB of which 36.50 MiB is free. Including non-PyTorch memory, this process has 15.39 GiB memory in use. Of the allocated memory 4.07 GiB is allocated by PyTorch, with 2.00 MiB allocated in private pools (e.g., CUDA Graphs), and 105.56 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+[1m[2026-09-23|21:39:22|FrontendAPI][0m [31mERROR   [0m Backend supervisor: backend worker freetoken-TP0-scheduler exited
+[1m[2026-09-23|21:39:32|FrontendAPI][0m [31mERROR   [0m Backend worker is gone and cannot be restarted; stopping the API server
+INFO:     Shutting down
+INFO:     Waiting for connections to close. (CTRL+C to force quit)
+ERROR:    Cancel 1 running task(s), timeout graceful shutdown exceeded
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [20049]
+/usr/lib/python3.12/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 3 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
