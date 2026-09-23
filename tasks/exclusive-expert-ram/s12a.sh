@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Plan S12a: NVFP4 Ornith through the reorganised path, single lane, arena, tuned prefill
 # tables (bc6f815), whole model in RAM (the mirror refuses Ornith: 2 experts span shards,
-# check_experts). Prefill of record: 32K and 80K, chunk 8192, pass 2, empty GPU.
+# check_experts). Prefill at 32K/80K (plan) and up to 250K (owner, 2026-09-23: "and why prefil is not being measured, let's say, up to 250k tokens?"), chunk 8192, pass 2, empty GPU.
 # Then the roofline inputs the plan asks for, on the same empty GPU after the arm stops:
 #   bench_moe_prefill_gemm.py --model ornith --m 8192, and ft bench bw.
 # Run as a systemd transient unit (--setenv=PATH), never from an agent shell.
@@ -28,7 +28,7 @@ empty_gpu() {
 }
 empty_gpu
 PYTHONPATH=$PWD/python "$PY" -m freetoken.models.check_experts "$FT_MODEL" > "$OUT/check_experts.txt" 2>&1 || true
-FT_ROWS=0 FT_SIZES="8000 32000 80000" "$HERE/measure.sh" ornith-s12a
+FT_ROWS=0 FT_SIZES="8000 32000 80000 128000 250000" "$HERE/measure.sh" ornith-s12a
 journalctl --user -u ft-measure-ornith-s12a -o cat --no-pager | sed 's/\x1b\[[0-9;]*m//g' > "$OUT/ornith-s12a-journal.txt" || true
 mv "$HERE"/results/ornith-s12a-* "$OUT/" 2>/dev/null || true
 empty_gpu
