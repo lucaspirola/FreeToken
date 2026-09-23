@@ -86,17 +86,47 @@ class GrowableKvController:
         granules per independent bank/layer allocation, and each allocation's row size
         rounds up to a different granule remainder (see
         ``freetoken.engine.cache_budget.arena_bytes_for_usable``).
-        """
-        from freetoken.engine.cache_budget import arena_bytes_for_usable
 
+        S12b: a mixed-GGUF cache exposes ``class_arena_layouts``/
+        ``class_bank_row_bytes`` (one arena per size class) instead of the
+        single-class ``arena_layout``/``bank_row_bytes``; ``cache_size`` is then
+        the JOINT usable cutoff swept across every class's fixed range (see
+        ``cache_budget.joint_arena_bytes_for_usable`` and
+        ``OffloadMoeCache.set_class_usable_slots``). A uniform-signature cache
+        never populates the class attributes, so this branch is a pure addition:
+        the single-class path below is untouched (the N=1 case).
+        """
         moe = self.moe
         assert moe is not None, "growable KV requires the MoE offload cache"
+        class_layouts = getattr(moe, "class_arena_layouts", None)
+        if class_layouts is not None:
+            from freetoken.engine.cache_budget import joint_arena_bytes_for_usable
+
+            capacities = [c for c, _ in class_layouts]
+            steps = [s for _, s in class_layouts]
+            row_bytes = moe.class_bank_row_bytes
+            assert row_bytes is not None
+            return joint_arena_bytes_for_usable(cache_size, capacities, steps, row_bytes)
+
+        from freetoken.engine.cache_budget import arena_bytes_for_usable
+
         bank_row_bytes = getattr(moe, "bank_row_bytes", None)
         arena_layout = getattr(moe, "arena_layout", None)
         if bank_row_bytes is None or arena_layout is None:
             raise RuntimeError(GROWABLE_KV_UNSUPPORTED)
         capacity, step_slots = arena_layout
         return arena_bytes_for_usable(cache_size, capacity, step_slots, bank_row_bytes)
+
+    def _growable_moe_class_floor(self) -> "list[int] | None":
+        """Per-class decode floor (``num_experts``, or ``2*num_experts`` with
+        prefill overlap) for the joint planner's ``joint_arena_floor``/
+        ``plan_joint_arena_usable`` (S12b). ``None`` off the multi-class arena."""
+        moe = self.moe
+        class_layouts = getattr(moe, "class_arena_layouts", None)
+        if class_layouts is None:
+            return None
+        floor = 2 * moe.num_experts if moe.prefill_overlap else moe.num_experts
+        return [floor for _ in class_layouts]
 
     def _plan_growable_kv(
         self,
@@ -142,6 +172,29 @@ class GrowableKvController:
                 "growable KV has no budget after its 256 MiB VMM safety margin"
             )
         kv_bytes = pool.mapped_bytes_for_pages(target_pages)
+
+        # S12b: mixed-GGUF per-class arena. One joint step count across every
+        # class's fixed range (see _growable_moe_bytes above), each class's own
+        # floor checked simultaneously (cache_budget.joint_arena_floor) --
+        # never a per-candidate prefill_overlap toggle, unlike the uniform-arena
+        # search below, because a size class's prefill-buffer borrow is fixed at
+        # construction (OffloadMoeCache._prefill_borrow_class), not re-derived
+        # per candidate. A uniform-signature cache never takes this branch (the
+        # N=1 case): it falls through to the untouched code below.
+        class_layouts = getattr(moe, "class_arena_layouts", None)
+        if class_layouts is not None:
+            from freetoken.engine.cache_budget import plan_joint_arena_usable
+
+            capacities = [c for c, _ in class_layouts]
+            steps = [s for _, s in class_layouts]
+            row_bytes = moe.class_bank_row_bytes
+            assert row_bytes is not None
+            floors = self._growable_moe_class_floor()
+            target_moe = plan_joint_arena_usable(
+                budget, kv_bytes, capacities, steps, row_bytes, floors
+            )
+            return target_moe, kv_bytes
+
         maximum = self.engine._growable_moe_ceiling
         desired_overlap = self.engine._growable_moe_prefill_overlap
 

@@ -147,10 +147,15 @@ def _refuse_unsupported_growable_kv(config: EngineConfig, banks) -> None:
         )
     if fmt == "gguf":
         classes = len(set(expert_slot_signatures(banks.sources)))
-        if classes > 1:
+        # S12b: mixed-GGUF size classes get growable KV once they are on the
+        # arena (OffloadMoeCache builds one arena per class -- see
+        # _set_gguf_size_class_sources). Off the arena there is still no
+        # mechanism for them (same as every other format; the generic
+        # "requires the expert arena" refusal below covers that case).
+        if classes > 1 and not config.expert_arena:
             raise ValueError(
                 f"{GROWABLE_KV_UNSUPPORTED} (GGUF experts with {classes} size classes; "
-                "drop --kv-grow-step-tokens)"
+                "pass --expert-arena, or drop --kv-grow-step-tokens)"
             )
     if not config.expert_arena:
         raise ValueError(

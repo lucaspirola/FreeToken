@@ -46,10 +46,18 @@ def test_tiled_nvfp4_formats_are_refused(fmt):
     assert fmt in str(exc.value)
 
 
-def test_mixed_size_class_gguf_is_refused():
+def test_mixed_size_class_gguf_off_the_arena_is_refused():
     with pytest.raises(ValueError, match="growable KV unsupported for this format") as exc:
-        _refuse_unsupported_growable_kv(_config(), _banks("gguf", [96, 128, 96]))
+        _refuse_unsupported_growable_kv(
+            _config(expert_arena=False), _banks("gguf", [96, 128, 96])
+        )
     assert "2 size classes" in str(exc.value)
+
+
+def test_mixed_size_class_gguf_on_the_arena_is_accepted():
+    # S12b: the arena builds one arena per size class, so mixed-GGUF regains
+    # growable KV once --expert-arena is on -- this refusal fires only off it.
+    _refuse_unsupported_growable_kv(_config(expert_arena=True), _banks("gguf", [96, 128, 96]))
 
 
 def test_format_refusal_wins_over_the_missing_arena():
