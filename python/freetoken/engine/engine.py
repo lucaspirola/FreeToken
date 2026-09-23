@@ -672,12 +672,13 @@ class Engine:
             # reaches it dies mid-flight on "growable KV refused an unsafe
             # VMM commit" -- as Ornith's 250K request did when the estimate
             # left out the linear-state pool. Fail the load here instead.
-            _need = self.moe.residency.min_gpu_slots()
-            if _need and getattr(self.moe, "class_arena_layouts", None) is None:
-                _step = self.moe.arena_layout[1]
+            _moe = self.moe_offload_cache
+            _need = _moe.residency.min_gpu_slots()
+            if _need and getattr(_moe, "class_arena_layouts", None) is None:
+                _step = _moe.arena_layout[1]
                 _need = -(-_need // _step) * _step
             if _need > final_moe:
-                _pool = self.moe.residency.pool
+                _pool = _moe.residency.pool
                 raise RuntimeError(
                     f"mirror pool too small for the KV ceiling: its coverage "
                     f"floor is {_need} arena slots but the ceiling plan leaves "
