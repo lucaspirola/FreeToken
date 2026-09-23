@@ -94,3 +94,19 @@ Credentials: none found on disk for vast.ai or Spheron. The only candidate is th
   - Final bitrate 4.11 bpw excluding the head, with `-hq`.
   - Repo pirola/K2-Horizon-MoVA-36B-A4B-exl3-4.0bpw-hq (private): 20 files, 19.12 GiB, 3 safetensors shards (7.87 / 7.68 / 3.52 GiB), plus quantization_config.json, the tokenizer, the modeling code and `conversion/{patch, run.sh, convert.log}`.
   - Local download is deferred until the control measurement ends, to keep the host quiet.
+- **Published 2026-09-23** at the owner's request ("make ... public, link it as a quantization of the original model"). The repo is public; the Hub shows `base_model:quantized:IFM/K2-Horizon-MoVA-36B-A4B`.
+  - Our own model card replaced IFM's README, which the converter had copied in. It says: community conversion, not affiliated with IFM; stock exllamav3 cannot load it; the patch is in `conversion/`; full-model validation is pending.
+  - The public patch has its Claude-Session line removed, but the first upload (commit 3bb057f) still carries it in the repo history.
+- **Prior art the owner found: vcruz305/K2-Horizon-MoVA-36B-A4B-EXL3** (created 2026-09-22):
+  - Packs 2.0 / 2.5 / 4.0 / 5.0 / 6.5 / 8.0 bpw, made with "SAGE" (their own mixed-precision method) on exllamav3 1.5.0, with calibration 64 x 1024 (ours: 250 x 2048).
+  - Their scores vs the BF16 original running on IFM's code with fp32 activations, over 10,240 held-out positions (top-1 / mean KLD):
+    - BF16 in exllamav3: 97.71% / 0.0030
+    - 8.0 bpw: 96.43% / 0.0047
+    - 6.5 bpw: 90.68% / 0.0335
+    - 5.0 bpw: 85.83% / 0.0923
+    - 4.0 bpw: 84.81% / 0.1082
+    - 2.5 bpw: 83.71% / 0.1326 (13.27 GB, fits 16 GB)
+    - 2.0 bpw: 81.66% / 0.1604
+  - So this model loses a lot between 8 and 5 bpw and then flattens; that is consistent with the router's sensitivity.
+  - **Their port is unpublished** ("will be linked here when they are published"), so ours is currently the only loadable public port.
+  - Their metrics are directly comparable to what our validation run computes (top-1 and KL vs BF16 on held-out text). Add the BF16-in-exllamav3 ceiling to our run if it is cheap.
