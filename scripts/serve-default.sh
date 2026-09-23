@@ -10,13 +10,15 @@
 #   snapshot slots (~80 MB each) so cold-session restores and prefix snapshots have
 #   somewhere to land; with 6 slots the soak logged "no GDN snapshot slot available for
 #   cold session restore" on every swap-in and fell back to a full re-prefill.
-# --pin-prefix-scope session: a request with a session key pins the prefix it leaves in
-#   the cache when it finishes, so one agent asking several questions of one long haystack
-#   keeps it across the KV shrink between requests (without it the shrink evicted a 112K
-#   haystack: cached_tokens 0, ~17 s re-prefill per question). Bounded by
-#   --pin-prefix-max-tokens 262144 (agent proposal from plan S13: 25% of the 1M pool, the clamp) and the state-slot
-#   budget (13 - 4 - 1 - 2 = 6; one pin holds at most 3 snapshots, the deepest), LRU-
-#   released; DELETE /v1/cache/pins releases them all.
+# Prefix pins stay at the default scope (shared: only a prefix two sessions share is pinned).
+#   A session's own haystack survives between its questions through its session lease and
+#   the RAM/disk spill, measured 2026-09-23: a 105K haystack hit 104,832 cached tokens
+#   across a 30K and a 961K handoff with nothing pinned (TTFT 0.5 s / 6.1 s). The
+#   --pin-prefix-scope session option (plan S13) is NOT used here: it added nothing in
+#   those runs and, when the pinned prefix plus the next session exceeded the KV pool, it
+#   blocked that session's admission indefinitely (tasks/exclusive-expert-ram/results/
+#   s13b-session-stuck.txt). A request without a session key gets no cache across
+#   requests: send session-id / x-session-id (or prompt_cache_key) to keep one.
 # KV starts at one 64K step and grows on demand up to 1M tokens, funded from the on-GPU
 # expert cache only when VRAM actually runs out. The expert cache is a fixed-capacity VMM
 # arena (FREETOKEN_EXPERT_ARENA=1, the alias server/args.py resolves into --expert-arena),
@@ -99,5 +101,4 @@ exec uv run ft serve \
   --trace-dir "$CACHE/trace" \
   --hidden-states-dir "$CACHE/hidden-states" --hidden-states-max-tokens 4096 \
   --pooled-sink-dir "$CACHE/pooled-sink" --pin-prefix-min-tokens 1024 \
-  --pin-prefix-scope session --pin-prefix-max-tokens 262144 \
   ${FREETOKEN_EXTRA_ARGS:-}
