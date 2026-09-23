@@ -39,7 +39,10 @@ def run(target_tokens: int, tag: str = "") -> dict:
         "chat_template_kwargs": {"enable_thinking": False},
     }).encode()
     req = urllib.request.Request(URL, data=body, headers={"Content-Type": "application/json"})
-    t0 = time.time(); first = None; n = 0; usage = None
+    # Both clocks: time.time() keeps the numbers comparable with every earlier record,
+    # time.monotonic() cannot jump (WSL2's wall clock steps ~1.7-2 s every ~34 s, which
+    # an 80K TTFT straddles). The *_mono_s fields are the ones to trust.
+    t0 = time.time(); m0 = time.monotonic(); first = None; mfirst = None; n = 0; usage = None
     with urllib.request.urlopen(req, timeout=3600) as r:
         for line in r:
             if not line.startswith(b"data:"):
@@ -55,16 +58,21 @@ def run(target_tokens: int, tag: str = "") -> dict:
                 if delta.get("content") or delta.get("reasoning_content"):
                     n += 1
                     if first is None:
-                        first = time.time()
-    t1 = time.time()
+                        first = time.time(); mfirst = time.monotonic()
+    t1 = time.time(); m1 = time.monotonic()
     ttft = (first or t1) - t0
+    ttft_m = (mfirst or m1) - m0
     dec = (t1 - first) if first and n > 1 else 0.0
     pt = (usage or {}).get("prompt_tokens", 0)
     ct = (usage or {}).get("completion_tokens", n)
     return {"prompt_tokens": pt, "ttft_s": round(ttft, 2),
             "prefill_tok_s": round(pt / ttft, 0) if ttft else None,
             "gen_tokens": ct, "decode_tok_s": round((ct - 1) / dec, 1) if dec else None,
-            "total_s": round(t1 - t0, 1)}
+            "total_s": round(t1 - t0, 1),
+            "ttft_mono_s": round(ttft_m, 3),
+            "prefill_tok_s_mono": round(pt / ttft_m, 0) if ttft_m else None,
+            "total_mono_s": round(m1 - m0, 2),
+            "t_start_wall": round(t0, 3)}
 
 
 for p in range(1, PASSES + 1):

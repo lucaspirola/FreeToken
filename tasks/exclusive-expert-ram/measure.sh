@@ -18,6 +18,12 @@
 #              forbidden): sets UV_PROJECT_ENVIRONMENT=$FT_VENV, UV_NO_SYNC=1 and puts
 #              $REPO/python first on PYTHONPATH, so the code of record is this tree's.
 #   FT_ENVS    extra NAME=value exports for this arm only (A/B knobs)
+#   FT_LAUNCHER  systemd (default) = transient --user unit; nohup = a host without
+#              systemd (a rented container): serve-default.sh runs in its own session
+#              under setsid/nohup with the SAME env and args, its output goes to
+#              $ARM-server.log (the journal's stand-in), and the whole process group
+#              is stopped on exit. The RAM attribution then reads the process group
+#              instead of the unit's cgroup (the cgroup counters are the container's).
 #   FT_KV      KV lane by name, recorded with the number so it is attributable:
 #              q8q8 (q8_0 K + q8_0 V, the default lane), q8q6, q6q5. Anything
 #              else is passed through verbatim as flags. Only these asymmetric
@@ -53,6 +59,10 @@ case "$KV" in
   *)       KV_FLAGS="$KV" ;;
 esac
 UNIT="ft-measure-$ARM"
+LAUNCHER="${FT_LAUNCHER:-systemd}"
+case "$LAUNCHER" in systemd|nohup) ;; *) echo "FT_LAUNCHER must be systemd or nohup" >&2; exit 1 ;; esac
+SERVER_LOG=""
+SERVER_PGID=""
 OUT="$REPO/tasks/exclusive-expert-ram/results"
 mkdir -p "$OUT"
 
@@ -110,7 +120,33 @@ grep -vE '^[[:space:]]*export[[:space:]]+(FREETOKEN_MIRROR_EXPERT_RAM|FREETOKEN_
   fi
 } >> "$ARMENV"
 
-systemctl --user reset-failed "$UNIT" 2>/dev/null || true
+[ "$LAUNCHER" = systemd ] && { systemctl --user reset-failed "$UNIT" 2>/dev/null || true; }
+
+# Launcher-neutral helpers: everything below that used to ask systemd asks these.
+server_alive() {
+  if [ "$LAUNCHER" = systemd ]; then systemctl --user is-active --quiet "$UNIT"
+  else kill -0 -- "-$SERVER_PGID" 2>/dev/null; fi
+}
+server_log() {   # the arm's log so far (journal or $ARM-server.log), ANSI stripped
+  if [ "$LAUNCHER" = systemd ]; then journalctl --user -u "$UNIT" --no-pager 2>/dev/null
+  else sed 's/\x1b\[[0-9;]*m//g' "$SERVER_LOG" 2>/dev/null; fi
+}
+server_procs() { # a file listing the arm's PIDs, one per line (the cgroup.procs stand-in)
+  if [ "$LAUNCHER" = systemd ]; then
+    echo "/sys/fs/cgroup$(systemctl --user show -p ControlGroup --value "$UNIT")/cgroup.procs"
+  else
+    local f="$OUT/.$ARM.procs"
+    ps -e -o pid=,pgid= | awk -v g="$SERVER_PGID" '$2 == g {print $1}' > "$f"
+    echo "$f"
+  fi
+}
+server_stop() {
+  if [ "$LAUNCHER" = systemd ]; then systemctl --user stop "$UNIT" >/dev/null 2>&1 || true; return; fi
+  [ -n "$SERVER_PGID" ] || return 0
+  kill -TERM -- "-$SERVER_PGID" 2>/dev/null || true
+  for _ in $(seq 1 60); do kill -0 -- "-$SERVER_PGID" 2>/dev/null || return 0; sleep 1; done
+  kill -KILL -- "-$SERVER_PGID" 2>/dev/null || true
+}
 
 # The RAM number, decided after two wrong ones (see results/README.md):
 #
@@ -130,17 +166,36 @@ sync
 sleep 5
 avail_before=$(awk '/MemAvailable/ {print $2 * 1024}' /proc/meminfo)
 
-echo "[$ARM] starting: model=$(basename "$MODEL") rows=$ROWS ratio=$RATIO port=$PORT code=$REPO@$(git -C "$REPO" rev-parse --short HEAD) venv=${FT_VENV:-uv-default}"
-systemd-run --user --unit="$UNIT" --property=OOMScoreAdjust=1000 \
-  --setenv=PATH="$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/wsl/lib" \
-  --setenv=FREETOKEN_HOST_ENV="$ARMENV" \
-  --setenv=FREETOKEN_PORT="$PORT" \
-  --setenv=FREETOKEN_EXTRA_ARGS="${FT_EXTRA:-} $KV_FLAGS" \
-  "$REPO/scripts/serve-default.sh" >/dev/null
+echo "[$ARM] starting: model=$(basename "$MODEL") rows=$ROWS ratio=$RATIO port=$PORT code=$REPO@$(git -C "$REPO" rev-parse --short HEAD) venv=${FT_VENV:-uv-default} launcher=$LAUNCHER"
+if [ "$LAUNCHER" = systemd ]; then
+  systemd-run --user --unit="$UNIT" --property=OOMScoreAdjust=1000 \
+    --setenv=PATH="$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/wsl/lib" \
+    --setenv=FREETOKEN_HOST_ENV="$ARMENV" \
+    --setenv=FREETOKEN_PORT="$PORT" \
+    --setenv=FREETOKEN_EXTRA_ARGS="${FT_EXTRA:-} $KV_FLAGS" \
+    "$REPO/scripts/serve-default.sh" >/dev/null
+else
+  # Same env and args as the unit above; PATH is the caller's (plus ~/.local/bin), since a
+  # container's toolchain (CUDA_HOME, nvcc) lives wherever it was put. setsid makes the
+  # server its own process-group leader, so the stop below reaches every child
+  # (scheduler workers, nvcc) and an agent shell dying does not take it down (nohup).
+  SERVER_LOG="$OUT/$ARM-server.log"
+  : > "$SERVER_LOG"
+  PATH="$HOME/.local/bin:$PATH" FREETOKEN_HOST_ENV="$ARMENV" FREETOKEN_PORT="$PORT" \
+    FREETOKEN_EXTRA_ARGS="${FT_EXTRA:-} $KV_FLAGS" \
+    setsid nohup "$REPO/scripts/serve-default.sh" >> "$SERVER_LOG" 2>&1 < /dev/null &
+  launched=$!
+  sleep 1
+  # setsid execs in place unless the caller leads a group, so read the group, not $!.
+  SERVER_PGID=$(ps -o pgid= -p "$launched" 2>/dev/null | tr -d ' ')
+  SERVER_PGID="${SERVER_PGID:-$launched}"
+  echo 1000 > "/proc/$SERVER_PGID/oom_score_adj" 2>/dev/null || true   # OOMScoreAdjust=1000
+  echo "[$ARM] server pgid=$SERVER_PGID log=$SERVER_LOG"
+fi
 
-# From here on the unit must never outlive this script: a leaked server holds the GPU and
+# From here on the server must never outlive this script: a leaked server holds the GPU and
 # ~20 GiB of host RAM, which blocks every later arm.
-trap 'systemctl --user stop "$UNIT" >/dev/null 2>&1 || true' EXIT
+trap 'server_stop' EXIT
 
 # Readiness is NOT /v1/models: the frontend answers that within seconds while the engine is
 # still building expert banks, and the first real request then returns 503 (measured). The
@@ -151,9 +206,9 @@ until [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
             -H 'Content-Type: application/json' \
             -d "{\"model\":\"$NAME\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" \
             "http://127.0.0.1:$PORT/v1/chat/completions")" = "200" ]; do
-  if ! systemctl --user is-active --quiet "$UNIT"; then
+  if ! server_alive; then
     echo "[$ARM] FAILED to start; last log:" >&2
-    journalctl --user -u "$UNIT" -n 40 --no-pager >&2 || true
+    server_log | tail -n 40 >&2 || true
     exit 1
   fi
   [ "$(date +%s)" -gt "$deadline" ] && { echo "[$ARM] timed out waiting for readiness" >&2; exit 1; }
@@ -167,14 +222,14 @@ echo "[$ARM] ready after $(( $(date +%s) - started ))s"
 # the model resident and nothing served yet (this is the model's residency,
 # the number the RAM knob is supposed to move), and again after the probe.
 avail_ready=$(awk '/MemAvailable/ {print $2 * 1024}' /proc/meminfo)
-CG_EARLY=$(systemctl --user show -p ControlGroup --value "$UNIT")
+PROCS_EARLY=$(server_procs)
 # RSS at readiness, plus the /dev/zero slice of it. Both are needed: pinned
 # memory obtained through torch maps from /dev/zero (which is also why the
 # cgroup charges it to `file` and `free` calls it `shared`), while memory
 # pinned with cudaHostRegister over an ordinary allocation stays anonymous.
 # A metric that only counted /dev/zero would read a profile as free the moment
 # it stopped using torch's allocator.
-read -r rss_ready pinned_ready <<<"$(python3 - "/sys/fs/cgroup$CG_EARLY/cgroup.procs" <<'PYREADY'
+read -r rss_ready pinned_ready <<<"$(python3 - "$PROCS_EARLY" <<'PYREADY'
 import collections, sys
 tot = collections.Counter(); path = None
 for line in open(sys.argv[1]):
@@ -198,7 +253,7 @@ PYREADY
 
 # What the arm actually built. Without this the pool geometry behind a row of
 # the table is a guess, and the RAM column is the whole point of the table.
-journalctl --user -u "$UNIT" --no-pager 2>/dev/null \
+server_log \
   | grep -E "Mirror (expert RAM|pool)|expert arena|memory ratio|KV cache" \
   > "$OUT/$ARM-geometry.txt" || true
 sed -n '1,12p' "$OUT/$ARM-geometry.txt" 2>/dev/null || true
@@ -254,8 +309,13 @@ sync
 sleep 5
 avail_after=$(awk '/MemAvailable/ {print $2 * 1024}' /proc/meminfo)
 
-CG=$(systemctl --user show -p ControlGroup --value "$UNIT")
-CGDIR="/sys/fs/cgroup$CG"
+if [ "$LAUNCHER" = systemd ]; then
+  CG=$(systemctl --user show -p ControlGroup --value "$UNIT")
+  CGDIR="/sys/fs/cgroup$CG"
+else
+  CGDIR=/sys/fs/cgroup   # the container's own cgroup: attribution only, includes everything
+fi
+PROCS_NOW=$(server_procs)
 mem_now=$(awk '/^anon /{print $2}' "$CGDIR/memory.stat" 2>/dev/null || echo 0)
 mem_file=$(awk '/^file /{print $2}' "$CGDIR/memory.stat" 2>/dev/null || echo 0)
 mem_unevict=$(awk '/^unevictable /{print $2}' "$CGDIR/memory.stat" 2>/dev/null || echo 0)
@@ -265,7 +325,7 @@ mem_cur=$(cat "$CGDIR/memory.current" 2>/dev/null || echo 0)
 # Attribution for the MemAvailable delta: summed over every process of the arm,
 # because the banks live in the scheduler worker, not in the frontend.
 rss_kb=0; lck_kb=0
-for pid in $(cat "$CGDIR/cgroup.procs" 2>/dev/null); do
+for pid in $(cat "$PROCS_NOW" 2>/dev/null); do
   r=$(awk '/^Rss:/{print $2}'    "/proc/$pid/smaps_rollup" 2>/dev/null || echo 0)
   l=$(awk '/^Locked:/{print $2}' "/proc/$pid/smaps_rollup" 2>/dev/null || echo 0)
   rss_kb=$(( rss_kb + ${r:-0} )); lck_kb=$(( lck_kb + ${l:-0} ))
@@ -324,6 +384,10 @@ try:
         rec[f"decode_{k}k{sfx}"] = round(d.get("decode_tok_s") or 0, 1)
         rec[f"ttft_{k}k{sfx}"] = round(d.get("ttft_s") or 0, 2)
         rec[f"total_{k}k{sfx}"] = round(d.get("total_s") or 0, 1)
+        # The same interval on time.monotonic() (probe_decode.py records both):
+        # WSL2's wall clock jumps ~1.7-2 s every ~34 s, which lands in time.time().
+        if d.get("ttft_mono_s") is not None:
+            rec[f"ttft_mono_{k}k{sfx}"] = round(d["ttft_mono_s"], 2)
 except Exception as exc:                      # a failed probe must not erase the arm
     rec["probe_error"] = str(exc)
 try:
@@ -350,4 +414,4 @@ PY
 python3 "$(dirname "${BASH_SOURCE[0]}")/table.py" "$OUT" || true
 
 echo "[$ARM] stopping"
-systemctl --user stop "$UNIT" || true
+server_stop
