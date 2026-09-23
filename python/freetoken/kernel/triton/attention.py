@@ -633,6 +633,31 @@ def extend_launch_config(
         # admit BLOCK_M=128 and are left exactly as they were. Head dims above 128 keep
         # their measured tiles (D=256 consumer 64x32, gemma4's D>=384 fallbacks).
         block_m = min(block_m, _extend_block_m_cap(block_d, num_warps))
+    elif (head_dim, block_m, block_n) == (256, 64, 32):
+        # The consumer D=256 tile has the SAME unexamined spill the <=128 arm was
+        # fixed for above, just worse: BLOCK_M=64 x BLOCK_DV=256 over 4 warps is 128
+        # accumulator registers/thread, double the ~64-register non-spilling budget
+        # _extend_block_m_cap enforces elsewhere, yet this tuple never went through
+        # that cap. Applying it here lands on exactly BLOCK_M=32 (the register cap
+        # equals 32 for D=256/4 warps) and matches the Ornith extend-kernel sweep
+        # (bench_ornith_attention.py --ops extend, RTX 5080, 2026-09-23): 1.5-1.58x
+        # on the split kernel at 32K-120K prefixes for both q8_0 and bf16 KV, with
+        # oracle error unchanged (0.0001-0.0005) -- so this is the register fix, not
+        # a numerical trade-off. Restricted to this exact tuple (not head_dim<=256
+        # generally) so it leaves the datacenter (128, 64) tile -- untested here and
+        # explicitly the "materially faster" large-tile case the module docstring
+        # calls out -- and gemma4's D>=384 fallbacks alone.
+        capped_block_m = min(block_m, _extend_block_m_cap(block_d, num_warps))
+        if capped_block_m != block_m:
+            # The cap only actually bites for the plain 4-warp sm_120 case (the
+            # sm_89 8-warp default and the Q6/Q5 8-warp override both already fit
+            # under it, so block_m is unchanged there and num_stages keeps the
+            # value measured for it above). At the new BLOCK_M=32, the same sweep
+            # that picked BLOCK_M itself also found num_stages=2 regressive
+            # (376/620 ms vs 211/348 ms at 73728/122880 prefixes, q8_0) -- the
+            # smaller tile has less work to hide a second pipeline stage behind.
+            num_stages = 1
+        block_m = capped_block_m
     env_m, env_n, env_warps, env_stages = _extend_launch_env_override()
     return (
         env_m or block_m,

@@ -1156,7 +1156,14 @@ def test_extend_block_m_cap_follows_the_accumulator(block_dv, num_warps, expecte
         (128, 101376, (8, 9), (0, 0), (128, 64, 8, 1)),
         (128, 232448, (9, 0), (0, 0), (128, 64, 8, 1)),
         # Measured head_dim >= 256 branches are overrides and must not move.
-        (256, 101376, (12, 0), (0, 0), (64, 32, 4, 2)),
+        # THE SECOND FIX (2026-09-23): the sm_120/4-warp consumer D=256 tile has the
+        # same unexamined register spill as the head_dim<=128 case above, just worse
+        # (BLOCK_M=64 x BLOCK_DV=256 / 4 warps = 128 acc registers/thread, double the
+        # ~64-register budget). Applying the same cap lands on BLOCK_M=32, and the
+        # matching drop to num_stages=1 (a second stage regressed at the smaller tile:
+        # 376/620 ms vs 211/348 ms at 73728/122880 prefixes, q8_0). 1.5-1.58x on
+        # bench_ornith_attention.py --ops extend, oracle error unchanged.
+        (256, 101376, (12, 0), (0, 0), (32, 32, 4, 1)),
         (256, 101376, (12, 0), (3, 4), (64, 32, 8, 2)),  # q6/q5 unpacking lanes
         (256, 232448, (9, 0), (0, 0), (128, 64, 8, 1)),
         (512, 101376, (12, 0), (0, 0), (16, 16, 4, 1)),  # gemma4 full attention
