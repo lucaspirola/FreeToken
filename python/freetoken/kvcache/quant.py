@@ -204,6 +204,16 @@ class KVQuantSpec:
             # half-to-even and would disagree on ties.
             q = torch.where(q >= 0, (q + 0.5).floor(), (q - 0.5).ceil())
             q = q.clamp_(-self.max_magnitude, self.max_magnitude)
+        else:
+            # The store kernel's clamp, exactly: tl.minimum(tl.maximum(q, -M), M),
+            # which lowers to fmaxf/fminf. A block whose amax / max_magnitude
+            # underflows the fp16 scale (|x| ~ 1e-30) stores scale 0, so q is
+            # +-inf, or 0/0 = NaN for the block's zeros. e4m3fn has no inf and the
+            # cast turns both into NaN codes; the kernel instead saturates to
+            # +-448 and, because fmax drops a NaN operand, maps NaN to -448.
+            # torch.fmax/fmin have the same NaN rule (clamp would propagate it).
+            q = torch.fmin(torch.fmax(q, q.new_tensor(-self.max_magnitude)),
+                           q.new_tensor(self.max_magnitude))
         return q.flatten(-2).to(self.storage_dtype), scales
 
     def dequantize(self, q: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
