@@ -229,6 +229,19 @@ Size: S ≤ 1 day, M 2–5 days, L 1–2 weeks. "GPU" says whether the step itse
 - **Upstream test failures, corrected 2026-09-23**: the non-core test directories (all but moe/engine/scheduler/kvcache/server) give 7 failed / 1221 passed / 214 skipped on HEAD; the same 7 (`tests/mm/test_processor.py` x3, `tests/models/qwen4_exp/test_ple.py` x1, `tests/models/test_muse_glimmer_vision.py` x3) fail identically on pristine origin/main `cab110e` and on `eae882d` -- pre-existing, not the reorg. (The earlier "4 upstream failures" count was for a different directory set.)
 - **Verify**: S8 check passes on the Ornith checkpoint with zero refusals; the S12a record exists under `results/ornith-*/` with `-record.json`, `-stats.json`, journal, and the roofline file; target met or the gap explained with a profile.
 
+- **S12c G0 accepted 2026-09-23 (guard3, `results/s12c-guard3-1m-*`, python = S12c + fastpack, commit 09f430e)**: the owner confirmed the NVIDIA performance overlay was off and gave the go ("ok, you have the go now").
+  - Against the record `nemotron-reserve-2e-1m`, pass 1 / pass 2:
+    - 8K 174.2 / 172.5 vs 177.0 / 170.7 (-1.6% / +1.1%);
+    - 1M 77.3 / 88.6 vs 76.9 / 72.9;
+    - RAM 12.24 vs 12.26 GiB;
+    - 0 coverage faults, 0 starved, one graph capture, 0 tracebacks.
+  - Decode recovered +5% at 8K and +8-9% at 1M vs guard runs 1-2 (overlay on). **Measurement rule [agent practice, owner-confirmed cause]: Windows-side GPU overlays (NVIDIA performance overlay) must be off; WSL `nvidia-smi` cannot see them.**
+  - The s12b guard's 185.6 at 8K was a fast run, not the bar; the record is.
+  - **Slot transitions**: 32/32 endpoints identical. The one differing step (KV 393,216 tokens: 1936 -> 1888 instead of -> 1896, and the 589,824 step that follows) is sized from the live driver free VRAM (`engine/growable_kv.py:462`, `live_free_before`).
+    - The record run itself logged 1896 in pass 1 and 1888 in pass 2.
+    - 1888 is a value the record produces, and the old code varies the same way.
+    - Not a regression. The S7 "same sequence" check is therefore exact only up to one arena step at a live-VRAM-sized commit (finding, 2026-09-23).
+
 ### S13 — Prefix pins for the single-session case (G2; M; after S7; GPU for the measurement)
 - **Mechanism already present (verified)**: `pin_prefix` locks the node's root path with the tree's own refs (`scheduler/cache.py:665-720`); `evict_full` walks only `ref_count == 0` leaves, so a pinned prefix survives `_evict_growable_prefix_pages` (`scheduler.py:2473-2488`); `page_usage` counts non-evictable pages as used (`scheduler/cache.py:149-156`), so `_maybe_shrink_growable_kv` (`scheduler.py:2244+`) keeps the pinned pages committed ("protected/live pages keep N tokens committed"). Nothing in the growable machinery needs to change.
 - **What is missing (verified)**: policy. `note_prompt_admitted` pins only via `_shared_pin_target` — two distinct session keys on the node (`scheduler/cache.py:610-663`); the producer of a node is never recorded; after the first request completes the shrink evicts its haystack before a second request can match it (STATUS: `cached_tokens` 0 at a 112K haystack, ~17 s re-prefill per question).
