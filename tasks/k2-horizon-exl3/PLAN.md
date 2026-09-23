@@ -125,3 +125,4 @@ Credentials: none found on disk for vast.ai or Spheron. The only candidate is th
     4. Evaluate on wikitext (comparable with vcruz305) AND on a disjoint self-sampled trace (the deployment metric; optimize.md argues raw web text misjudges reasoning models).
   - **Readiness:** the patch, the conversion pipeline (47 min, ~$2.2) and the validation script exist. Unknowns: sc_* on MoE + MoVA; whether the floor is intrinsic to the model.
   - **Extra spend estimate** beyond the approved validation: ~$10-15 (sensitivity measurement on BF16 ~1-2 h + one recipe conversion + one validation). Awaiting the owner's approval.
+- Owner 2026-09-23: "you have my go to beat vcruz205" -> the beat plan is approved at the ~$10-15 estimate given (cap $15 [agent: my stated figure]).
