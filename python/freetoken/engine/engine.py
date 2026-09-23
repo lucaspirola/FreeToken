@@ -49,7 +49,13 @@ from freetoken.utils import (
 
 from .config import EngineConfig
 from .graph import GraphRunner, get_free_memory
-from .growable_kv import GROWABLE_KV_UNSUPPORTED, GrowableKvController
+from .growable_kv import (
+    GROWABLE_KV_UNSUPPORTED,
+    PREFILL_HEADROOM_MARGIN_BYTES,
+    VMM_COMMIT_CUSHION_BYTES,
+    GrowableKvController,
+    growable_headroom_bytes,
+)
 from .sample import BatchSamplingArgs, FirstStepLogprobs, Sampler
 from freetoken.kvcache import create_kv_pool, resolve_pool_class
 from freetoken.kvcache.base import CacheRebuildRejected
@@ -193,6 +199,35 @@ def _startup_kv_budget(
     what the resident model consumed. Kept as a pure function so the composition with the
     pool families' ``solve_num_pages`` stays CPU-testable."""
     return int(memory_ratio * init_free_memory) - (init_free_memory - new_free_memory)
+
+
+# Planning estimate of one prefill chunk's transient VRAM, per chunk token, used only
+# until Engine._measure_prefill_transient replaces it with the measured value -- i.e.
+# by the bounded mirror pool's sizing (residency._mirror_final_gpu_slots), which has to
+# run before the expert cache that the measurement's forward needs exists. Calibrated
+# on the models the measurement has run on (see _prefill_transient_estimate); a model
+# whose measured transient exceeds it is caught at load by _validate_growable_ceiling.
+_PREFILL_TRANSIENT_EST_BYTES_PER_TOKEN = 128 * 1024
+
+
+def _prefill_transient_estimate(config) -> int:
+    """Pre-measurement estimate of one ``--max-prefill-length`` chunk's transient VRAM.
+
+    ``FREETOKEN_PREFILL_TRANSIENT_MB`` overrides it (e.g. with the value a previous
+    start logged as "Prefill headroom: ... transient"); otherwise it scales with the
+    chunk length, which is what the transient scales with."""
+    raw = os.environ.get("FREETOKEN_PREFILL_TRANSIENT_MB", "").strip()
+    if raw:
+        return int(float(raw) * 1024 * 1024)
+    return int(config.max_extend_tokens) * _PREFILL_TRANSIENT_EST_BYTES_PER_TOKEN
+
+
+def _prefill_transient_measure_enabled() -> bool:
+    """``FREETOKEN_PREFILL_TRANSIENT_MEASURE=0`` skips the startup measurement (and the
+    growable arena's park/fill around it); the planning estimate then stands in."""
+    return os.environ.get("FREETOKEN_PREFILL_TRANSIENT_MEASURE", "1").strip() not in (
+        "0", "false", "no", "off",
+    )
 
 
 def _page_table_width(max_seq_len: int, page_size: int) -> int:
@@ -605,6 +640,13 @@ class Engine:
         # Publish the expert-arena gate before any OffloadMoeCache exists or any offload
         # kernel launches: both read it (it used to be an import-time env constant).
         set_expert_arena(config.expert_arena)
+        # One prefill chunk's transient VRAM: the planning estimate until
+        # _measure_prefill_transient replaces it (the mirror pool is sized from it
+        # inside _init_offload_moe_cache, before a forward can run).
+        self.prefill_transient_bytes = _prefill_transient_estimate(config)
+        self.prefill_transient_measured = False
+        self._growable_live_budget = None
+        self._arena_parked_bytes = 0
         if is_offload_moe_strategy(config.moe_strategy):
             self._init_offload_moe_cache(config)
         if config.kv_grow_step_tokens:
@@ -619,6 +661,23 @@ class Engine:
             # again instead of making the decode penalty permanent.
             self._growable_moe_ceiling = self.moe_offload_cache.cache_size
             self._growable_moe_prefill_overlap = self.moe_offload_cache.prefill_overlap
+            # The arena's startup plan (ratio arithmetic) prices weights, KV and the
+            # state pool but not graph pools, workspaces or one prefill chunk's
+            # transient. Park it at its floor while the rest allocates and the
+            # transient is measured; _settle_prefill_headroom fills it back to what
+            # the measurement leaves, never above this capacity.
+            self._growable_arena_capacity = self.moe_offload_cache.cache_size
+            if _prefill_transient_measure_enabled():
+                parked_from, parked_to, self._arena_parked_bytes = (
+                    self.growable_kv.park_arena_for_startup()
+                )
+                logger.info_rank0(
+                    "Expert arena parked %d -> %d slots (%s) until the prefill "
+                    "transient is measured",
+                    parked_from,
+                    parked_to,
+                    mem_GB(self._arena_parked_bytes),
+                )
         if hasattr(self.model, "prepare_for_runtime"):
             self.model.prepare_for_runtime()
         self.encoder_cache = None
@@ -644,7 +703,9 @@ class Engine:
             )
 
         # ======================= KV cache initialization ========================
-        new_free = self._sync_get_memory()[1]
+        # A parked arena (see above) is still the arena's to take back: size the KV
+        # pool exactly as if it were resident, so parking changes no KV geometry.
+        new_free = self._sync_get_memory()[1] - self._arena_parked_bytes
         # The engine measures the budget and settles the sibling GDN state pool's bytes
         # off it; the KV pool family owns every geometry-specific formula behind the rest.
         available_memory = _startup_kv_budget(
@@ -656,36 +717,8 @@ class Engine:
         self.ctx.kv_cache = self.kv_cache = create_kv_pool(
             config, self.num_pages, device=self.device, dtype=self.dtype
         )
-        if config.kv_grow_step_tokens:
-            final_moe, final_kv_bytes = self.growable_kv._plan_growable_kv(self.num_pages)
-            logger.info_rank0(
-                "Growable-KV ceiling validated: %d tokens, %s physical, planned final "
-                "MoE cache %d slots",
-                self.num_pages * config.page_size,
-                mem_GB(final_kv_bytes),
-                final_moe,
-            )
-            # A bounded mirror pool was sized (before the cache existed) for
-            # an estimated final arena; the plan above is the real one. If
-            # the pool's coverage floor sits above it, the arena cannot
-            # shrink far enough to fund the ceiling and the request that
-            # reaches it dies mid-flight on "growable KV refused an unsafe
-            # VMM commit" -- as Ornith's 250K request did when the estimate
-            # left out the linear-state pool. Fail the load here instead.
-            _moe = self.moe_offload_cache
-            _need = _moe.residency.min_gpu_slots()
-            if _need and getattr(_moe, "class_arena_layouts", None) is None:
-                _step = _moe.arena_layout[1]
-                _need = -(-_need // _step) * _step
-            if _need > final_moe:
-                _pool = _moe.residency.pool
-                raise RuntimeError(
-                    f"mirror pool too small for the KV ceiling: its coverage "
-                    f"floor is {_need} arena slots but the ceiling plan leaves "
-                    f"{final_moe}; raise --moe-mirror-host-rows to at least "
-                    f"{_pool.capacity + _need - final_moe} (now "
-                    f"{_pool.capacity}) or lower --num-tokens"
-                )
+        # The growable-KV ceiling is validated in _settle_prefill_headroom, once the
+        # prefill transient it must leave free is measured.
 
         # ======================= Linear (GatedDeltaNet) state initialization ========================
         linear_group = config.model_config.linear_attention_group()
@@ -786,6 +819,7 @@ class Engine:
         if config.attention_backend.split(",")[0] == "triton":
             # Prefill runs on the first comma part; warm its autotune cache.
             self._warmup_prefill()
+        self._settle_prefill_headroom()
 
     def _init_communication(
         self, config: EngineConfig
@@ -1678,6 +1712,241 @@ class Engine:
             f"Prefill warmup complete for lengths {warmup_lens} "
             f"in {started.elapsed_time(ended) / 1000.0:.3f} s"
         )
+
+    def _prefill_forward(self, length: int, cached_len: int = 0) -> None:
+        """One eager prefill forward of ``length`` tokens on the dummy request row,
+        after a (garbage) prefix of ``cached_len`` tokens. The caller restores the
+        dummy row and resets the MoE cache."""
+        total = cached_len + length
+        dummy_row = self.page_table[self.dummy_req.table_idx]
+        dummy_row[:total] = torch.arange(total, dtype=torch.int32, device=self.device)
+        req = Req(
+            input_ids=torch.zeros(total, dtype=torch.int32, device="cpu"),
+            table_idx=self.dummy_req.table_idx,
+            cached_len=cached_len,
+            output_len=1,
+            uid=-1,
+            sampling_params=None,  # type: ignore[arg-type]
+            cache_handle=None,  # type: ignore[arg-type]
+        )
+        if self.linear_state_pool is not None:
+            # Scratch GDN state: the padding slot, like the dummy decode row.
+            req.linear_slot_idx = self.linear_state_pool.padding_slot
+        batch = Batch(reqs=[req], phase="prefill")
+        batch.padded_reqs = batch.reqs
+        batch.input_ids = torch.zeros(length, dtype=torch.int32, device=self.device)
+        batch.positions = torch.arange(
+            cached_len, total, dtype=torch.int32, device=self.device
+        )
+        if self.config.model_config.model_is_mrope:
+            batch.mrope_positions = batch.positions.unsqueeze(0).expand(3, -1).contiguous()
+        batch.out_loc = dummy_row[cached_len:total]
+        self.attn_backend.prepare_metadata(batch)
+        with self.ctx.forward_batch(batch):
+            self.model.forward()
+
+    def _measure_prefill_transient(self) -> "dict[str, int] | None":
+        """Peak transient VRAM of one full ``--max-prefill-length`` chunk.
+
+        Runs the chunk twice on the dummy row: from an empty prefix, and again
+        after a one-chunk prefix (the extend path every later chunk of a long
+        prompt takes). Each run starts from an emptied caching allocator, so the
+        rise of ``max_memory_reserved`` is what the allocator had to map from the
+        driver for that chunk -- the free VRAM the chunk needs on top of everything
+        resident. ``max_memory_allocated``'s rise is taken too, in case reuse of
+        blocks reserved before the run hid part of it. The larger over both runs
+        (and across TP ranks) is the transient. Returns None when there is no room
+        for a chunk (tiny ``max_seq_len``).
+        """
+        limit = int(self.max_seq_len)
+        if getattr(self.kv_cache, "growable", False):
+            committed = getattr(self.kv_cache, "committed_pages", None)
+            if committed is not None:
+                limit = min(limit, int(committed) * self.config.page_size)
+        length = min(int(self.config.max_extend_tokens), limit)
+        if length < 2:
+            return None
+        prefixes = [0, length] if 2 * length <= limit else [0]
+        dummy_row = self.page_table[self.dummy_req.table_idx]
+        dummy_slot = int(dummy_row[0].item())
+        peaks: list[int] = []
+        alloc_peaks: list[int] = []
+        try:
+            for cached_len in prefixes:
+                torch.cuda.synchronize(self.device)
+                torch.cuda.empty_cache()
+                reserved0 = torch.cuda.memory_reserved(self.device)
+                allocated0 = torch.cuda.memory_allocated(self.device)
+                torch.cuda.reset_peak_memory_stats(self.device)
+                self._prefill_forward(length, cached_len)
+                torch.cuda.synchronize(self.device)
+                reserved_rise = torch.cuda.max_memory_reserved(self.device) - reserved0
+                allocated_rise = torch.cuda.max_memory_allocated(self.device) - allocated0
+                alloc_peaks.append(int(allocated_rise))
+                peaks.append(int(max(reserved_rise, allocated_rise)))
+        finally:
+            dummy_row.fill_(dummy_slot)
+            if self.moe_offload_cache is not None:
+                self.moe_offload_cache.reset()
+        torch.cuda.synchronize(self.device)
+        torch.cuda.empty_cache()
+        transient = torch.tensor([max(peaks)], dtype=torch.int64, device="cpu")
+        torch.distributed.all_reduce(
+            transient, op=torch.distributed.ReduceOp.MAX, group=self.tp_cpu_group
+        )
+        return {
+            "length": length,
+            "transient": int(transient.item()),
+            "first": peaks[0],
+            "prefix": peaks[1] if len(peaks) > 1 else -1,
+            "allocated": max(alloc_peaks),
+        }
+
+    def _settle_prefill_headroom(self) -> None:
+        """Measure one prefill chunk's transient, fill the growable arena to what it
+        leaves, validate the growable-KV ceiling against it, and log it once.
+
+        Order matters: the arena was parked at its floor right after the expert
+        cache was built, so the KV/state pools, the page table, graph capture and
+        the prefill warmup all allocated with room to spare; the measurement then
+        runs with room to spare too. Only after it does the arena take back the
+        rest of the VRAM, minus the growable headroom (``growable_headroom_bytes``:
+        the larger of the VMM commit cushion and the transient) plus
+        ``PREFILL_HEADROOM_MARGIN_BYTES`` -- the free level every later KV grow's
+        arena shrink also aims for.
+        """
+        config = self.config
+        growable = bool(config.kv_grow_step_tokens)
+        measured = None
+        # The measurement drives the same eager prefill forward the triton warmup
+        # does; other prefill backends keep their unmeasured startup unless the
+        # growable arena (whose fill depends on it) is on.
+        triton_prefill = config.attention_backend.split(",")[0] == "triton"
+        if _prefill_transient_measure_enabled() and (growable or triton_prefill):
+            try:
+                measured = self._measure_prefill_transient()
+            except torch.OutOfMemoryError:
+                if growable:
+                    raise
+                # No arena to take the room from: say so instead of failing a load
+                # that serves short prompts; the first full chunk would OOM the same way.
+                torch.cuda.empty_cache()
+                logger.error(
+                    "Prefill transient measurement OOMed on a %d-token chunk: the "
+                    "first full --max-prefill-length chunk will OOM too; lower "
+                    "--memory-ratio or --max-prefill-length",
+                    int(config.max_extend_tokens),
+                )
+        if measured is not None:
+            self.prefill_transient_bytes = measured["transient"]
+            self.prefill_transient_measured = True
+        headroom = growable_headroom_bytes(self.prefill_transient_bytes)
+        arena_note = ""
+        if growable:
+            capacity = self._growable_arena_capacity
+            before = self.moe_offload_cache.cache_size
+            if _prefill_transient_measure_enabled():
+                usable, free_after, target_free = self.growable_kv.fill_arena_to_headroom(
+                    capacity
+                )
+            else:
+                usable, free_after = before, self._sync_get_memory()[0]
+                target_free = headroom + PREFILL_HEADROOM_MARGIN_BYTES
+            self._growable_moe_ceiling = usable
+            # What arena + KV can really hold from here on: the ceiling plan never
+            # prices more (GrowableKvController._plan_growable_kv).
+            self._growable_live_budget = (
+                self.growable_kv._growable_moe_bytes(usable)
+                + self.kv_cache.mapped_bytes_for_pages(
+                    int(getattr(self.kv_cache, "committed_pages", self.num_pages))
+                )
+                + free_after
+            )
+            arena_note = (
+                f"; expert arena {before} -> {usable} of {capacity} slots, "
+                f"{mem_GB(free_after)} free (target {mem_GB(target_free)})"
+            )
+            if usable < capacity:
+                arena_note += (
+                    f", {capacity - usable} slots below the ratio plan"
+                )
+            self._validate_growable_ceiling()
+        else:
+            free_after = self._sync_get_memory()[0]
+            arena_note = f"; {mem_GB(free_after)} free"
+            if measured is not None and free_after < self.prefill_transient_bytes:
+                logger.warning(
+                    "Only %s free after startup, below one %d-token prefill chunk's "
+                    "%s transient: long prompts will OOM; lower --memory-ratio",
+                    mem_GB(free_after),
+                    int(config.max_extend_tokens),
+                    mem_GB(self.prefill_transient_bytes),
+                )
+        if measured is not None:
+            source = (
+                f"measured on a {measured['length']}-token chunk "
+                f"(empty prefix {mem_GB(measured['first'])}, "
+                + (
+                    f"after a {measured['length']}-token prefix {mem_GB(measured['prefix'])}, "
+                    if measured["prefix"] >= 0
+                    else ""
+                )
+                + f"allocator peak {mem_GB(measured['allocated'])})"
+            )
+        else:
+            source = "estimated, not measured"
+        logger.info_rank0(
+            "Prefill headroom: transient %s %s; headroom %s (max of VMM cushion %s "
+            "and transient) + margin %s%s",
+            mem_GB(self.prefill_transient_bytes),
+            source,
+            mem_GB(headroom),
+            mem_GB(VMM_COMMIT_CUSHION_BYTES),
+            mem_GB(PREFILL_HEADROOM_MARGIN_BYTES),
+            arena_note,
+        )
+
+    def _validate_growable_ceiling(self) -> None:
+        """Plan the growable-KV ceiling once the headroom is known; refuse a mirror
+        pool whose coverage floor sits above the arena that plan leaves."""
+        config = self.config
+        final_moe, final_kv_bytes = self.growable_kv._plan_growable_kv(self.num_pages)
+        logger.info_rank0(
+            "Growable-KV ceiling validated: %d tokens, %s physical, planned final "
+            "MoE cache %d slots",
+            self.num_pages * config.page_size,
+            mem_GB(final_kv_bytes),
+            final_moe,
+        )
+        # A bounded mirror pool was sized (before the cache existed) for
+        # an estimated final arena; the plan above is the real one. If
+        # the pool's coverage floor sits above it, the arena cannot
+        # shrink far enough to fund the ceiling and the request that
+        # reaches it dies mid-flight on "growable KV refused an unsafe
+        # VMM commit" -- as Ornith's 250K request did when the estimate
+        # left out the linear-state pool. Fail the load here instead.
+        _moe = self.moe_offload_cache
+        _need = _moe.residency.min_gpu_slots()
+        if _need and getattr(_moe, "class_arena_layouts", None) is None:
+            _step = _moe.arena_layout[1]
+            _need = -(-_need // _step) * _step
+        if _need > final_moe:
+            _pool = _moe.residency.pool
+            hint = ""
+            if self.prefill_transient_measured:
+                hint = (
+                    f" (the pool was sized for a prefill transient estimate; this "
+                    f"start measured {self.prefill_transient_bytes >> 20} MiB -- "
+                    f"FREETOKEN_PREFILL_TRANSIENT_MB={self.prefill_transient_bytes >> 20} "
+                    f"sizes it for that)"
+                )
+            raise RuntimeError(
+                f"mirror pool too small for the KV ceiling: its coverage "
+                f"floor is {_need} arena slots but the ceiling plan leaves "
+                f"{final_moe}; raise --moe-mirror-host-rows to at least "
+                f"{_pool.capacity + _need - final_moe} (now "
+                f"{_pool.capacity}) or lower --num-tokens{hint}"
+            )
 
     def shutdown(self) -> None:
         self.graph_runner.destroy_cuda_graphs()

@@ -52,6 +52,29 @@ logger = init_logger(__name__)
 # bigger than the ceiling plan allowed -- the 250K request died on the commit.
 VMM_COMMIT_CUSHION_BYTES = 256 * 1024 * 1024
 
+# Slack on top of the growable headroom below: the arena shrink (and the startup
+# fill, Engine._fill_expert_arena) aim for headroom + this margin, and only the
+# bare headroom is a hard refusal. Before the prefill transient was measured this
+# was the whole post-grow guarantee (cushion 256 MiB + 128 MiB = 0.375 GiB), which
+# an Ornith 8192-token chunk (> 0.61 GiB of transient) could not run in.
+PREFILL_HEADROOM_MARGIN_BYTES = 128 * 1024 * 1024
+
+
+def growable_headroom_bytes(prefill_transient_bytes: int) -> int:
+    """Live VRAM every growable-KV commit must leave free on top of the pages it maps.
+
+    Two needs, at different moments: the VMM commit itself wants
+    ``VMM_COMMIT_CUSHION_BYTES`` of live headroom while it maps (WSL/DXG's
+    cuMemSetAccess), and the prefill chunk that runs right after the commit wants
+    one chunk's transient (activations and kernel workspaces the caching allocator
+    maps for the forward, measured at startup by ``Engine._measure_prefill_transient``).
+    They are never needed at the same time, so the headroom is the larger of the two.
+    The runtime commit check, the ceiling plan and the mirror pool's sizing estimate
+    (``residency._mirror_final_gpu_slots``) all price THIS number.
+    """
+    return max(VMM_COMMIT_CUSHION_BYTES, int(prefill_transient_bytes or 0))
+
+
 GROWABLE_KV_UNSUPPORTED = (
     "growable KV unsupported for this format: --kv-grow-step-tokens funds KV from the "
     "expert arena (--expert-arena, alias FREETOKEN_EXPERT_ARENA=1), which this expert "
@@ -66,6 +89,12 @@ class GrowableKvController:
 
     def __init__(self, engine) -> None:
         self.engine = engine
+
+    def headroom_bytes(self) -> int:
+        """``growable_headroom_bytes`` of the engine's current prefill transient (the
+        measured value once ``Engine._measure_prefill_transient`` ran, the planning
+        estimate before; 0 on a stub engine, which prices the bare VMM cushion)."""
+        return growable_headroom_bytes(getattr(self.engine, "prefill_transient_bytes", 0))
 
     @property
     def kv_cache(self):
@@ -282,10 +311,24 @@ class GrowableKvController:
         # many bytes as KV is about to consume.  Keep a small, permanent commit
         # cushion instead of discovering that condition by poisoning the CUDA
         # context midway through a long prompt.
-        budget -= VMM_COMMIT_CUSHION_BYTES + extra_vmm_reserve_bytes
+        #
+        # The same headroom must also hold one prefill chunk's transient after the
+        # commit (growable_headroom_bytes): the chunk right after a grow is exactly
+        # where Ornith OOMed on native Linux when only the cushion was priced.
+        headroom = self.headroom_bytes()
+        reserve = headroom + extra_vmm_reserve_bytes
+        budget -= reserve
+        # Once the startup fill has run, the engine knows what arena + KV can really
+        # hold (Engine._fill_expert_arena: arena + mapped KV + live free VRAM, after
+        # graphs, workspaces and every other allocation the ratio arithmetic above
+        # does not see). Never plan above it.
+        live_budget = getattr(self.engine, "_growable_live_budget", None)
+        if live_budget is not None:
+            budget = min(budget, int(live_budget) - reserve)
         if budget <= 0:
             raise RuntimeError(
-                "growable KV has no budget after its 256 MiB VMM safety margin"
+                f"growable KV has no budget after its {mem_GB(reserve)} "
+                "VMM commit / prefill headroom"
             )
         kv_bytes = pool.mapped_bytes_for_pages(target_pages)
 
@@ -397,6 +440,77 @@ class GrowableKvController:
                 "growable KV/MoE rollback failed; engine restart is required"
             )
 
+    # ------------------------------------------------------------------
+    # Startup: park the arena at its floor, measure one prefill chunk, fill the
+    # arena back up to what that leaves (Engine.__init__ drives the order).
+    # ------------------------------------------------------------------
+
+    def startup_floor_slots(self) -> int:
+        """Smallest arena boundary the startup may park at: the prefill-overlap /
+        ``num_experts`` floor (per class on a class arena) and the residency's
+        coverage floor (``min_gpu_slots``: a bounded mirror must keep a GPU slot
+        for every expert its pool does not hold), rounded UP to a boundary."""
+        moe = self.moe
+        assert moe is not None
+        class_layouts = getattr(moe, "class_arena_layouts", None)
+        if class_layouts is not None:
+            from freetoken.engine.cache_budget import joint_arena_floor
+
+            floor = joint_arena_floor(
+                [c for c, _ in class_layouts], self._growable_moe_class_floor()
+            )
+        else:
+            floor = 2 * moe.num_experts if moe.prefill_overlap else moe.num_experts
+        floor = max(floor, int(moe.residency.min_gpu_slots()))
+        boundaries = self._growable_arena_boundaries()
+        above = [b for b in boundaries if b >= floor]
+        return min(above) if above else boundaries[-1]
+
+    def park_arena_for_startup(self) -> tuple[int, int]:
+        """Shrink the arena to ``startup_floor_slots`` before the rest of the engine
+        allocates, so the KV/state pools, graph capture and the prefill-transient
+        measurement never compete with a ratio-1.00 arena for the last bytes (native
+        Linux OOMed in the LinearStatePool that way). ``fill_arena_to_headroom``
+        gives the slots back once the transient is known. Returns (from, to, bytes
+        released)."""
+        moe = self.moe
+        assert moe is not None
+        old = moe.cache_size
+        floor = min(self.startup_floor_slots(), old)
+        released = 0
+        if floor < old:
+            released = int(moe.set_usable_slots(floor))
+            object.__setattr__(self.engine.config, "moe_cache_size", floor)
+        return old, floor, released
+
+    def fill_arena_to_headroom(self, capacity: int) -> tuple[int, int, int]:
+        """Grow the arena to the largest boundary <= ``capacity`` that still leaves
+        ``headroom_bytes() + PREFILL_HEADROOM_MARGIN_BYTES`` of live VRAM free --
+        the same target every grow's arena shrink aims for, so the arena sits at
+        one free level before and after every KV step.
+
+        Returns (usable slots, live free VRAM after, target free VRAM)."""
+        moe = self.moe
+        assert moe is not None
+        free = self.engine._sync_get_memory()[0]
+        target_free = self.headroom_bytes() + PREFILL_HEADROOM_MARGIN_BYTES
+        current = moe.cache_size
+        current_bytes = self._arena_transition_bytes(current)
+        spendable = free - target_free
+        target = current
+        for boundary in self._growable_arena_boundaries():
+            if boundary <= current:
+                continue
+            if boundary > capacity:
+                break
+            if self._arena_transition_bytes(boundary) - current_bytes <= spendable:
+                target = boundary
+        if target != current:
+            moe.set_usable_slots(target)
+            object.__setattr__(self.engine.config, "moe_cache_size", target)
+        free_after = self.engine._sync_get_memory()[0]
+        return target, free_after, target_free
+
     def _grow_runtime_kv_arena(
         self,
         *,
@@ -466,8 +580,12 @@ class GrowableKvController:
         released_bytes = 0
         try:
             commit_bytes = kv_bytes - pool.mapped_bytes_for_pages(old_pages)
-            required_free = commit_bytes + VMM_COMMIT_CUSHION_BYTES
-            desired_free = required_free + 128 * 1024 * 1024
+            # Hard floor: the commit's pages plus the growable headroom (VMM cushion
+            # during the map, one prefill chunk's transient after it). The shrink
+            # aims PREFILL_HEADROOM_MARGIN_BYTES higher so a chunk-rounded release
+            # does not land the next chunk exactly on its transient.
+            required_free = commit_bytes + self.headroom_bytes()
+            desired_free = required_free + PREFILL_HEADROOM_MARGIN_BYTES
             live_free_before = self.engine._sync_get_memory()[0]
             if live_free_before < desired_free:
                 extra_needed = desired_free - live_free_before
@@ -617,9 +735,14 @@ class GrowableKvController:
             released = old_kv_bytes - kv_bytes
             old_bytes = self._arena_transition_bytes(old_moe)
             budget_bytes = old_bytes + released
+            # Never regrow above the startup fill (Engine._fill_expert_arena): the
+            # arena above it would eat the prefill headroom the fill left free.
+            ceiling = getattr(self.engine, "_growable_moe_ceiling", None)
             for boundary in self._growable_arena_boundaries():
                 if boundary < old_moe:
                     continue
+                if ceiling is not None and boundary > ceiling:
+                    break
                 if self._arena_transition_bytes(boundary) <= budget_bytes:
                     target_moe = boundary
             if target_moe != old_moe:
