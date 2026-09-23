@@ -118,6 +118,9 @@ _BANK_SCHEMAS: dict[str, tuple[str, ...]] = {
     # DeepSeek-V4 FP4: packed e2m1 codes + e8m0 per-32 block scales, no global scale
     # (4 banks). Read by DeepSeek-V4's own DS-FP4 grouped GEMV kernels via bank_views().
     "ds_fp4": ("gate_up_packed", "gate_up_scale", "down_packed", "down_scale"),
+    # exllamav3 EXL3 experts, the checkpoint's bytes unchanged (models/exl3_banks.py):
+    # trellis int16 [2, H/16, I/16, 16*bits] / [I/16, H/16, 16*bits], suh / svh fp16
+    "exl3": ("gate_up_trellis", "gate_up_suh", "gate_up_svh", "down_trellis", "down_suh", "down_svh"),
 }
 
 # lives in kernel/aot_models.py: the AOT row table shares it and must stay importable in the torch-only kernel-cache build env, which cannot import freetoken.moe
@@ -2012,9 +2015,9 @@ class OffloadMoeCache:
             self.residency = residency
             return
         pool = residency.pool
-        if (self.quant_format not in ("nvfp4", "gguf") or self.decode_target != "gpu"
+        if (self.quant_format not in ("nvfp4", "gguf", "exl3") or self.decode_target != "gpu"
                 or self.cpu_layer_ids or self.pageable_gpu):
-            raise ValueError("mirror residency requires native NVFP4 or GGUF experts, "
+            raise ValueError("mirror residency requires native NVFP4, GGUF or EXL3 experts, "
                              "GPU decode, and no CPU/pageable routing")
         if not self._expert_arena_enabled:
             # Not a preference: only the gated ``_v2`` admission kernel
