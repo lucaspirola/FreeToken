@@ -1,0 +1,123 @@
+[s13b-session] preflight ok: GPU 0 MiB, MemAvailable 25 GiB, code 79c602e S13 measured: the session lease, not the pin, keeps a 105K haystack across a 30K handoff
+[s13b-session] starting: model=NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 rows=-1 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/reorg@79c602e venv=/home/lucas/ai/FreeToken/.venv
+Running as unit: ft-measure-s13b-session.service; invocation ID: d19112c8ee084974a06d6fad460c79d1
+[s13b-session] ready after 53s
+Sep 23 05:26:14 TESSERACT serve-default.sh[4158489]: [2026-09-23|05:26:14|core|rank=0] INFO     Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode graphs enabled, prefill overlap on (layers assembled from resident slots + pool rows, no disk)
+Sep 23 05:26:14 TESSERACT serve-default.sh[4158489]: [2026-09-23|05:26:14|core|rank=0] INFO     Mirror pool: reserve resolved to 256 rows (FREETOKEN_MIRROR_RESERVE_ROWS='256')
+Sep 23 05:26:27 TESSERACT serve-default.sh[4158489]: [2026-09-23|05:26:27|core|rank=0] INFO     Mirror pool: 1765 rows pinned (9.24 GiB), 771 cover the complement of 2173 GPU residents, 256 reserved, up to 738 duplicates (a duplicate makes its expert's next eviction free of any host traffic)
+Sep 23 05:26:27 TESSERACT serve-default.sh[4158489]: [2026-09-23|05:26:27|core|rank=0] INFO     Mirror pool: the coverage floor is 1440 of 2173 arena slots, leaving 733 slots (3.84 GiB) the growable KV may still take
+Sep 23 05:26:27 TESSERACT serve-default.sh[4158489]: [2026-09-23|05:26:27|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+[s13b-session] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8014, "ttft_s": 0.22, "prefill_tok_s": 36025.0, "gen_tokens": 127, "decode_tok_s": 182.7, "total_s": 0.9}
+{"target": 8000, "pass": 2, "prompt_tokens": 8016, "ttft_s": 5.78, "prefill_tok_s": 1388.0, "gen_tokens": 127, "decode_tok_s": 167.1, "total_s": 6.5}
+[s13b-session] post: S13_OUT=/home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/s13b-session-pins.json python3 /home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/s13_pins.py 112000 1030000
+[s13b-session] POST FAILED (exit 0) -- see s13b-session-post.txt
+    with urllib.request.urlopen(f"{URL}/v1/stats", timeout=30) as r:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 515, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 532, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 1373, in http_open
+    return self.do_open(http.client.HTTPConnection, req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 1347, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 111] Connection refused>
+{
+  "arm": "s13b-session",
+  "model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+  "rows": "-1",
+  "commit": "3eef4d6",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 12.26,
+  "rss_ready_gib": 13.25,
+  "devzero_gib": 0.09,
+  "ram_after_80k_gib": 0.01,
+  "rss_gib": 0.0,
+  "locked_gib": 0.0,
+  "anon_gib": 1.61,
+  "file_gib": 8.33,
+  "unevict_gib": 0.0,
+  "shmem_gib": 0.0,
+  "current_gib": 0.0,
+  "peak_current_gib": 0.0,
+  "gpu_mib": "0",
+  "decode_8k_p1": 182.7,
+  "ttft_8k_p1": 0.22,
+  "total_8k_p1": 0.9,
+  "decode_8k": 167.1,
+  "ttft_8k": 5.78,
+  "total_8k": 6.5
+}
+42 arms -> /home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/sweep.tsv
+[s13b-session] stopping
+[s13b-shared] preflight ok: GPU 0 MiB, MemAvailable 25 GiB, code 3eef4d6 Plan S12b: required by the goal; GGUF Ornith checkpoint absent from the host; per-class arena design
+[s13b-shared] starting: model=NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 rows=-1 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/reorg@3eef4d6 venv=/home/lucas/ai/FreeToken/.venv
+Running as unit: ft-measure-s13b-shared.service; invocation ID: 562eada9f1c34a4483dda16a63605f53
+[s13b-shared] ready after 62s
+Sep 23 05:50:28 TESSERACT serve-default.sh[27251]: [2026-09-23|05:50:28|core|rank=0] INFO     Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode graphs enabled, prefill overlap on (layers assembled from resident slots + pool rows, no disk)
+Sep 23 05:50:28 TESSERACT serve-default.sh[27251]: [2026-09-23|05:50:28|core|rank=0] INFO     Mirror pool: reserve resolved to 256 rows (FREETOKEN_MIRROR_RESERVE_ROWS='256')
+Sep 23 05:50:42 TESSERACT serve-default.sh[27251]: [2026-09-23|05:50:42|core|rank=0] INFO     Mirror pool: 1765 rows pinned (9.24 GiB), 771 cover the complement of 2173 GPU residents, 256 reserved, up to 738 duplicates (a duplicate makes its expert's next eviction free of any host traffic)
+Sep 23 05:50:42 TESSERACT serve-default.sh[27251]: [2026-09-23|05:50:42|core|rank=0] INFO     Mirror pool: the coverage floor is 1440 of 2173 arena slots, leaving 733 slots (3.84 GiB) the growable KV may still take
+Sep 23 05:50:42 TESSERACT serve-default.sh[27251]: [2026-09-23|05:50:42|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+[s13b-shared] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8014, "ttft_s": 0.21, "prefill_tok_s": 37703.0, "gen_tokens": 127, "decode_tok_s": 184.3, "total_s": 0.9}
+{"target": 8000, "pass": 2, "prompt_tokens": 8016, "ttft_s": 5.75, "prefill_tok_s": 1393.0, "gen_tokens": 127, "decode_tok_s": 166.3, "total_s": 6.5}
+[s13b-shared] post: S13_OUT=/home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/s13b-shared-pins.json python3 /home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/s13_pins.py 112000 1030000
+{"key": "s13-session-a", "ttft_s": 103.27, "total_s": 103.339, "prompt_tokens": 104863, "cached_tokens": 0, "answer": "TANGO-6052", "label": "A1", "prefix_after": {"hits": 2, "misses": 4, "hit_tokens": 15872, "miss_tokens": 120910, "pooled_hits": 0, "pooled_hit_tokens": 0, "pooled_sumless_misses": 0, "pooled_sumless_miss_tokens": 0, "pinned_prefixes": 0, "pinned_tokens": 0, "pinned_slots": 0, "pin_evictions": 0, "pin_budget_refusals": 0}}
+{"key": "s13-session-a", "ttft_s": 0.542, "total_s": 0.609, "prompt_tokens": 104863, "cached_tokens": 104832, "answer": "ROMEO-1328", "label": "A2", "prefix_after": {"hits": 2, "misses": 4, "hit_tokens": 15872, "miss_tokens": 120910, "pooled_hits": 0, "pooled_hit_tokens": 0, "pooled_sumless_misses": 0, "pooled_sumless_miss_tokens": 0, "pinned_prefixes": 0, "pinned_tokens": 0, "pinned_slots": 0, "pin_evictions": 0, "pin_budget_refusals": 0}}
+{"key": "s13-session-a", "ttft_s": 0.457, "total_s": 0.518, "prompt_tokens": 104863, "cached_tokens": 104832, "answer": "ZULU-7710", "label": "A3", "prefix_after": {"hits": 4, "misses": 4, "hit_tokens": 225536, "miss_tokens": 120910, "pooled_hits": 0, "pooled_hit_tokens": 0, "pooled_sumless_misses": 0, "pooled_sumless_miss_tokens": 0, "pinned_prefixes": 0, "pinned_tokens": 0, "pinned_slots": 0, "pin_evictions": 0, "pin_budget_refusals": 0}}
+{"key": "s13-session-b", "ttft_s": 709.06, "total_s": 709.473, "prompt_tokens": 961390, "cached_tokens": 0, "answer": "ROMEO-7906, SIERRA-6167, TANGO-4094", "label": "B1", "prefix_after": {"hits": 4, "misses": 5, "hit_tokens": 225536, "miss_tokens": 1082300, "pooled_hits": 0, "pooled_hit_tokens": 0, "pooled_sumless_misses": 0, "pooled_sumless_miss_tokens": 0, "pinned_prefixes": 0, "pinned_tokens": 0, "pinned_slots": 0, "pin_evictions": 0, "pin_budget_refusals": 0}}
+{"key": "s13-session-a", "ttft_s": 6.114, "total_s": 6.29, "prompt_tokens": 104863, "cached_tokens": 104832, "answer": "TANGO-6052, ROMEO-1328, ZULU-7710", "label": "A4", "prefix_after": {"hits": 5, "misses": 5, "hit_tokens": 330368, "miss_tokens": 1082300, "pooled_hits": 0, "pooled_hit_tokens": 0, "pooled_sumless_misses": 0, "pooled_sumless_miss_tokens": 0, "pinned_prefixes": 0, "pinned_tokens": 0, "pinned_slots": 0, "pin_evictions": 0, "pin_budget_refusals": 0}}
+PASS  A2/A3 cached >= prompt-8192  
+PASS  A2/A3 TTFT < 3 s  
+PASS  A4 after handoff cached >= prompt-8192  
+PASS  pin_budget_refusals == 0  
+PASS  codes  [True, True, True]
+{
+  "arm": "s13b-shared",
+  "model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+  "rows": "-1",
+  "commit": "e4aea26",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 12.36,
+  "rss_ready_gib": 13.24,
+  "devzero_gib": 0.09,
+  "ram_after_80k_gib": 13.1,
+  "rss_gib": 14.08,
+  "locked_gib": 0.0,
+  "anon_gib": 12.92,
+  "file_gib": 3.33,
+  "unevict_gib": 0.0,
+  "shmem_gib": 0.09,
+  "current_gib": 16.37,
+  "peak_current_gib": 16.46,
+  "gpu_mib": "15758",
+  "decode_8k_p1": 184.3,
+  "ttft_8k_p1": 0.21,
+  "total_8k_p1": 0.9,
+  "decode_8k": 166.3,
+  "ttft_8k": 5.75,
+  "total_8k": 6.5,
+  "coverage_faults": 0,
+  "starved": 0,
+  "swaps": 4822,
+  "retained_rows": 2891,
+  "free_evict_rate": 0.659,
+  "buffer_free_evictions": 1280
+}
+43 arms -> /home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/sweep.tsv
+[s13b-shared] stopping
