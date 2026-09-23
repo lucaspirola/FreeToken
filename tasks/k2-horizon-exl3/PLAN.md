@@ -196,3 +196,15 @@ Outputs: `validation/rerun/summary.{md,json}`. Fixes vs the first run: cache det
 - **Premise check [agent]:** 75.7% came from one prompt's prompt tokens, not generated tool calls.
   - ~40 min in, `toolcal-run/report_old.md` gives the OLD quant's tool-row vs prose-row KL.
   - If tool rows are not worse than prose, cancel and save ~$4.5.
+- **Attempt 1 (6ab3a7d751992417dfcd6e19) failed** at S3 after ~64 min (~$2.90).
+  - Cause: the BF16 reference kept all 70 GB on the GPU and OOMed in fp32 SDPA on eval rows up to ~12K tokens (needed 10.5 GiB, 6.7 free).
+  - S1/S2 outputs are saved in the repo and are good:
+    - calibration: 250 rows, 35% tool tokens, all 147 tool rows with a complete call block, 0 parse errors;
+    - eval: 134 rows, 78 tool calls, sampled from BF16.
+  - Fix in `toolcal/k2h_eval.py`:
+    - model in host RAM, one fp32 layer at a time on the GPU, activations on the CPU;
+    - batches also bounded by attention memory (`--att_gib`, default 24).
+    - The local 5L check matches the old output exactly (382/382 argmax, logsumexp diff 0).
+- Owner 2026-09-23: "don't relaunch with a strict time cap, use something like many hours".
+  - A 155-min relaunch (6ab3b7fa..., cancelled before it ran; no cost) was replaced by **6ab3b81051992417dfcd7213: timeout 8h, sc_measure cap raised 70 -> 240 min**, resuming after S2.
+  - Expected remaining ~2h10m (~$6); the 8h cap is only a hang guard.
