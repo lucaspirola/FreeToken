@@ -85,3 +85,7 @@ Credentials: none found on disk for vast.ai or Spheron. The only candidate is th
   - One shared barrier buffer means one compute stream.
   - The prefill full-layer stream moves 13.4 GB per forward.
 - Owner 2026-09-23: "validation run on the rtx pro 6000 approved" (the ~$1.50-2 run: BF16 original vs EXL3 on all 48 layers, plus golden reference outputs saved to the repo).
+- Owner 2026-09-23: "why don't collect the needle questions at higher tokens? because of our own local limitation ?" -> yes, I had sized them to the local ~32K. Now changed: BF16 to 64K (bf16 KV 196 KB/token; 128K+ does not fit in 96 GB); EXL3 with an FP16 cache to 256K; exllamav3 quantized-cache arms K8V8 / K6V5 / K4V4 to 256K, scored against the FP16 arm. The extended run's cost (~$3-5 estimated) is above the approved ~$1.50-2 and is being put to the owner.
+- **Owner challenge 2026-09-23**: "I challenge you to create something that will make it fast in our rtx5080, with 256k kv 8-bits, or at least 6-bits k and 5-bits V (usually quality is still maintained, right?)".
+  - Facts: KV is 25.5 GiB at q8_0 and ~18 GiB at K6/V5 for 256K. That is more than the 16 GB card, and competes in host RAM with 12-16 GiB of expert banks. So resident 256K KV is impossible; it needs tiered KV (VRAM/RAM/NVMe) and sparse retrieval-style decode attention.
+  - Design by an Opus specialist in progress, with a physics budget and accuracy plan; it fits G2 (the smart KV manager).
