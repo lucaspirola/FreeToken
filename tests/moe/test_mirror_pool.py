@@ -356,7 +356,6 @@ def test_gated_rows_match_the_triton_kernel_pack(tmp_path, split):
         spec=QWEN_SPEC, config=types.SimpleNamespace(), reserve_rows=0,
     )
     try:
-        pool.load_initial(set())
         cfg = MoEConfig(num_experts=G_EXPERTS, hidden=G_H, intermediate=G_I, top_k=1)
         kernel = TritonNvfp4MoEKernel()
         layout = kernel.layout(cfg)
@@ -368,6 +367,9 @@ def test_gated_rows_match_the_triton_kernel_pack(tmp_path, split):
         )
         pool.adopt_cache_schema(bank_schema, layout)
         assert tuple(pool.schema_order) == bank_schema
+        # Production order: attach (the rename) comes before the warm start reads any
+        # row, and later coverage refills read rows too -- so rows are read AFTER it.
+        pool.load_initial(set())
 
         for flat in range(total):
             row = pool.pool_row_of_id[flat]

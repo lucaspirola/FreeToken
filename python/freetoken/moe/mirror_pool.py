@@ -458,6 +458,16 @@ class MirrorExpertPool:
         self.shapes = {name: self.shapes[mapping[name]] for name in bank_schema}
         self.row_bytes = {name: self.row_bytes[mapping[name]] for name in bank_schema}
         self.schema_order = tuple(bank_schema)
+        # The scan's read records name their destination bank; a rename that left
+        # them on the old names would make every later _read_row (warm start,
+        # coverage refill) miss its bank.
+        cache_of = {pool_name: cache_name for cache_name, pool_name in mapping.items()}
+        self._records = {
+            flat: tuple((fd, [(off, length, cache_of[bank], dst, broadcast)
+                              for off, length, bank, dst, broadcast in pieces])
+                        for fd, pieces in groups)
+            for flat, groups in self._records.items()
+        }
 
     # ------------------------------------------------------------------
     # Checkpoint scan + startup fill (the only disk contact)
