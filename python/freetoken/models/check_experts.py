@@ -52,6 +52,17 @@ class CheckFailed(Exception):
     """A conformance check refused the checkpoint. ``str(exc)`` is the exact reason."""
 
 
+# llama.cpp's per-projection expert tensor name suffixes for a routed-MoE block, common
+# to every GGUF family in this tree (qwen3_5_moe, laguna; gemma4 fuses gate+up into one
+# ``ffn_gate_up_exps`` tensor and is picked up by the looser ``_exps.weight`` match below
+# used only to *total* bytes, not to size classes).
+_GGUF_EXPERT_SUFFIXES = (
+    "ffn_gate_exps.weight",
+    "ffn_up_exps.weight",
+    "ffn_down_exps.weight",
+)
+
+
 def _model_hook(spec, name: str):
     try:
         return _load_attr(spec.module, name)
@@ -154,6 +165,228 @@ class ExpertConformanceReport:
             f"    expert arena       {'supports' if self.arena_supports_format else 'does NOT support'} nvfp4",
         ]
         return "\n".join(lines)
+
+
+@dataclass
+class GgufExpertConformanceReport:
+    """S8's report for a bare ``.gguf`` checkpoint (or an FTW dir converted from one).
+
+    A GGUF checkpoint carries no ``config.json``/safetensors index, and its expert
+    tensors are native ggml blocks read straight off the file (``models/gguf/reader.py``),
+    not the NVFP4 row layout -- so this is a distinct report from
+    :class:`ExpertConformanceReport`, not a reinterpretation of it.
+    """
+
+    model_path: str
+    gguf_architecture: str
+    model_type: str
+    hidden_size: int
+    moe_intermediate_size: int
+    num_experts: int
+    num_expert_blocks: int  # every GGUF block carrying expert tensors (served + MTP)
+    num_served_layers: int  # config.num_layers: what load_gguf_expert_sources loads
+    mtp_blocks: int  # nextn_predict_layers: present in the file, excluded from serving
+    quant_types: tuple[str, ...]  # distinct ggml type names over the served layers
+    per_layer_types: tuple[str, ...]  # ggml type name per served layer, in order
+    signatures: tuple[tuple[int, ...], ...]  # per served layer, from cache_budget.expert_slot_signatures
+    total_expert_bank_bytes: int  # real on-disk bytes, every expert block incl. MTP
+    cache_type: str
+    pin_prefix_honoured: bool
+    arena_supports_format: bool
+
+    def render(self) -> str:
+        gib = 1 << 30
+        unique = tuple(dict.fromkeys(self.signatures))
+        mixed = len(unique) > 1
+        if mixed:
+            classes_lines = [
+                f"    size class {i}: {n} layer(s), row bytes {sig} "
+                f"(gate_up={sig[0]:,}, down={sig[1]:,})"
+                for i, sig in enumerate(unique)
+                for n in [sum(1 for s in self.signatures if s == sig)]
+            ]
+            arena_line = (
+                f"    expert arena       per-class arena, {len(unique)} classes "
+                "(mixed GGUF size classes, S12b merge 1704620: engine/cache_budget.py, "
+                "moe/offload_cache.py)"
+            )
+        else:
+            sig = unique[0] if unique else ()
+            classes_lines = [
+                f"    size class 0 (uniform, all {self.num_served_layers} layers): "
+                f"row bytes {sig} (gate_up={sig[0]:,}, down={sig[1]:,})"
+                if sig
+                else "    size class 0: no served expert layers"
+            ]
+            arena_line = (
+                f"    expert arena       single arena (uniform size class across "
+                f"{self.num_served_layers} served layers)"
+            )
+        if not self.arena_supports_format:
+            arena_line += "  -- WARNING: engine's gguf bank schema does not match"
+        lines = [
+            f"OK  {self.model_path}",
+            f"    format             GGUF (general.architecture={self.gguf_architecture!r}, "
+            f"model_type={self.model_type!r})",
+            f"    H={self.hidden_size} I={self.moe_intermediate_size} E={self.num_experts}",
+            f"    expert blocks      {self.num_expert_blocks} in the file "
+            f"({self.num_served_layers} served + {self.mtp_blocks} MTP predictor, "
+            "not part of autoregressive serving -- excluded from config.num_layers, "
+            "never reaches load_gguf_expert_sources)"
+            if self.mtp_blocks
+            else f"    expert blocks      {self.num_expert_blocks} (all served)",
+            f"    per-layer quant    "
+            + (
+                f"uniform {self.quant_types[0]}"
+                if len(self.quant_types) == 1
+                else f"mixed {dict.fromkeys(self.per_layer_types)!r} -- {self.per_layer_types}"
+            ),
+            f"    distinct size classes  {len(unique)}",
+            *classes_lines,
+            f"    total expert bank bytes  {self.total_expert_bank_bytes:,} "
+            f"({self.total_expert_bank_bytes / gib:.3f} GiB) "
+            "-- real on-disk tensor bytes, every expert-bearing block including MTP",
+            f"    cache type         {self.cache_type} "
+            f"(--cache-type radix requested; the engine resolves hybrid_radix for any "
+            "model with a linear-attention group)",
+            f"    --pin-prefix-*     {'honoured' if self.pin_prefix_honoured else 'ignored (cache is not hybrid_radix)'}",
+            arena_line,
+            "    --expert-residency mirror  REFUSED: requires nvfp4 "
+            "(moe/mirror_pool.py resolves models.nvfp4_banks.expert_source_spec and reads "
+            "model.safetensors.index.json; this checkpoint is GGUF, expert_quant='gguf')",
+        ]
+        return "\n".join(lines)
+
+
+def check_gguf_experts(model_path: str) -> GgufExpertConformanceReport:
+    """S8's report for a bare ``.gguf`` file (or an FTW dir converted from one).
+
+    Header/metadata + tensor-info only (``gguf.GGUFReader`` memory-maps the tensor
+    *data* too, but this never reads a block's bytes) -- no GPU, seconds on a 16-30 GiB
+    checkpoint, same contract as :func:`check_experts` for a safetensors checkpoint.
+    """
+    import gguf as gguf_py
+
+    from freetoken.engine.cache_budget import expert_slot_signatures
+    from freetoken.models.gguf.dequant import row_bytes as gguf_row_bytes
+    from freetoken.models.gguf.reader import (
+        gguf_architecture,
+        iter_gguf_tensors,
+        load_gguf_metadata,
+    )
+
+    hf_config = cached_load_hf_config(model_path)
+    architectures = list(getattr(hf_config, "architectures", None) or [])
+    if not architectures:
+        raise CheckFailed(f"{model_path}: GGUF metadata resolved no `architectures`")
+    architecture = architectures[0]
+    try:
+        arch_spec = get_model_spec(architecture)
+    except ValueError as exc:
+        raise CheckFailed(str(exc)) from exc
+
+    parse_config = _load_attr(arch_spec.module, arch_spec.parse_config)
+    try:
+        config = parse_config(hf_config)
+    except (KeyError, ValueError) as exc:
+        # A family's gguf.py parses metadata against the file's own tensor table (e.g.
+        # qwen3_5_moe._expert_types keys off block_count and raises a raw KeyError if a
+        # block metadata says should exist has no expert tensors) -- a real inconsistency
+        # in the checkpoint, not a bug in this check, so it is reported, not a traceback.
+        raise CheckFailed(f"{model_path}: {arch_spec.module}.{arch_spec.parse_config} failed: {exc}") from exc
+
+    if not getattr(config, "gguf_expert_types", None):
+        raise CheckFailed(
+            f"{model_path}: no routed experts (config.gguf_expert_types is empty) -- "
+            f"this GGUF checkpoint ({architecture}) has nothing for this check to verify"
+        )
+
+    gguf_arch = gguf_architecture(model_path)
+    metadata = load_gguf_metadata(model_path)
+    mtp_blocks = int(metadata.get(f"{gguf_arch}.nextn_predict_layers", 0) or 0)
+
+    H = config.hidden_size
+    I = config.moe_intermediate_size
+    E = config.num_experts
+    num_served = config.num_layers
+    types = config.gguf_expert_types
+    if len(types) != num_served:
+        raise CheckFailed(
+            f"{model_path}: config.gguf_expert_types has {len(types)} entries, "
+            f"expected {num_served} (config.num_layers)"
+        )
+
+    def align(n: int) -> int:
+        return (n + 63) // 64 * 64
+
+    per_layer_geometry = tuple(
+        (align(2 * I * gguf_row_bytes(H, gate_type)), align(H * gguf_row_bytes(I, down_type)))
+        for gate_type, down_type in types
+    )
+    # meta tensors: shape/dtype only, no allocation -- reuses the engine's own
+    # size-class function (engine/cache_budget.py) instead of reimplementing its logic.
+    sources = {
+        "gate_up": [
+            torch.empty((E, gu), dtype=torch.uint8, device="meta") for gu, _ in per_layer_geometry
+        ],
+        "down": [
+            torch.empty((E, dn), dtype=torch.uint8, device="meta") for _, dn in per_layer_geometry
+        ],
+    }
+    signatures = expert_slot_signatures(sources)
+
+    def type_name(t: int) -> str:
+        try:
+            return gguf_py.GGMLQuantizationType(t).name
+        except ValueError:
+            return str(t)
+
+    per_layer_types = tuple(type_name(gate_type) for gate_type, _ in types)
+    quant_types = tuple(dict.fromkeys(per_layer_types))
+
+    # Total real on-disk bytes of every expert-bearing block, served or not (MTP's own
+    # expert bank included): the generic ``_exps.weight`` match needs no per-family
+    # tensor-name knowledge, unlike the served-layer size-class math above.
+    total_bank_bytes = 0
+    num_expert_blocks = 0
+    seen_blocks: set[int] = set()
+    for t in iter_gguf_tensors(model_path):
+        if not t.name.startswith("blk.") or not t.name.endswith(_GGUF_EXPERT_SUFFIXES):
+            continue
+        total_bank_bytes += t.rows * t.row_bytes
+        seen_blocks.add(int(t.name.split(".")[1]))
+    num_expert_blocks = len(seen_blocks)
+    if num_expert_blocks < num_served:
+        raise CheckFailed(
+            f"{model_path}: only {num_expert_blocks} GGUF blocks carry expert tensors, "
+            f"fewer than the {num_served} served layers config.num_layers expects"
+        )
+
+    from freetoken.engine.engine import _resolve_cache_type
+
+    has_linear_attention = bool(getattr(config, "has_linear_attention", False))
+    cache_type = _resolve_cache_type(has_linear_attention, "radix")
+    pin_prefix_honoured = cache_type == "hybrid_radix"
+    arena_supports_format = "gguf" in _BANK_SCHEMAS and set(_BANK_SCHEMAS["gguf"]) == set(sources)
+
+    return GgufExpertConformanceReport(
+        model_path=model_path,
+        gguf_architecture=gguf_arch,
+        model_type=getattr(config, "model_type", "") or "",
+        hidden_size=H,
+        moe_intermediate_size=I,
+        num_experts=E,
+        num_expert_blocks=num_expert_blocks,
+        num_served_layers=num_served,
+        mtp_blocks=mtp_blocks,
+        quant_types=quant_types,
+        per_layer_types=per_layer_types,
+        signatures=signatures,
+        total_expert_bank_bytes=total_bank_bytes,
+        cache_type=cache_type,
+        pin_prefix_honoured=pin_prefix_honoured,
+        arena_supports_format=arena_supports_format,
+    )
 
 
 def check_expert_tensors(
@@ -306,8 +539,29 @@ def check_expert_tensors(
     return layout, per_expert, num_moe_layers, expected_experts, experts_spanning_shards
 
 
-def check_experts(model_path: str) -> ExpertConformanceReport:
-    hf_config = cached_load_hf_config(model_path)
+def check_experts(model_path: str):
+    """(spec, mechanism)-resolving conformance check, dispatched by checkpoint type.
+
+    Returns an :class:`ExpertConformanceReport` for an NVFP4 safetensors checkpoint or
+    a :class:`GgufExpertConformanceReport` for a ``.gguf`` file (or an FTW dir converted
+    from one) -- both expose ``.render()``. Any other checkpoint type, or one this tree
+    cannot parse at all, raises :class:`CheckFailed` with the exact reason.
+    """
+    from freetoken.models.gguf.reader import gguf_config_source
+
+    if gguf_config_source(model_path) is not None:
+        return check_gguf_experts(model_path)
+
+    try:
+        hf_config = cached_load_hf_config(model_path)
+    except CheckFailed:
+        raise
+    except Exception as exc:
+        raise CheckFailed(f"{model_path}: not a recognized checkpoint ({exc})") from exc
+    return _check_nvfp4_experts(hf_config, model_path)
+
+
+def _check_nvfp4_experts(hf_config, model_path: str) -> ExpertConformanceReport:
     architectures = list(getattr(hf_config, "architectures", None) or [])
     if not architectures:
         raise CheckFailed(f"{model_path}: config.json has no `architectures`")
