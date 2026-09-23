@@ -90,3 +90,7 @@ Credentials: none found on disk for vast.ai or Spheron. The only candidate is th
   - Facts: KV is 25.5 GiB at q8_0 and ~18 GiB at K6/V5 for 256K. That is more than the 16 GB card, and competes in host RAM with 12-16 GiB of expert banks. So resident 256K KV is impossible; it needs tiered KV (VRAM/RAM/NVMe) and sparse retrieval-style decode attention.
   - Design by an Opus specialist in progress, with a physics budget and accuracy plan; it fits G2 (the smart KV manager).
 - Owner 2026-09-23: "approved the longer validation" (~$3-5; exact estimate to be reported once the script is timed).
+- **Conversion DONE 2026-09-23.** Job 6ab3773d52d0dbd7f1d82f2e: COMPLETED, running 2,843 s (47.4 min), ~$2.17 at $2.75/h. The job ended by itself; `hf jobs ps` shows no running jobs.
+  - Final bitrate 4.11 bpw excluding the head, with `-hq`.
+  - Repo pirola/K2-Horizon-MoVA-36B-A4B-exl3-4.0bpw-hq (private): 20 files, 19.12 GiB, 3 safetensors shards (7.87 / 7.68 / 3.52 GiB), plus quantization_config.json, the tokenizer, the modeling code and `conversion/{patch, run.sh, convert.log}`.
+  - Local download is deferred until the control measurement ends, to keep the host quiet.
