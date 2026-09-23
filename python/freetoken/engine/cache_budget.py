@@ -296,6 +296,36 @@ def plan_joint_arena_usable(
     return best
 
 
+def joint_usable_for_target_free_bytes(
+    target_free_bytes: int,
+    class_capacities: "list[int]",
+    class_step_slots: "list[int]",
+    class_bank_row_bytes: "list[list[int]]",
+    granule: int = 2 * 1024 * 1024,
+) -> int:
+    """Multi-class counterpart of :func:`usable_for_target_free_bytes`: the
+    largest joint boundary (:func:`joint_arena_boundaries`) such that freeing
+    everything above it (shrinking from the full joint total down to it)
+    releases at least ``target_free_bytes``. Same contract, same "closest the
+    arena can get" fallback (0) when the target is unreachable -- see that
+    function's docstring; this is exactly its shape run over
+    :func:`joint_arena_bytes_for_usable` instead of :func:`arena_bytes_for_usable`.
+    """
+    boundaries = joint_arena_boundaries(class_capacities, class_step_slots)
+    total = boundaries[-1]
+    total_bytes = joint_arena_bytes_for_usable(
+        total, class_capacities, class_step_slots, class_bank_row_bytes, granule
+    )
+    best = 0
+    for usable in boundaries:
+        freed = total_bytes - joint_arena_bytes_for_usable(
+            usable, class_capacities, class_step_slots, class_bank_row_bytes, granule
+        )
+        if freed >= target_free_bytes:
+            best = max(best, usable)
+    return best
+
+
 def net_cache_budget_bytes(
     memory_ratio: float, baseline_free: int, weights_bytes: int, fixed_cache_size: int
 ) -> int:

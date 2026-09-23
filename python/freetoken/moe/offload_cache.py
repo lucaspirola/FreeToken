@@ -1449,7 +1449,16 @@ class OffloadMoeCache:
         ``|arena_bytes_for_usable(new, ...) - arena_bytes_for_usable(old, ...)|``
         for the same ``arena_layout``/``bank_row_bytes`` (see
         ``freetoken.engine.cache_budget``).
+
+        S12b: a mixed-GGUF per-size-class arena (``_class_arena_banks`` populated
+        instead of ``_arena_banks``) dispatches to :meth:`set_class_usable_slots`
+        here -- the SAME entry point every caller (``engine/growable_kv.py``)
+        already uses, so those call sites need no format-specific branch. The
+        single-class body below this dispatch is completely unreached, hence
+        unchanged, whenever a class arena is active.
         """
+        if self._class_arena_banks:
+            return self.set_class_usable_slots(n)
         assert self._expert_arena_enabled, (
             "set_usable_slots requires FREETOKEN_EXPERT_ARENA=1"
         )

@@ -609,7 +609,10 @@ class Engine:
             self._init_offload_moe_cache(config)
         if config.kv_grow_step_tokens:
             assert self.moe_offload_cache is not None
-            if getattr(self.moe_offload_cache, "arena_layout", None) is None:
+            if (
+                getattr(self.moe_offload_cache, "arena_layout", None) is None
+                and getattr(self.moe_offload_cache, "class_arena_layouts", None) is None
+            ):
                 raise RuntimeError(GROWABLE_KV_UNSUPPORTED)
             # Growth may temporarily trade expert slots for KV. Preserve the startup ceiling
             # and requested overlap policy so teardown can spend released KV VRAM on experts
