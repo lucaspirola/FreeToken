@@ -25,6 +25,10 @@ from freetoken.kernel.triton.exl3 import Exl3Parts, exl3_gemm, exl3_gemv, had_ro
 
 # tokens per prefill chunk: xh is 2 * chunk * top_k * H fp16 (64 MiB for 1024 x 8 x 2048)
 PREFILL_CHUNK_TOKENS = 1024
+# the gate/up output and the activation between the two GEMMs: fp16, as in exllamav3 (whose
+# fp16 forward the checkpoint was quantized and calibrated against); bf16 here cost 8x the
+# rounding error for nothing, since the down projection rounds its rotated input to fp16 anyway
+ACT_DTYPE = torch.float16
 
 
 @functools.lru_cache(maxsize=16)
@@ -61,7 +65,7 @@ def _decode(x, banks, topk_weights, ids, top_k, parts, activation, alpha, limit)
     g = torch.zeros((routes, gu.n), dtype=torch.float32, device=dev)
     exl3_gemv(xh, gu_tr, gu_svh, gu, out=g, experts=ids, tr_expert_stride=gu_tr.stride(0) // 2,
               svh_expert_stride=gu_svh.stride(0), split_k=split)
-    a = _act(g.to(x.dtype), activation, alpha, limit)
+    a = _act(g.to(ACT_DTYPE), activation, alpha, limit)
     ah = had_rows(a, dn_suh, dn, experts=ids, suh_expert_stride=dn_suh.stride(0))
     split = pick_split_k(routes, dn.n // 128, dn.k, dev)
     o = torch.zeros((routes, dn.n), dtype=torch.float32, device=dev)
@@ -91,13 +95,13 @@ def _prefill(x, banks, topk_weights, topk_ids, top_k, parts, activation, alpha, 
         sorted_ids, expert_ids, npad = moe_align_block_size(ids2.contiguous(), bm, num_experts)
         sort = dict(sorted_ids=sorted_ids, expert_ids=expert_ids, num_post_pad=npad, block_m=bm)
         xh = had_rows(xc, gu_suh, gu, src_div=top_k, experts=ids, suh_expert_stride=gu_suh.stride(0))
-        g = torch.empty((routes, gu.n), dtype=x.dtype, device=x.device)
+        g = torch.empty((routes, gu.n), dtype=ACT_DTYPE, device=x.device)
         exl3_gemm(xh, gu_tr, gu_svh, gu, out=g, tr_expert_stride=gu_tr.stride(0) // 2, svh_expert_stride=gu_svh.stride(0), **sort)
         del xh
         a = _act(g, activation, alpha, limit)
         del g
         ah = had_rows(a, dn_suh, dn, experts=ids, suh_expert_stride=dn_suh.stride(0))
-        o = torch.empty((routes, dn.n), dtype=x.dtype, device=x.device)
+        o = torch.empty((routes, dn.n), dtype=torch.float32, device=x.device)
         exl3_gemm(ah, dn_tr, dn_svh, dn, out=o, tr_expert_stride=dn_tr.stride(0) // 2, svh_expert_stride=dn_svh.stride(0), **sort)
         out[t0:t1] = _combine(o, topk_weights[t0:t1], t1 - t0, top_k, x.dtype)
     return out
@@ -136,7 +140,7 @@ def fused_experts_exl3(
 
 
 def fused_experts_exl3_reference(x, banks, topk_weights, topk_ids, *, codebook: str, activation: str = "silu") -> torch.Tensor:
-    """Torch reference (decode by ``linear_reference``, fp32): for the tests only."""
+    """Torch reference (decode by ``linear_reference``), fp32 throughout and returned as fp32: for the tests only."""
     import torch.nn.functional as F
 
     from freetoken.kernel.triton.exl3 import linear_reference
@@ -156,7 +160,7 @@ def fused_experts_exl3_reference(x, banks, topk_weights, topk_ids, *, codebook: 
             o = linear_reference(a, dn_tr[e], dn_suh[e], dn_svh[e], codebook).float()
             out[t] += float(topk_weights[t, k]) * o[0]
     assert inter == gu_svh.shape[-1]
-    return out.to(x.dtype)
+    return out
 
 
 __all__ = ["PREFILL_CHUNK_TOKENS", "expert_parts", "fused_experts_exl3", "fused_experts_exl3_reference"]
