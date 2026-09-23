@@ -13,7 +13,9 @@ HERE="$PWD/tasks/exclusive-expert-ram"
 OUT="$HERE/results/ornith-s12a-grow-ab-box"
 mkdir -p "$OUT"
 export CUDA_HOME=/usr/local/cuda-13.0 PATH="/usr/local/cuda-13.0/bin:$PATH"
-export FT_LAUNCHER=nohup FT_VENV=/root/venv FT_RATIO=1.00
+# FT_RATIO: 1.00 is the local profile, but on native Linux it OOMs at startup (see
+# results/ornith-s12a-grow-ab-box/README.md); the box runs the highest ratio that starts.
+export FT_LAUNCHER=nohup FT_VENV=/root/venv FT_RATIO="${FT_RATIO:-1.00}"
 export FT_MODEL=/root/models/Ornith-1.5-35B-A3B-NVFP4 FT_NAME=ornith FT_ROWS=0
 BASE="--num-tokens 262144 --max-seq-len-override 262144 --served-model-name ornith"
 AB_SIZES="8000 32000 80000 128000"

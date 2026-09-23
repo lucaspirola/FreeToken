@@ -135,7 +135,7 @@ server_procs() { # a file listing the arm's PIDs, one per line (the cgroup.procs
   if [ "$LAUNCHER" = systemd ]; then
     echo "/sys/fs/cgroup$(systemctl --user show -p ControlGroup --value "$UNIT")/cgroup.procs"
   else
-    local f="$OUT/.$ARM.procs"
+    local f="${TMPDIR:-/tmp}/ft-measure-$ARM.procs"
     ps -e -o pid=,pgid= | awk -v g="$SERVER_PGID" '$2 == g {print $1}' > "$f"
     echo "$f"
   fi

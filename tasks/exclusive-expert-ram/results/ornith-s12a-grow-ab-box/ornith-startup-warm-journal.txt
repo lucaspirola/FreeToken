@@ -1,0 +1,58 @@
+[1m[2026-09-23|21:23:21][0m [33mWARNING [0m --moe-backend is deprecated; use --moe-strategy
+[1m[2026-09-23|21:23:21][0m [32mINFO    [0m Parsed arguments:
+ServerArgs(model_path='/root/models/Ornith-1.5-35B-A3B-NVFP4', tp_info=DistributedInfo(rank=0, size=1), dtype=torch.bfloat16, max_running_req=1, adaptive_scheduler=True, auto_session_grace_seconds=0.0, session_spill_dir='/root/.cache/freetoken/spill', session_spill_ram_gb=1.0, session_spill_disk_gb=50.0, session_spill_limit_gb=50.0, session_spill_persist=True, session_spill_state_stride=65536, session_spill_capture_states=None, attention_backend='triton', moe_strategy='offload', quant_backend=None, ple_backend='disk', nvfp4_backend='triton', expert_load='auto', host_ram_reserve_gb=0.0, moe_cache_size=0, moe_cache_rate=None, moe_cache_auto=True, kv_reserve_tokens=8192, moe_cache_policy='lfu', moe_prefill_overlap=True, expert_residency='whole', moe_mirror_host_rows=0, moe_prefill_hit_d2d=False, moe_extend_cache_tokens=64, moe_collect_stats=False, moe_pageable_profile='off', moe_cpu_threads=0, moe_cpu_layers=None, moe_pageable_gpu=False, moe_hybrid_max_fetch=-1, cuda_graph_bs=None, cuda_graph_max_bs=None, page_size=1, memory_ratio=1.0, linear_state_cache_ratio=2.0, swa_full_tokens_ratio=0.2, swa_num_pages_override=None, distributed_timeout=60.0, use_dummy_weight=False, use_pynccl=True, max_seq_len_override=262144, rope_yarn_factor=None, rope_yarn_original_context=None, linear_state_slots_override=13, num_page_override=None, num_token_override=262144, kv_cache_dtype='q8_0', kv_cache_dtype_k=None, kv_cache_dtype_v=None, kv_grow_step_tokens=65536, expert_arena=True, context_preflight=True, json_retry=1, hidden_states_dir='/root/.cache/freetoken/hidden-states', hidden_states_max_tokens=4096, pooled_sink_dir='/root/.cache/freetoken/pooled-sink', mm=MultimodalConfig(disabled_encoders=frozenset(), embed_cache_device='cpu', encoder_weights='host', image_min_tokens=None, image_max_tokens=None, processor_kwargs={}), max_extend_tokens=8192, auto_prefill_chunk=False, max_prefill_seqs=None, cache_type='radix', pin_prefix_min_tokens=1024, pin_prefix_max_tokens=65536, pin_prefix_max_slots=-1, pin_prefix_scope='shared', speculative=None, spec_ngram_n=8, spec_draft_len=8, spec_adaptive=True, offline_mode=False, decode_log_interval=40, special_token_ckpt=False, _unique_suffix='.pid=13497', server_host='127.0.0.1', server_port=1920, num_tokenizer=0, silent_output=False, shell_mode=False, served_model_name='ornith', served_model_aliases=('nemotron-3.5-lightning-judge', 'nemotron-3.5-lightning-collect'), strict_model_name=False, tool_call_parser='qwen3_coder', reasoning_parser='nemotron_v3', sampling_defaults='model', max_output_tokens=65536, enable_cache_report=True, cuda_memory_telemetry=False, force_nonempty_content=True, allowed_media_domains='', allowed_local_media_path='', cors_origins='tauri://localhost,http://tauri.localhost,http://localhost:1420', trace_dir='/root/.cache/freetoken/trace', trace_include_text=False, gpu=(), gpu_assigned=None)
+[1m[2026-09-23|21:23:21|FrontendAPI][0m [32mINFO    [0m Default sampling config (source=model): temperature=1.0, top_k=20, top_p=0.95
+INFO:     Started server process [13497]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:1920 (Press CTRL+C to quit)
+INFO:     127.0.0.1:59888 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+/root/FreeToken-reorg/python/freetoken/engine/engine.py:1756: FutureWarning: torch.cuda._set_allocator_settings is deprecated. Use torch._C._accelerator_setAllocatorSettings instead.
+  torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+[1m[2026-09-23|21:23:25|core|rank=0][0m [32mINFO    [0m Enabled expandable_segments (override via PYTORCH_ALLOC_CONF)
+[1m[2026-09-23|21:23:26|core|rank=0][0m [32mINFO    [0m Resolved config: moe_strategy='offload', attention_backend='triton', cache_type='hybrid_radix', page_size=1
+[1m[2026-09-23|21:23:26|core|rank=0][0m [32mINFO    [0m Free memory before loading model: 15.14 GiB
+Loading weights:   0%|          | 0/3 [00:00<?, ?it/s]INFO:     127.0.0.1:37168 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+Loading weights:  33%|███▎      | 1/3 [00:01<00:03,  1.66s/it]Loading weights:  67%|██████▋   | 2/3 [00:02<00:01,  1.29s/it]INFO:     127.0.0.1:37174 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+Loading weights: 100%|██████████| 3/3 [00:05<00:00,  1.89s/it]Loading weights: 100%|██████████| 3/3 [00:05<00:00,  1.76s/it]
+[1m[2026-09-23|21:23:33|core|rank=0][0m [32mINFO    [0m MoE experts: nvfp4 via triton
+[1m[2026-09-23|21:23:33|core|rank=0][0m [32mINFO    [0m expert banks: slow path (parallel build)
+Loading experts (parallel):   0%|          | 0.00/21.8G [00:00<?, ?B/s]INFO:     127.0.0.1:51192 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:51200 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+Loading experts (parallel):  43%|████▎     | 9.32G/21.8G [00:11<00:14, 909MB/s]INFO:     127.0.0.1:57286 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:57292 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+Loading experts (parallel):  85%|████████▌ | 18.6G/21.8G [00:20<00:03, 988MB/s]INFO:     127.0.0.1:41888 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+Loading experts (parallel): 100%|██████████| 21.8G/21.8G [00:24<00:00, 958MB/s]                                                                               ninja: no work to do.
+[1m[2026-09-23|21:23:59|core|rank=0][0m [32mINFO    [0m --moe-cache-auto resolved moe_cache_size=6510 num_pages=73289 (prefill_overlap=True)
+[1m[2026-09-23|21:24:00|core|rank=0][0m [32mINFO    [0m Multimodal enabled: QwenVLMMProcessor, encoders ['vision'] on host, serving ['image']
+[1m[2026-09-23|21:24:01|core|rank=0][0m [32mINFO    [0m Allocating 262144 tokens for KV cache, K + V = 2.66 GiB
+[1m[2026-09-23|21:24:01|core|rank=0][0m [32mINFO    [0m Growable-KV ceiling validated: 262144 tokens, 2.73 GiB physical, planned final MoE cache 5152 slots
+Process freetoken-TP0-scheduler:
+[1m[2026-09-23|21:24:01|FrontendAPI][0m [31mERROR   [0m Backend supervisor: OutOfMemoryError: CUDA out of memory. Tried to allocate 780.00 MiB. GPU 0 has a total capacity of 15.47 GiB of which 720.50 MiB is free. Including non-PyTorch memory, this process has 14.72 GiB memory in use. Of the allocated memory 2.73 GiB is allocated by PyTorch, and 83.99 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/usr/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/root/FreeToken-reorg/python/freetoken/server/launch.py", line 81, in _run_scheduler
+    scheduler = Scheduler(args)
+                ^^^^^^^^^^^^^^^
+  File "/root/FreeToken-reorg/python/freetoken/scheduler/scheduler.py", line 161, in __init__
+    self.engine = Engine(config)
+                  ^^^^^^^^^^^^^^
+  File "/root/FreeToken-reorg/python/freetoken/engine/engine.py", line 695, in __init__
+    self.linear_state_pool = LinearStatePool(
+                             ^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-reorg/python/freetoken/kvcache/linear_state_pool.py", line 91, in __init__
+    self.recurrent_states = torch.zeros(
+                            ^^^^^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 780.00 MiB. GPU 0 has a total capacity of 15.47 GiB of which 720.50 MiB is free. Including non-PyTorch memory, this process has 14.72 GiB memory in use. Of the allocated memory 2.73 GiB is allocated by PyTorch, and 83.99 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+INFO:     127.0.0.1:41894 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:57350 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[1m[2026-09-23|21:24:11|FrontendAPI][0m [31mERROR   [0m Backend worker is gone and cannot be restarted; stopping the API server
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [13497]
+/usr/lib/python3.12/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 3 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
