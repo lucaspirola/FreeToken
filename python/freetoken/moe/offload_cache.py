@@ -1281,7 +1281,7 @@ class OffloadMoeCache:
             # A full rebuild reallocates every bank from scratch (the very thing the
             # arena exists to avoid): it collapses the arena to a single degenerate
             # chunk spanning exactly the new cache_size, with no growth headroom.
-            # set_usable_slots is the elastic path; rebuild remains the destructive
+            # set_usable_slots is the in-place resize path; rebuild remains the destructive
             # fallback and is not expected to preserve a caller's slot_capacity/
             # arena_step_slots across the call.
             self._arena_step_slots = cache_size
@@ -1359,7 +1359,7 @@ class OffloadMoeCache:
         # Refresh only that vector after evict_slots/src_indices adopt the new
         # geometry. The bounded host staging, source pointers, and gather tasks
         # depend on max batch/expert rows rather than cache size, so rebuilding
-        # their large pinned arenas here would add pure elastic-admission churn.
+        # their large pinned arenas here would add pure admission churn.
         if self.pageable_gpu and self._pageable_stage_capacity:
             self._pageable_stage_src_indices = torch.arange(
                 self.evict_slots.numel(), dtype=torch.int32, device=self.device

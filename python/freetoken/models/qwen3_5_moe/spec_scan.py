@@ -55,7 +55,7 @@ class _FusedPlan(NamedTuple):
 
 
 # (rec data_ptr, conv data_ptr, num_slots, live slot, layer ids, A_log storage id) -> plan.
-# Keyed on the data pointer so an elastic pool rebuild (which reallocates both tensors)
+# Keyed on the data pointer so a pool resize or rebuild (which reallocates both tensors)
 # cannot hand back an index vector built for the old geometry.
 _PLAN_CACHE: Dict[tuple, _FusedPlan] = {}
 

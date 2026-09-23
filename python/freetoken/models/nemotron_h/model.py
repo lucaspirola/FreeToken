@@ -160,8 +160,8 @@ class NemotronHMamba2Mixer(BaseOP):
         One buffer PER batch size, and an entry is never replaced once handed out. A
         single grow-only buffer would be a use-after-free: capture runs an eager warmup
         at every graph batch size, so each captured graph bakes in the address it saw,
-        and a later *eager* decode wider than the largest captured size (elastic capacity
-        raises max_running_requests above the captured sizes) would reallocate the buffer
+        and a later *eager* decode wider than the largest captured size (if
+        max_running_requests exceeds the captured sizes) would reallocate the buffer
         and free the block those graphs still write to on every replay.
 
         Keyed on (bs, dtype, device); the entry count is bounded by the graph batch-size

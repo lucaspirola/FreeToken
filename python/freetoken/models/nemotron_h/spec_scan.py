@@ -77,7 +77,7 @@ class _FusedPlan(NamedTuple):
 
 
 # (recurrent data_ptr, num_slots, layer ids, live slot) -> plan. Keyed on the data pointer
-# so an elastic pool rebuild (which reallocates both state tensors) cannot hand back an
+# so a pool resize or rebuild (which reallocates both state tensors) cannot hand back an
 # index vector built for the old geometry.
 _PLAN_CACHE: Dict[tuple, _FusedPlan] = {}
 # (device, chunk_size, n) -> (metadata, cu_seqlens). The chunk plan for a one-sequence
