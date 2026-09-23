@@ -130,7 +130,8 @@ def test_uniform_gguf_checkpoint_reports_one_size_class(tmp_path):
     assert rendered.startswith("OK  ")
     assert "single arena" in rendered
     assert "1 MTP" in rendered
-    assert "REFUSED: requires nvfp4" in rendered  # --expert-residency mirror line
+    assert "mirror OK (gguf, 1 size class)" in rendered  # --expert-residency mirror line
+    assert report.mirror_status == "mirror OK (gguf, 1 size class)"
 
 
 def test_mixed_gguf_checkpoint_reports_per_class_arena(tmp_path):
@@ -151,6 +152,8 @@ def test_mixed_gguf_checkpoint_reports_per_class_arena(tmp_path):
     assert "per-class arena, 2 classes" in rendered
     assert "S12b merge 1704620" in rendered
     assert "distinct size classes  2" in rendered
+    assert "REFUSED: mixed GGUF size classes are not supported by the mirror pool yet" in rendered
+    assert rendered.count("--expert-residency mirror") == 1
 
 
 def test_no_expert_tensors_is_refused_not_traceback(tmp_path):

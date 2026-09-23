@@ -193,6 +193,7 @@ class GgufExpertConformanceReport:
     cache_type: str
     pin_prefix_honoured: bool
     arena_supports_format: bool
+    mirror_status: str  # S12c: "mirror OK (gguf, N size class)" or a REFUSED reason
 
     def render(self) -> str:
         gib = 1 << 30
@@ -251,9 +252,7 @@ class GgufExpertConformanceReport:
             "model with a linear-attention group)",
             f"    --pin-prefix-*     {'honoured' if self.pin_prefix_honoured else 'ignored (cache is not hybrid_radix)'}",
             arena_line,
-            "    --expert-residency mirror  REFUSED: requires nvfp4 "
-            "(moe/mirror_pool.py resolves models.nvfp4_banks.expert_source_spec and reads "
-            "model.safetensors.index.json; this checkpoint is GGUF, expert_quant='gguf')",
+            f"    --expert-residency mirror  {self.mirror_status}",
         ]
         return "\n".join(lines)
 
@@ -369,6 +368,21 @@ def check_gguf_experts(model_path: str) -> GgufExpertConformanceReport:
     pin_prefix_honoured = cache_type == "hybrid_radix"
     arena_supports_format = "gguf" in _BANK_SCHEMAS and set(_BANK_SCHEMAS["gguf"]) == set(sources)
 
+    # S12c: the mirror pool has one pointer/stride per bank, so it can only serve
+    # a checkpoint whose served-layer expert row sizes are all one size class.
+    # A per-class pool is a separate step (S12b already gave the ARENA per-class
+    # support; the mirror does not have it yet).
+    unique_signatures = tuple(dict.fromkeys(signatures))
+    if len(unique_signatures) == 1:
+        mirror_status = f"mirror OK (gguf, {len(unique_signatures)} size class)"
+    else:
+        mirror_status = (
+            "REFUSED: mixed GGUF size classes are not supported by the mirror "
+            "pool yet (moe/mirror_pool.py has one pointer/stride per bank; a "
+            f"per-class pool is a separate step) -- {len(unique_signatures)} "
+            "distinct size classes found"
+        )
+
     return GgufExpertConformanceReport(
         model_path=model_path,
         gguf_architecture=gguf_arch,
@@ -386,6 +400,7 @@ def check_gguf_experts(model_path: str) -> GgufExpertConformanceReport:
         cache_type=cache_type,
         pin_prefix_honoured=pin_prefix_honoured,
         arena_supports_format=arena_supports_format,
+        mirror_status=mirror_status,
     )
 
 

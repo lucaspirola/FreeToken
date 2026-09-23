@@ -10,6 +10,7 @@ part of autoregressive serving.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import torch
@@ -695,6 +696,156 @@ def dummy_gguf_expert_sources(config: ModelConfig) -> dict[str, list[torch.Tenso
     return banks
 
 
+def _uniform_stride(geometry: tuple[tuple[int, int], ...], idx: int) -> int:
+    strides = {g[idx] for g in geometry}
+    if len(strides) != 1:
+        raise ValueError(
+            "mixed GGUF size classes are not supported by the mirror pool yet"
+        )
+    return strides.pop()
+
+
+def gguf_mirror_bank_shapes(config: ModelConfig) -> dict[str, tuple[tuple[int, ...], torch.dtype]]:
+    """Uniform mirror-pool bank shapes for this GGUF checkpoint's routed experts.
+
+    Pure metadata (``config.gguf_expert_types`` + ``_expert_layer_geometry``,
+    the same aligned per-layer strides ``load_gguf_expert_sources`` allocates
+    its host banks with) -- no file I/O, so this is cheap enough to call before
+    the mirror pool exists (``residency.py``'s ``_mirror_final_gpu_slots``
+    sizes the pool against it) as well as inside ``gguf_expert_row_extents``
+    itself, which additionally opens the file for the real per-expert extents.
+
+    Raises if the file's per-layer expert row sizes are not uniform: the
+    mirror plan has one pointer/stride per bank, so a mixed-size-class GGUF
+    (S12b's per-class arena) is refused rather than silently truncated or
+    over-read.
+    """
+    geometry = _expert_layer_geometry(config)
+    return {
+        "gate_up": ((_uniform_stride(geometry, 0),), torch.uint8),
+        "down": ((_uniform_stride(geometry, 1),), torch.uint8),
+    }
+
+
+def gguf_expert_row_extents(model_path: str, config: ModelConfig):
+    """Build a mirror-pool ``source`` over this GGUF's routed-expert tensors.
+
+    Returns an object with ``quant_format``, ``shapes``, ``records``,
+    ``shard_fds`` and ``fd_size`` -- exactly what ``MirrorExpertPool.__init__``
+    reads from a ``source`` (see its docstring) and in exactly the shape
+    ``_scan_checkpoint`` would have produced, so ``_read_row`` (which only
+    reads ``self._records``/``self._shard_fds``/``self._fd_size``) needs no
+    change to serve a GGUF checkpoint.
+
+    Per the S12c design: each expert's gate/up/down slice is contiguous in the
+    file (``blk.N.ffn_{gate,up,down}_exps`` are ``[E, rows, row_bytes]``
+    tensors), tensor starts are 256-aligned but not necessarily 4 KiB-aligned,
+    and the pool's own ``_read_row`` already rounds extents to 4 KiB and
+    O_DIRECT-reads into aligned scratch before copying the exact bytes out --
+    reused verbatim, nothing here re-implements that. No repack: gate lands at
+    byte 0 of the ``gate_up`` bank row, up at ``half`` (matching the loader,
+    ``load_gguf_expert_sources`` above), down at byte 0 of the ``down`` bank
+    row. The MTP block (``layer >= config.num_layers``) is never touched: the
+    scan below only visits ``blk.0`` through ``blk.{num_layers - 1}``.
+    """
+    from freetoken.models.gguf.dequant import row_bytes as gguf_row_bytes
+    from freetoken.models.gguf.reader import gguf_tensor_extents, gguf_tensor_type
+
+    assert config.gguf_expert_types
+    types = config.gguf_expert_types
+    num_layers = config.num_layers
+    if len(types) != num_layers:
+        raise ValueError(
+            f"gguf mirror source: config.gguf_expert_types has {len(types)} "
+            f"entries, expected {num_layers} (config.num_layers)"
+        )
+    E, H, I = config.num_experts, config.hidden_size, config.moe_intermediate_size
+    # Validates uniformity (raises the mixed-size-class message) before any
+    # file is opened.
+    shapes = gguf_mirror_bank_shapes(config)
+    geometry = _expert_layer_geometry(config)
+    extents = gguf_tensor_extents(model_path)
+
+    fd = os.open(model_path, os.O_RDONLY | os.O_DIRECT)
+    file_size = os.fstat(fd).st_size
+    fd_size = {fd: file_size}
+    shard_fds = {model_path: fd}
+
+    records: dict[int, tuple[int, list[tuple[int, int, str, int, int]]]] = {}
+    for layer, (gate_type, down_type) in enumerate(types):
+        half = I * gguf_row_bytes(H, gate_type)
+        payload = H * gguf_row_bytes(I, down_type)
+        names = {
+            "gate": f"blk.{layer}.ffn_gate_exps.weight",
+            "up": f"blk.{layer}.ffn_up_exps.weight",
+            "down": f"blk.{layer}.ffn_down_exps.weight",
+        }
+        wanted_type = {"gate": gate_type, "up": gate_type, "down": down_type}
+        per_expert = {"gate": half, "up": half, "down": payload}
+        offsets: dict[str, int] = {}
+        for role, name in names.items():
+            if name not in extents:
+                raise ValueError(
+                    f"gguf mirror source: missing tensor {name!r} for served layer {layer}"
+                )
+            off, n_bytes = extents[name]
+            actual_type = gguf_tensor_type(model_path, name)
+            if actual_type != wanted_type[role]:
+                raise ValueError(
+                    f"gguf mirror source: {name} ggml type {actual_type} != "
+                    f"config.gguf_expert_types {wanted_type[role]}"
+                )
+            if n_bytes != per_expert[role] * E:
+                raise ValueError(
+                    f"gguf mirror source: {name} is {n_bytes} bytes, expected "
+                    f"{per_expert[role]} * {E} experts = {per_expert[role] * E}"
+                )
+            if off < 0 or off + n_bytes > file_size:
+                raise ValueError(
+                    f"gguf mirror source: {name} extent runs past the end of {model_path}"
+                )
+            offsets[role] = off
+        for e in range(E):
+            flat = layer * E + e
+            records[flat] = (fd, [
+                (offsets["gate"] + e * half, half, "gate_up", 0, 0),
+                (offsets["up"] + e * half, half, "gate_up", half, 0),
+                (offsets["down"] + e * payload, payload, "down", 0, 0),
+            ])
+
+    # Every expert tensor in a served block (< num_layers) must have been
+    # visited above -- not fewer (already raised, a missing tensor for a
+    # visited layer) and not more (a layer index this loop never iterated,
+    # e.g. a config.num_layers under-count, would silently leave the extra
+    # block's tensors unaccounted for and out of `records`).
+    served_expert_tensors = sum(
+        1 for name in extents
+        if name.startswith("blk.") and name.endswith(_EXPERT_SUFFIXES)
+        and int(name.split(".")[1]) < num_layers
+    )
+    if served_expert_tensors != 3 * num_layers:
+        raise ValueError(
+            f"gguf mirror source: {served_expert_tensors} expert tensors in "
+            f"blocks [0, {num_layers}), expected {3 * num_layers}"
+        )
+
+    return _GgufMirrorSource(
+        quant_format="gguf", shapes=shapes, records=records,
+        shard_fds=shard_fds, fd_size=fd_size,
+    )
+
+
+class _GgufMirrorSource:
+    """The mirror pool's ``source`` protocol: see ``MirrorExpertPool.__init__``."""
+
+    def __init__(self, *, quant_format, shapes, records, shard_fds, fd_size):
+        self.quant_format = quant_format
+        self.shapes = shapes
+        self.records = records
+        self.shard_fds = shard_fds
+        self.fd_size = fd_size
+
+
 __all__ = [
     "parse_gguf_config",
     "iter_gguf_weights",
@@ -702,4 +853,6 @@ __all__ = [
     "is_gguf_model",
     "load_gguf_expert_sources",
     "dummy_gguf_expert_sources",
+    "gguf_mirror_bank_shapes",
+    "gguf_expert_row_extents",
 ]
