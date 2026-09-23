@@ -216,3 +216,17 @@ Outputs: `validation/rerun/summary.{md,json}`. Fixes vs the first run: cache det
   - The "75.7% tool-call XML" figure from validation was an artifact of one short prompt's prompt tokens. On generated tool calls the old quant is as good as on prose.
   - The residual gap is KL inside call blocks (~1.9x prose) and 20% of blocks with at least one teacher-forced argmax flip. Not yet checked: whether those flips are benign formatting.
   - **Decision [agent]: continue.** The recipe run also tests the sensitivity allocation's general gain. Remaining ~$4-5. The owner was told and may cancel.
+- **Result (job 6ab3b81051992417dfcd7213, COMPLETED, 1h36m, ~$4.40; toolcal total incl. attempt 1 ~$7.30).** Negative: the sensitivity-recipe conversion (`conversion_mode` recipe, alpha forced to 2.0 because the fit gave 0.35, outside [1.5, 3.0]) is **worse than the uniform -hq everywhere**.
+  - Paired over conversations, new vs old, 95% CI:
+    - all KL +11.5% [+8, +15%];
+    - prose +17.7%;
+    - tool +4.7%;
+    - inside call blocks +1.6% [-0.6, +4.1%] (no gain).
+  - Block exact match: 76.6% vs 79.7%.
+  - Wikitext: 91.93% / 0.0283 vs 93.90% / 0.0170.
+  - Likely causes [agent, not separated]:
+    1. the noise-injection sensitivity model does not transfer to this sparse MoE + MoVA model (fitted exponent 0.35 vs ~2 expected; upstream: "untested on sparse models");
+    2. the recipe path ignores `--hq` (convert.py warns so), so the -hq advantage was lost;
+    3. self-sampled calibration vs the default mix.
+  - **Decision [agent]: keep the uniform 4.0 bpw -hq as the model of record.** Do not publish the -tool repo; it stays private. Deleting it is the owner's call.
+  - No further spend proposed: the old quant is already at 97.3-97.8% top-1 on held-out generations (prose and tool), and the gap to BF16 inside call blocks is small.
