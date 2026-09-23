@@ -154,3 +154,6 @@ Outputs: `validation/summary.{md,json}` in pirola/K2-Horizon-MoVA-36B-A4B-exl3-4
   - The remaining lever is tool-call quality: the sc_* recipe with a self-sampled trace that contains tool calls.
   - The fixed long-context/KV arms are still needed for the 256K design.
   - Proposed to the owner before spending more.
+- Owner 2026-09-23: "local overlay is off, but wait for my go. approved both fixed rerun of needle and a new conversion tuned for tool calls."
+  - Guard3 (S12c) stays held until the owner's go.
+  - Approved spend [agent estimates given]: the fixed needle/KV rerun (~$1.5) and the tool-call-tuned conversion (~$8-10).
