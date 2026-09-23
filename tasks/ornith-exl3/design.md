@@ -41,8 +41,15 @@ Per-tensor bits (`bits_per_weight` in `tensor_storage`, and `trellis.shape[-1] /
 Stored unquantized: `embed_tokens` bf16 `[248320, 2048]`; all RMSNorm weights bf16; the routers
 `mlp.gate` fp16 `[256, 2048]` and `shared_expert_gate` fp16 `[1, 2048]`; `linear_attn.in_proj_a/b`
 fp16 `[32, 2048]`; `A_log`, `dt_bias`, `conv1d`. The index also carries an MTP head (`mtp.*`, 4 bits)
-that FreeToken does not serve (the Ornith reader already drops `mtp.`), and **no vision tensors**,
-so this checkpoint serves text only (`--text-model-only` / no encoders).
+that FreeToken does not serve (the Ornith reader already drops `mtp.`).
+
+Correction (2026-09-24): the export **does** carry a vision tower (`model.visual.*`, 27 blocks), which the
+first version of this note missed; `tensor_storage` does not list it. Its `attn.qkv` is kept bf16
+next to EXL3 `attn.{q,k,v}_proj` (6 bits, fp16 bias), and `attn.proj`, `mlp.linear_fc{1,2}` and
+`merger.linear_fc{1,2}` exist only as EXL3. `linear_fc1`'s trellis is `[72, 272, 96]`, i.e. N = 4352
+for the config's 4304: exllamav3 pads. Serving the tower would need an EXL3 path in the vision
+encoder plus that padding; out of scope here, so this checkpoint serves **text only**
+(`--text-model-only`).
 
 Every bit width is an integer (no `16*bits + 8` half-integer tiles), and all routed experts in all
 40 layers are 5 bits, so one bank row size serves every layer.

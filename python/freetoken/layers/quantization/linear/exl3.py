@@ -117,3 +117,7 @@ class Exl3LinearMethod(LinearMethod):
         layer.trellis = torch.empty((g.in_features // 16) * (g.out_features // 16) * 16 * bits, dtype=torch.int16)
         layer.suh = torch.empty(len(g.output_sizes), g.in_features, dtype=torch.float16)
         layer.svh = torch.empty(g.out_features, dtype=torch.float16)
+        # an EXL3 layer has no dense weight; drop the placeholder a base class may have
+        # declared (ParallelLMHead inherits VocabParallelEmbedding's [V, H] ``weight``)
+        if isinstance(getattr(layer, "weight", None), torch.Tensor):
+            layer.weight = None
