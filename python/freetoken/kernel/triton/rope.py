@@ -262,9 +262,12 @@ def apply_mrope_torch_fallback(
     sin = cs[:, idx, half + idx].unsqueeze(1).float()
     for t, heads in ((query, query.shape[1] // head_size), (key, key.shape[1] // head_size)):
         v = t.view(nnz, heads, head_size)
+        # .float() aliases fp32 inputs: compute both halves before writing either.
         lo, hi = v[..., :half].float(), v[..., half:rotary_dim].float()
-        v[..., :half] = (lo * cos - hi * sin).to(v.dtype)
-        v[..., half:rotary_dim] = (hi * cos + lo * sin).to(v.dtype)
+        new_lo = lo * cos - hi * sin
+        new_hi = hi * cos + lo * sin
+        v[..., :half] = new_lo.to(v.dtype)
+        v[..., half:rotary_dim] = new_hi.to(v.dtype)
 
 
 __all__ = ["apply_rope_with_cos_sin_cache_inplace", "apply_mrope_with_cos_sin_cache_inplace"]

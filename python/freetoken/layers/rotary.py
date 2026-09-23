@@ -114,9 +114,13 @@ def _mrope_torch(
     sin = rows[:, half:].unsqueeze(1).float()
     for t, heads in ((query, query.shape[1] // head_size), (key, key.shape[1] // head_size)):
         v = t.view(nnz, heads, head_size)
+        # .float() is a no-op view for fp32 inputs: compute both halves before writing either,
+        # or the second half would read the already-rotated first half.
         lo, hi = v[..., :half].float(), v[..., half:rotary_dim].float()
-        v[..., :half] = (lo * cos - hi * sin).to(v.dtype)
-        v[..., half:rotary_dim] = (hi * cos + lo * sin).to(v.dtype)
+        new_lo = lo * cos - hi * sin
+        new_hi = hi * cos + lo * sin
+        v[..., :half] = new_lo.to(v.dtype)
+        v[..., half:rotary_dim] = new_hi.to(v.dtype)
 
 
 MROPE_LAYOUTS = ("contiguous", "interleaved", "interleaved_glm")
@@ -193,30 +197,23 @@ class MRotaryEmbedding(RotaryEmbedding):
         return query, key
 
 
-def _get_rope(
-    head_dim: int,
+def _resolve_rope_scaling(
     rotary_dim: int,
-    max_position: int,
     base: float,
-    rope_scaling: Dict[str, Any] | None = None,
-    is_neox: bool = True,
-) -> RotaryEmbedding:
-    if rope_scaling is None:
-        return RotaryEmbedding(head_dim, rotary_dim, max_position, base, is_neox=is_neox)
-    # need to test some cases:
-    match rope_scaling["rope_type"]:
-        case "default":
-            return RotaryEmbedding(head_dim, rotary_dim, max_position, base, is_neox=is_neox)
+    rope_scaling: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    """Scaling-dependent RotaryEmbedding kwargs (``proportional``/``post_process``/
+    ``attention_factor``) for a plain ``rope_scaling`` dict. Shared by the 1-D path
+    (``_get_rope``) and mrope (``get_rope``'s ``mrope_section`` branch) so a yarn/llama3/
+    proportional model gets identical inv_freq post-processing and cos/sin mscale whether
+    or not it also carries an mrope section split -- the two are orthogonal (mrope only
+    picks, per frequency slot, which of the 3 position axes reads that slot's cos/sin row)."""
+    if rope_scaling is None or rope_scaling.get("rope_type", "default") == "default":
+        return {}
 
+    match rope_scaling["rope_type"]:
         case "proportional":
-            return RotaryEmbedding(
-                head_dim,
-                rotary_dim,
-                max_position,
-                base,
-                proportional=True,
-                is_neox=is_neox,
-            )
+            return {"proportional": True}
 
         case "llama3":
             scaling_factor: float = rope_scaling["factor"]
@@ -240,9 +237,7 @@ def _get_rope(
                 factor = (1 - smooth) / scaling_factor + smooth
                 return factor * inv_freq
 
-            return RotaryEmbedding(
-                head_dim, rotary_dim, max_position, base, post_process, is_neox=is_neox
-            )
+            return {"post_process": post_process}
 
         case "yarn":
             factor: float = rope_scaling["factor"]
@@ -296,17 +291,21 @@ def _get_rope(
                 )
                 return (inv_freq / factor) * ramp + inv_freq * (1 - ramp)
 
-            return RotaryEmbedding(
-                head_dim,
-                rotary_dim,
-                max_position,
-                base,
-                post_process,
-                attention_factor=float(attention_factor),
-                is_neox=is_neox,
-            )
+            return {"post_process": post_process, "attention_factor": float(attention_factor)}
 
     raise ValueError(f"Unsupported {rope_scaling = }")
+
+
+def _get_rope(
+    head_dim: int,
+    rotary_dim: int,
+    max_position: int,
+    base: float,
+    rope_scaling: Dict[str, Any] | None = None,
+    is_neox: bool = True,
+) -> RotaryEmbedding:
+    kwargs = _resolve_rope_scaling(rotary_dim, base, rope_scaling)
+    return RotaryEmbedding(head_dim, rotary_dim, max_position, base, is_neox=is_neox, **kwargs)
 
 
 _ROPE_DEVICE: torch.device | None = None
@@ -332,11 +331,15 @@ def get_rope(
 
     def build() -> RotaryEmbedding:
         if mrope_section is not None:
-            assert rope_map is None or rope_map.get("rope_type", "default") == "default"
+            # Same scaling resolution as the 1-D path (_get_rope): a yarn/llama3/proportional
+            # mrope model gets the identical inv_freq post-process and cos/sin attention_factor
+            # mscale that RotaryEmbedding applies for that scaling type. mrope only changes which
+            # position axis each frequency slot reads (build_section_table), orthogonal to scaling.
+            scaling_kwargs = _resolve_rope_scaling(rotary_dim, base, rope_map)
             return MRotaryEmbedding(
                 head_dim, rotary_dim, max_position, base,
                 is_neox=is_neox, mrope_section=tuple(mrope_section),
-                layout=mrope_layout,
+                layout=mrope_layout, **scaling_kwargs,
             )
         return _get_rope(head_dim, rotary_dim, max_position, base, rope_map, is_neox)
 
