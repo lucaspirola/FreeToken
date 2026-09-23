@@ -4,10 +4,6 @@ path, not a duct-typed shim): same Ornith-shaped config (head_dim 256, partial_r
 over an original context of 262144. Runs on CPU; no GPU/model server touched."""
 from __future__ import annotations
 
-import os
-
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
-
 import pytest
 import torch
 

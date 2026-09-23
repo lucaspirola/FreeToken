@@ -9,10 +9,6 @@ apply_rotary_pos_emb built from a yarn rope_parameters dict. CPU only (torch fal
 mrope apply; the triton kernel gathers the same _cos_sin_cache rows)."""
 from __future__ import annotations
 
-import os
-
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
-
 import pytest
 import torch
 
