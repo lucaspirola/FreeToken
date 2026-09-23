@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Plan S13 Verify on the GPU: two arms in the record config (auto pool, reserve 2E), each
 # followed by s13_pins.py 112000 32000 as FT_POST.
-#   s13-session  serve-default.sh as shipped (--pin-prefix-scope session)
+#   s13-session  --pin-prefix-scope session --pin-prefix-max-tokens 262144 (plan S13's proposal)
 #   s13-shared   control: --pin-prefix-scope shared, same session key -- separates the pin
 #                from the session lease (a hit here would mean the lease, not the pin, kept it)
 # Run as a systemd transient unit (needs --setenv=PATH for nvidia-smi), never an agent shell.
@@ -24,7 +24,8 @@ for arm in $PFX-session $PFX-shared; do
   avail=$(awk '/MemAvailable/ {printf "%d", $2/1048576}' /proc/meminfo)
   [ "$avail" -ge 22 ] || { echo "MemAvailable $avail GiB"; exit 1; }
   echo "[$arm] preflight ok: GPU 0 MiB, MemAvailable $avail GiB, code $(git log --oneline -1)"
-  extra=""; [ "$arm" = $PFX-shared ] && extra="--pin-prefix-scope shared"
+  # serve-default.sh ships the default (shared) scope since 16442c8: the session arm sets it.
+  extra="--pin-prefix-scope shared"; [ "$arm" = $PFX-session ] && extra="--pin-prefix-scope session --pin-prefix-max-tokens 262144"
   env FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000" FT_EXTRA="$extra" FT_POST_TIMEOUT=7200 \
     FT_POST="S13_OUT=$OUT/$arm-pins.json python3 $HERE/s13_pins.py 112000 $HANDOFF" \
     "$HERE/measure.sh" "$arm"
