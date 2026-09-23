@@ -332,7 +332,7 @@ class MirrorResidency:
         from freetoken.moe.expert_banks import ExpertBanks
 
         mirror_pool = self._mirror_pool
-        banks = ExpertBanks("nvfp4", {
+        banks = ExpertBanks(mirror_pool.quant_format, {
             name: [torch.empty((mc.num_experts, *tail), dtype=dtype, device="meta")]
             * mc.num_moe_layers
             for name, (tail, dtype) in mirror_pool.shapes.items()
@@ -1052,18 +1052,36 @@ class MirrorResidency:
             expert_bytes_per_slot,
             net_cache_budget_bytes,
         )
-        from freetoken.moe.mirror_pool import nvfp4_bank_shapes
-
-        from freetoken.models.nvfp4_banks import expert_source_spec
 
         mc = config.model_config
-        spec = expert_source_spec(mc)
-        hidden = (getattr(mc, spec.hidden_size_attr) if spec and spec.hidden_size_attr
-                  else mc.hidden_size)
-        shapes = nvfp4_bank_shapes(
-            hidden, mc.moe_intermediate_size,
-            gated=bool(getattr(spec, "gated", False)),
-        )
+        if mc.expert_quant == "gguf":
+            # Shapes from the source (S12c): metadata-only, no file I/O -- see
+            # gguf_mirror_bank_shapes. The NVFP4 branch below is unchanged.
+            from freetoken.models.gguf.reader import gguf_mirror_hooks
+
+            hooks = gguf_mirror_hooks(mc)
+            if hooks is None:
+                raise ValueError(
+                    f"mirror expert RAM has no GGUF expert-row hook for model "
+                    f"type {mc.model_type!r}: it cannot size the pool for this "
+                    f"GGUF checkpoint. Export gguf_expert_row_extents and "
+                    f"gguf_mirror_bank_shapes from that model's gguf module "
+                    f"once its layout is verified."
+                )
+            _extents_fn, bank_shapes_fn = hooks
+            shapes = bank_shapes_fn(mc)
+        else:
+            from freetoken.moe.mirror_pool import nvfp4_bank_shapes
+
+            from freetoken.models.nvfp4_banks import expert_source_spec
+
+            spec = expert_source_spec(mc)
+            hidden = (getattr(mc, spec.hidden_size_attr) if spec and spec.hidden_size_attr
+                      else mc.hidden_size)
+            shapes = nvfp4_bank_shapes(
+                hidden, mc.moe_intermediate_size,
+                gated=bool(getattr(spec, "gated", False)),
+            )
         sources = {
             name: [torch.empty((mc.num_experts, *tail), dtype=dtype, device="meta")]
             for name, (tail, dtype) in shapes.items()
@@ -1130,32 +1148,51 @@ def build_residency(config, mc, engine) -> ExpertResidency:
         )
     mirror_rows = config.moe_mirror_host_rows or 0
     cache_factory = getattr(engine.model, "make_offload_moe_cache", None)
-    from freetoken.models.nvfp4_banks import expert_source_spec
+    is_gguf = mc.expert_quant == "gguf"
 
-    mirror_spec = expert_source_spec(mc)
     if (
         cache_factory is not None or config.moe_strategy != "offload"
         or config.moe_pageable_gpu or config.moe_cpu_layers is not None
         or config.use_dummy_weight or config.tp_info.size != 1
-        or mc.expert_quant != "nvfp4" or config.nvfp4_backend != "triton"
+        or mc.expert_quant not in ("nvfp4", "gguf")
+        or (mc.expert_quant == "nvfp4" and config.nvfp4_backend != "triton")
     ):
         raise ValueError(
-            "mirror expert RAM requires native NVFP4 experts, the triton "
-            "backend and single-rank GPU offload"
+            "mirror expert RAM requires native NVFP4 experts (triton backend) "
+            "or GGUF experts, and single-rank GPU offload"
         )
-    if mirror_spec is None:
-        raise ValueError(
-            f"mirror expert RAM has no expert source spec for model type "
-            f"{mc.model_type!r}: it cannot locate expert rows in this "
-            f"checkpoint. Export NVFP4_EXPERT_SOURCE_SPEC from that "
-            f"model's weight module once its layout is verified."
-        )
-    if mirror_spec.gated != bool(mc.expert_gated):
-        raise ValueError(
-            f"mirror expert RAM: spec says gated={mirror_spec.gated} but "
-            f"the config says expert_gated={mc.expert_gated}; the row "
-            f"layout would be half the size it should be"
-        )
+    mirror_spec = None
+    gguf_row_extents_fn = None
+    if is_gguf:
+        from freetoken.models.gguf.reader import gguf_mirror_hooks
+
+        hooks = gguf_mirror_hooks(mc)
+        if hooks is None:
+            raise ValueError(
+                f"mirror expert RAM has no GGUF expert-row hook for model "
+                f"type {mc.model_type!r}: it cannot locate expert rows in "
+                f"this GGUF checkpoint. Export gguf_expert_row_extents and "
+                f"gguf_mirror_bank_shapes from that model's gguf module once "
+                f"its layout is verified."
+            )
+        gguf_row_extents_fn, _bank_shapes_fn = hooks
+    else:
+        from freetoken.models.nvfp4_banks import expert_source_spec
+
+        mirror_spec = expert_source_spec(mc)
+        if mirror_spec is None:
+            raise ValueError(
+                f"mirror expert RAM has no expert source spec for model type "
+                f"{mc.model_type!r}: it cannot locate expert rows in this "
+                f"checkpoint. Export NVFP4_EXPERT_SOURCE_SPEC from that "
+                f"model's weight module once its layout is verified."
+            )
+        if mirror_spec.gated != bool(mc.expert_gated):
+            raise ValueError(
+                f"mirror expert RAM: spec says gated={mirror_spec.gated} but "
+                f"the config says expert_gated={mc.expert_gated}; the row "
+                f"layout would be half the size it should be"
+            )
     # Decode CUDA graphs stay ON -- that is the whole point: a mirror
     # miss is a plain H2D, exactly what the baseline captures.
     #
@@ -1216,13 +1253,63 @@ def build_residency(config, mc, engine) -> ExpertResidency:
         MirrorResidency._mirror_final_gpu_slots(engine, config),
         reserve=mirror_reserve_rows,
     )
-    mirror_pool = MirrorExpertPool(
-        config.model_path, mc.num_moe_layers, mc.num_experts, capacity,
-        hidden_size=(getattr(mc, mirror_spec.hidden_size_attr)
-                     if mirror_spec.hidden_size_attr else mc.hidden_size),
-        intermediate_size=mc.moe_intermediate_size,
-        spec=mirror_spec, config=mc,
-        device=engine.device,
-        reserve_rows=mirror_reserve_rows,
-    )
+    if is_gguf:
+        source = gguf_row_extents_fn(config.model_path, mc)
+        _check_mirror_host_ram(capacity, source.shapes)
+        mirror_pool = MirrorExpertPool(
+            config.model_path, mc.num_moe_layers, mc.num_experts, capacity,
+            hidden_size=mc.hidden_size, intermediate_size=mc.moe_intermediate_size,
+            source=source, config=mc,
+            device=engine.device,
+            reserve_rows=mirror_reserve_rows,
+        )
+    else:
+        from freetoken.moe.mirror_pool import nvfp4_bank_shapes
+
+        hidden = (getattr(mc, mirror_spec.hidden_size_attr)
+                  if mirror_spec.hidden_size_attr else mc.hidden_size)
+        _check_mirror_host_ram(
+            capacity,
+            nvfp4_bank_shapes(hidden, mc.moe_intermediate_size, gated=mirror_spec.gated),
+        )
+        mirror_pool = MirrorExpertPool(
+            config.model_path, mc.num_moe_layers, mc.num_experts, capacity,
+            hidden_size=hidden,
+            intermediate_size=mc.moe_intermediate_size,
+            spec=mirror_spec, config=mc,
+            device=engine.device,
+            reserve_rows=mirror_reserve_rows,
+        )
     return MirrorResidency(mirror_pool)
+
+
+# Startup RAM guard (S12c): applies to both NVFP4 and GGUF mirror pools alike.
+# Measured on this host at a 256K ceiling, the Ornith Q6_K pool is ~18-20 GiB
+# against ~25 GiB MemAvailable -- inside the banks+4GiB rule by only 1-3 GiB,
+# not "well under" it -- so a checkpoint whose pool does not actually fit must
+# refuse loudly at startup instead of the process getting OOM-killed (or
+# worse, partially initialized) minutes into loading.
+_MIRROR_HOST_RAM_GUARD_GIB = 4
+
+
+def _mem_available_bytes() -> int:
+    with open("/proc/meminfo") as f:
+        for line in f:
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) * 1024
+    raise RuntimeError("mirror expert RAM: /proc/meminfo has no MemAvailable line")
+
+
+def _check_mirror_host_ram(capacity: int, shapes: dict) -> None:
+    from freetoken.moe.mirror_pool import _row_bytes
+
+    pool_bytes = capacity * sum(_row_bytes(tail, dtype) for tail, dtype in shapes.values())
+    guard_bytes = _MIRROR_HOST_RAM_GUARD_GIB * (1 << 30)
+    available = _mem_available_bytes()
+    if pool_bytes + guard_bytes > available:
+        raise ValueError(
+            f"mirror expert RAM: the pool needs {pool_bytes / 2**30:.2f} GiB "
+            f"plus a {_MIRROR_HOST_RAM_GUARD_GIB} GiB headroom, but "
+            f"MemAvailable is only {available / 2**30:.2f} GiB (/proc/meminfo). "
+            "Reduce --moe-mirror-host-rows or the KV ceiling, or free host RAM."
+        )

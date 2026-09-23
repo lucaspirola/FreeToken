@@ -2012,10 +2012,10 @@ class OffloadMoeCache:
             self.residency = residency
             return
         pool = residency.pool
-        if (self.quant_format != "nvfp4" or self.decode_target != "gpu"
+        if (self.quant_format not in ("nvfp4", "gguf") or self.decode_target != "gpu"
                 or self.cpu_layer_ids or self.pageable_gpu):
-            raise ValueError("mirror residency requires native NVFP4, GPU decode, "
-                             "and no CPU/pageable routing")
+            raise ValueError("mirror residency requires native NVFP4 or GGUF experts, "
+                             "GPU decode, and no CPU/pageable routing")
         if not self._expert_arena_enabled:
             # Not a preference: only the gated ``_v2`` admission kernel
             # publishes victim_ids/prior_ids, and the swap kernel needs the

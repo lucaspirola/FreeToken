@@ -200,4 +200,66 @@ __all__ = [
     "iter_gguf_tensors",
     "gguf_tensor_names",
     "gguf_tensor_type",
+    "gguf_tensor_extents",
+    "gguf_mirror_hooks",
 ]
+
+
+def gguf_tensor_extents(model_path: str) -> dict[str, tuple[int, int]]:
+    """Every tensor's ``(file_offset, n_bytes)`` extent, straight off the GGUF header.
+
+    Used by the mirror pool's GGUF source (``models/qwen3_5_moe/gguf.py``
+    ``gguf_expert_row_extents``) to locate one expert's bytes without
+    memory-mapping or reading the tensor data itself (``iter_gguf_tensors``
+    does both, which this deliberately avoids -- the mirror pool reads the
+    bytes itself, with its own O_DIRECT + aligned-scratch path).
+
+    Refuses a split GGUF (``split.count`` > 1 in the file's own metadata, or a
+    ``-00001-of-000NN.gguf``-shaped file name with N > 1): a split file's
+    tensor data lives across sibling files this function never opens, so an
+    offset taken from one file's header would be meaningless.
+    """
+    import re
+
+    reader = _reader(model_path)
+    split_count = _field_value(reader, "split.count")
+    if split_count not in (None, 0, 1):
+        raise ValueError(
+            f"{model_path}: split GGUF (split.count={split_count}) is not "
+            "supported by the mirror pool's GGUF source"
+        )
+    name_match = re.search(r"-(\d+)-of-(\d+)\.gguf$", model_path)
+    if name_match and int(name_match.group(2)) > 1:
+        raise ValueError(
+            f"{model_path}: file name looks like one shard of a split GGUF "
+            f"({name_match.group(0)}), not supported by the mirror pool's GGUF source"
+        )
+    return {t.name: (t.data_offset, t.n_bytes) for t in reader.tensors}
+
+
+def gguf_mirror_hooks(config):
+    """This model's GGUF mirror-pool hooks, or ``None``.
+
+    Discovered by importlib exactly like ``models.nvfp4_banks.expert_source_spec``:
+    only ``freetoken.models.<model_type>.gguf`` modules that define BOTH
+    ``gguf_expert_row_extents(model_path, config)`` (the real per-expert file
+    extents, opens the checkpoint) and ``gguf_mirror_bank_shapes(config)`` (the
+    same geometry, metadata-only, for sizing the pool before it exists) are
+    resolved. A model whose GGUF mirror layout has never been verified through
+    this path returns None, so the caller refuses explicitly with a reason
+    instead of guessing a layout.
+    """
+    import importlib
+
+    model_type = getattr(config, "model_type", "") or ""
+    if not model_type.isidentifier():
+        return None
+    try:
+        module = importlib.import_module(f"freetoken.models.{model_type}.gguf")
+    except ModuleNotFoundError:
+        return None
+    extents = getattr(module, "gguf_expert_row_extents", None)
+    shapes = getattr(module, "gguf_mirror_bank_shapes", None)
+    if extents is None or shapes is None:
+        return None
+    return extents, shapes

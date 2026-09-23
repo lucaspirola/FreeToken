@@ -192,7 +192,30 @@ class MirrorExpertPool:
                  capacity: int, *, hidden_size: int, intermediate_size: int,
                  spec=None, config=None,
                  device: torch.device | None = None,
-                 reserve_rows: int | None = None):
+                 reserve_rows: int | None = None,
+                 source=None):
+        """``source=None`` (default): the native NVFP4 path, byte-identical to
+        before this parameter existed -- every line below that reads ``spec``
+        and calls ``nvfp4_bank_shapes``/``self._scan_checkpoint`` is unchanged.
+
+        ``source`` (S12c): an alternative checkpoint format that has already
+        indexed its own expert rows (e.g. a GGUF file -- see
+        ``models/qwen3_5_moe/gguf.gguf_expert_row_extents``), bypassing
+        ``_scan_checkpoint`` entirely. It carries three things this
+        constructor needs and nothing ``_read_row``/``load_initial``/
+        ``seed_duplicates`` do not already handle generically:
+
+        * ``quant_format`` -- the ``ExpertBanks`` format name the placeholder
+          banks and the engine's bank schema are keyed on ("gguf").
+        * ``shapes`` -- ``{bank_name: (tail_shape, dtype)}``, one size class
+          for every bank (a mirror pool has one pointer/stride per bank; a
+          source with more than one row size per bank must refuse before
+          reaching here -- see ``gguf_mirror_bank_shapes``).
+        * ``records``/``shard_fds``/``fd_size`` -- exactly ``_scan_checkpoint``'s
+          own output shape, so ``_read_row`` (which only reads
+          ``self._records``/``self._shard_fds``/``self._fd_size``) needs no
+          change to serve either format.
+        """
         total = num_layers * num_experts
         if capacity <= 0 or num_layers <= 0 or num_experts <= 0:
             raise ValueError("mirror pool capacity and model dimensions must be positive")
@@ -213,11 +236,17 @@ class MirrorExpertPool:
         self.device = device
         self._spec = spec
         self._config = config
+        self._source = source
         self.gated = bool(getattr(spec, "gated", False))
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
-        self.shapes = nvfp4_bank_shapes(hidden_size, intermediate_size,
-                                        gated=self.gated)
+        if source is None:
+            self.quant_format = "nvfp4"
+            self.shapes = nvfp4_bank_shapes(hidden_size, intermediate_size,
+                                            gated=self.gated)
+        else:
+            self.quant_format = source.quant_format
+            self.shapes = source.shapes
         self.schema_order = tuple(self.shapes)
         # Meta sources keep the engine's bank-shape budgeting working without
         # ever holding a byte; the real rows live in `banks`.
@@ -239,7 +268,12 @@ class MirrorExpertPool:
         self.pool_row_of_id = [-1] * total
         self.id_of_pool_row = [-1] * capacity
         try:
-            self._scan_checkpoint(model_path)
+            if source is None:
+                self._scan_checkpoint(model_path)
+            else:
+                self._records, self._shard_fds, self._fd_size = (
+                    source.records, source.shard_fds, source.fd_size
+                )
             scratch_bytes = max(
                 sum(end - start for start, end in
                     _regions_of([(off, length) for off, length, *_rest in pieces]))
@@ -276,6 +310,17 @@ class MirrorExpertPool:
             self._registered = []
             for name, (tail, dtype) in self.shapes.items():
                 bank = torch.empty((capacity, *tail), dtype=dtype)
+                if source is not None:
+                    # A GGUF row's raw bytes cover only its unaligned tensor
+                    # width; the bank's per-row stride is padded to 64B (the
+                    # loader's own alignment, models/qwen3_5_moe/gguf.py
+                    # _expert_layer_geometry). _read_row never writes those
+                    # padding columns (its pieces are exactly the source's
+                    # extents), so zero them once here instead of leaving
+                    # torch.empty garbage a kernel could read past a row's
+                    # real width. The NVFP4 path never takes this branch --
+                    # every one of its bytes is written by _read_row.
+                    bank.zero_()
                 nbytes = bank.numel() * bank.element_size()
                 host_register(bank.data_ptr(), nbytes)
                 self._registered.append(bank.data_ptr())
