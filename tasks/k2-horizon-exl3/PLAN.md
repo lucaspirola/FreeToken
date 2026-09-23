@@ -126,3 +126,31 @@ Credentials: none found on disk for vast.ai or Spheron. The only candidate is th
   - **Readiness:** the patch, the conversion pipeline (47 min, ~$2.2) and the validation script exist. Unknowns: sc_* on MoE + MoVA; whether the floor is intrinsic to the model.
   - **Extra spend estimate** beyond the approved validation: ~$10-15 (sensitivity measurement on BF16 ~1-2 h + one recipe conversion + one validation). Awaiting the owner's approval.
 - Owner 2026-09-23: "you have my go to beat vcruz205" -> the beat plan is approved at the ~$10-15 estimate given (cap $15 [agent: my stated figure]).
+
+## Validation run result (job 6ab389d351992417dfcd650b, rtx-pro-6000, 31m26s, ~$1.4; COMPLETED, nothing left running)
+
+Outputs: `validation/summary.{md,json}` in pirola/K2-Horizon-MoVA-36B-A4B-exl3-4.0bpw-hq.
+
+- **Headline, our 4.0 bpw -hq (4.11 bpw excluding the head, 19.12 GiB)**, measured against the BF16 reference with fp32 activations (vcruz305's method), wikitext-2 test, 8 x 2048 = 16,384 positions:
+  - top-1 **93.90%**, mean KL **0.0170**, p99 KL 0.176. PPL 7.200 vs BF16 7.153 (+0.7%).
+  - vcruz305 4.0 bpw: 84.81% / 0.108 / 0.909. Ours also beats their 6.5 bpw (90.68% / 0.0335); their 8.0 bpw is 96.43% / 0.0047.
+  - Caveats [agent]: their held-out text is unnamed and has 10,240 positions (ours: wikitext-2 test, 16,384), and our KL is truncated to the reference's top-64 (a slight underestimate; top-1 is exact). Only a run of both packs through the same script is apples to apples.
+  - Their "structural floor" is **not in our port**. Hypothesis: it is a port error in theirs (their unquantized ceiling is already 97.71%). Ours was not measured: the ceiling arm was skipped because VRAM was still held.
+- **Per-prompt top-1 vs BF16:**
+  - math 95–98%, code 93–94%, multilingual 93%, thinking 88–93%, reasoning 84–88%.
+  - **Tool-call XML is the weak spot: 75.7%, KL 0.43, p99 3.08.**
+- **Per layer:**
+  - Teacher-forced relative error is 0.6–1.7% in every layer, with no bad layer.
+  - The accumulated error grows smoothly to 11% by layers 42–45, then recovers to 9.9% at layer 47.
+  - Routing exact-match of the whole top-k set: MoE 55–76%, MoVA 70–93%. The mismatch margins are ~1e-3, i.e. near-tie flips, not a broken router.
+  - BF16 router GEMM flips vs fp32: 0/512 rows in every layer, so router storage precision is not the problem.
+- **What failed (the harness, not the model):**
+  1. The needle scores are invalid. The thinking preamble used up `max_new_tokens`, so the code was cut off (e.g. "I find: \"The secret verification code for site Bravo"). All "plant=False" results come from truncation.
+  2. KV-quant arms: k8v8 reload OOMed because the fp16 arm had not been freed; k6v5 and k4v4 hit an AssertionError on reload. No KV-quant numbers.
+  3. The BF16 needles OOMed at 64K (88,743 tokens) on the transformers path.
+  4. The BF16-in-exllamav3 ceiling arm was skipped (0.3 GB free).
+- **Consequence for the beat plan [agent]:** the target is already beaten at the same bpw.
+  - The router-precision fix is moot (0 flips).
+  - The remaining lever is tool-call quality: the sc_* recipe with a self-sampled trace that contains tool calls.
+  - The fixed long-context/KV arms are still needed for the 256K design.
+  - Proposed to the owner before spending more.
