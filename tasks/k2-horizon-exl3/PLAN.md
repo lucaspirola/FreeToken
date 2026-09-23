@@ -37,3 +37,13 @@ Queued by the owner on 2026-09-23 after the S12c and fastpack merges, before the
 | Spheron | A100 80 GB | 1.48 | |
 
 Credentials: none found on disk for vast.ai or Spheron. The only candidate is the owner's Bitwarden vault, which is locked.
+
+## exllamav3 support (2026-09-23, /home/lucas/ai/tools/exllamav3 branch k2-horizon, commit 4160552, local only)
+- `architecture/k2_horizon.py` and `modules/arch_specific/k2_horizon.py` (MoVAValues: 64 value experts, each its own quantizable EXL3 linear; router in fp32 with a selection-only bias; softplus(beta=ln 2) gate; grouped RMSNorm; dots-style MoE router with a selection-only bias). Python only; no kernel change.
+- Unquantized vs the HF fp32 reference, layers 0-4 (262 tokens): cos min >= 0.999999 on tokens without a routing flip; logits cos 0.999996, top-1 100%.
+- 4.0 bpw -hq, 5-layer model, 100 calibration rows, fp16 head: logits cos min 0.999627, top-1 100%. Value-expert routing: 90% exact / 97.5% overlap. Converter errors (rfn) 0.004-0.010.
+- Untested locally: the 6-bit lm_head step with default reference states (needs 14-16 GB host RAM), and layers 5-47.
+- Estimates (from a measured 77 s per MoE layer on the 5080 at 250 rows): 5080 ~70 min, RTX PRO 6000 ~30-35 min, RTX 5090 ~40 min, H100 SXM ~55-75 min. The H100 is the worst value because the trellis quantization is compute-bound on SMs. Host needs >= 64 GB RAM and ~130 GB disk.
+- Decision [agent]: HF Jobs RTX PRO 6000 ($2.75/h, 256 GB RAM, 475 GB disk). Reasons: the `hf` CLI is authenticated; no vast/Spheron credentials were found; the output lands in the owner's HF account directly. Hard cap: `--timeout 3h` = $8.25 max; expected ~1-1.5 h including the 70 GB download = ~$3-4.
+- Output repo: pirola/K2-Horizon-MoVA-36B-A4B-exl3-4.0bpw-hq, created PRIVATE (the owner said "push to my huggingface account"; visibility was not stated, so private is the default [agent]). The recipe is in its `conversion/` folder (patch + run.sh).
+- Job 6ab3773d52d0dbd7f1d82f2e launched 2026-09-23 (`hf jobs logs 6ab3773d52d0dbd7f1d82f2e`).
