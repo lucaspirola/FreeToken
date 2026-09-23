@@ -257,7 +257,8 @@ class MirrorExpertPool:
         }
         self._shard_fds: dict[str, int] = {}
         self._fd_size: dict[int, int] = {}
-        self._records: dict[int, tuple[int, list[tuple[int, int]]]] = {}
+        # flat id -> ((fd, pieces), ...): one read group per shard the expert spans.
+        self._records: dict[int, tuple[tuple[int, list[tuple]], ...]] = {}
         self._scratch = None
         self._sview = None
         self._closed = False
@@ -277,7 +278,7 @@ class MirrorExpertPool:
             scratch_bytes = max(
                 sum(end - start for start, end in
                     _regions_of([(off, length) for off, length, *_rest in pieces]))
-                for _fd, pieces in self._records.values()
+                for groups in self._records.values() for _fd, pieces in groups
             )
             self._scratch = mmap.mmap(-1, scratch_bytes)
             self._sview = memoryview(self._scratch)
@@ -453,40 +454,50 @@ class MirrorExpertPool:
                     f"{spec.desc}: layer {bank_layer} expert {expert} does not "
                     f"carry exactly {sorted(expected_roles)}"
                 )
-            shards = {weight_map[key] for key, _r, _k in entries}
-            if len(shards) != 1:
-                raise ValueError("mirror pool requires each expert's tensors in one shard")
-            shard = next(iter(shards))
-            if shard not in headers:
-                path = os.path.join(model_path, shard)
-                with open(path, "rb") as f:
-                    n = struct.unpack("<Q", f.read(8))[0]
-                    header = json.loads(f.read(n))
-                fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
-                self._shard_fds[shard] = fd
-                self._fd_size[fd] = os.fstat(fd).st_size
-                headers[shard] = (8 + n, header)
-            data_start, header = headers[shard]
-            fd = self._shard_fds[shard]
-            pieces = []
-            # Sorted so a row's reads walk the file forward, and so the record is
-            # deterministic regardless of weight_map iteration order.
-            for key, role, kind in sorted(entries, key=lambda e: (e[1], e[2])):
-                entry = header[key]
-                off, end_off = entry["data_offsets"]
-                bank, dst, broadcast, shape = self._row_layout(role, kind)
-                expected = 4 if broadcast else shape[0] * shape[1]
-                if (entry["dtype"] != _KIND_DTYPE[kind]
-                        or end_off - off != expected or off < 0
-                        or data_start + end_off > self._fd_size[fd]
-                        or (not broadcast and entry["shape"] != shape)):
-                    raise ValueError(f"unsupported or corrupt native NVFP4 tensor: {key}")
-                pieces.append((data_start + off, end_off - off, bank, dst, broadcast))
-            self._records[bank_layer * self.num_experts + expert] = (fd, pieces)
+            # One read group per shard the expert's tensors live in. HF's size-based
+            # sharder cuts wherever the byte budget runs out, so an expert can
+            # straddle two files (Ornith ships two such experts); each group is
+            # read on its own and lands in its own bank bytes, so the row is the
+            # same whichever file each tensor came from.
+            groups = []
+            for shard in sorted({weight_map[key] for key, _r, _k in entries}):
+                if shard not in headers:
+                    path = os.path.join(model_path, shard)
+                    with open(path, "rb") as f:
+                        n = struct.unpack("<Q", f.read(8))[0]
+                        header = json.loads(f.read(n))
+                    fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
+                    self._shard_fds[shard] = fd
+                    self._fd_size[fd] = os.fstat(fd).st_size
+                    headers[shard] = (8 + n, header)
+                data_start, header = headers[shard]
+                fd = self._shard_fds[shard]
+                pieces = []
+                # Sorted so a row's reads walk the file forward, and so the record is
+                # deterministic regardless of weight_map iteration order.
+                for key, role, kind in sorted(entries, key=lambda e: (e[1], e[2])):
+                    if weight_map[key] != shard:
+                        continue
+                    entry = header[key]
+                    off, end_off = entry["data_offsets"]
+                    bank, dst, broadcast, shape = self._row_layout(role, kind)
+                    expected = 4 if broadcast else shape[0] * shape[1]
+                    if (entry["dtype"] != _KIND_DTYPE[kind]
+                            or end_off - off != expected or off < 0
+                            or data_start + end_off > self._fd_size[fd]
+                            or (not broadcast and entry["shape"] != shape)):
+                        raise ValueError(f"unsupported or corrupt native NVFP4 tensor: {key}")
+                    pieces.append((data_start + off, end_off - off, bank, dst, broadcast))
+                groups.append((fd, pieces))
+            self._records[bank_layer * self.num_experts + expert] = tuple(groups)
 
     def _read_row(self, flat: int, row: int) -> None:
         """Read expert ``flat`` from the checkpoint into pool row ``row``."""
-        fd, pieces = self._records[flat]
+        for fd, pieces in self._records[flat]:
+            self._read_group(flat, row, fd, pieces)
+
+    def _read_group(self, flat: int, row: int, fd: int, pieces) -> None:
+        """One shard's share of expert ``flat``: read its extents, scatter to ``row``."""
         regions = _regions_of([(off, length) for off, length, _b, _d, _bc in pieces])
         size = self._fd_size[fd]
         cursors, cursor = [], 0

@@ -71,7 +71,7 @@ def test_extents_and_row_assembly_match_the_file(tmp_path):
     half = I * row_bytes
     payload = H * row_bytes
 
-    for flat, (fd, pieces) in source.records.items():
+    for flat, ((fd, pieces),) in source.records.items():
         assert source.shard_fds[path] == fd
         gu = bytearray(source.shapes["gate_up"][0][0])
         dn = bytearray(source.shapes["down"][0][0])
@@ -114,7 +114,7 @@ def test_pool_row_matches_the_loader_row(tmp_path):
     for layer in range(MAIN_LAYERS):
         for expert in range(E):
             flat = layer * E + expert
-            fd, pieces = source.records[flat]
+            ((fd, pieces),) = source.records[flat]
             gu = bytearray(source.shapes["gate_up"][0][0])
             dn = bytearray(source.shapes["down"][0][0])
             for off, length, bank, dst, _bc in pieces:

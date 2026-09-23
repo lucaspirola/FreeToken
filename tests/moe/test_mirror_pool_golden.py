@@ -49,10 +49,11 @@ def _records_digest(pool: MirrorExpertPool) -> str:
     checkpoint layout _scan_checkpoint computed."""
     h = hashlib.sha256()
     for flat in sorted(pool._records):
-        _fd, pieces = pool._records[flat]
         h.update(str(flat).encode())
-        for off, length, bank, dst, broadcast in pieces:
-            h.update(f"|{off},{length},{bank},{dst},{broadcast}".encode())
+        # One group per shard; single-shard records hash exactly as before groups existed.
+        for _fd, pieces in pool._records[flat]:
+            for off, length, bank, dst, broadcast in pieces:
+                h.update(f"|{off},{length},{bank},{dst},{broadcast}".encode())
     return h.hexdigest()
 
 

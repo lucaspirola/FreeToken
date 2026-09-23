@@ -194,8 +194,8 @@ def test_cross_shard_expert_is_reported_not_refused(tmp_path, name, spec):
     real in Ornith-1.5-35B-A3B-NVFP4) must NOT refuse the checkpoint: the
     loaders that actually read it (load_nvfp4_expert_source_banks* and
     iter_nvfp4_expert_pieces) group tensors by (layer, expert) as they stream
-    every shard and tolerate this. Only the bounded host mirror reader needs
-    one shard per expert, so this is reported, not raised."""
+    every shard and tolerate this, and so does the mirror pool (one read group
+    per shard), so this is reported, not raised."""
     config = _synthetic_config(spec)
     split = frozenset({(0, 1)})
     _write_checkpoint(str(tmp_path), spec, config, split_experts=split)

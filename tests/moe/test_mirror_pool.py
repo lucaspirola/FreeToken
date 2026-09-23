@@ -160,8 +160,13 @@ def test_load_initial_refuses_to_break_coverage(checkpoint):
 G_LAYERS, G_EXPERTS, G_H, G_I = 2, 4, 32, 32
 
 
-def _write_gated_checkpoint(root):
+def _write_gated_checkpoint(root, split="none"):
     """Qwen3.5/Ornith-shaped NVFP4 checkpoint: three projections, gate|up fused.
+
+    ``split`` shards it the way real checkpoints end up: "none" (one file),
+    "middle" (cut at the middle tensor, as HF's size-based sharder does -- the
+    expert straddling the cut spans two files, which is how Ornith ships), or
+    "by_role" (every expert's down_proj in a second file: every expert spans).
 
     The loader packs gate into the first I output rows of the gate_up banks and
     up into the next I (models/nvfp4_banks.py). The mirror must land on exactly
@@ -217,22 +222,46 @@ def _write_gated_checkpoint(root):
             expected[(flat, "down_global")] = torch.full(
                 (G_H,), rows[("down_proj", "global")], dtype=torch.float16)
 
-    head = json.dumps(header).encode()
-    with open(os.path.join(root, "model.safetensors"), "wb") as f:
-        f.write(struct.pack("<Q", len(head)))
-        f.write(head)
-        f.write(blob)
+    keys = list(header)
+    if split == "none":
+        shard_of = {k: 0 for k in keys}
+    elif split == "middle":
+        shard_of = {k: int(i >= len(keys) // 2) for i, k in enumerate(keys)}
+    elif split == "by_role":
+        shard_of = {k: int(".down_proj." in k) for k in keys}
+    else:
+        raise ValueError(split)
+    names = (["model.safetensors"] if split == "none" else
+             ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"])
+    for si, name in enumerate(names):
+        sub, part, pos = {}, bytearray(), 0
+        for k in keys:
+            if shard_of[k] != si:
+                continue
+            lo, hi = header[k]["data_offsets"]
+            sub[k] = dict(header[k], data_offsets=[pos, pos + hi - lo])
+            part += blob[lo:hi]
+            pos += hi - lo
+        head = json.dumps(sub).encode()
+        with open(os.path.join(root, name), "wb") as f:
+            f.write(struct.pack("<Q", len(head)))
+            f.write(head)
+            f.write(part)
     with open(os.path.join(root, "model.safetensors.index.json"), "w") as f:
-        json.dump({"weight_map": {k: "model.safetensors" for k in header}}, f)
+        json.dump({"weight_map": {k: names[shard_of[k]] for k in keys}}, f)
     with open(os.path.join(root, "config.json"), "w") as f:
         json.dump({"layers_block_type": ["moe"] * G_LAYERS}, f)
     return expected
 
 
-def test_gated_rows_match_the_checkpoint(tmp_path):
-    """Ornith's layout reads byte-exact through the shipped Qwen3.5 spec."""
+@pytest.mark.parametrize("split", ["none", "middle", "by_role"])
+def test_gated_rows_match_the_checkpoint(tmp_path, split):
+    """Ornith's layout reads byte-exact through the shipped Qwen3.5 spec, also
+    when experts span safetensors shards (Ornith's real checkpoint has two such
+    experts; the pool used to refuse it: "requires each expert's tensors in one
+    shard")."""
     root = str(tmp_path)
-    expected = _write_gated_checkpoint(root)
+    expected = _write_gated_checkpoint(root, split)
     total = G_LAYERS * G_EXPERTS
     pool = MirrorExpertPool(
         root, G_LAYERS, G_EXPERTS, total, hidden_size=G_H, intermediate_size=G_I,
