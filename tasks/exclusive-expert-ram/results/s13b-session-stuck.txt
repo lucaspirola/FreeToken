@@ -1,0 +1,1 @@
+2026-09-23T05:49:58+04:00 B1 (961390 tok, key B) accepted 05:29:32, never prefilled; GPU 0% util at 05:49; kv used 104934/131072 committed = pinned_tokens 104934 (3 prefixes); fresh_admits_deferred 106632; stopped by the orchestrator at 05:49:58

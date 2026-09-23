@@ -1,0 +1,57 @@
+{"key": "s13-session-a", "ttft_s": 103.863, "total_s": 103.934, "prompt_tokens": 104863, "cached_tokens": 0, "answer": "TANGO-6052", "label": "A1", "prefix_after": {"hits": 2, "misses": 4, "hit_tokens": 15872, "miss_tokens": 120910, "pooled_hits": 0, "pooled_hit_tokens": 0, "pooled_sumless_misses": 0, "pooled_sumless_miss_tokens": 0, "pinned_prefixes": 1, "pinned_tokens": 104872, "pinned_slots": 2, "pin_evictions": 0, "pin_budget_refusals": 0}}
+{"key": "s13-session-a", "ttft_s": 0.553, "total_s": 0.622, "prompt_tokens": 104863, "cached_tokens": 104832, "answer": "ROMEO-1328", "label": "A2", "prefix_after": {"hits": 3, "misses": 4, "hit_tokens": 120704, "miss_tokens": 120910, "pooled_hits": 0, "pooled_hit_tokens": 0, "pooled_sumless_misses": 0, "pooled_sumless_miss_tokens": 0, "pinned_prefixes": 2, "pinned_tokens": 104903, "pinned_slots": 3, "pin_evictions": 0, "pin_budget_refusals": 0}}
+{"key": "s13-session-a", "ttft_s": 0.489, "total_s": 0.552, "prompt_tokens": 104863, "cached_tokens": 104832, "answer": "ZULU-7710", "label": "A3", "prefix_after": {"hits": 4, "misses": 4, "hit_tokens": 225536, "miss_tokens": 120910, "pooled_hits": 0, "pooled_hit_tokens": 0, "pooled_sumless_misses": 0, "pooled_sumless_miss_tokens": 0, "pinned_prefixes": 3, "pinned_tokens": 104934, "pinned_slots": 4, "pin_evictions": 0, "pin_budget_refusals": 0}}
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/urllib/request.py", line 1344, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "/usr/lib/python3.12/http/client.py", line 1365, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "/usr/lib/python3.12/http/client.py", line 1411, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "/usr/lib/python3.12/http/client.py", line 1360, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "/usr/lib/python3.12/http/client.py", line 1120, in _send_output
+    self.send(msg)
+  File "/usr/lib/python3.12/http/client.py", line 1064, in send
+    self.connect()
+  File "/usr/lib/python3.12/http/client.py", line 1030, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/socket.py", line 852, in create_connection
+    raise exceptions[0]
+  File "/usr/lib/python3.12/socket.py", line 837, in create_connection
+    sock.connect(sa)
+ConnectionRefusedError: [Errno 111] Connection refused
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/s13_pins.py", line 136, in <module>
+    sys.exit(main(sys.argv[1:]))
+             ^^^^^^^^^^^^^^^^^^
+  File "/home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/s13_pins.py", line 112, in main
+    run("B1", hay_b, QUESTIONS[3], key_b)
+  File "/home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/s13_pins.py", line 103, in run
+    r["prefix_after"] = prefix_stats()
+                        ^^^^^^^^^^^^^^
+  File "/home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/s13_pins.py", line 44, in prefix_stats
+    with urllib.request.urlopen(f"{URL}/v1/stats", timeout=30) as r:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 515, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 532, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 1373, in http_open
+    return self.do_open(http.client.HTTPConnection, req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 1347, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 111] Connection refused>
