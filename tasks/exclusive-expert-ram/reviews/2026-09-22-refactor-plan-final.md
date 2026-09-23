@@ -68,7 +68,7 @@ between the bounded pool and the whole-model-in-RAM baseline.
 | id | constraint | reason / evidence |
 |---|---|---|
 | C-SINGLE-LANE | **Single lane is permanent design**: consumer GPUs, one session computed at a time; other sessions queued and spilled. `--max-running-requests 1` is not a tunable. | Owner: "FreeToken is to run on consumer GPU, not datacenter graded ones, and it's more than proved that it can only handle a single session at a time." Measured (`benchmarks/results/nemotron35_lightning_5080_single_lane_2026-09-17.md:14-28`): single lane 148–174 tok/s decode for one request vs the 16-lane profile's 75 tok/s alone and 16–41 tok/s per lane under load; MoE cache 1924 slots vs 1023 — the 16 lanes' KV was eating the expert arena. Not a controlled A/B (different commits and profiles): margin indicative, direction settled. |
-| C-NO-MAIN | Work stays on `exp/reorg` (branched from `exp/exclusive-expert-ram` at cde7ace, which stays frozen as the mirror-pool record). No merge into `main`, no push, never touch `main`. | Owner's authority limits (handover §1). |
+| C-NO-MAIN | Work stays on `exp/reorg` (branched from `exp/exclusive-expert-ram` at cde7ace, which stays frozen as the mirror-pool record). No merge into `main`, never touch `main`. | Agent-written limit (handover §1, carried from the steady-baking-bird plan); "no push" removed 2026-09-24: the owner never set it. |
 | C-MERGE-NOT-REBASE | Upstream is taken by `git merge origin/main` into the branch, never by rebase. | Rebase replays 328 agent-authored commits through ~40 recurring conflict hunks and reviews nothing; a merge resolves each hunk once. Agent recommendation (section 3.3); no owner acceptance found in the owner's messages (audit 2026-09-23). |
 | C-EMPTY-GPU | No performance number is valid unless `nvidia-smi` read 0 MiB before the arm, embedder stopped and never restarted by an agent, port 1920, one arm at a time, memory ratio 1.00, two probe passes, pass 2 of record. | Embedder stop: owner. Ratio 1.00: recorded as an owner decision in an earlier plan, not found in owner messages. Empty GPU, port, passes: agent measurement practice. Handover §11; `tasks/exclusive-expert-ram/measure.sh`. |
 | C-EVIDENCE | The evidence record (section 7) must be reproduced at every GPU checkpoint. A step that fails a checkpoint is **reverted on the branch, not patched forward**. | Agent-authored rule. The quote formerly attributed to the owner here appears in no owner message (audit 2026-09-23). Rationale: a regression must not be hidden by patching under a checkpoint. |
@@ -388,7 +388,7 @@ History is evidence, not authority. Re-verify, in this order, from the repositor
 - Ownership per lane is in section 6 and is part of each worker's assignment text; an assignment that needs a file outside its lane returns a request instead of editing.
 
 ### 9.5 Stop conditions
-Stop and ask only for: authority (spend, merge, push, delete, `~/.config` changes beyond the ratio), a checkpoint failure that the revert rule cannot resolve mechanically, or an S11/S13 discovery that a deletion is load-bearing for compaction or spill. Do not stop to ask permission for what the accepted plan already authorises.
+Stop and ask only for: authority (spend, merge into main, delete, `~/.config` changes beyond the ratio), a checkpoint failure that the revert rule cannot resolve mechanically, or an S11/S13 discovery that a deletion is load-bearing for compaction or spill. Do not stop to ask permission for what the accepted plan already authorises.
 
 ---
 

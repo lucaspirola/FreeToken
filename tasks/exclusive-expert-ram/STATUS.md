@@ -693,4 +693,4 @@ Phase 0 is done and is the section above.
   1919. No torch pytest and no GPU benchmark beside a live arm — doing that
   cost one baseline (80K TTFT 9.36 -> 11.19 s) and killed the 1700 arm outright
   ("growable KV refused an unsafe VMM commit: need 0.46 GiB free, have 0.18").
-* Commit on this branch; no merge, no push.
+* Commit on this branch; no merge into main.

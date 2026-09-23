@@ -136,7 +136,7 @@ A step whose GPU checkpoint fails any of 3-5 is reverted on the branch, not patc
 
 ## Do not do this
 
-Carried over: no kernel body edits; no change to the coverage invariant, free stack or `publish_freed_rows`; no rewrite of session spill; no touching `main`, no push, no merge into `main`; no `uv sync`; no server from an agent shell; embedder stays down; no numbers on a non-empty GPU.
+Carried over: no kernel body edits; no change to the coverage invariant, free stack or `publish_freed_rows`; no rewrite of session spill; no touching `main`, no merge into `main`; no `uv sync`; no server from an agent shell; embedder stays down; no numbers on a non-empty GPU.
 Added: no `git rebase` onto upstream (merge only); no upstream PR without the owner running it on hardware himself; no collapsing the `_v2` kernel twins; do not change `measure.sh` knob names (`FT_RESERVE`, `FT_TIEBREAK`) without both a write and a strip entry; do not move `tasks/exclusive-expert-ram/*.py` while `test_mirror_device.py` shells out to them (S6 may move them into `tests/moe/device/` afterwards, as one commit); do not edit a moved function's body in the same commit as the move; do not "fix" `_mirror_final_gpu_slots`'s `4 * step` before S8's planner/estimator test exists; do not touch `~/.config/freetoken/serve.env` except the already-authorised ratio.
 
 ## Questions for the owner before committing
