@@ -1,0 +1,156 @@
+{
+ "haystack_tokens": 112000,
+ "planted": [
+  "TANGO-6052",
+  "ROMEO-1328",
+  "ZULU-7710"
+ ],
+ "start_prefix": {
+  "hits": 2,
+  "misses": 3,
+  "hit_tokens": 15872,
+  "miss_tokens": 16047,
+  "pooled_hits": 0,
+  "pooled_hit_tokens": 0,
+  "pooled_sumless_misses": 0,
+  "pooled_sumless_miss_tokens": 0,
+  "pinned_prefixes": 0,
+  "pinned_tokens": 0,
+  "pinned_slots": 0,
+  "pin_evictions": 0,
+  "pin_budget_refusals": 0
+ },
+ "steps": [
+  {
+   "key": "s13-session-a",
+   "ttft_s": 102.402,
+   "total_s": 102.47,
+   "prompt_tokens": 104863,
+   "cached_tokens": 0,
+   "answer": "TANGO-6052",
+   "label": "A1",
+   "prefix_after": {
+    "hits": 2,
+    "misses": 4,
+    "hit_tokens": 15872,
+    "miss_tokens": 120910,
+    "pooled_hits": 0,
+    "pooled_hit_tokens": 0,
+    "pooled_sumless_misses": 0,
+    "pooled_sumless_miss_tokens": 0,
+    "pinned_prefixes": 0,
+    "pinned_tokens": 0,
+    "pinned_slots": 0,
+    "pin_evictions": 0,
+    "pin_budget_refusals": 0
+   }
+  },
+  {
+   "key": "s13-session-a",
+   "ttft_s": 0.497,
+   "total_s": 0.564,
+   "prompt_tokens": 104863,
+   "cached_tokens": 104832,
+   "answer": "ROMEO-1328",
+   "label": "A2",
+   "prefix_after": {
+    "hits": 3,
+    "misses": 4,
+    "hit_tokens": 120704,
+    "miss_tokens": 120910,
+    "pooled_hits": 0,
+    "pooled_hit_tokens": 0,
+    "pooled_sumless_misses": 0,
+    "pooled_sumless_miss_tokens": 0,
+    "pinned_prefixes": 0,
+    "pinned_tokens": 0,
+    "pinned_slots": 0,
+    "pin_evictions": 0,
+    "pin_budget_refusals": 0
+   }
+  },
+  {
+   "key": "s13-session-a",
+   "ttft_s": 0.456,
+   "total_s": 0.518,
+   "prompt_tokens": 104863,
+   "cached_tokens": 104832,
+   "answer": "ZULU-7710",
+   "label": "A3",
+   "prefix_after": {
+    "hits": 4,
+    "misses": 4,
+    "hit_tokens": 225536,
+    "miss_tokens": 120910,
+    "pooled_hits": 0,
+    "pooled_hit_tokens": 0,
+    "pooled_sumless_misses": 0,
+    "pooled_sumless_miss_tokens": 0,
+    "pinned_prefixes": 0,
+    "pinned_tokens": 0,
+    "pinned_slots": 0,
+    "pin_evictions": 0,
+    "pin_budget_refusals": 0
+   }
+  },
+  {
+   "key": "s13-session-b",
+   "ttft_s": 3.253,
+   "total_s": 3.436,
+   "prompt_tokens": 29847,
+   "cached_tokens": 0,
+   "answer": "ZULU-4534, KILO-3773, TANGO-8286",
+   "label": "B1",
+   "prefix_after": {
+    "hits": 4,
+    "misses": 5,
+    "hit_tokens": 225536,
+    "miss_tokens": 150757,
+    "pooled_hits": 0,
+    "pooled_hit_tokens": 0,
+    "pooled_sumless_misses": 0,
+    "pooled_sumless_miss_tokens": 0,
+    "pinned_prefixes": 0,
+    "pinned_tokens": 0,
+    "pinned_slots": 0,
+    "pin_evictions": 0,
+    "pin_budget_refusals": 0
+   }
+  },
+  {
+   "key": "s13-session-a",
+   "ttft_s": 0.483,
+   "total_s": 0.679,
+   "prompt_tokens": 104863,
+   "cached_tokens": 104832,
+   "answer": "TANGO-6052, ROMEO-1328, ZULU-7710",
+   "label": "A4",
+   "prefix_after": {
+    "hits": 4,
+    "misses": 5,
+    "hit_tokens": 225536,
+    "miss_tokens": 150757,
+    "pooled_hits": 0,
+    "pooled_hit_tokens": 0,
+    "pooled_sumless_misses": 0,
+    "pooled_sumless_miss_tokens": 0,
+    "pinned_prefixes": 0,
+    "pinned_tokens": 0,
+    "pinned_slots": 0,
+    "pin_evictions": 0,
+    "pin_budget_refusals": 0
+   }
+  }
+ ],
+ "checks": {
+  "A2/A3 cached >= prompt-8192": true,
+  "A2/A3 TTFT < 3 s": true,
+  "A4 after handoff cached >= prompt-8192": true,
+  "pin_budget_refusals == 0": true,
+  "codes": [
+   true,
+   true,
+   true
+  ]
+ }
+}

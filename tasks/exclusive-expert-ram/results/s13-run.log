@@ -1,0 +1,118 @@
+[s13-session] preflight ok: GPU 0 MiB, MemAvailable 25 GiB, code 6597be0 s13.sh: plan S13 GPU arms (session scope vs shared-scope control), s13_pins.py as FT_POST
+[s13-session] starting: model=NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 rows=-1 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/reorg@6597be0 venv=/home/lucas/ai/FreeToken/.venv
+Running as unit: ft-measure-s13-session.service; invocation ID: 3f0446f5b9704f47bfaa5e6fff2cd78e
+[s13-session] ready after 63s
+Sep 23 05:17:48 TESSERACT serve-default.sh[4140762]: [2026-09-23|05:17:48|core|rank=0] INFO     Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode graphs enabled, prefill overlap on (layers assembled from resident slots + pool rows, no disk)
+Sep 23 05:17:48 TESSERACT serve-default.sh[4140762]: [2026-09-23|05:17:48|core|rank=0] INFO     Mirror pool: reserve resolved to 256 rows (FREETOKEN_MIRROR_RESERVE_ROWS='256')
+Sep 23 05:18:03 TESSERACT serve-default.sh[4140762]: [2026-09-23|05:18:03|core|rank=0] INFO     Mirror pool: 1765 rows pinned (9.24 GiB), 771 cover the complement of 2173 GPU residents, 256 reserved, up to 738 duplicates (a duplicate makes its expert's next eviction free of any host traffic)
+Sep 23 05:18:03 TESSERACT serve-default.sh[4140762]: [2026-09-23|05:18:03|core|rank=0] INFO     Mirror pool: the coverage floor is 1440 of 2173 arena slots, leaving 733 slots (3.84 GiB) the growable KV may still take
+Sep 23 05:18:03 TESSERACT serve-default.sh[4140762]: [2026-09-23|05:18:03|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+[s13-session] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8014, "ttft_s": 0.22, "prefill_tok_s": 36815.0, "gen_tokens": 127, "decode_tok_s": 184.6, "total_s": 0.9}
+{"target": 8000, "pass": 2, "prompt_tokens": 8016, "ttft_s": 5.73, "prefill_tok_s": 1399.0, "gen_tokens": 127, "decode_tok_s": 172.2, "total_s": 6.5}
+[s13-session] post: S13_OUT=/home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/s13-session-pins.json python3 /home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/s13_pins.py 112000 32000
+{"key": "s13-session-a", "ttft_s": 103.091, "total_s": 103.159, "prompt_tokens": 104863, "cached_tokens": 0, "answer": "TANGO-6052", "label": "A1", "prefix_after": {"hits": 2, "misses": 4, "hit_tokens": 15872, "miss_tokens": 120910, "pooled_hits": 0, "pooled_hit_tokens": 0, "pooled_sumless_misses": 0, "pooled_sumless_miss_tokens": 0, "pinned_prefixes": 0, "pinned_tokens": 0, "pinned_slots": 0, "pin_evictions": 0, "pin_budget_refusals": 0}}
+{"key": "s13-session-a", "ttft_s": 0.976, "total_s": 1.042, "prompt_tokens": 104863, "cached_tokens": 104832, "answer": "ROMEO-1328", "label": "A2", "prefix_after": {"hits": 2, "misses": 4, "hit_tokens": 15872, "miss_tokens": 120910, "pooled_hits": 0, "pooled_hit_tokens": 0, "pooled_sumless_misses": 0, "pooled_sumless_miss_tokens": 0, "pinned_prefixes": 1, "pinned_tokens": 104872, "pinned_slots": 2, "pin_evictions": 0, "pin_budget_refusals": 0}}
+{"key": "s13-session-a", "ttft_s": 0.458, "total_s": 0.518, "prompt_tokens": 104863, "cached_tokens": 104832, "answer": "ZULU-7710", "label": "A3", "prefix_after": {"hits": 4, "misses": 4, "hit_tokens": 225536, "miss_tokens": 120910, "pooled_hits": 0, "pooled_hit_tokens": 0, "pooled_sumless_misses": 0, "pooled_sumless_miss_tokens": 0, "pinned_prefixes": 3, "pinned_tokens": 104934, "pinned_slots": 4, "pin_evictions": 0, "pin_budget_refusals": 0}}
+{"key": "s13-session-b", "ttft_s": 3.71, "total_s": 3.89, "prompt_tokens": 29847, "cached_tokens": 0, "answer": "ZULU-4534, KILO-3773, TANGO-8286", "label": "B1", "prefix_after": {"hits": 4, "misses": 5, "hit_tokens": 225536, "miss_tokens": 150757, "pooled_hits": 0, "pooled_hit_tokens": 0, "pooled_sumless_misses": 0, "pooled_sumless_miss_tokens": 0, "pinned_prefixes": 3, "pinned_tokens": 104934, "pinned_slots": 4, "pin_evictions": 0, "pin_budget_refusals": 0}}
+{"key": "s13-session-a", "ttft_s": 0.467, "total_s": 0.657, "prompt_tokens": 104863, "cached_tokens": 104832, "answer": "TANGO-6052, ROMEO-1328, ZULU-7710", "label": "A4", "prefix_after": {"hits": 4, "misses": 5, "hit_tokens": 225536, "miss_tokens": 150757, "pooled_hits": 0, "pooled_hit_tokens": 0, "pooled_sumless_misses": 0, "pooled_sumless_miss_tokens": 0, "pinned_prefixes": 4, "pinned_tokens": 134800, "pinned_slots": 6, "pin_evictions": 0, "pin_budget_refusals": 0}}
+PASS  A2/A3 cached >= prompt-8192  
+PASS  A2/A3 TTFT < 3 s  
+PASS  A4 after handoff cached >= prompt-8192  
+PASS  pin_budget_refusals == 0  
+PASS  codes  [True, True, True]
+{
+  "arm": "s13-session",
+  "model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+  "rows": "-1",
+  "commit": "6597be0",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 12.26,
+  "rss_ready_gib": 13.25,
+  "devzero_gib": 0.09,
+  "ram_after_80k_gib": 12.29,
+  "rss_gib": 13.38,
+  "locked_gib": 0.0,
+  "anon_gib": 12.2,
+  "file_gib": 0.21,
+  "unevict_gib": 0.0,
+  "shmem_gib": 0.09,
+  "current_gib": 12.45,
+  "peak_current_gib": 13.06,
+  "gpu_mib": "15484",
+  "decode_8k_p1": 184.6,
+  "ttft_8k_p1": 0.22,
+  "total_8k_p1": 0.9,
+  "decode_8k": 172.2,
+  "ttft_8k": 5.73,
+  "total_8k": 6.5,
+  "coverage_faults": 0,
+  "starved": 0,
+  "swaps": 5152,
+  "retained_rows": 3196,
+  "free_evict_rate": 0.678,
+  "buffer_free_evictions": 1280
+}
+40 arms -> /home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/sweep.tsv
+[s13-session] stopping
+[s13-shared] preflight ok: GPU 0 MiB, MemAvailable 25 GiB, code 6597be0 s13.sh: plan S13 GPU arms (session scope vs shared-scope control), s13_pins.py as FT_POST
+[s13-shared] starting: model=NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 rows=-1 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/reorg@6597be0 venv=/home/lucas/ai/FreeToken/.venv
+Running as unit: ft-measure-s13-shared.service; invocation ID: 6c20e05ee8a541c9bcbcf1a961f2bfec
+[s13-shared] ready after 55s
+Sep 23 05:21:43 TESSERACT serve-default.sh[4149408]: [2026-09-23|05:21:43|core|rank=0] INFO     Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode graphs enabled, prefill overlap on (layers assembled from resident slots + pool rows, no disk)
+Sep 23 05:21:43 TESSERACT serve-default.sh[4149408]: [2026-09-23|05:21:43|core|rank=0] INFO     Mirror pool: reserve resolved to 256 rows (FREETOKEN_MIRROR_RESERVE_ROWS='256')
+Sep 23 05:21:53 TESSERACT serve-default.sh[4149408]: [2026-09-23|05:21:53|core|rank=0] INFO     Mirror pool: 1765 rows pinned (9.24 GiB), 771 cover the complement of 2173 GPU residents, 256 reserved, up to 738 duplicates (a duplicate makes its expert's next eviction free of any host traffic)
+Sep 23 05:21:53 TESSERACT serve-default.sh[4149408]: [2026-09-23|05:21:53|core|rank=0] INFO     Mirror pool: the coverage floor is 1440 of 2173 arena slots, leaving 733 slots (3.84 GiB) the growable KV may still take
+Sep 23 05:21:53 TESSERACT serve-default.sh[4149408]: [2026-09-23|05:21:53|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+[s13-shared] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8014, "ttft_s": 0.22, "prefill_tok_s": 36702.0, "gen_tokens": 127, "decode_tok_s": 186.9, "total_s": 0.9}
+{"target": 8000, "pass": 2, "prompt_tokens": 8016, "ttft_s": 5.63, "prefill_tok_s": 1423.0, "gen_tokens": 127, "decode_tok_s": 172.9, "total_s": 6.4}
+[s13-shared] post: S13_OUT=/home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/s13-shared-pins.json python3 /home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/s13_pins.py 112000 32000
+{"key": "s13-session-a", "ttft_s": 102.402, "total_s": 102.47, "prompt_tokens": 104863, "cached_tokens": 0, "answer": "TANGO-6052", "label": "A1", "prefix_after": {"hits": 2, "misses": 4, "hit_tokens": 15872, "miss_tokens": 120910, "pooled_hits": 0, "pooled_hit_tokens": 0, "pooled_sumless_misses": 0, "pooled_sumless_miss_tokens": 0, "pinned_prefixes": 0, "pinned_tokens": 0, "pinned_slots": 0, "pin_evictions": 0, "pin_budget_refusals": 0}}
+{"key": "s13-session-a", "ttft_s": 0.497, "total_s": 0.564, "prompt_tokens": 104863, "cached_tokens": 104832, "answer": "ROMEO-1328", "label": "A2", "prefix_after": {"hits": 3, "misses": 4, "hit_tokens": 120704, "miss_tokens": 120910, "pooled_hits": 0, "pooled_hit_tokens": 0, "pooled_sumless_misses": 0, "pooled_sumless_miss_tokens": 0, "pinned_prefixes": 0, "pinned_tokens": 0, "pinned_slots": 0, "pin_evictions": 0, "pin_budget_refusals": 0}}
+{"key": "s13-session-a", "ttft_s": 0.456, "total_s": 0.518, "prompt_tokens": 104863, "cached_tokens": 104832, "answer": "ZULU-7710", "label": "A3", "prefix_after": {"hits": 4, "misses": 4, "hit_tokens": 225536, "miss_tokens": 120910, "pooled_hits": 0, "pooled_hit_tokens": 0, "pooled_sumless_misses": 0, "pooled_sumless_miss_tokens": 0, "pinned_prefixes": 0, "pinned_tokens": 0, "pinned_slots": 0, "pin_evictions": 0, "pin_budget_refusals": 0}}
+{"key": "s13-session-b", "ttft_s": 3.253, "total_s": 3.436, "prompt_tokens": 29847, "cached_tokens": 0, "answer": "ZULU-4534, KILO-3773, TANGO-8286", "label": "B1", "prefix_after": {"hits": 4, "misses": 5, "hit_tokens": 225536, "miss_tokens": 150757, "pooled_hits": 0, "pooled_hit_tokens": 0, "pooled_sumless_misses": 0, "pooled_sumless_miss_tokens": 0, "pinned_prefixes": 0, "pinned_tokens": 0, "pinned_slots": 0, "pin_evictions": 0, "pin_budget_refusals": 0}}
+{"key": "s13-session-a", "ttft_s": 0.483, "total_s": 0.679, "prompt_tokens": 104863, "cached_tokens": 104832, "answer": "TANGO-6052, ROMEO-1328, ZULU-7710", "label": "A4", "prefix_after": {"hits": 4, "misses": 5, "hit_tokens": 225536, "miss_tokens": 150757, "pooled_hits": 0, "pooled_hit_tokens": 0, "pooled_sumless_misses": 0, "pooled_sumless_miss_tokens": 0, "pinned_prefixes": 0, "pinned_tokens": 0, "pinned_slots": 0, "pin_evictions": 0, "pin_budget_refusals": 0}}
+PASS  A2/A3 cached >= prompt-8192  
+PASS  A2/A3 TTFT < 3 s  
+PASS  A4 after handoff cached >= prompt-8192  
+PASS  pin_budget_refusals == 0  
+PASS  codes  [True, True, True]
+{
+  "arm": "s13-shared",
+  "model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+  "rows": "-1",
+  "commit": "6597be0",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 12.24,
+  "rss_ready_gib": 13.24,
+  "devzero_gib": 0.09,
+  "ram_after_80k_gib": 12.34,
+  "rss_gib": 13.35,
+  "locked_gib": 0.0,
+  "anon_gib": 12.21,
+  "file_gib": 0.09,
+  "unevict_gib": 0.0,
+  "shmem_gib": 0.09,
+  "current_gib": 12.33,
+  "peak_current_gib": 12.95,
+  "gpu_mib": "15484",
+  "decode_8k_p1": 186.9,
+  "ttft_8k_p1": 0.22,
+  "total_8k_p1": 0.9,
+  "decode_8k": 172.9,
+  "ttft_8k": 5.63,
+  "total_8k": 6.4,
+  "coverage_faults": 0,
+  "starved": 0,
+  "swaps": 5152,
+  "retained_rows": 3196,
+  "free_evict_rate": 0.678,
+  "buffer_free_evictions": 1280
+}
+41 arms -> /home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/sweep.tsv
+[s13-shared] stopping

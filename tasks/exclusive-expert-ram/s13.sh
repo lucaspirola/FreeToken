@@ -12,7 +12,8 @@ OUT="$HERE/results"
 export FT_VENV=/home/lucas/ai/FreeToken/.venv FT_RATIO=1.00
 exec 9>/home/lucas/.cache/freetoken/gpu-host.lock
 flock 9
-for arm in s13-session s13-shared; do
+PFX="${S13_PREFIX:-s13}"; HANDOFF="${S13_HANDOFF:-32000}"
+for arm in $PFX-session $PFX-shared; do
   # checkpoint1.sh's preflight, inline (calling it would wait on the lock held above)
   [ -z "$(git status --porcelain -- python)" ] || { echo "python/ dirty"; exit 1; }
   systemctl is-active --quiet freetoken-serve && { echo "freetoken-serve is up"; exit 1; }
@@ -23,9 +24,9 @@ for arm in s13-session s13-shared; do
   avail=$(awk '/MemAvailable/ {printf "%d", $2/1048576}' /proc/meminfo)
   [ "$avail" -ge 22 ] || { echo "MemAvailable $avail GiB"; exit 1; }
   echo "[$arm] preflight ok: GPU 0 MiB, MemAvailable $avail GiB, code $(git log --oneline -1)"
-  extra=""; [ "$arm" = s13-shared ] && extra="--pin-prefix-scope shared"
-  env FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000" FT_EXTRA="$extra" FT_POST_TIMEOUT=3600 \
-    FT_POST="S13_OUT=$OUT/$arm-pins.json python3 $HERE/s13_pins.py 112000 32000" \
+  extra=""; [ "$arm" = $PFX-shared ] && extra="--pin-prefix-scope shared"
+  env FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000" FT_EXTRA="$extra" FT_POST_TIMEOUT=7200 \
+    FT_POST="S13_OUT=$OUT/$arm-pins.json python3 $HERE/s13_pins.py 112000 $HANDOFF" \
     "$HERE/measure.sh" "$arm"
   journalctl --user -u "ft-measure-$arm" -o cat --no-pager > "$OUT/$arm-journal.txt" || true
 done
