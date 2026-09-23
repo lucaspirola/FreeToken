@@ -1,0 +1,264 @@
+code: 7c8788d checkpoint1.sh: checkpoint label argument (ck1|ck2); header says who runs it
+preflight ok: GPU 0 MiB, MemAvailable 25 GiB, no server, no pytest
+checkpoint label: ck2
+code: 7c8788d checkpoint1.sh: checkpoint label argument (ck1|ck2); header says who runs it
+preflight ok: GPU 0 MiB, MemAvailable 25 GiB, no server, no pytest
+=== arm ck2-whole ===
+[ck2-whole] starting: model=NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 rows=0 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/reorg@7c8788d venv=/home/lucas/ai/FreeToken/.venv
+Running as unit: ft-measure-ck2-whole.service; invocation ID: 77c94443a06e4041ba4afa1947ecc919
+[ck2-whole] ready after 34s
+Sep 23 03:25:28 TESSERACT serve-default.sh[3886135]: [2026-09-23|03:25:28|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+[ck2-whole] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8014, "ttft_s": 0.32, "prefill_tok_s": 25324.0, "gen_tokens": 127, "decode_tok_s": 204.0, "total_s": 0.9}
+{"target": 32000, "pass": 1, "prompt_tokens": 32027, "ttft_s": 47.46, "prefill_tok_s": 675.0, "gen_tokens": 127, "decode_tok_s": 204.2, "total_s": 48.1}
+{"target": 80000, "pass": 1, "prompt_tokens": 80028, "ttft_s": 114.91, "prefill_tok_s": 696.0, "gen_tokens": 127, "decode_tok_s": 184.5, "total_s": 115.6}
+{"target": 8000, "pass": 2, "prompt_tokens": 8016, "ttft_s": 0.73, "prefill_tok_s": 10959.0, "gen_tokens": 127, "decode_tok_s": 201.8, "total_s": 1.4}
+{"target": 32000, "pass": 2, "prompt_tokens": 32029, "ttft_s": 6.2, "prefill_tok_s": 5166.0, "gen_tokens": 127, "decode_tok_s": 196.5, "total_s": 6.8}
+{"target": 80000, "pass": 2, "prompt_tokens": 80030, "ttft_s": 10.28, "prefill_tok_s": 7782.0, "gen_tokens": 127, "decode_tok_s": 189.0, "total_s": 11.0}
+[ck2-whole] post: NEEDLES_THINK_MAX_TOKENS=65536 NEEDLES_OUT="/home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/ck2-whole-needles.json" python3 /home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/needles.py 21000 120000; python3 /home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/recall.py 21000 120000 240000
+[21000 -> 19927 tok] 5/7  codes=ok multihop=TRUNC counting=FAIL ordering=ok contradiction=ok arithmetic=ok negative=ok
+  WARNING: prefix cache MISSED at 120000 (cached 0 of 112298 prompt tokens). Every question re-prefilled the haystack; raise --pin-prefix-max-tokens above the haystack size.
+[120000 -> 112298 tok] 3/7  codes=ok multihop=TRUNC counting=FAIL ordering=TRUNC contradiction=ok arithmetic=FAIL negative=ok
+wrote /home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/ck2-whole-needles.json
+{"target": 21000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 19757, "completion_tokens": 27, "seconds": 2.0, "planted": ["ZULU-2188", "ROMEO-6864", "KILO-3647"], "recalled": ["ZULU-2188", "ROMEO-6864", "KILO-3647"], "all_three": true, "answer": "ZULU-2188, ROMEO-6864, KILO-3647"}
+{"target": 120000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 112048, "completion_tokens": 27, "seconds": 16.3, "planted": ["ROMEO-1813", "TANGO-6789", "ZULU-5364"], "recalled": ["ROMEO-1813", "TANGO-6789", "ZULU-5364"], "all_three": true, "answer": "ROMEO-1813, TANGO-6789, ZULU-5364"}
+{"target": 240000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 224417, "completion_tokens": 27, "seconds": 49.9, "planted": ["SIERRA-6523", "SIERRA-1067", "ROMEO-9011"], "recalled": ["SIERRA-6523", "SIERRA-1067", "ROMEO-9011"], "all_three": true, "answer": "SIERRA-6523, SIERRA-1067, ROMEO-9011"}
+{
+  "arm": "ck2-whole",
+  "model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+  "rows": "0",
+  "commit": "3f634f0",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 18.3,
+  "rss_ready_gib": 19.45,
+  "devzero_gib": 15.49,
+  "ram_after_80k_gib": 19.29,
+  "rss_gib": 19.43,
+  "locked_gib": 0.0,
+  "anon_gib": 3.04,
+  "file_gib": 15.95,
+  "unevict_gib": 0.0,
+  "shmem_gib": 15.49,
+  "current_gib": 19.11,
+  "peak_current_gib": 20.5,
+  "gpu_mib": "15820",
+  "decode_8k_p1": 204.0,
+  "ttft_8k_p1": 0.32,
+  "total_8k_p1": 0.9,
+  "decode_32k_p1": 204.2,
+  "ttft_32k_p1": 47.46,
+  "total_32k_p1": 48.1,
+  "decode_80k_p1": 184.5,
+  "ttft_80k_p1": 114.91,
+  "total_80k_p1": 115.6,
+  "decode_8k": 201.8,
+  "ttft_8k": 0.73,
+  "total_8k": 1.4,
+  "decode_32k": 196.5,
+  "ttft_32k": 6.2,
+  "total_32k": 6.8,
+  "decode_80k": 189.0,
+  "ttft_80k": 10.28,
+  "total_80k": 11.0
+}
+36 arms -> /home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/sweep.tsv
+[ck2-whole] stopping
+code: 3f634f0 compare_records.py: checkpoint arm vs the record, pass by pass (91% band, RAM, faults, starved)
+preflight ok: GPU 0 MiB, MemAvailable 24 GiB, no server, no pytest
+=== arm ck2-mirror-1m ===
+[ck2-mirror-1m] starting: model=NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 rows=-1 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/reorg@3f634f0 venv=/home/lucas/ai/FreeToken/.venv
+Running as unit: ft-measure-ck2-mirror-1m.service; invocation ID: 21327a36cdc14137bba5e74e67bea9ac
+[ck2-mirror-1m] ready after 67s
+Sep 23 03:51:29 TESSERACT serve-default.sh[3943358]: [2026-09-23|03:51:29|core|rank=0] INFO     Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode graphs enabled, prefill overlap on (layers assembled from resident slots + pool rows, no disk)
+Sep 23 03:51:29 TESSERACT serve-default.sh[3943358]: [2026-09-23|03:51:29|core|rank=0] INFO     Mirror pool: reserve resolved to 256 rows (FREETOKEN_MIRROR_RESERVE_ROWS='256')
+Sep 23 03:51:43 TESSERACT serve-default.sh[3943358]: [2026-09-23|03:51:43|core|rank=0] INFO     Mirror pool: 1765 rows pinned (9.24 GiB), 771 cover the complement of 2173 GPU residents, 256 reserved, up to 738 duplicates (a duplicate makes its expert's next eviction free of any host traffic)
+Sep 23 03:51:43 TESSERACT serve-default.sh[3943358]: [2026-09-23|03:51:43|core|rank=0] INFO     Mirror pool: the coverage floor is 1440 of 2173 arena slots, leaving 733 slots (3.84 GiB) the growable KV may still take
+Sep 23 03:51:43 TESSERACT serve-default.sh[3943358]: [2026-09-23|03:51:43|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+[ck2-mirror-1m] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8014, "ttft_s": 0.22, "prefill_tok_s": 36823.0, "gen_tokens": 127, "decode_tok_s": 184.5, "total_s": 0.9}
+{"target": 1000000, "pass": 1, "prompt_tokens": 1000030, "ttft_s": 955.68, "prefill_tok_s": 1046.0, "gen_tokens": 127, "decode_tok_s": 79.5, "total_s": 957.3}
+{"target": 8000, "pass": 2, "prompt_tokens": 8016, "ttft_s": 1.0, "prefill_tok_s": 8043.0, "gen_tokens": 127, "decode_tok_s": 181.6, "total_s": 1.7}
+{"target": 1000000, "pass": 2, "prompt_tokens": 1000032, "ttft_s": 1090.61, "prefill_tok_s": 917.0, "gen_tokens": 127, "decode_tok_s": 91.2, "total_s": 1092.0}
+[ck2-mirror-1m] post: NEEDLES_THINK_MAX_TOKENS=65536 NEEDLES_OUT="/home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/ck2-mirror-1m-needles.json" python3 /home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/needles.py 21000 120000; python3 /home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/recall.py 21000 120000 240000
+[21000 -> 19927 tok] 5/7  codes=ok multihop=TRUNC counting=FAIL ordering=ok contradiction=ok arithmetic=ok negative=ok
+  WARNING: prefix cache MISSED at 120000 (cached 0 of 112298 prompt tokens). Every question re-prefilled the haystack; raise --pin-prefix-max-tokens above the haystack size.
+[120000 -> 112298 tok] 3/7  codes=ok multihop=TRUNC counting=FAIL ordering=TRUNC contradiction=ok arithmetic=FAIL negative=ok
+wrote /home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/ck2-mirror-1m-needles.json
+{"target": 21000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 19757, "completion_tokens": 27, "seconds": 2.5, "planted": ["ZULU-2188", "ROMEO-6864", "KILO-3647"], "recalled": ["ZULU-2188", "ROMEO-6864", "KILO-3647"], "all_three": true, "answer": "ZULU-2188, ROMEO-6864, KILO-3647"}
+{"target": 120000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 112048, "completion_tokens": 27, "seconds": 25.7, "planted": ["ROMEO-1813", "TANGO-6789", "ZULU-5364"], "recalled": ["ROMEO-1813", "TANGO-6789", "ZULU-5364"], "all_three": true, "answer": "ROMEO-1813, TANGO-6789, ZULU-5364"}
+{"target": 240000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 224417, "completion_tokens": 27, "seconds": 83.2, "planted": ["SIERRA-6523", "SIERRA-1067", "ROMEO-9011"], "recalled": ["SIERRA-6523", "SIERRA-1067", "ROMEO-9011"], "all_three": true, "answer": "SIERRA-6523, SIERRA-1067, ROMEO-9011"}
+{
+  "arm": "ck2-mirror-1m",
+  "model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+  "rows": "-1",
+  "commit": "3f634f0",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 10.71,
+  "rss_ready_gib": 13.29,
+  "devzero_gib": 0.09,
+  "ram_after_80k_gib": 11.23,
+  "rss_gib": 13.87,
+  "locked_gib": 0.0,
+  "anon_gib": 12.69,
+  "file_gib": 0.7,
+  "unevict_gib": 0.0,
+  "shmem_gib": 0.09,
+  "current_gib": 13.43,
+  "peak_current_gib": 13.69,
+  "gpu_mib": "15628",
+  "decode_8k_p1": 184.5,
+  "ttft_8k_p1": 0.22,
+  "total_8k_p1": 0.9,
+  "decode_1000k_p1": 79.5,
+  "ttft_1000k_p1": 955.68,
+  "total_1000k_p1": 957.3,
+  "decode_8k": 181.6,
+  "ttft_8k": 1.0,
+  "total_8k": 1.7,
+  "decode_1000k": 91.2,
+  "ttft_1000k": 1090.61,
+  "total_1000k": 1092.0,
+  "coverage_faults": 0,
+  "starved": 0,
+  "swaps": 88661,
+  "retained_rows": 57327,
+  "free_evict_rate": 0.654,
+  "buffer_free_evictions": 5561
+}
+37 arms -> /home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/sweep.tsv
+[ck2-mirror-1m] stopping
+code: 3f634f0 compare_records.py: checkpoint arm vs the record, pass by pass (91% band, RAM, faults, starved)
+preflight ok: GPU 0 MiB, MemAvailable 25 GiB, no server, no pytest
+=== arm ck2-mirror ===
+[ck2-mirror] starting: model=NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 rows=-1 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/reorg@3f634f0 venv=/home/lucas/ai/FreeToken/.venv
+Running as unit: ft-measure-ck2-mirror.service; invocation ID: 90b6152055d045a5845bed210fd0e3bd
+[ck2-mirror] ready after 58s
+Sep 23 04:52:21 TESSERACT serve-default.sh[4079809]: [2026-09-23|04:52:21|core|rank=0] INFO     Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode graphs enabled, prefill overlap on (layers assembled from resident slots + pool rows, no disk)
+Sep 23 04:52:21 TESSERACT serve-default.sh[4079809]: [2026-09-23|04:52:21|core|rank=0] INFO     Mirror pool: reserve resolved to 256 rows (FREETOKEN_MIRROR_RESERVE_ROWS='256')
+Sep 23 04:52:37 TESSERACT serve-default.sh[4079809]: [2026-09-23|04:52:37|core|rank=0] INFO     Mirror pool: 1765 rows pinned (9.24 GiB), 771 cover the complement of 2173 GPU residents, 256 reserved, up to 738 duplicates (a duplicate makes its expert's next eviction free of any host traffic)
+Sep 23 04:52:37 TESSERACT serve-default.sh[4079809]: [2026-09-23|04:52:37|core|rank=0] INFO     Mirror pool: the coverage floor is 1440 of 2173 arena slots, leaving 733 slots (3.84 GiB) the growable KV may still take
+Sep 23 04:52:37 TESSERACT serve-default.sh[4079809]: [2026-09-23|04:52:37|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+[ck2-mirror] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8014, "ttft_s": 0.23, "prefill_tok_s": 35452.0, "gen_tokens": 127, "decode_tok_s": 182.5, "total_s": 0.9}
+{"target": 80000, "pass": 1, "prompt_tokens": 80028, "ttft_s": 111.38, "prefill_tok_s": 719.0, "gen_tokens": 127, "decode_tok_s": 161.5, "total_s": 112.2}
+{"target": 713000, "pass": 1, "prompt_tokens": 713035, "ttft_s": 437.13, "prefill_tok_s": 1631.0, "gen_tokens": 127, "decode_tok_s": 93.7, "total_s": 438.5}
+{"target": 8000, "pass": 2, "prompt_tokens": 8016, "ttft_s": 0.87, "prefill_tok_s": 9191.0, "gen_tokens": 127, "decode_tok_s": 183.2, "total_s": 1.6}
+{"target": 80000, "pass": 2, "prompt_tokens": 80030, "ttft_s": 10.61, "prefill_tok_s": 7542.0, "gen_tokens": 127, "decode_tok_s": 178.8, "total_s": 11.3}
+{"target": 713000, "pass": 2, "prompt_tokens": 713037, "ttft_s": 494.68, "prefill_tok_s": 1441.0, "gen_tokens": 127, "decode_tok_s": 107.6, "total_s": 495.9}
+{
+  "arm": "ck2-mirror",
+  "model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+  "rows": "-1",
+  "commit": "3f634f0",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 12.26,
+  "rss_ready_gib": 13.26,
+  "devzero_gib": 0.09,
+  "ram_after_80k_gib": 13.01,
+  "rss_gib": 13.69,
+  "locked_gib": 0.0,
+  "anon_gib": 12.54,
+  "file_gib": 0.17,
+  "unevict_gib": 0.0,
+  "shmem_gib": 0.09,
+  "current_gib": 12.74,
+  "peak_current_gib": 12.96,
+  "gpu_mib": "15710",
+  "decode_8k_p1": 182.5,
+  "ttft_8k_p1": 0.23,
+  "total_8k_p1": 0.9,
+  "decode_80k_p1": 161.5,
+  "ttft_80k_p1": 111.38,
+  "total_80k_p1": 112.2,
+  "decode_713k_p1": 93.7,
+  "ttft_713k_p1": 437.13,
+  "total_713k_p1": 438.5,
+  "decode_8k": 183.2,
+  "ttft_8k": 0.87,
+  "total_8k": 1.6,
+  "decode_80k": 178.8,
+  "ttft_80k": 10.61,
+  "total_80k": 11.3,
+  "decode_713k": 107.6,
+  "ttft_713k": 494.68,
+  "total_713k": 495.9,
+  "coverage_faults": 0,
+  "starved": 0,
+  "swaps": 7281,
+  "retained_rows": 4192,
+  "free_evict_rate": 0.624,
+  "buffer_free_evictions": 1792
+}
+38 arms -> /home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/sweep.tsv
+[ck2-mirror] stopping
+code: 3f634f0 compare_records.py: checkpoint arm vs the record, pass by pass (91% band, RAM, faults, starved)
+preflight ok: GPU 0 MiB, MemAvailable 25 GiB, no server, no pytest
+=== arm ck2-whole-close ===
+[ck2-whole-close] starting: model=NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 rows=0 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/reorg@3f634f0 venv=/home/lucas/ai/FreeToken/.venv
+Running as unit: ft-measure-ck2-whole-close.service; invocation ID: f3169de5f69845719c633c547ac79b7f
+[ck2-whole-close] ready after 35s
+Sep 23 05:12:03 TESSERACT serve-default.sh[4127413]: [2026-09-23|05:12:03|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+[ck2-whole-close] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8014, "ttft_s": 0.31, "prefill_tok_s": 25774.0, "gen_tokens": 127, "decode_tok_s": 205.6, "total_s": 0.9}
+{"target": 32000, "pass": 1, "prompt_tokens": 32027, "ttft_s": 47.6, "prefill_tok_s": 673.0, "gen_tokens": 127, "decode_tok_s": 202.2, "total_s": 48.2}
+{"target": 80000, "pass": 1, "prompt_tokens": 80028, "ttft_s": 114.82, "prefill_tok_s": 697.0, "gen_tokens": 127, "decode_tok_s": 184.9, "total_s": 115.5}
+{"target": 8000, "pass": 2, "prompt_tokens": 8016, "ttft_s": 0.73, "prefill_tok_s": 11012.0, "gen_tokens": 127, "decode_tok_s": 202.9, "total_s": 1.3}
+{"target": 32000, "pass": 2, "prompt_tokens": 32029, "ttft_s": 3.23, "prefill_tok_s": 9909.0, "gen_tokens": 127, "decode_tok_s": 196.5, "total_s": 3.9}
+{"target": 80000, "pass": 2, "prompt_tokens": 80030, "ttft_s": 13.73, "prefill_tok_s": 5829.0, "gen_tokens": 127, "decode_tok_s": 189.8, "total_s": 14.4}
+{
+  "arm": "ck2-whole-close",
+  "model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+  "rows": "0",
+  "commit": "3f634f0",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 18.41,
+  "rss_ready_gib": 19.43,
+  "devzero_gib": 15.49,
+  "ram_after_80k_gib": 18.68,
+  "rss_gib": 19.52,
+  "locked_gib": 0.0,
+  "anon_gib": 2.98,
+  "file_gib": 17.26,
+  "unevict_gib": 0.0,
+  "shmem_gib": 15.49,
+  "current_gib": 20.35,
+  "peak_current_gib": 20.89,
+  "gpu_mib": "15856",
+  "decode_8k_p1": 205.6,
+  "ttft_8k_p1": 0.31,
+  "total_8k_p1": 0.9,
+  "decode_32k_p1": 202.2,
+  "ttft_32k_p1": 47.6,
+  "total_32k_p1": 48.2,
+  "decode_80k_p1": 184.9,
+  "ttft_80k_p1": 114.82,
+  "total_80k_p1": 115.5,
+  "decode_8k": 202.9,
+  "ttft_8k": 0.73,
+  "total_8k": 1.3,
+  "decode_32k": 196.5,
+  "ttft_32k": 3.23,
+  "total_32k": 3.9,
+  "decode_80k": 189.8,
+  "ttft_80k": 13.73,
+  "total_80k": 14.4
+}
+39 arms -> /home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/sweep.tsv
+[ck2-whole-close] stopping
+ck2-whole R3: PASS
+ck2-whole R6(arm): PASS
+ck2-mirror-1m R3: PASS
+ck2-mirror-1m R6(arm): PASS
+ck2-mirror R3: PASS
+ck2-mirror R6(arm): PASS
+ck2-whole-close R3: PASS
+ck2-whole-close R6(arm): PASS
+checkpoint ck2 arms done. The embedder stays stopped.
