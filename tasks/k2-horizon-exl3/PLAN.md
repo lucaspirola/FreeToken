@@ -89,3 +89,4 @@ Credentials: none found on disk for vast.ai or Spheron. The only candidate is th
 - **Owner challenge 2026-09-23**: "I challenge you to create something that will make it fast in our rtx5080, with 256k kv 8-bits, or at least 6-bits k and 5-bits V (usually quality is still maintained, right?)".
   - Facts: KV is 25.5 GiB at q8_0 and ~18 GiB at K6/V5 for 256K. That is more than the 16 GB card, and competes in host RAM with 12-16 GiB of expert banks. So resident 256K KV is impossible; it needs tiered KV (VRAM/RAM/NVMe) and sparse retrieval-style decode attention.
   - Design by an Opus specialist in progress, with a physics budget and accuracy plan; it fits G2 (the smart KV manager).
+- Owner 2026-09-23: "approved the longer validation" (~$3-5; exact estimate to be reported once the script is timed).
