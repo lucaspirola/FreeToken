@@ -712,3 +712,57 @@ def test_a_120k_haystack_carries_more_snapshots_than_the_single_lane_pin_budget(
     h = _admit(cm, ids[:119_990] + [0], session="A")
     assert h.cached_len == 119_936 and h.cached_len >= tokens - chunk
     cm.check_integrity()
+
+
+# --------------------------------------------------------------------------- admission pressure (S13 fix)
+# ``CacheManager.release_pins_for_admission`` -- the companion to the scheduler's
+# soft-session admission-pressure release. A pin locks the tree directly (``inc_lock``), so
+# releasing a session's soft protection frees nothing a pin already holds; without this, a
+# session-scope pin left standing after its own session's release starves a later, unrelated
+# fresh request forever even though its footprint fits the pool once the pin is gone
+# (measured 2026-09-23, s13b-session: see scheduler.py's ``_reclaim_soft_sessions_for_pending``).
+def test_release_pins_for_admission_frees_exactly_enough_to_fit():
+    pool = _pool()
+    cm = _cm(pool, min_tokens=2, num_pages=40)
+    _insert(cm, pool, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    _admit(cm, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], session="a")
+    _admit(cm, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], session="b")   # pins all 10 tokens
+    assert _ledger(cm) == (1, 10, 1)
+    before = cm.available_size
+    needed = before + 5                                        # only fits once the pin goes
+
+    assert cm.release_pins_for_admission(needed) is True
+    assert _ledger(cm) == (0, 0, 0)
+    assert cm.available_size >= needed
+    assert cm.prefix_counters.as_dict()["pin_admission_releases"] == 1
+    assert _node(cm, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]).ref_count == 0
+    cm.check_integrity()
+
+
+def test_release_pins_for_admission_does_nothing_when_the_request_already_fits():
+    pool = _pool()
+    cm = _cm(pool, min_tokens=2, num_pages=40)
+    _insert(cm, pool, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    _admit(cm, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], session="a")
+    _admit(cm, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], session="b")
+    assert _ledger(cm) == (1, 10, 1)
+
+    assert cm.release_pins_for_admission(cm.available_size) is False
+    assert _ledger(cm) == (1, 10, 1)                            # untouched
+    assert cm.prefix_counters.as_dict()["pin_admission_releases"] == 0
+
+
+def test_release_pins_for_admission_releases_everything_it_can_and_still_reports_the_shortfall():
+    pool = _pool()
+    cm = _cm(pool, min_tokens=2, num_pages=40)
+    _insert(cm, pool, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    _admit(cm, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], session="a")
+    _admit(cm, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], session="b")
+    assert _ledger(cm) == (1, 10, 1)
+
+    impossible = cm.num_pages * cm.page_size + 1                # more than the pool can ever hold
+    assert cm.release_pins_for_admission(impossible) is True    # it tried: every pin is gone
+    assert _ledger(cm) == (0, 0, 0)
+    assert cm.available_size < impossible                       # still short -- unchanged today
+    assert cm.prefix_counters.as_dict()["pin_admission_releases"] == 1
+    cm.check_integrity()
