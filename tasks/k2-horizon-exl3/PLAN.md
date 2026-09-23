@@ -178,3 +178,21 @@ Outputs: `validation/rerun/summary.{md,json}`. Fixes vs the first run: cache det
 - **Ceiling, BF16 weights run through exllamav3** (same wikitext 16,384 positions, fp32-activation reference): **97.36% top-1, KL 0.0049**, PPL 7.157. vcruz305's ceiling: 97.71% / 0.0030.
   - The two ports' numerics agree, so the gap at 4.0 bpw (ours 93.90% vs their 84.81%) comes from the quantization, not from the port.
   - Our 4.0 bpw keeps 96.4% of the ceiling's top-1.
+
+## Tool-call-tuned conversion job (launched 2026-09-23)
+
+- Job 6ab3a7d751992417dfcd6e19: rtx-pro-6000, timeout 210 min.
+  - Estimate: ~2h20m / ~$6.4; cap $9.63.
+- Output repo pirola/K2-Horizon-MoVA-36B-A4B-exl3-4.0bpw-tool, **created private** [agent choice; the owner decides publication, as for the -hq repo].
+- Package (specialist-built, dry-run end to end on the 5-layer models): `toolcal/` in that repo.
+  - Calibration trace: 36 new tool conversations plus general text, sampled from the old 4.0 bpw.
+  - Eval set, disjoint tool names: 24 new + qbench's 6 tool conversations, 20 prose, sampled from BF16.
+  - Sensitivity pipeline: `sc_measure --shaped`.
+    - The patch (exllamav3 k2-horizon 510f26e) groups each layer's MoVA value experts into one target: 331 targets instead of 3166.
+  - Then `sc_optimize` -> `convert.py -rcp -cd`.
+  - Fallback to uniform `-b 4.0 -hq -cd` if measure/optimize fails or runs past 70 min.
+  - Eval: tool rows vs prose rows (KL, top-1, tool-call block exact match) for old and new, plus the same wikitext metric as validate.py.
+- The Claude-Session trailer was stripped from the patch before upload (owner rule from the -hq repo).
+- **Premise check [agent]:** 75.7% came from one prompt's prompt tokens, not generated tool calls.
+  - ~40 min in, `toolcal-run/report_old.md` gives the OLD quant's tool-row vs prose-row KL.
+  - If tool rows are not worse than prose, cancel and save ~$4.5.
