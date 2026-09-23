@@ -1,0 +1,6 @@
+S7 Verify: grep -o 'MoE slots N -> M' journal, ck2-mirror-1m vs nemotron-reserve-2e-1m
+record: 32 transitions (probe only, no FT_POST). ck2: 58.
+transitions 1-32: IDENTICAL (diff prints only 32a33,58).
+transition 32 at 04:27:06 = probe end (ck2-mirror-1m-probe.jsonl mtime 04:27:06);
+transitions 33-58 from 04:31:11 on = the needles/recall FT_POST the record arm did not run.
+recaptures in journal: 0; graph captures: 1.
