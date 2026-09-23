@@ -8,11 +8,17 @@ import torch
 import os
 
 from freetoken.engine.cache_budget import (
+    _arena_chunk_boundaries,
     arena_bytes_for_usable,
     expert_bytes_per_slot,
     expert_cache_bytes,
     expert_slot_signatures,
+    gguf_class_capacities,
+    joint_arena_boundaries,
+    joint_arena_bytes_for_usable,
+    joint_arena_floor,
     plan_cache_budget,
+    plan_joint_arena_usable,
     resolve_moe_cache_auto,
     usable_for_target_free_bytes,
 )
@@ -787,3 +793,118 @@ def test_uncapped_platform_stays_uncapped(monkeypatch):
     if hasattr(os, "uname") and "microsoft" in os.uname().release.lower():
         pytest.skip("WSL caps pinning")
     assert _pin_budget_bytes(reserved=2**30) is None
+
+
+# ---- S12b: mixed-GGUF per-size-class arena (joint byte model + planner) ----
+
+
+def test_gguf_class_capacities_sums_to_usable_and_matches_expert_cache_bytes():
+    # expert_cache_bytes' internal split (refactored onto gguf_class_capacities)
+    # must still land on the same numbers it always has.
+    capacities = gguf_class_capacities(usable=20, layer_counts=[3, 1], num_layers=4, num_experts=2)
+    assert sum(capacities) == 20
+    assert all(c >= 2 for c in capacities)
+    # 3:1 layer ratio over (20 - 2*2=16) remaining slots -> 12/4 split, +floor.
+    assert capacities == [2 + 16 * 3 // 4, 2 + 16 * 1 // 4]
+
+
+def test_joint_arena_bytes_n1_matches_single_class_primitive():
+    """The N=1 regression: one class's joint byte model must equal
+    arena_bytes_for_usable term for term, for every usable value."""
+    capacity, step, rows = 10, 4, [100, 50]
+    for n in range(capacity + 1):
+        assert joint_arena_bytes_for_usable(n, [capacity], [step], [rows]) == (
+            arena_bytes_for_usable(n, capacity, step, rows)
+        )
+    assert joint_arena_boundaries([capacity], [step]) == _arena_chunk_boundaries(capacity, step)
+
+
+def test_joint_arena_bytes_multi_class_is_the_sum_of_single_class_calls():
+    capacities, steps, rows = [10, 20], [4, 5], [[100], [200]]
+    for n in range(sum(capacities) + 1):
+        expected = arena_bytes_for_usable(
+            min(max(n - 0, 0), 10), 10, 4, [100]
+        ) + arena_bytes_for_usable(min(max(n - 10, 0), 20), 20, 5, [200])
+        assert joint_arena_bytes_for_usable(n, capacities, steps, rows) == expected
+
+
+def test_joint_arena_boundaries_is_the_union_of_offset_local_boundaries():
+    capacities, steps = [10, 20], [4, 5]
+    boundaries = joint_arena_boundaries(capacities, steps)
+    expected = sorted(
+        {b for b in _arena_chunk_boundaries(10, 4)}
+        | {10 + b for b in _arena_chunk_boundaries(20, 5)}
+    )
+    assert list(boundaries) == expected
+    assert boundaries[0] == 0
+    assert boundaries[-1] == 30
+
+
+def test_joint_arena_floor_is_the_last_classs_own_floor_past_every_ceiling():
+    capacities = [10, 20, 5]
+    floors = [4, 8, 2]
+    # Every class before the last must already be FULL by the time the last
+    # class clears its own floor -- so the joint floor is the sum of every
+    # earlier ceiling plus only the last class's floor.
+    assert joint_arena_floor(capacities, floors) == 10 + 20 + 2
+
+
+def test_plan_joint_arena_usable_never_returns_below_any_class_floor():
+    capacities, steps, rows = [8, 12], [4, 4], [[10], [10]]
+    floors = [4, 4]
+    floor = joint_arena_floor(capacities, floors)
+    # Row bytes always round up to a whole 2 MiB granule per allocation, so the
+    # floor's own footprint is already a few MiB -- give every candidate room.
+    total_bytes = joint_arena_bytes_for_usable(sum(capacities), capacities, steps, rows)
+    for kv_bytes in (0, 10, 100, 1000):
+        budget = total_bytes + 10 * 1024 * 1024
+        n = plan_joint_arena_usable(budget, kv_bytes, capacities, steps, rows, floors)
+        assert n >= floor
+        # Every individual class must itself clear ITS OWN floor at this n.
+        begin = 0
+        for capacity, class_floor in zip(capacities, floors):
+            local = min(max(n - begin, 0), capacity)
+            assert local >= class_floor or local == capacity, (n, begin, local, class_floor)
+            begin += capacity
+
+
+def test_plan_joint_arena_usable_maximizes_moe_within_budget():
+    # MoE-priority, same shape as plan_cache_budget: the largest joint usable
+    # whose bytes + kv fit the budget, not the smallest.
+    capacities, steps, rows = [8, 12], [4, 4], [[10], [10]]
+    floors = [4, 4]
+    total_bytes = joint_arena_bytes_for_usable(sum(capacities), capacities, steps, rows)
+    n = plan_joint_arena_usable(total_bytes, 0, capacities, steps, rows, floors)
+    assert n == sum(capacities)  # whole arena affordable -> take it all
+
+
+def test_plan_joint_arena_usable_raises_when_even_the_floor_does_not_fit():
+    capacities, steps, rows = [8, 12], [4, 4], [[10_000_000], [10_000_000]]
+    with pytest.raises(ValueError, match="joint arena floor"):
+        plan_joint_arena_usable(1, 0, capacities, steps, rows, [4, 4])
+
+
+def test_growable_moe_bytes_uses_joint_model_for_mixed_gguf_arena():
+    """S12b: a mixed-GGUF cache exposes class_arena_layouts/class_bank_row_bytes
+    instead of the single-class arena_layout/bank_row_bytes; _growable_moe_bytes
+    must route to the joint model instead of raising GROWABLE_KV_UNSUPPORTED."""
+    from freetoken.engine.engine import Engine
+    from freetoken.engine.growable_kv import GrowableKvController
+
+    class MixedClassArenaMoeCache:
+        num_experts = 4
+        prefill_overlap = False
+        class_arena_layouts = [(10, 4), (20, 5)]
+        class_bank_row_bytes = [[100], [200]]
+        # No single-class bank_row_bytes/arena_layout at all -- the joint path
+        # must not need them.
+
+    engine = Engine.__new__(Engine)
+    engine.moe_offload_cache = MixedClassArenaMoeCache()
+    engine._growable_moe_prefill_overlap = False
+
+    controller = GrowableKvController(engine)
+    for n in (0, 5, 10, 15, 25, 30):
+        assert controller._growable_moe_bytes(n) == joint_arena_bytes_for_usable(
+            n, [10, 20], [4, 5], [[100], [200]]
+        )

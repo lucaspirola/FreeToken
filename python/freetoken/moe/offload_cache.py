@@ -422,6 +422,14 @@ class OffloadMoeCache:
         self._class_bank_caches: list[dict[str, torch.Tensor]] = []
         self._prefill_borrow_class: int | None = None
         self._lru_size = self.cache_size
+        # S12b: per-size-class arena state (one independent VMM arena per GGUF
+        # signature class), populated only when FREETOKEN_EXPERT_ARENA=1 AND the
+        # checkpoint has mixed row signatures (_set_gguf_size_class_sources).
+        # Empty otherwise -- including for the uniform single-class arena, which
+        # keeps using _arena_banks/_arena_boundaries/slot_capacity exactly as
+        # before this step (N=1 regression: that path is untouched).
+        self._class_arena_layouts: list[tuple[int, int]] | None = None
+        self._class_arena_banks: list[dict[str, dict]] = []
         # Expert-arena prerequisite: a device-side "how many slots are usable" value,
         # plus the fixed slot-arena capacity it will eventually shrink/grow within.
         # ``slot_capacity`` == ``cache_size`` and ``usable_slots`` == ``cache_size`` for
@@ -612,7 +620,7 @@ class OffloadMoeCache:
         return allocation.tensor
 
     def _arena_chunk_ranges(
-        self, row_bytes: int, granularity: int
+        self, row_bytes: int, granularity: int, boundaries: tuple[int, ...] | None = None
     ) -> list[tuple[int, int]]:
         """Per-chunk ``(offset, size)`` VMM ranges for one bank's row byte count.
 
@@ -626,9 +634,14 @@ class OffloadMoeCache:
         when its slots fit inside the previous chunk's rounding; callers must
         skip zero-size entries before calling ``commit_ranges``/``uncommit_ranges``
         (which reject size == 0) while keeping one list entry per chunk so
-        indices stay aligned with ``_arena_boundaries``.
+        indices stay aligned with ``boundaries``.
+
+        ``boundaries`` defaults to ``self._arena_boundaries`` (the single, whole-
+        cache arena). S12b's per-size-class arena passes that class's OWN
+        boundaries (``_arena_chunk_boundaries(class_capacity, class_step_slots)``)
+        instead, so each class keeps an independent commit ladder.
         """
-        boundaries = self._arena_boundaries
+        boundaries = self._arena_boundaries if boundaries is None else boundaries
         byte_bounds = [div_ceil(b * row_bytes, granularity) * granularity for b in boundaries]
         return list(zip(byte_bounds, (e - s for s, e in zip(byte_bounds, byte_bounds[1:]))))
 
@@ -675,6 +688,62 @@ class OffloadMoeCache:
             "allocation": allocation,
             "row_bytes": row_bytes,
             "chunk_ranges": chunk_ranges,
+        }
+        return allocation.tensor
+
+    def _alloc_arena_class_bank_cache(
+        self,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        name: str,
+        class_id: int,
+        capacity: int,
+        step_slots: int,
+        granularity: int,
+    ) -> torch.Tensor:
+        """S12b: one class's independent VMM arena for one bank (parallel to
+        :meth:`_alloc_arena_bank_cache`, keyed by ``class_id`` instead of the
+        single whole-cache arena).
+
+        Reserves ``capacity`` slots of VA for this (class, bank) and commits
+        chunks up to ``shape[0]`` (that class's INITIAL usable count, always one
+        of its own boundaries -- see :func:`freetoken.engine.cache_budget.
+        _arena_chunk_boundaries`). The returned tensor is always
+        ``(capacity, *shape[1:])`` -- not ``shape[0]`` -- for the same reason the
+        single-class arena's tensor is ``slot_capacity``-shaped: its identity/
+        address never changes again, only which prefix is physically mapped.
+
+        Every size class gets its OWN commit ladder (own ``chunk_ranges``, own
+        VMM allocation), which is the accepted S12b design ("one arena per size
+        class"): classes never share a granule, so growing/shrinking one class
+        can never perturb another's addressing.
+        """
+        from freetoken.kernel.vmm import VMMTensor
+        from freetoken.engine.cache_budget import _arena_chunk_boundaries
+
+        slots = shape[0]
+        assert slots <= capacity, (name, class_id, slots, capacity)
+        row_bytes = math.prod(shape[1:]) * torch.empty((), dtype=dtype).element_size()
+        boundaries = _arena_chunk_boundaries(capacity, step_slots)
+        chunk_ranges = self._arena_chunk_ranges(row_bytes, granularity, boundaries)
+        reserved_bytes = chunk_ranges[-1][0] + chunk_ranges[-1][1] if chunk_ranges else 0
+        committed_chunks = boundaries.index(slots)
+        initial_ranges = chunk_ranges[:committed_chunks]
+        assert initial_ranges, (name, class_id, slots, boundaries)
+        mapped_ranges = [r for r in initial_ranges if r[1] > 0]
+        allocation = VMMTensor(
+            (capacity, *shape[1:]),
+            dtype=dtype,
+            device=self.device,
+            reserved_bytes=reserved_bytes,
+            initial_ranges=mapped_ranges,
+        )
+        self._direct_bank_allocations.append(allocation)
+        self._class_arena_banks[class_id][name] = {
+            "allocation": allocation,
+            "row_bytes": row_bytes,
+            "chunk_ranges": chunk_ranges,
+            "boundaries": boundaries,
         }
         return allocation.tensor
 
@@ -735,12 +804,8 @@ class OffloadMoeCache:
             for layer in range(self.num_layers)
         ]
         if self.quant_format == "gguf" and len(set(signatures)) > 1:
-            if self._expert_arena_enabled:
-                raise NotImplementedError(
-                    "FREETOKEN_EXPERT_ARENA=1 does not support mixed-GGUF size classes "
-                    f"({len(set(signatures))} distinct row signatures across layers); "
-                    "unset the gate or use a uniform-signature GGUF checkpoint"
-                )
+            # S12b: FREETOKEN_EXPERT_ARENA=1 now builds one arena per size class
+            # (see _set_gguf_size_class_sources) instead of refusing here.
             if unpinned:
                 raise NotImplementedError(
                     "mixed-GGUF GPU size classes currently require pinned host banks"
@@ -838,13 +903,10 @@ class OffloadMoeCache:
                 f"mixed-GGUF size classes need {minimum + reserve} requested slots "
                 f"({minimum} decode + {reserve} prefill), got {self.cache_size}"
             )
+        from freetoken.engine.cache_budget import gguf_class_capacities
+
         counts = [self._layer_cache_class.count(i) for i in range(len(unique))]
-        remaining = usable - minimum
-        capacities = [
-            self.num_experts + remaining * count // self.num_layers for count in counts
-        ]
-        for i in range(usable - sum(capacities)):
-            capacities[i % len(capacities)] += 1
+        capacities = gguf_class_capacities(usable, counts, self.num_layers, self.num_experts)
         # The explicit mixed-size prefill buffers have the largest signature. Borrow
         # those same bytes as extra decode rows for that class between prefills, just
         # like the uniform cache already borrows its first 2E rows. This changes no
@@ -857,9 +919,49 @@ class OffloadMoeCache:
         )
         if self._prefill_borrow_class is not None:
             capacities[self._prefill_borrow_class] += reserve
+
+        # S12b: with the expert arena on, each class gets its OWN fixed-ceiling
+        # VMM arena (one arena per size class -- the accepted design; see
+        # tasks/exclusive-expert-ram/reviews/2026-09-22-refactor-plan-final.md
+        # "S12b status"). The class ranges are then FIXED at each class's own
+        # ceiling (not its initial capacity): a single joint usable cutoff
+        # (self.usable_slots, the same device scalar the uniform arena already
+        # uses) sweeps across the classes' concatenated ranges top-to-bottom, so
+        # id_of_slot/slot_for_id/usage keep their addresses -- see
+        # cache_budget.joint_arena_bytes_for_usable for the byte model this
+        # must match. Off the gate (or for a uniform-signature checkpoint,
+        # which never reaches this method), nothing here changes: class ranges
+        # stay capacity-sized exactly as before this step.
+        if self._expert_arena_enabled:
+            # The joint usable-slot cutoff (self.usable_slots, set once in
+            # __post_init__ to the constructor's cache_size, BEFORE this method
+            # ever runs) sweeps the concatenated class ranges top-down: it can
+            # only mean "class 0 full, class 1 full, ..., class k partial" for
+            # SOME k. That is only consistent with a BALANCED initial split
+            # across classes (this method's usual proportional-by-layer-count
+            # capacities) when the cache starts fully committed, i.e. cache_size
+            # == slot_capacity -- exactly the invariant engine.py's growable-KV
+            # wiring already establishes for the single-class arena ("the
+            # initial usable count starts at the ceiling itself"). Enforcing it
+            # here also means the ceiling split is IDENTICAL to the initial
+            # split (both computed from the same cache_size == slot_capacity),
+            # so ``capacities`` doubles as ``ceiling_capacities``: no second
+            # gguf_class_capacities call, no risk of the two drifting apart.
+            assert self.cache_size == self.slot_capacity, (
+                "the expert arena requires a mixed-GGUF cache to start fully "
+                f"committed (cache_size {self.cache_size} != slot_capacity "
+                f"{self.slot_capacity}); growable KV shrinks it from there"
+            )
+        ceiling_capacities = capacities
+
+        # Off the gate, this loop is exactly the pre-S12b code: class ranges are
+        # the (capacity-sized) allocations below, no arena ceiling headroom. On
+        # the gate, capacities IS the ceiling split too (see the assert above),
+        # so this is also the arena's fixed [begin_c, begin_c + ceiling_c) range
+        # for every class, unchanged for the lifetime of the arena.
         self._class_ranges = []
         begin = 0
-        for capacity in capacities:
+        for capacity in ceiling_capacities:
             self._class_ranges.append((begin, begin + capacity))
             begin += capacity
         self._lru_size = begin
@@ -867,18 +969,58 @@ class OffloadMoeCache:
 
         self.bank_caches.clear()
         self._class_bank_caches = []
-        for class_id, signature in enumerate(unique):
-            layer = self._layer_cache_class.index(class_id)
-            capacity = capacities[class_id]
-            caches: dict[str, torch.Tensor] = {}
-            for name in self.bank_schema:
-                source = sources[name][layer]
-                cache = self._alloc_device_bank_cache(
-                    (capacity, *source.shape[1:]), source.dtype
-                )
-                caches[name] = cache
-                self.bank_caches[f"{name}.class{class_id}"] = cache
-            self._class_bank_caches.append(caches)
+        self._class_arena_layouts = None
+        self._class_arena_banks = []
+        if self._expert_arena_enabled:
+            from freetoken.kernel.vmm import allocation_granularity
+
+            granularity = (
+                allocation_granularity(self.device) if self.device.type == "cuda" else 1
+            )
+            self._class_arena_banks = [dict() for _ in unique]
+            # Each class's OWN commit ladder steps by num_experts: coarser (e.g.
+            # the whole class in one chunk) would make its own floor -- num_experts,
+            # or 2*num_experts with prefill overlap -- unreachable as a boundary
+            # whenever a shrink needs to land inside a class instead of emptying
+            # it outright (see cache_budget.joint_arena_floor: the LAST class in
+            # the joint sweep must be able to shrink to exactly its own floor,
+            # not just to 0 or to its ceiling).
+            class_step = self.num_experts
+            self._class_arena_layouts = [
+                (ceiling_capacities[c], class_step) for c in range(len(unique))
+            ]
+            for class_id, signature in enumerate(unique):
+                layer = self._layer_cache_class.index(class_id)
+                capacity = capacities[class_id]
+                ceiling = ceiling_capacities[class_id]
+                caches: dict[str, torch.Tensor] = {}
+                for name in self.bank_schema:
+                    source = sources[name][layer]
+                    cache = self._alloc_arena_class_bank_cache(
+                        (capacity, *source.shape[1:]),
+                        source.dtype,
+                        name,
+                        class_id,
+                        ceiling,
+                        class_step,
+                        granularity,
+                    )
+                    caches[name] = cache
+                    self.bank_caches[f"{name}.class{class_id}"] = cache
+                self._class_bank_caches.append(caches)
+        else:
+            for class_id, signature in enumerate(unique):
+                layer = self._layer_cache_class.index(class_id)
+                capacity = capacities[class_id]
+                caches = {}
+                for name in self.bank_schema:
+                    source = sources[name][layer]
+                    cache = self._alloc_device_bank_cache(
+                        (capacity, *source.shape[1:]), source.dtype
+                    )
+                    caches[name] = cache
+                    self.bank_caches[f"{name}.class{class_id}"] = cache
+                self._class_bank_caches.append(caches)
         self.banks = []
         self._build_copy_plan()
         if self.prefill_overlap:
@@ -1254,6 +1396,35 @@ class OffloadMoeCache:
             return None
         return (self.slot_capacity, self._arena_step_slots)
 
+    @property
+    def class_arena_layouts(self) -> list[tuple[int, int]] | None:
+        """S12b: per-size-class ``(capacity, step_slots)``, one entry per GGUF
+        signature class, in ``_class_ranges``/``_layer_cache_class`` order.
+
+        ``None`` unless the expert arena is on AND ``set_bank_sources`` built a
+        per-class arena (a GGUF checkpoint with >1 distinct row signature). A
+        uniform-signature checkpoint never populates this -- it uses
+        :attr:`arena_layout` (the single whole-cache arena) instead, unchanged.
+        Consumed by ``engine.growable_kv``'s joint planner together with
+        :attr:`class_bank_row_bytes` and
+        ``freetoken.engine.cache_budget.joint_arena_bytes_for_usable``.
+        """
+        if not self._expert_arena_enabled or not self._class_arena_banks:
+            return None
+        return list(self._class_arena_layouts)
+
+    @property
+    def class_bank_row_bytes(self) -> list[list[int]] | None:
+        """S12b: per-size-class list of per-bank row byte counts, same class
+        order as :attr:`class_arena_layouts`. See :attr:`bank_row_bytes` for the
+        single-class counterpart."""
+        if not self._expert_arena_enabled or not self._class_arena_banks:
+            return None
+        return [
+            [meta[name]["row_bytes"] for name in self.bank_schema if name in meta]
+            for meta in self._class_arena_banks
+        ]
+
     def set_usable_slots(self, n: int) -> int:
         """Shrink or grow the usable slot count in place -- no reallocation.
 
@@ -1278,7 +1449,16 @@ class OffloadMoeCache:
         ``|arena_bytes_for_usable(new, ...) - arena_bytes_for_usable(old, ...)|``
         for the same ``arena_layout``/``bank_row_bytes`` (see
         ``freetoken.engine.cache_budget``).
+
+        S12b: a mixed-GGUF per-size-class arena (``_class_arena_banks`` populated
+        instead of ``_arena_banks``) dispatches to :meth:`set_class_usable_slots`
+        here -- the SAME entry point every caller (``engine/growable_kv.py``)
+        already uses, so those call sites need no format-specific branch. The
+        single-class body below this dispatch is completely unreached, hence
+        unchanged, whenever a class arena is active.
         """
+        if self._class_arena_banks:
+            return self.set_class_usable_slots(n)
         assert self._expert_arena_enabled, (
             "set_usable_slots requires FREETOKEN_EXPERT_ARENA=1"
         )
@@ -1377,6 +1557,139 @@ class OffloadMoeCache:
         self.usable_slots[0] = n
         self.cache_size = n
         self._sync_layer_slot_bounds()
+        return committed
+
+    def set_class_usable_slots(self, n: int) -> int:
+        """S12b joint counterpart of :meth:`set_usable_slots` for a mixed-GGUF
+        per-size-class arena: one JOINT ``usable`` cutoff swept across every
+        class's fixed, concatenated ``[begin_c, begin_c + capacity_c)`` range
+        (see :attr:`class_arena_layouts` and
+        ``cache_budget.joint_arena_bytes_for_usable``), instead of one scalar
+        per class.
+
+        This reuses the SAME ``self.usable_slots`` device tensor and the SAME
+        gated kernel bound (``off_c < usable``, already read via ``tl.load`` --
+        see ``offload_kernels._ensure_experts_sized_kernel_v2``) the single-class
+        arena uses: ``class_begin``/``class_end`` in ``_layer_slot_bounds`` stay
+        FIXED at each class's own ceiling (set once in
+        ``_set_gguf_size_class_sources`` and never touched here), so a decode
+        CUDA graph captured against them never needs to be destroyed/recaptured.
+        Only ``usable_slots`` and each class's OWN physical commit ladder move.
+
+        Per-class physical deltas: for class ``c`` with fixed ``begin_c``, its own
+        LOCAL usable count is ``clamp(usable - begin_c, 0, capacity_c)``. Whenever
+        ``n`` is a real joint boundary (:func:`cache_budget.joint_arena_boundaries`),
+        every class's derived local value is one of THAT class's own chunk
+        boundaries (either ``0``, ``capacity_c``, or the one class whose own
+        boundary ``n`` actually landed on -- see the docstring of
+        ``joint_arena_boundaries``), so each class's ``uncommit_ranges``/
+        ``commit_ranges`` call is always an exact match for a prior commit.
+        """
+        assert self._expert_arena_enabled, (
+            "set_class_usable_slots requires FREETOKEN_EXPERT_ARENA=1"
+        )
+        assert self._class_arena_banks, (
+            "set_bank_sources must build a per-class arena before "
+            "set_class_usable_slots (mixed-GGUF signatures required)"
+        )
+        current = int(self.usable_slots.item())
+        if n == current:
+            return 0
+        total = sum(capacity for capacity, _ in self._class_arena_layouts)
+        if n > total or n < 0:
+            raise ValueError(f"set_class_usable_slots target {n} is outside [0, {total}]")
+        from freetoken.engine.cache_budget import joint_arena_boundaries
+
+        capacities = [c for c, _ in self._class_arena_layouts]
+        steps = [s for _, s in self._class_arena_layouts]
+        boundaries = joint_arena_boundaries(capacities, steps)
+        if n not in boundaries:
+            raise ValueError(
+                f"set_class_usable_slots target {n} is not a joint arena boundary "
+                f"{boundaries}"
+            )
+        from freetoken.engine.cache_budget import joint_arena_floor
+
+        class_floor = 2 * self.num_experts if self.prefill_overlap else self.num_experts
+        floor = joint_arena_floor(capacities, [class_floor] * len(capacities))
+        if n < floor:
+            raise ValueError(
+                f"set_class_usable_slots target {n} is below the joint floor {floor} "
+                "(every class must simultaneously keep its own decode floor)"
+            )
+        if n < current:
+            return self._class_arena_shrink(n, current, capacities, steps)
+        return self._class_arena_grow(current, n, capacities, steps)
+
+    def _class_arena_shrink(
+        self, n: int, current: int, capacities: list[int], steps: list[int]
+    ) -> int:
+        old_ids = self.id_of_slot[n:current]
+        valid = old_ids >= 0
+        self.slot_for_id.view(-1)[old_ids[valid].long()] = -1
+        old_ids.fill_(-1)
+        self.usage[n:current].zero_()
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        self.usable_slots[0] = n
+        self.cache_size = n
+        released = 0
+        begin = 0
+        for class_id, (capacity, step) in enumerate(zip(capacities, steps)):
+            local_n = min(max(n - begin, 0), capacity)
+            local_current = min(max(current - begin, 0), capacity)
+            if local_n != local_current:
+                from freetoken.engine.cache_budget import _arena_chunk_boundaries
+
+                class_boundaries = _arena_chunk_boundaries(capacity, step)
+                idx_n = class_boundaries.index(local_n)
+                idx_current = class_boundaries.index(local_current)
+                for meta in self._class_arena_banks[class_id].values():
+                    ranges = meta["chunk_ranges"][idx_n:idx_current]
+                    if not ranges:
+                        continue
+                    nonempty = [r for r in ranges if r[1] > 0]
+                    if nonempty:
+                        meta["allocation"].uncommit_ranges(nonempty)
+                    released += sum(size for _, size in ranges)
+            begin += capacity
+        return released
+
+    def _class_arena_grow(
+        self, current: int, n: int, capacities: list[int], steps: list[int]
+    ) -> int:
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        committed = 0
+        committed_meta: list[tuple[dict, list[tuple[int, int]]]] = []
+        from freetoken.engine.cache_budget import _arena_chunk_boundaries
+
+        try:
+            begin = 0
+            for class_id, (capacity, step) in enumerate(zip(capacities, steps)):
+                local_n = min(max(n - begin, 0), capacity)
+                local_current = min(max(current - begin, 0), capacity)
+                if local_n != local_current:
+                    class_boundaries = _arena_chunk_boundaries(capacity, step)
+                    idx_current = class_boundaries.index(local_current)
+                    idx_n = class_boundaries.index(local_n)
+                    for meta in self._class_arena_banks[class_id].values():
+                        ranges = meta["chunk_ranges"][idx_current:idx_n]
+                        if not ranges:
+                            continue
+                        nonempty = [r for r in ranges if r[1] > 0]
+                        if nonempty:
+                            meta["allocation"].commit_ranges(nonempty)
+                        committed_meta.append((meta, nonempty))
+                        committed += sum(size for _, size in ranges)
+                begin += capacity
+        except Exception:
+            for meta, nonempty in reversed(committed_meta):
+                if nonempty:
+                    meta["allocation"].uncommit_ranges(nonempty)
+            raise
+        self.usable_slots[0] = n
+        self.cache_size = n
         return committed
 
     def set_alphas(

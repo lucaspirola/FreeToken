@@ -43,6 +43,29 @@ def expert_slot_signatures(
     )
 
 
+def gguf_class_capacities(
+    usable: int, layer_counts: "list[int]", num_layers: int, num_experts: int
+) -> "list[int]":
+    """Per-class decode-slot capacities for ``usable`` slots total, distributed in
+    proportion to each class's layer count (``layer_counts``, same order as the
+    classes), remainder handed out round-robin, each floored at ``num_experts``.
+
+    This is the exact arithmetic ``OffloadMoeCache._set_gguf_size_class_sources``
+    uses to split ``cache_size`` (today) across signature classes; it is factored
+    out here so the same split can be applied to other joint totals -- notably the
+    expert arena's ``slot_capacity`` ceiling (S12b) -- without the two call sites
+    drifting apart. ``sum(result) == usable`` always (assuming
+    ``usable >= len(layer_counts) * num_experts``, checked by callers).
+    """
+    remaining = usable - len(layer_counts) * num_experts
+    capacities = [
+        num_experts + remaining * count // num_layers for count in layer_counts
+    ]
+    for i in range(usable - sum(capacities)):
+        capacities[i % len(capacities)] += 1
+    return capacities
+
+
 def expert_cache_bytes(
     cache_size: int,
     *,
@@ -68,12 +91,7 @@ def expert_cache_bytes(
     if usable < len(unique) * num_experts:
         raise ValueError("mixed-size cache is below its per-class decode floor")
     counts = [signatures.count(signature) for signature in unique]
-    remaining = usable - len(unique) * num_experts
-    capacities = [
-        num_experts + remaining * count // len(signatures) for count in counts
-    ]
-    for class_id in range(usable - sum(capacities)):
-        capacities[class_id % len(capacities)] += 1
+    capacities = gguf_class_capacities(usable, counts, len(signatures), num_experts)
     max_slot_bytes = sum(max(signature[i] for signature in unique) for i in range(len(unique[0])))
     return reserve * max_slot_bytes + sum(
         capacity * sum(unique[class_id])
@@ -149,6 +167,160 @@ def usable_for_target_free_bytes(
     best = 0
     for usable in boundaries:
         freed = total_bytes - arena_bytes_for_usable(usable, capacity, step_slots, bank_row_bytes, granule)
+        if freed >= target_free_bytes:
+            best = max(best, usable)
+    return best
+
+
+def joint_arena_boundaries(
+    class_capacities: "list[int]", class_step_slots: "list[int]"
+) -> tuple[int, ...]:
+    """Valid joint ``usable`` values for S12b's one-arena-per-size-class layout,
+    sorted ascending.
+
+    Each class ``c`` owns a fixed, disjoint sub-range of the joint slot-id space:
+    ``[begin_c, begin_c + class_capacities[c])`` with ``begin_c`` the cumulative sum
+    of the earlier classes' capacities (ceilings). A single joint ``usable`` cutoff
+    sweeps across that concatenated space top-to-bottom (mirroring the existing
+    single-class ``usable_slots`` scalar the gated kernels already read via
+    ``tl.load`` -- see ``offload_kernels._ensure_experts_sized_kernel_v2``'s
+    ``off_c < usable`` mask): class ``c``'s own live usable count is
+    ``clamp(usable - begin_c, 0, class_capacities[c])``. A commit/uncommit ladder
+    can only land on one of class ``c``'s OWN chunk boundaries
+    (``_arena_chunk_boundaries(class_capacities[c], class_step_slots[c])``), so the
+    only joint values a real transition can target are ``begin_c + local_boundary``
+    for some class and one of its local boundaries -- the union computed here.
+    """
+    assert len(class_capacities) == len(class_step_slots)
+    begin = 0
+    values = {0}
+    for capacity, step in zip(class_capacities, class_step_slots):
+        for local in _arena_chunk_boundaries(capacity, step):
+            values.add(begin + local)
+        begin += capacity
+    values.add(begin)
+    return tuple(sorted(values))
+
+
+def joint_arena_bytes_for_usable(
+    usable: int,
+    class_capacities: "list[int]",
+    class_step_slots: "list[int]",
+    class_bank_row_bytes: "list[list[int]]",
+    granule: int = 2 * 1024 * 1024,
+) -> int:
+    """Bytes mapped across EVERY size class's own arena at joint cutoff ``usable``
+    (see :func:`joint_arena_boundaries`): the sum, over classes in order, of
+    :func:`arena_bytes_for_usable` applied to that class's own
+    ``clamp(usable - begin_c, 0, capacity_c)``.
+
+    With exactly one class this reduces to ``arena_bytes_for_usable(usable,
+    class_capacities[0], class_step_slots[0], class_bank_row_bytes[0])`` term for
+    term (``begin_0 == 0``), i.e. today's single-class arena byte model,
+    unchanged -- the N=1 regression this function must satisfy.
+    """
+    assert len(class_capacities) == len(class_step_slots) == len(class_bank_row_bytes)
+    begin = 0
+    total = 0
+    for capacity, step, row_bytes in zip(
+        class_capacities, class_step_slots, class_bank_row_bytes
+    ):
+        local = min(max(usable - begin, 0), capacity)
+        total += arena_bytes_for_usable(local, capacity, step, row_bytes, granule)
+        begin += capacity
+    return total
+
+
+def joint_arena_floor(
+    class_capacities: "list[int]", class_floors: "list[int]"
+) -> int:
+    """Smallest joint ``usable`` at which EVERY class simultaneously meets its own
+    floor (``>= num_experts``, or ``>= 2*num_experts`` with prefill overlap).
+
+    The joint cutoff fills classes in order (class 0 first): class ``c`` sees any
+    slots at all only once ``usable > begin_c``, and by the time class ``c+1``
+    needs any coverage, ``usable >= begin_{c+1} = begin_c + capacity_c``, i.e.
+    class ``c`` is already at its own ceiling (which is always ``>= its own
+    floor`` by construction) -- so every class before the last is automatically
+    covered once the last class is. The binding constraint is therefore the last
+    class's own floor, reached at ``sum(class_capacities[:-1]) + class_floors[-1]``.
+    """
+    assert len(class_capacities) == len(class_floors)
+    if not class_capacities:
+        return 0
+    return sum(class_capacities[:-1]) + class_floors[-1]
+
+
+def plan_joint_arena_usable(
+    budget_bytes: int,
+    kv_bytes: int,
+    class_capacities: "list[int]",
+    class_step_slots: "list[int]",
+    class_bank_row_bytes: "list[list[int]]",
+    class_floors: "list[int]",
+) -> int:
+    """Largest joint ``usable`` (see :func:`joint_arena_boundaries`) whose arena
+    bytes plus ``kv_bytes`` fit ``budget_bytes``, among values that meet every
+    class's floor (:func:`joint_arena_floor`). MoE-priority, same shape as
+    ``plan_cache_budget``'s single-class binary search: KV takes whatever the
+    largest affordable expert footprint leaves.
+
+    Raises ``ValueError`` if even the floor does not fit.
+    """
+    boundaries = joint_arena_boundaries(class_capacities, class_step_slots)
+    floor = joint_arena_floor(class_capacities, class_floors)
+    candidates = [b for b in boundaries if b >= floor]
+    if not candidates:
+        raise ValueError("no joint arena boundary meets every class floor")
+
+    def bytes_at(n: int) -> int:
+        return joint_arena_bytes_for_usable(
+            n, class_capacities, class_step_slots, class_bank_row_bytes
+        )
+
+    if bytes_at(candidates[0]) + kv_bytes > budget_bytes:
+        raise ValueError(
+            f"joint arena floor {candidates[0]} needs "
+            f"{bytes_at(candidates[0]) + kv_bytes} B > budget {budget_bytes} B"
+        )
+    lo, hi = 0, len(candidates) - 1
+    best = candidates[0]
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        n = candidates[mid]
+        if bytes_at(n) + kv_bytes <= budget_bytes:
+            best = n
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best
+
+
+def joint_usable_for_target_free_bytes(
+    target_free_bytes: int,
+    class_capacities: "list[int]",
+    class_step_slots: "list[int]",
+    class_bank_row_bytes: "list[list[int]]",
+    granule: int = 2 * 1024 * 1024,
+) -> int:
+    """Multi-class counterpart of :func:`usable_for_target_free_bytes`: the
+    largest joint boundary (:func:`joint_arena_boundaries`) such that freeing
+    everything above it (shrinking from the full joint total down to it)
+    releases at least ``target_free_bytes``. Same contract, same "closest the
+    arena can get" fallback (0) when the target is unreachable -- see that
+    function's docstring; this is exactly its shape run over
+    :func:`joint_arena_bytes_for_usable` instead of :func:`arena_bytes_for_usable`.
+    """
+    boundaries = joint_arena_boundaries(class_capacities, class_step_slots)
+    total = boundaries[-1]
+    total_bytes = joint_arena_bytes_for_usable(
+        total, class_capacities, class_step_slots, class_bank_row_bytes, granule
+    )
+    best = 0
+    for usable in boundaries:
+        freed = total_bytes - joint_arena_bytes_for_usable(
+            usable, class_capacities, class_step_slots, class_bank_row_bytes, granule
+        )
         if freed >= target_free_bytes:
             best = max(best, usable)
     return best

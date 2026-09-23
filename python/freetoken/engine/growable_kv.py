@@ -86,17 +86,155 @@ class GrowableKvController:
         granules per independent bank/layer allocation, and each allocation's row size
         rounds up to a different granule remainder (see
         ``freetoken.engine.cache_budget.arena_bytes_for_usable``).
-        """
-        from freetoken.engine.cache_budget import arena_bytes_for_usable
 
+        S12b: a mixed-GGUF cache exposes ``class_arena_layouts``/
+        ``class_bank_row_bytes`` (one arena per size class) instead of the
+        single-class ``arena_layout``/``bank_row_bytes``; ``cache_size`` is then
+        the JOINT usable cutoff swept across every class's fixed range (see
+        ``cache_budget.joint_arena_bytes_for_usable`` and
+        ``OffloadMoeCache.set_class_usable_slots``). A uniform-signature cache
+        never populates the class attributes, so this branch is a pure addition:
+        the single-class path below is untouched (the N=1 case).
+        """
         moe = self.moe
         assert moe is not None, "growable KV requires the MoE offload cache"
+        class_layouts = getattr(moe, "class_arena_layouts", None)
+        if class_layouts is not None:
+            from freetoken.engine.cache_budget import joint_arena_bytes_for_usable
+
+            capacities = [c for c, _ in class_layouts]
+            steps = [s for _, s in class_layouts]
+            row_bytes = moe.class_bank_row_bytes
+            assert row_bytes is not None
+            return joint_arena_bytes_for_usable(cache_size, capacities, steps, row_bytes)
+
+        from freetoken.engine.cache_budget import arena_bytes_for_usable
+
         bank_row_bytes = getattr(moe, "bank_row_bytes", None)
         arena_layout = getattr(moe, "arena_layout", None)
         if bank_row_bytes is None or arena_layout is None:
             raise RuntimeError(GROWABLE_KV_UNSUPPORTED)
         capacity, step_slots = arena_layout
         return arena_bytes_for_usable(cache_size, capacity, step_slots, bank_row_bytes)
+
+    def _arena_transition_bytes(self, cache_size: int) -> int:
+        """Exact GPU bytes at ``cache_size`` usable slots, for the arena
+        grow/shrink TRANSACTION methods only (``_grow_runtime_kv_arena``/
+        ``_shrink_runtime_kv_arena``).
+
+        This duplicates ``_growable_moe_bytes``'s dispatch (single-class
+        ``arena_layout``/``bank_row_bytes`` vs. the S12b joint per-class model)
+        under a DIFFERENT name on purpose: ``test_growable_kv_transaction.py``'s
+        ``_controller`` helper stubs ``_growable_moe_bytes`` to the identity
+        function for its own, unrelated planner-adjacent tests, and the
+        transaction methods must keep computing real bytes regardless -- that
+        is exactly what they read directly off ``cache_budget.arena_bytes_for_usable``
+        before this method existed (no behavior change for the N=1 case).
+        """
+        moe = self.moe
+        assert moe is not None
+        class_layouts = getattr(moe, "class_arena_layouts", None)
+        if class_layouts is not None:
+            from freetoken.engine.cache_budget import joint_arena_bytes_for_usable
+
+            capacities = [c for c, _ in class_layouts]
+            steps = [s for _, s in class_layouts]
+            row_bytes = moe.class_bank_row_bytes
+            assert row_bytes is not None
+            return joint_arena_bytes_for_usable(cache_size, capacities, steps, row_bytes)
+
+        from freetoken.engine.cache_budget import arena_bytes_for_usable
+
+        bank_row_bytes = moe.bank_row_bytes
+        assert bank_row_bytes is not None
+        capacity, step_slots = moe.arena_layout
+        return arena_bytes_for_usable(cache_size, capacity, step_slots, bank_row_bytes)
+
+    def _growable_moe_class_floor(self) -> "list[int] | None":
+        """Per-class decode floor (``num_experts``, or ``2*num_experts`` with
+        prefill overlap) for the joint planner's ``joint_arena_floor``/
+        ``plan_joint_arena_usable`` (S12b). ``None`` off the multi-class arena."""
+        moe = self.moe
+        class_layouts = getattr(moe, "class_arena_layouts", None)
+        if class_layouts is None:
+            return None
+        floor = 2 * moe.num_experts if moe.prefill_overlap else moe.num_experts
+        return [floor for _ in class_layouts]
+
+    def _growable_arena_boundaries(self) -> "list[int]":
+        """Every usable-slot value the arena can be resized to, ascending.
+
+        S12b: dispatches to the joint per-class boundaries
+        (``cache_budget.joint_arena_boundaries``) when the cache is a mixed-GGUF
+        class arena; otherwise the single-class chunk boundaries from
+        ``arena_layout``'s ``(capacity, step_slots)`` -- the N=1 case, unchanged.
+        """
+        moe = self.moe
+        assert moe is not None
+        class_layouts = getattr(moe, "class_arena_layouts", None)
+        if class_layouts is not None:
+            from freetoken.engine.cache_budget import joint_arena_boundaries
+
+            capacities = [c for c, _ in class_layouts]
+            steps = [s for _, s in class_layouts]
+            return list(joint_arena_boundaries(capacities, steps))
+
+        from freetoken.engine.cache_budget import _arena_chunk_boundaries
+
+        capacity, step_slots = moe.arena_layout
+        return list(_arena_chunk_boundaries(capacity, step_slots))
+
+    def _growable_usable_for_target_free_bytes(self, target_free_bytes: int) -> int:
+        """Largest arena boundary that frees at least ``target_free_bytes`` when
+        shrinking from full capacity down to it.
+
+        S12b: dispatches to ``cache_budget.joint_usable_for_target_free_bytes``
+        for a mixed-GGUF class arena, else ``cache_budget.usable_for_target_free_bytes``
+        against ``arena_layout``/``bank_row_bytes`` -- the N=1 case, unchanged.
+        """
+        moe = self.moe
+        assert moe is not None
+        class_layouts = getattr(moe, "class_arena_layouts", None)
+        if class_layouts is not None:
+            from freetoken.engine.cache_budget import (
+                joint_usable_for_target_free_bytes,
+            )
+
+            capacities = [c for c, _ in class_layouts]
+            steps = [s for _, s in class_layouts]
+            row_bytes = moe.class_bank_row_bytes
+            assert row_bytes is not None
+            return joint_usable_for_target_free_bytes(
+                target_free_bytes, capacities, steps, row_bytes
+            )
+
+        from freetoken.engine.cache_budget import usable_for_target_free_bytes
+
+        bank_row_bytes = moe.bank_row_bytes
+        assert bank_row_bytes is not None
+        capacity, step_slots = moe.arena_layout
+        return usable_for_target_free_bytes(
+            target_free_bytes, capacity, step_slots, bank_row_bytes
+        )
+
+    def _growable_arena_step_down(self, target_moe: int, floor: int) -> int:
+        """Next lower usable-slot target for the live-memory top-up loop.
+
+        Single-class: the exact original computation,
+        ``max(target_moe - step_slots, floor)`` (``arena_layout``'s fixed step) --
+        the N=1 case, unchanged. Class arena: chunk sizes are not uniform across
+        the joint range, so step to the next lower boundary at or above ``floor``
+        instead of subtracting a flat amount that could skip over, or land short
+        of, a real boundary.
+        """
+        moe = self.moe
+        assert moe is not None
+        class_layouts = getattr(moe, "class_arena_layouts", None)
+        if class_layouts is None:
+            _capacity, step_slots = moe.arena_layout
+            return max(target_moe - step_slots, floor)
+        lower = [b for b in self._growable_arena_boundaries() if floor <= b < target_moe]
+        return max(lower) if lower else floor
 
     def _plan_growable_kv(
         self,
@@ -142,6 +280,29 @@ class GrowableKvController:
                 "growable KV has no budget after its 256 MiB VMM safety margin"
             )
         kv_bytes = pool.mapped_bytes_for_pages(target_pages)
+
+        # S12b: mixed-GGUF per-class arena. One joint step count across every
+        # class's fixed range (see _growable_moe_bytes above), each class's own
+        # floor checked simultaneously (cache_budget.joint_arena_floor) --
+        # never a per-candidate prefill_overlap toggle, unlike the uniform-arena
+        # search below, because a size class's prefill-buffer borrow is fixed at
+        # construction (OffloadMoeCache._prefill_borrow_class), not re-derived
+        # per candidate. A uniform-signature cache never takes this branch (the
+        # N=1 case): it falls through to the untouched code below.
+        class_layouts = getattr(moe, "class_arena_layouts", None)
+        if class_layouts is not None:
+            from freetoken.engine.cache_budget import plan_joint_arena_usable
+
+            capacities = [c for c, _ in class_layouts]
+            steps = [s for _, s in class_layouts]
+            row_bytes = moe.class_bank_row_bytes
+            assert row_bytes is not None
+            floors = self._growable_moe_class_floor()
+            target_moe = plan_joint_arena_usable(
+                budget, kv_bytes, capacities, steps, row_bytes, floors
+            )
+            return target_moe, kv_bytes
+
         maximum = self.engine._growable_moe_ceiling
         desired_overlap = self.engine._growable_moe_prefill_overlap
 
@@ -236,7 +397,6 @@ class GrowableKvController:
         old_moe: int,
         old_overlap: bool,
         kv_bytes: int,
-        arena_layout: tuple[int, int],
     ) -> tuple[int, int]:
         """``grow_runtime_kv``'s transaction (design step 5).
 
@@ -249,18 +409,21 @@ class GrowableKvController:
         scheduler boundary, because
         ``set_usable_slots`` mutates slot bookkeeping with plain (non-graph)
         ops on the current stream and a shrink physically unmaps pages.
+
+        S12b: all arena byte/boundary math below goes through
+        ``_growable_moe_bytes``/``_growable_usable_for_target_free_bytes``/
+        ``_growable_arena_step_down``, which dispatch to the joint per-class
+        model for a mixed-GGUF cache and to the untouched single-class formulas
+        (``arena_layout``/``bank_row_bytes``) otherwise -- the N=1 case is byte-
+        identical to before this method stopped taking ``arena_layout`` as a
+        parameter (its old local ``capacity`` is now the arena's top boundary,
+        ``self._growable_arena_boundaries()[-1]`` -- the same value
+        ``arena_layout[0]`` gave for a single-class cache, no new attribute
+        read).
         """
         pool = self.kv_cache
         moe = self.moe
         assert moe is not None
-        from freetoken.engine.cache_budget import (
-            arena_bytes_for_usable,
-            usable_for_target_free_bytes,
-        )
-
-        capacity, step_slots = arena_layout
-        bank_row_bytes = moe.bank_row_bytes
-        assert bank_row_bytes is not None
         floor = 2 * moe.num_experts if moe.prefill_overlap else moe.num_experts
         # A bounded host mirror puts a second, higher floor under the arena:
         # every expert the GPU drops must have a pool row outside the pool's
@@ -277,7 +440,14 @@ class GrowableKvController:
         # min_gpu_slots alone already counts every resident the pool's
         # capacity guarantees coverage for.
         need = moe.residency.min_gpu_slots()
-        cov_floor = -(-need // step_slots) * step_slots
+        # S12b: a class arena has no single ``step_slots`` (each class owns its
+        # own fixed range); round to ``num_experts`` instead, matching the
+        # uniform per-class chunk granularity ``_set_gguf_size_class_sources``
+        # already builds each class's arena with. Single-class: unchanged,
+        # rounds to the real ``arena_layout`` step.
+        class_layouts = getattr(moe, "class_arena_layouts", None)
+        cov_step = moe.num_experts if class_layouts is not None else moe.arena_layout[1]
+        cov_floor = -(-need // cov_step) * cov_step
         floor = max(floor, cov_floor)
         runner_before = self.engine.graph_runner
         target_moe = old_moe
@@ -299,18 +469,13 @@ class GrowableKvController:
                 # already given up between capacity and old_moe (the "deficit")
                 # to translate "extra_needed more, from here" into "this much,
                 # from capacity" before calling it.
-                capacity_bytes = arena_bytes_for_usable(
-                    capacity, capacity, step_slots, bank_row_bytes
+                capacity_bytes = self._arena_transition_bytes(
+                    self._growable_arena_boundaries()[-1]
                 )
-                old_bytes = arena_bytes_for_usable(
-                    old_moe, capacity, step_slots, bank_row_bytes
-                )
+                old_bytes = self._arena_transition_bytes(old_moe)
                 deficit_from_capacity = capacity_bytes - old_bytes
-                target_moe = usable_for_target_free_bytes(
-                    extra_needed + deficit_from_capacity,
-                    capacity,
-                    step_slots,
-                    bank_row_bytes,
+                target_moe = self._growable_usable_for_target_free_bytes(
+                    extra_needed + deficit_from_capacity
                 )
                 target_moe = max(target_moe, floor)
                 if target_moe >= old_moe:
@@ -361,7 +526,7 @@ class GrowableKvController:
                 # of refusing the commit with releasable rows still sitting
                 # above the floor.
                 while live_free < required_free and target_moe > floor:
-                    target_moe = max(target_moe - step_slots, floor)
+                    target_moe = self._growable_arena_step_down(target_moe, floor)
                     released_bytes += moe.set_usable_slots(target_moe)
                     object.__setattr__(self.engine.config, "moe_cache_size", target_moe)
                     live_free = max(live_free, live_free_before + released_bytes)
@@ -422,41 +587,32 @@ class GrowableKvController:
         old_overlap: bool,
         kv_bytes: int,
         old_kv_bytes: int,
-        arena_layout: tuple[int, int],
     ) -> tuple[int, int]:
         """``shrink_runtime_kv``'s expert-arena branch (design step 5): regrow
         experts with ``set_usable_slots`` up to the largest chunk boundary the
         released KV bytes fund. Bank addresses never move (see
-        ``_grow_runtime_kv_arena`` for the shared reasoning)."""
+        ``_grow_runtime_kv_arena`` for the shared reasoning).
+
+        S12b: boundary enumeration and byte pricing go through
+        ``_growable_arena_boundaries``/``_growable_moe_bytes``, which dispatch to
+        the joint per-class model for a mixed-GGUF cache and to the untouched
+        single-class formulas otherwise -- the N=1 case is byte-identical to
+        before this method stopped taking ``arena_layout`` as a parameter.
+        """
         pool = self.kv_cache
         moe = self.moe
         assert moe is not None
-        from freetoken.engine.cache_budget import (
-            _arena_chunk_boundaries,
-            arena_bytes_for_usable,
-        )
-
-        capacity, step_slots = arena_layout
-        bank_row_bytes = moe.bank_row_bytes
-        assert bank_row_bytes is not None
         runner_before = self.engine.graph_runner
         target_moe = old_moe
         try:
             pool.decommit_pages(target_pages)
             released = old_kv_bytes - kv_bytes
-            old_bytes = arena_bytes_for_usable(
-                old_moe, capacity, step_slots, bank_row_bytes
-            )
+            old_bytes = self._arena_transition_bytes(old_moe)
             budget_bytes = old_bytes + released
-            for boundary in _arena_chunk_boundaries(capacity, step_slots):
+            for boundary in self._growable_arena_boundaries():
                 if boundary < old_moe:
                     continue
-                if (
-                    arena_bytes_for_usable(
-                        boundary, capacity, step_slots, bank_row_bytes
-                    )
-                    <= budget_bytes
-                ):
+                if self._arena_transition_bytes(boundary) <= budget_bytes:
                     target_moe = boundary
             if target_moe != old_moe:
                 moe.set_usable_slots(target_moe)
@@ -503,8 +659,12 @@ class GrowableKvController:
 
         moe = self.moe
         assert moe is not None, "growable KV requires the MoE offload cache"
-        arena_layout = moe.arena_layout
-        if arena_layout is None:
+        # S12b: a mixed-GGUF cache has no single arena_layout, only
+        # class_arena_layouts (one arena per size class) -- accept either.
+        if (
+            getattr(moe, "arena_layout", None) is None
+            and getattr(moe, "class_arena_layouts", None) is None
+        ):
             raise RuntimeError(GROWABLE_KV_UNSUPPORTED)
         old_moe = moe.cache_size
         old_overlap = moe.prefill_overlap
@@ -521,7 +681,6 @@ class GrowableKvController:
             old_moe=old_moe,
             old_overlap=old_overlap,
             kv_bytes=kv_bytes,
-            arena_layout=arena_layout,
         )
 
     @torch.inference_mode()
@@ -540,8 +699,12 @@ class GrowableKvController:
 
         moe = self.moe
         assert moe is not None, "growable KV requires the MoE offload cache"
-        arena_layout = moe.arena_layout
-        if arena_layout is None:
+        # S12b: accept either the single-class arena_layout or the mixed-GGUF
+        # class_arena_layouts (one arena per size class).
+        if (
+            getattr(moe, "arena_layout", None) is None
+            and getattr(moe, "class_arena_layouts", None) is None
+        ):
             raise RuntimeError(GROWABLE_KV_UNSUPPORTED)
         old_moe = moe.cache_size
         old_overlap = moe.prefill_overlap
@@ -558,5 +721,4 @@ class GrowableKvController:
             old_overlap=old_overlap,
             kv_bytes=kv_bytes,
             old_kv_bytes=old_kv_bytes,
-            arena_layout=arena_layout,
         )
