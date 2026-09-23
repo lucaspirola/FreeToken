@@ -1076,13 +1076,21 @@ class MirrorResidency:
             for name, (tail, dtype) in shapes.items()
         }
         per_slot = expert_bytes_per_slot(sources)
-        from freetoken.engine.growable_kv import VMM_COMMIT_CUSHION_BYTES
+        from freetoken.engine.growable_kv import (
+            VMM_COMMIT_CUSHION_BYTES,
+            growable_headroom_bytes,
+        )
         from freetoken.kvcache.linear_state_pool import state_pool_bytes
 
         # The SAME budget arithmetic as GrowableKV._plan_growable_kv, which
         # decides the arena's real size at the ceiling once the cache exists:
         # the KV family's fixed cost PLUS the sibling linear-state pool, minus
-        # the VMM commit cushion. This estimate once omitted the last two and
+        # the growable headroom (growable_headroom_bytes: the VMM commit cushion
+        # or one prefill chunk's transient, whichever is larger -- priced here
+        # from the engine's pre-measurement estimate, since the pool must exist
+        # before a forward can measure it; Engine._validate_growable_ceiling
+        # re-checks the pool against the measured value). This estimate once
+        # omitted the state pool and the cushion and
         # a conservative prefill-buffer term happened to cover them on
         # Nemotron (floor 1440 vs plan 1552); on Ornith (30 GatedDeltaNet
         # layers x 13 state slots = 0.80 GiB of state) it did not: the pool
@@ -1095,7 +1103,7 @@ class MirrorResidency:
             engine._baseline_free,
             engine._weights_bytes,
             fixed_cache_size,
-        ) - VMM_COMMIT_CUSHION_BYTES
+        ) - growable_headroom_bytes(getattr(engine, "prefill_transient_bytes", 0))
         # The mirror is built before the KV pool exists, so take the ceiling
         # from config (--num-tokens / --num-pages, the growable KV target)
         # rather than self.num_pages, which is set later.
