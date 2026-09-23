@@ -116,3 +116,12 @@ Credentials: none found on disk for vast.ai or Spheron. The only candidate is th
   - Their curve is flat from 5.0 to 2.5 bpw (85.8 -> 83.7%) after a cliff from 8.0 (96.4%). That points to a structural error floor (routing flips, fp16 router weights or activations, MoVA), not weight precision.
   - Decide after OUR validation run, whose per-layer routing agreement and KL can locate the floor. If it is the router, keeping routers/value experts in higher precision may remove it.
   - Owner's call pending: continue after the validation, or drop.
+- Owner 2026-09-23: "most likely vcruz305 gave us a warning of where to look and maybe dodge a problem. are we ready for that? let's beat this guy? you tell me."
+  - **Target:** beat vcruz305 4.0 bpw (84.81% top-1, mean KLD 0.108, p99 0.909 vs BF16 with fp32 activations, held-out text) at <= ~20 GB. Stretch: approach their 8 bpw (96.4%) at ~4.5 bpw.
+  - **Plan** [agent]:
+    1. The validation run, now with a per-layer error-growth and routing diagnostic (which layer and component makes the error).
+    2. Fix the router storage in our patch: the MoE router is stored fp16 today; store it bf16/fp32 as in the checkpoint.
+    3. exllamav3's own per-tensor sensitivity pipeline (`doc/optimize.md`): sc_trace (self-sampled in-domain trace) -> sc_measure (noise injection into the UNQUANTIZED model, KLD) -> sc_optimize (greedy per-tensor bit allocation) -> `convert.py -rcp recipe.yaml [-cd cal_trace.safetensors]`. Upstream warns it is "untested on sparse models", and MoVA is new to it.
+    4. Evaluate on wikitext (comparable with vcruz305) AND on a disjoint self-sampled trace (the deployment metric; optimize.md argues raw web text misjudges reasoning models).
+  - **Readiness:** the patch, the conversion pipeline (47 min, ~$2.2) and the validation script exist. Unknowns: sc_* on MoE + MoVA; whether the floor is intrinsic to the model.
+  - **Extra spend estimate** beyond the approved validation: ~$10-15 (sensitivity measurement on BF16 ~1-2 h + one recipe conversion + one validation). Awaiting the owner's approval.
