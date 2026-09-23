@@ -265,6 +265,14 @@ Phase D  (parallel, no GPU)
   lane 3  S12a (only after S8 and checkpoint 2; yields to any Phase C/D GPU need)
 
 Phase E  deferred: decided on S9's numbers, after D.
+         DECIDED 2026-09-23 (owner's goal: "decide E after Phase D from S9's numbers"): NOT NOW.
+         S9 numbers: sync-check at S0 and at the end of Phase C: 0 conflicting files, 0 silent
+         fork-symbol losses, 0 behind (origin/main still cab110e, 0 upstream commits since
+         the merge); upstream touched scheduler/ + kvcache/ in 6 commits in the month before
+         S0; our fork's diff there is ~7,900 inserted lines. A re-port costs a rewrite of that
+         and a re-measure of every record, against a sync tax that is currently zero.
+         Trigger to revisit: a sync-check that reports a conflict or silent loss in
+         scheduler/ or kvcache/, or upstream scheduler activity above its current rate.
 ```
 
 Phase A may run after S0 instead if the owner wants the sync proven first; nothing in A changes the conflict count. Nothing in S0–S11/S13 waits on S12.
