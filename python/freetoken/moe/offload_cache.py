@@ -2031,9 +2031,19 @@ class OffloadMoeCache:
             )
         if self.bank_caches or self.residency.bounded:
             raise RuntimeError("mirror pool must attach to a fresh cache")
-        if (pool.num_layers != self.num_layers or pool.num_experts != self.num_experts
-                or tuple(pool.schema_order) != tuple(self.bank_schema)):
+        if pool.num_layers != self.num_layers or pool.num_experts != self.num_experts:
             raise ValueError("mirror pool geometry/schema does not match cache")
+        # Same bank names (the common case: this cache's loader and the pool
+        # both come from the fixed nvfp4/gguf name tuples) needs nothing more
+        # than the identity mapping resolve_cache_schema returns. A
+        # kernel-method model's cache (self.layout is its method's own
+        # BankSpec dict) may bind the exact same raw NVFP4 row bytes to
+        # different bank NAMES -- adopt_cache_schema renames the pool's banks
+        # to match ONLY after proving, position for position, that every
+        # cache bank is the same (shape, dtype) as this pool's raw row for
+        # that role; otherwise it raises naming the mismatched bank and why
+        # (see moe/mirror_pool.py:resolve_cache_schema).
+        pool.adopt_cache_schema(self.bank_schema, self.layout)
         residency.cache = self
         self.bank_sources = {name: list(pool.sources[name]) for name in self.bank_schema}
         self._variable_bank_rows.clear()

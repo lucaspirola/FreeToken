@@ -185,6 +185,82 @@ def plan_capacity(num_layers: int, num_experts: int, final_gpu_slots: int,
     return min(max(total - final_gpu_slots, 0) + reserve, total)
 
 
+def resolve_cache_schema(pool, bank_schema: tuple, layout) -> dict:
+    """The {cache_bank_name: pool_bank_name} mapping this pool can serve ``bank_schema``
+    under, or a ``ValueError`` naming why it cannot.
+
+    The common case -- a checkpoint's own loader and this pool agree on names,
+    because both come from the fixed ``nvfp4``/``gguf`` bank-name tuples in
+    ``offload_cache._BANK_SCHEMAS`` -- needs nothing more than identity and is
+    returned first, unconditionally, so a model on that path (Nemotron-H,
+    every GGUF family) is byte-for-byte unaffected by anything below.
+
+    A kernel-method model (``layout`` is the method's own ``BankSpec`` dict,
+    ``offload_cache.OffloadMoeCache.layout``) may bind its NVFP4 banks to
+    different NAMES for the exact same raw ModelOpt row bytes -- the Triton
+    inline-dequant kernel calls its packed-weight bank ``"gate_up"``,
+    ``nvfp4_bank_shapes`` (what this pool reads off disk) calls the same bytes
+    ``"gate_up_packed"``. Rather than special-case that one kernel by name
+    (which would fail the next kernel-method model that reuses the same raw
+    layout under yet another name, or silently "match" one that does not),
+    this generalizes on the one thing that actually decides whether a GPU miss
+    can be served from this pool's rows: position for position, is the cache's
+    non-resident bank the same ``(shape, dtype)`` as the pool's own raw NVFP4
+    row for that role? The exact byte content is not re-derived here -- it is
+    proven once per gating/shard combination this repo ships, in
+    tests/moe/test_mirror_pool.py, against the real kernel's own ``pack()`` --
+    but the shape/dtype match is the runtime-checkable proxy for it, and any
+    layout that fails it (Marlin, b12x: pre-tiled for their GEMM, globals
+    folded into a GPU-resident alpha instead of a bank, so the bank *count*
+    already differs) is refused by name instead of silently mismatched.
+    """
+    own = tuple(pool.schema_order)
+    target = tuple(bank_schema)
+    if own == target:
+        return dict(zip(own, own))
+    if pool.quant_format != "nvfp4":
+        raise ValueError(
+            f"mirror pool geometry/schema does not match cache: this "
+            f"{pool.quant_format!r} pool serves banks {own}, the cache "
+            f"expects {target}"
+        )
+    if layout is None:
+        raise ValueError(
+            "mirror pool geometry/schema does not match cache: this NVFP4 "
+            f"pool serves banks {own}, the cache expects {target} with no "
+            "kernel layout to check them against (a kernel-method model must "
+            "pass its method's layout() into the cache)"
+        )
+    if len(own) != len(target):
+        raise ValueError(
+            f"mirror pool cannot serve this cache's {len(target)}-bank "
+            f"layout {target} with its {len(own)} raw NVFP4 banks {own} -- "
+            "a different bank count is not a raw checkpoint-row layout (e.g. "
+            "Marlin/b12x pre-tile the weights and fold the global scale into "
+            "a GPU-resident alpha instead of a bank)"
+        )
+    mapping = {}
+    for pool_name, cache_name in zip(own, target):
+        want_tail, want_dtype = pool.shapes[pool_name]
+        spec = layout.get(cache_name)
+        if spec is None or spec.resident:
+            raise ValueError(
+                f"mirror pool cannot serve cache bank {cache_name!r}: it is "
+                "not a non-resident row bank in this layout"
+            )
+        if tuple(spec.shape) != tuple(want_tail) or spec.dtype != want_dtype:
+            raise ValueError(
+                f"mirror pool cannot serve cache bank {cache_name!r}: its "
+                f"layout gives shape {tuple(spec.shape)} dtype {spec.dtype}, "
+                f"but the raw NVFP4 checkpoint row for this role is "
+                f"{tuple(want_tail)} {want_dtype} -- {cache_name!r} is not a "
+                "raw checkpoint row (pre-tiled kernel banks, e.g. Marlin, "
+                "cannot be served by the mirror pool)"
+            )
+        mapping[cache_name] = pool_name
+    return mapping
+
+
 class MirrorExpertPool:
     """Fixed-size pinned host mirror; swaps rows with the GPU cache, never disk."""
 
@@ -356,6 +432,26 @@ class MirrorExpertPool:
             else max(self.total - self.capacity + self.reserve_rows, 0)
         )
 
+    def adopt_cache_schema(self, bank_schema, layout) -> None:
+        """Rename this pool's banks to the attaching cache's names, if it can serve them.
+
+        Called once, from ``OffloadMoeCache.attach_residency``, with the cache's
+        own final ``bank_schema``/``layout``. ``resolve_cache_schema`` decides
+        whether this pool's raw NVFP4 rows are what ``bank_schema`` names (it
+        raises ``ValueError`` naming the exact mismatch otherwise); a positive
+        answer is metadata-only here -- ``self.banks``' tensors, and every byte
+        already read into them, move to their new dict key unchanged, so a
+        rename can never be the reason a served row differs from what
+        ``load_initial``/``_read_row`` wrote.
+        """
+        mapping = resolve_cache_schema(self, bank_schema, layout)
+        if tuple(bank_schema) == tuple(self.schema_order):
+            return  # already named exactly as the cache expects
+        self.banks = {name: self.banks[mapping[name]] for name in bank_schema}
+        self.sources = {name: self.sources[mapping[name]] for name in bank_schema}
+        self.shapes = {name: self.shapes[mapping[name]] for name in bank_schema}
+        self.row_bytes = {name: self.row_bytes[mapping[name]] for name in bank_schema}
+        self.schema_order = tuple(bank_schema)
 
     # ------------------------------------------------------------------
     # Checkpoint scan + startup fill (the only disk contact)

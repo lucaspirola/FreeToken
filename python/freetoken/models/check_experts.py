@@ -130,6 +130,7 @@ class ExpertConformanceReport:
     cache_type: str
     pin_prefix_honoured: bool
     arena_supports_format: bool
+    mirror_status: str
     layout: Nvfp4RowLayout = field(repr=False)
 
     def render(self) -> str:
@@ -163,6 +164,7 @@ class ExpertConformanceReport:
             "model with a linear-attention group)",
             f"    --pin-prefix-*     {'honoured' if self.pin_prefix_honoured else 'ignored (cache is not hybrid_radix)'}",
             f"    expert arena       {'supports' if self.arena_supports_format else 'does NOT support'} nvfp4",
+            f"    --expert-residency mirror  {self.mirror_status}",
         ]
         return "\n".join(lines)
 
@@ -629,6 +631,27 @@ def _check_nvfp4_experts(hf_config, model_path: str) -> ExpertConformanceReport:
         layout.bank_shapes
     )
 
+    # S12d: the bounded mirror pool (moe/mirror_pool.py) reads exactly this
+    # checkpoint's raw ModelOpt NVFP4 rows -- the same layout just verified
+    # tensor by tensor above -- and (offload_cache.attach_residency ->
+    # MirrorExpertPool.adopt_cache_schema / resolve_cache_schema) can rename
+    # its banks to match ANY kernel's names, as long as that kernel's
+    # non-resident banks are the same (shape, dtype) per role, position for
+    # position. Every kernel-method model built on these rows qualifies
+    # generically -- no per-model name list to keep in sync (G4) -- but only
+    # under a backend that keeps the rows raw: Marlin and flashinfer b12x
+    # pre-tile them for their own GEMM and fold the global scale into a
+    # GPU-resident alpha (a different bank count), so ``--nvfp4-backend
+    # triton`` (the mirror residency gate already requires it,
+    # moe/residency.py:build_residency) is the one this checkpoint's rows can
+    # actually be mirrored under; this check has no GPU and cannot itself run
+    # ``select_nvfp4_backend``, so it names the requirement rather than a verdict.
+    mirror_status = (
+        "mirror OK for these raw NVFP4 rows, served ONLY under "
+        "--nvfp4-backend triton (Marlin/b12x pre-tile the banks and are "
+        "refused by name at attach time -- moe/mirror_pool.py:resolve_cache_schema)"
+    )
+
     return ExpertConformanceReport(
         model_path=model_path,
         architecture=architecture,
@@ -647,6 +670,7 @@ def _check_nvfp4_experts(hf_config, model_path: str) -> ExpertConformanceReport:
         cache_type=cache_type,
         pin_prefix_honoured=pin_prefix_honoured,
         arena_supports_format=arena_supports_format,
+        mirror_status=mirror_status,
         layout=layout,
     )
 
