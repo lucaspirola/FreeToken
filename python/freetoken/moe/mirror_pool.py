@@ -248,6 +248,12 @@ def resolve_cache_schema(pool, bank_schema: tuple, layout) -> dict:
                 f"mirror pool cannot serve cache bank {cache_name!r}: it is "
                 "not a non-resident row bank in this layout"
             )
+        if not getattr(spec, "raw_row", False):
+            raise ValueError(
+                f"mirror pool cannot serve cache bank {cache_name!r}: the kernel "
+                "does not declare it a raw checkpoint row (BankSpec.raw_row), and "
+                "a matching shape alone does not prove the bytes are the same"
+            )
         if tuple(spec.shape) != tuple(want_tail) or spec.dtype != want_dtype:
             raise ValueError(
                 f"mirror pool cannot serve cache bank {cache_name!r}: its "

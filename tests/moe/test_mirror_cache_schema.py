@@ -78,15 +78,27 @@ def test_wrong_shape_bank_is_named_in_the_refusal():
     bank and both shapes, not just say "mismatch"."""
     pool = _fake_pool(gated=True)
     layout = {
-        "gate_up": BankSpec((2 * I, H // 2), torch.uint8),
-        "gate_up_scale": BankSpec((2 * I, H // 16), torch.float8_e4m3fn),
-        "gate_up_global": BankSpec((2 * I,), torch.float16),
-        "down": BankSpec((H, I // 2), torch.uint8),
-        "down_scale": BankSpec((H, I // 16), torch.float8_e4m3fn),
+        "gate_up": BankSpec((2 * I, H // 2), torch.uint8, raw_row=True),
+        "gate_up_scale": BankSpec((2 * I, H // 16), torch.float8_e4m3fn, raw_row=True),
+        "gate_up_global": BankSpec((2 * I,), torch.float16, raw_row=True),
+        "down": BankSpec((H, I // 2), torch.uint8, raw_row=True),
+        "down_scale": BankSpec((H, I // 16), torch.float8_e4m3fn, raw_row=True),
         # wrong dtype for the global scale bank
-        "down_global": BankSpec((H,), torch.bfloat16),
+        "down_global": BankSpec((H,), torch.bfloat16, raw_row=True),
     }
     with pytest.raises(ValueError, match="down_global"):
+        resolve_cache_schema(pool, tuple(layout), layout)
+
+
+def test_same_shapes_without_a_raw_row_claim_are_refused():
+    """Equal shapes and dtypes do not prove equal bytes (a swizzled tile can keep its
+    shape). A layout whose kernel does not declare BankSpec.raw_row is refused even
+    when every bank's geometry matches the pool's raw rows."""
+    pool = _fake_pool(gated=True)
+    cfg = MoEConfig(num_experts=4, hidden=H, intermediate=I, top_k=1)
+    layout = {name: BankSpec(spec.shape, spec.dtype)
+              for name, spec in TritonNvfp4MoEKernel().layout(cfg).items()}
+    with pytest.raises(ValueError, match="does not declare it a raw checkpoint row"):
         resolve_cache_schema(pool, tuple(layout), layout)
 
 
