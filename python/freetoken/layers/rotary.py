@@ -114,9 +114,13 @@ def _mrope_torch(
     sin = rows[:, half:].unsqueeze(1).float()
     for t, heads in ((query, query.shape[1] // head_size), (key, key.shape[1] // head_size)):
         v = t.view(nnz, heads, head_size)
+        # .float() is a no-op view for fp32 inputs: compute both halves before writing either,
+        # or the second half would read the already-rotated first half.
         lo, hi = v[..., :half].float(), v[..., half:rotary_dim].float()
-        v[..., :half] = (lo * cos - hi * sin).to(v.dtype)
-        v[..., half:rotary_dim] = (hi * cos + lo * sin).to(v.dtype)
+        new_lo = lo * cos - hi * sin
+        new_hi = hi * cos + lo * sin
+        v[..., :half] = new_lo.to(v.dtype)
+        v[..., half:rotary_dim] = new_hi.to(v.dtype)
 
 
 MROPE_LAYOUTS = ("contiguous", "interleaved", "interleaved_glm")
