@@ -1,0 +1,162 @@
+"""EXL3 routed experts: the forward over the six raw-row banks (``models/exl3_banks.py``).
+
+Per route ``p`` (token ``p // top_k``, expert ``ids[p]``)::
+
+    xh   = H(x * gate_up_suh[e])                  both parts, [2, P, H] fp16  (had_rows)
+    g    = [gate | up] = gemm/gemv(xh, gate_up)   [P, 2I]
+    a    = act(gate) * up                         [P, I]
+    ah   = H(a * down_suh[e])                     [1, P, I]
+    o    = gemm/gemv(ah, down)                    [P, H]
+    out  = sum_k w[t, k] * o[t * top_k + k]
+
+Decode (``is_prefill=False``): ``ids`` are slot ids into the GPU cache's ``[S, ...]`` views and
+every step is a fixed-shape launch, so it records in a CUDA graph. Prefill: ``ids`` are expert
+ids into ``[E, ...]`` views; routes are sorted per expert (``moe_align_block_size``) and run
+through the tl.dot GEMM, a chunk of tokens at a time to bound the ``[2, P, H]`` rotation buffer.
+"""
+
+from __future__ import annotations
+
+import functools
+
+import torch
+
+from freetoken.kernel.triton.exl3 import Exl3Parts, exl3_gemm, exl3_gemv, had_rows
+
+# tokens per prefill chunk: xh is 2 * chunk * top_k * H fp16 (64 MiB for 1024 x 8 x 2048)
+PREFILL_CHUNK_TOKENS = 1024
+
+
+@functools.lru_cache(maxsize=16)
+def expert_parts(hidden: int, inter: int, bits: int, codebook: str, device: torch.device) -> tuple[Exl3Parts, Exl3Parts]:
+    """Part tables of one expert: gate_up (two parts ``[H -> I]``, suh parts H apart) and down (``[I -> H]``)."""
+    gate_up = Exl3Parts.build(hidden, (inter, inter), bits, codebook, device, suh_part_stride=hidden)
+    down = Exl3Parts.build(inter, (hidden,), bits, codebook, device)
+    return gate_up, down
+
+
+def _combine(o: torch.Tensor, topk_weights: torch.Tensor, tokens: int, top_k: int, dtype: torch.dtype) -> torch.Tensor:
+    w = topk_weights.reshape(tokens, top_k, 1).to(torch.float32)
+    return (o.view(tokens, top_k, -1).to(torch.float32) * w).sum(dim=1).to(dtype)
+
+
+def _act(g: torch.Tensor, activation: str, alpha: float, limit: float) -> torch.Tensor:
+    from freetoken.layers.activation import gated_act_and_mul
+
+    a = torch.empty((g.shape[0], g.shape[1] // 2), dtype=g.dtype, device=g.device)
+    gated_act_and_mul(activation, g, a, alpha=alpha, limit=limit)
+    return a
+
+
+def _decode(x, banks, topk_weights, ids, top_k, parts, activation, alpha, limit):
+    from freetoken.layers.quantization.linear.exl3 import pick_split_k
+
+    gu_tr, gu_suh, gu_svh, dn_tr, dn_suh, dn_svh = banks
+    gu, dn = parts
+    tokens = x.shape[0]
+    routes = tokens * top_k
+    dev = x.device
+    xh = had_rows(x, gu_suh, gu, src_div=top_k, experts=ids, suh_expert_stride=gu_suh.stride(0))
+    split = pick_split_k(routes, gu.n // 128, gu.k, dev)
+    g = torch.zeros((routes, gu.n), dtype=torch.float32, device=dev)
+    exl3_gemv(xh, gu_tr, gu_svh, gu, out=g, experts=ids, tr_expert_stride=gu_tr.stride(0) // 2,
+              svh_expert_stride=gu_svh.stride(0), split_k=split)
+    a = _act(g.to(x.dtype), activation, alpha, limit)
+    ah = had_rows(a, dn_suh, dn, experts=ids, suh_expert_stride=dn_suh.stride(0))
+    split = pick_split_k(routes, dn.n // 128, dn.k, dev)
+    o = torch.zeros((routes, dn.n), dtype=torch.float32, device=dev)
+    exl3_gemv(ah, dn_tr, dn_svh, dn, out=o, experts=ids, tr_expert_stride=dn_tr.stride(0) // 2,
+              svh_expert_stride=dn_svh.stride(0), split_k=split)
+    return _combine(o, topk_weights, tokens, top_k, x.dtype)
+
+
+def _prefill_block_m(routes: int, num_experts: int) -> int:
+    per_expert = routes / max(num_experts, 1)
+    return 16 if per_expert < 16 else (32 if per_expert < 64 else 64)
+
+
+def _prefill(x, banks, topk_weights, topk_ids, top_k, parts, activation, alpha, limit, num_experts):
+    from freetoken.moe.fused import moe_align_block_size
+
+    gu_tr, gu_suh, gu_svh, dn_tr, dn_suh, dn_svh = banks
+    gu, dn = parts
+    out = torch.empty_like(x)
+    for t0 in range(0, x.shape[0], PREFILL_CHUNK_TOKENS):
+        t1 = min(t0 + PREFILL_CHUNK_TOKENS, x.shape[0])
+        xc = x[t0:t1]
+        ids2 = topk_ids[t0:t1]
+        ids = ids2.reshape(-1).contiguous()
+        routes = ids.numel()
+        bm = _prefill_block_m(routes, num_experts)
+        sorted_ids, expert_ids, npad = moe_align_block_size(ids2.contiguous(), bm, num_experts)
+        sort = dict(sorted_ids=sorted_ids, expert_ids=expert_ids, num_post_pad=npad, block_m=bm)
+        xh = had_rows(xc, gu_suh, gu, src_div=top_k, experts=ids, suh_expert_stride=gu_suh.stride(0))
+        g = torch.empty((routes, gu.n), dtype=x.dtype, device=x.device)
+        exl3_gemm(xh, gu_tr, gu_svh, gu, out=g, tr_expert_stride=gu_tr.stride(0) // 2, svh_expert_stride=gu_svh.stride(0), **sort)
+        del xh
+        a = _act(g, activation, alpha, limit)
+        del g
+        ah = had_rows(a, dn_suh, dn, experts=ids, suh_expert_stride=dn_suh.stride(0))
+        o = torch.empty((routes, dn.n), dtype=x.dtype, device=x.device)
+        exl3_gemm(ah, dn_tr, dn_svh, dn, out=o, tr_expert_stride=dn_tr.stride(0) // 2, svh_expert_stride=dn_svh.stride(0), **sort)
+        out[t0:t1] = _combine(o, topk_weights[t0:t1], t1 - t0, top_k, x.dtype)
+    return out
+
+
+def fused_experts_exl3(
+    x: torch.Tensor,
+    banks: tuple[torch.Tensor, ...],
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    *,
+    bits: int,
+    codebook: str,
+    activation: str = "silu",
+    alpha: float = 1.0,
+    limit: float = float("inf"),
+    is_prefill: bool,
+    num_experts: int | None = None,
+) -> torch.Tensor:
+    """``banks`` = (gate_up_trellis, gate_up_suh, gate_up_svh, down_trellis, down_suh, down_svh),
+    each ``[S or E, ...]`` with the expert dim outermost; see the module docstring."""
+    if x.stride(-1) != 1 or x.stride(0) != x.shape[1]:
+        x = x.contiguous()
+    top_k = topk_ids.shape[1]
+    hidden = x.shape[1]
+    inter = banks[4].shape[-1]
+    parts = expert_parts(hidden, inter, bits, codebook, x.device)
+    if x.shape[0] == 0:
+        return torch.empty_like(x)
+    if is_prefill:
+        if num_experts is None:
+            raise ValueError("EXL3 prefill needs the view's expert count")
+        return _prefill(x, banks, topk_weights, topk_ids, top_k, parts, activation, alpha, limit, num_experts)
+    ids = topk_ids.reshape(-1).contiguous()
+    return _decode(x, banks, topk_weights, ids, top_k, parts, activation, alpha, limit)
+
+
+def fused_experts_exl3_reference(x, banks, topk_weights, topk_ids, *, codebook: str, activation: str = "silu") -> torch.Tensor:
+    """Torch reference (decode by ``linear_reference``, fp32): for the tests only."""
+    import torch.nn.functional as F
+
+    from freetoken.kernel.triton.exl3 import linear_reference
+
+    gu_tr, gu_suh, gu_svh, dn_tr, dn_suh, dn_svh = banks
+    assert activation == "silu"
+    tokens, top_k = topk_ids.shape
+    inter = dn_suh.shape[-1]
+    out = torch.zeros((tokens, x.shape[1]), dtype=torch.float32, device=x.device)
+    for t in range(tokens):
+        for k in range(top_k):
+            e = int(topk_ids[t, k])
+            xi = x[t : t + 1].float()
+            gate = linear_reference(xi, gu_tr[e, 0], gu_suh[e, 0], gu_svh[e, 0], codebook).float()
+            up = linear_reference(xi, gu_tr[e, 1], gu_suh[e, 1], gu_svh[e, 1], codebook).float()
+            a = F.silu(gate) * up
+            o = linear_reference(a, dn_tr[e], dn_suh[e], dn_svh[e], codebook).float()
+            out[t] += float(topk_weights[t, k]) * o[0]
+    assert inter == gu_svh.shape[-1]
+    return out.to(x.dtype)
+
+
+__all__ = ["PREFILL_CHUNK_TOKENS", "expert_parts", "fused_experts_exl3", "fused_experts_exl3_reference"]
