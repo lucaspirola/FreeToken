@@ -1,0 +1,55 @@
+[s12c-guard-1m] starting: model=NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 rows=-1 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/reorg@7a09bd3 venv=/home/lucas/ai/FreeToken/.venv
+Running as unit: ft-measure-s12c-guard-1m.service; invocation ID: b3194f6eb0284f9aa1d17aa9caf2ed30
+[s12c-guard-1m] ready after 77s
+Sep 23 09:54:15 TESSERACT serve-default.sh[638751]: [2026-09-23|09:54:15|core|rank=0] INFO     Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode graphs enabled, prefill overlap on (layers assembled from resident slots + pool rows, no disk)
+Sep 23 09:54:15 TESSERACT serve-default.sh[638751]: [2026-09-23|09:54:15|core|rank=0] INFO     Mirror pool: reserve resolved to 256 rows (FREETOKEN_MIRROR_RESERVE_ROWS='256')
+Sep 23 09:54:38 TESSERACT serve-default.sh[638751]: [2026-09-23|09:54:38|core|rank=0] INFO     Mirror pool: 1765 rows pinned (9.24 GiB), 771 cover the complement of 2173 GPU residents, 256 reserved, up to 738 duplicates (a duplicate makes its expert's next eviction free of any host traffic)
+Sep 23 09:54:38 TESSERACT serve-default.sh[638751]: [2026-09-23|09:54:38|core|rank=0] INFO     Mirror pool: the coverage floor is 1440 of 2173 arena slots, leaving 733 slots (3.84 GiB) the growable KV may still take
+Sep 23 09:54:38 TESSERACT serve-default.sh[638751]: [2026-09-23|09:54:38|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+[s12c-guard-1m] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8014, "ttft_s": 0.25, "prefill_tok_s": 31503.0, "gen_tokens": 127, "decode_tok_s": 166.1, "total_s": 1.0}
+{"target": 1000000, "pass": 1, "prompt_tokens": 1000030, "ttft_s": 958.27, "prefill_tok_s": 1044.0, "gen_tokens": 127, "decode_tok_s": 69.9, "total_s": 960.1}
+{"target": 8000, "pass": 2, "prompt_tokens": 8016, "ttft_s": 1.89, "prefill_tok_s": 4238.0, "gen_tokens": 127, "decode_tok_s": 163.6, "total_s": 2.7}
+{"target": 1000000, "pass": 2, "prompt_tokens": 1000032, "ttft_s": 1096.07, "prefill_tok_s": 912.0, "gen_tokens": 127, "decode_tok_s": 80.9, "total_s": 1097.6}
+{
+  "arm": "s12c-guard-1m",
+  "model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+  "rows": "-1",
+  "commit": "7a09bd3",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 9.03,
+  "rss_ready_gib": 13.24,
+  "devzero_gib": 0.09,
+  "ram_after_80k_gib": 9.64,
+  "rss_gib": 13.57,
+  "locked_gib": 0.0,
+  "anon_gib": 12.89,
+  "file_gib": 0.32,
+  "unevict_gib": 0.0,
+  "shmem_gib": 0.09,
+  "current_gib": 13.25,
+  "peak_current_gib": 14.21,
+  "gpu_mib": "15646",
+  "decode_8k_p1": 166.1,
+  "ttft_8k_p1": 0.25,
+  "total_8k_p1": 1.0,
+  "decode_1000k_p1": 69.9,
+  "ttft_1000k_p1": 958.27,
+  "total_1000k_p1": 960.1,
+  "decode_8k": 163.6,
+  "ttft_8k": 1.89,
+  "total_8k": 2.7,
+  "decode_1000k": 80.9,
+  "ttft_1000k": 1096.07,
+  "total_1000k": 1097.6,
+  "coverage_faults": 0,
+  "starved": 0,
+  "swaps": 5293,
+  "retained_rows": 2671,
+  "free_evict_rate": 0.588,
+  "buffer_free_evictions": 1280
+}
+47 arms -> /home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/sweep.tsv
+[s12c-guard-1m] stopping
