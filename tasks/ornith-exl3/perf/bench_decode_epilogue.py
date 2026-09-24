@@ -1,8 +1,9 @@
 """One Ornith MoE decode layer (EXL3 5.0bpw mul1, H 2048, I 512, top-8) and one dense GEMV
 (o_proj 4096 -> 2048), replayed in a CUDA graph: split-K reduced by torch.sum vs inside the
 GEMV (FREETOKEN_EXL3_SPLITK_INKERNEL), MoE epilogues unfused vs fused
-(FREETOKEN_EXL3_FUSED_EPILOGUE). Prints us per replay and the max difference to the unfused
-path."""
+(FREETOKEN_EXL3_FUSED_EPILOGUE), input rotation as its own had_rows launch vs inside the GEMV
+prologue (FREETOKEN_EXL3_GEMV_PREROT). Prints us per replay and the max difference to the unfused
+path. A GDN in_proj-shaped dense GEMV (2048 -> 12288) is timed too."""
 import os
 
 import torch
@@ -38,12 +39,24 @@ svh = (torch.randn(n, generator=g, device=dev) * 0.05).half()
 xd = torch.randn(1, k, generator=g, device=dev).to(torch.bfloat16)
 
 
+k2, n2 = 2048, 12288
+parts2 = Exl3Parts.build(k2, (n2,), BITS, "mul1", "cuda")
+tr2 = torch.randint(-(1 << 31), (1 << 31) - 1, ((k2 // 16) * (n2 // 16) * 8 * BITS,), generator=g, device=dev, dtype=torch.int32)
+suh2 = (torch.randn(1, k2, generator=g, device=dev) * 0.5).half()
+svh2 = (torch.randn(n2, generator=g, device=dev) * 0.05).half()
+xd2 = torch.randn(1, k2, generator=g, device=dev).to(torch.bfloat16)
+
+
 def moe():
     return fused_experts_exl3(x, banks, w, ids, bits=BITS, codebook="mul1", is_prefill=False)
 
 
 def dense():
     return exl3_forward(xd, tr, suh, svh, parts, torch.bfloat16)
+
+
+def dense_in():
+    return exl3_forward(xd2, tr2, suh2, svh2, parts2, torch.bfloat16)
 
 
 def graphed(fn):
@@ -60,11 +73,12 @@ def graphed(fn):
 
 
 ref = {}
-for label, env in (("unfused, torch.sum", {"FREETOKEN_EXL3_SPLITK_INKERNEL": "0", "FREETOKEN_EXL3_FUSED_EPILOGUE": "0"}),
-                   ("in-kernel sum", {"FREETOKEN_EXL3_SPLITK_INKERNEL": "1", "FREETOKEN_EXL3_FUSED_EPILOGUE": "0"}),
-                   ("in-kernel sum + fused", {"FREETOKEN_EXL3_SPLITK_INKERNEL": "1", "FREETOKEN_EXL3_FUSED_EPILOGUE": "1"})):
+for label, env in (("unfused, torch.sum", {"FREETOKEN_EXL3_SPLITK_INKERNEL": "0", "FREETOKEN_EXL3_FUSED_EPILOGUE": "0", "FREETOKEN_EXL3_GEMV_PREROT": "0"}),
+                   ("in-kernel sum", {"FREETOKEN_EXL3_SPLITK_INKERNEL": "1", "FREETOKEN_EXL3_FUSED_EPILOGUE": "0", "FREETOKEN_EXL3_GEMV_PREROT": "0"}),
+                   ("in-kernel sum + fused", {"FREETOKEN_EXL3_SPLITK_INKERNEL": "1", "FREETOKEN_EXL3_FUSED_EPILOGUE": "1", "FREETOKEN_EXL3_GEMV_PREROT": "0"}),
+                   ("+ gemv pre-rotation", {"FREETOKEN_EXL3_SPLITK_INKERNEL": "1", "FREETOKEN_EXL3_FUSED_EPILOGUE": "1", "FREETOKEN_EXL3_GEMV_PREROT": "1"})):
     os.environ.update(env)
-    for name, fn in (("moe layer", moe), ("dense o_proj", dense)):
+    for name, fn in (("moe layer", moe), ("dense o_proj", dense), ("dense in_proj", dense_in)):
         graph, out = graphed(fn)
         graph.replay()
         torch.cuda.synchronize()

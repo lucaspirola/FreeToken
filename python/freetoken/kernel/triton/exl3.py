@@ -341,7 +341,10 @@ def _exl3_gemv_kernel(
     part_of_nb_ptr, word_off_ptr, ntiles_ptr, nstart_ptr,
     expert_ptr, K_SPLIT,
     final_ptr, stride_fm, count_ptr,
+    x_ptr, stride_x, suh_ptr, suh_expert_stride, suh_part_stride, rot_ptr,
     BITS: tl.constexpr, CB: tl.constexpr, HAS_EXPERT: tl.constexpr, REDUCE: tl.constexpr,
+    PRE_ROT: tl.constexpr = False, SRC_DIV: tl.constexpr = 1, KB: tl.constexpr = 1,
+    K_BLOCKS: tl.constexpr = 1,
 ):
     """GEMV in bitstream order. Code ``t`` of a 16x16 tile sits at bit ``t * BITS`` of the tile's
     stream and is W_hat[r, c] with ``t = 32 (c & 7) + 16 r2 + 8 r1 + 4 (c >> 3) + 2 r3 + r0``, so the
@@ -364,11 +367,45 @@ def _exl3_gemv_kernel(
     cl = g % 8
     start = (32 * BITS * cl + OFF0) // 32  # first word of the group's run (before the wrap)
     tile = tr_ptr + expert * tr_expert_stride + tl.load(word_off_ptr + part) + nt.to(tl.int64) * WORDS
-    a_ptr = xh_ptr + part * stride_xpart + p.to(tl.int64) * stride_xm
     row_words = n_tiles.to(tl.int64) * WORDS
     acc_lo = tl.zeros([64], dtype=tl.float32)
     acc_hi = tl.zeros([64], dtype=tl.float32)
     k_begin = pid_k * K_SPLIT
+    if PRE_ROT:
+        # Input rotation in the prologue (replaces the separate had_rows launch): this
+        # program rotates only the KB 128-blocks its K range touches, from the raw row
+        # x[p // SRC_DIV], into a private fp16 scratch that the loop below reads like xh.
+        # H128 = H8 (x) H16 (Sylvester, natural order), so Y = H8 @ X @ H16 on X = x*suh
+        # viewed [8, 16]; entries are (-1)^popcount(a & b), generated, not loaded.
+        i8 = tl.arange(0, 8)
+        i16 = tl.arange(0, 16)
+        a8 = i8[:, None] & i8[None, :]
+        a8 = a8 ^ (a8 >> 2)
+        a8 = a8 ^ (a8 >> 1)
+        h8 = 1.0 - 2.0 * (a8 & 1).to(tl.float32)
+        a16 = i16[:, None] & i16[None, :]
+        a16 = a16 ^ (a16 >> 2)
+        a16 = a16 ^ (a16 >> 1)
+        h16 = 1.0 - 2.0 * (a16 & 1).to(tl.float32)
+        blk0 = k_begin // 128
+        rot = rot_ptr + ((p.to(tl.int64) * tl.num_programs(1) + pid_n) * tl.num_programs(2) + pid_k) * (KB * 128)
+        src = (p // SRC_DIV).to(tl.int64)
+        within = i8[:, None] * 16 + i16[None, :]
+        for b in tl.static_range(KB):
+            blk = blk0 + b
+            bmask = (within >= 0) & (blk < K_BLOCKS)
+            c2 = blk * 128 + within
+            xv = tl.load(x_ptr + src * stride_x + c2, mask=bmask, other=0.0).to(tl.float32)
+            sv_in = tl.load(suh_ptr + expert * suh_expert_stride + part * suh_part_stride + c2,
+                            mask=bmask, other=0.0).to(tl.float32)
+            xs = xv * sv_in
+            t = tl.sum(h8[:, :, None] * xs[None, :, :], axis=1)
+            y = tl.sum(t[:, None, :] * h16[None, :, :], axis=2) * 0.08838834764831843
+            tl.store(rot + b * 128 + within, y.to(tl.float16))
+        tl.debug_barrier()
+        a_ptr = rot - blk0 * 128
+    else:
+        a_ptr = xh_ptr + part * stride_xpart + p.to(tl.int64) * stride_xm
     for k0 in range(k_begin, k_begin + K_SPLIT, 16):
         band = tile + (k0 // 16) * row_words
         for i in tl.static_range(32):
@@ -505,7 +542,7 @@ def exl3_gemm(
 
 
 def exl3_gemv(
-    xh: torch.Tensor,
+    xh: torch.Tensor | None,
     trellis: torch.Tensor,
     svh: torch.Tensor,
     parts: Exl3Parts,
@@ -515,38 +552,68 @@ def exl3_gemv(
     tr_expert_stride: int = 0,
     svh_expert_stride: int = 0,
     split_k: int = 1,
+    x: torch.Tensor | None = None,
+    suh: torch.Tensor | None = None,
+    suh_expert_stride: int = 0,
+    src_div: int = 1,
 ) -> torch.Tensor:
     """Per-row GEMV (decode) into ``out`` ``[rows, N]`` (any float dtype). With ``split_k > 1``
     each K split writes a rotated fp32 partial to its own plane of a scratch buffer and the
     planes are summed in order (the output rotation is linear, so rotating partials is exact):
-    deterministic, and fixed-shape for CUDA graphs."""
-    rows = xh.shape[1]
+    deterministic, and fixed-shape for CUDA graphs.
+
+    ``xh=None`` with ``x``/``suh`` (had_rows' arguments) rotates the input inside the GEMV
+    prologue instead of reading a had_rows result: rows = ``x.shape[0] * src_div``, row ``p``
+    reads ``x[p // src_div]`` scaled by ``suh[experts[p]]`` (dense: ``experts=None``)."""
+    pre_rot = xh is None
+    if pre_rot:
+        assert x is not None and suh is not None and x.stride(-1) == 1 and suh.stride(-1) == 1
+        rows = x.shape[0] * src_div
+        device = x.device
+    else:
+        rows = xh.shape[1]
+        device = xh.device
     if rows == 0:
         return out
     k = parts.k
     if k % (split_k * 16):
         raise ValueError(f"split_k {split_k} does not divide K {k} into 16-row bands")
-    dst = out if split_k == 1 else torch.empty((split_k, rows, parts.n), dtype=torch.float32, device=xh.device)
+    dst = out if split_k == 1 else torch.empty((split_k, rows, parts.n), dtype=torch.float32, device=device)
     words = _words(trellis)
     grid = (rows, parts.n // HAD, split_k)
     reduce = split_k > 1 and _inkernel_reduce()
-    counts = _split_counters(rows * (parts.n // HAD), xh.device) if reduce else parts.part_of_nb
+    counts = _split_counters(rows * (parts.n // HAD), device) if reduce else parts.part_of_nb
+    kb = 1
+    if pre_rot:
+        k_split = k // split_k
+        kb = max((((i + 1) * k_split - 1) // HAD) - (i * k_split) // HAD + 1 for i in range(split_k))
+        rot = torch.empty((rows * (parts.n // HAD) * split_k, kb * HAD), dtype=torch.float16, device=device)
+        xh = rot  # placeholder for the unused xh pointer
     _exl3_gemv_kernel[grid](
-        xh, xh.stride(0), xh.stride(1),
+        xh, xh.stride(0) if not pre_rot else 0, xh.stride(1) if not pre_rot else 0,
         dst, dst.stride(-2), dst.stride(0) if split_k > 1 else 0,
         words, tr_expert_stride,
         svh, svh_expert_stride,
-        hadamard_pm1(xh.device),
+        hadamard_pm1(device),
         parts.part_of_nb, parts.word_off, parts.ntiles, parts.nstart,
         experts if experts is not None else parts.part_of_nb, k // split_k,
         out, out.stride(-2), counts,
+        x if pre_rot else xh, x.stride(0) if pre_rot else 0,
+        suh if pre_rot else xh, suh_expert_stride, parts.suh_part_stride,
+        rot if pre_rot else xh,
         BITS=parts.bits, CB=CODEBOOKS[parts.codebook],
         HAS_EXPERT=experts is not None, REDUCE=reduce,
+        PRE_ROT=pre_rot, SRC_DIV=src_div, KB=kb, K_BLOCKS=k // HAD,
         num_warps=1,
     )
     if split_k > 1 and not reduce:
         torch.sum(dst, dim=0, out=out) if out.dtype == torch.float32 else out.copy_(dst.sum(dim=0))
     return out
+
+
+def gemv_pre_rot() -> bool:
+    """``FREETOKEN_EXL3_GEMV_PREROT=0`` restores the separate ``had_rows`` launch before a decode GEMV."""
+    return os.getenv("FREETOKEN_EXL3_GEMV_PREROT", "1").strip() != "0"
 
 
 def _inkernel_reduce() -> bool:

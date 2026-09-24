@@ -29,6 +29,7 @@ from freetoken.kernel.triton.exl3 import (
     Exl3Parts,
     exl3_gemm,
     exl3_gemv,
+    gemv_pre_rot,
     had_rows,
     reconstruct_experts,
     splitk_combine,
@@ -83,19 +84,27 @@ def _decode(x, banks, topk_weights, ids, top_k, parts, activation, alpha, limit)
     tokens = x.shape[0]
     routes = tokens * top_k
     dev = x.device
-    xh = had_rows(x, gu_suh, gu, src_div=top_k, experts=ids, suh_expert_stride=gu_suh.stride(0))
     if activation == "silu" and _fused_epilogues():
         # The gate|up output's fp16 rounding, silu*up and the down input rotation are one
         # launch, and the top-k combine another (was: cast, act, had_rows, and four torch
-        # ops for the combine). The split-K sums happen inside exl3_gemv.
+        # ops for the combine). The split-K sums happen inside exl3_gemv, and with
+        # FREETOKEN_EXL3_GEMV_PREROT (default) so does the gate|up input rotation.
         g = torch.empty((routes, gu.n), dtype=torch.float32, device=dev)
-        exl3_gemv(xh, gu_tr, gu_svh, gu, out=g, experts=ids, tr_expert_stride=gu_tr.stride(0) // 2,
-                  svh_expert_stride=gu_svh.stride(0), split_k=pick_split_k(routes, gu.n // 128, gu.k, dev))
+        gu_split = pick_split_k(routes, gu.n // 128, gu.k, dev)
+        if gemv_pre_rot():
+            exl3_gemv(None, gu_tr, gu_svh, gu, out=g, experts=ids, tr_expert_stride=gu_tr.stride(0) // 2,
+                      svh_expert_stride=gu_svh.stride(0), split_k=gu_split,
+                      x=x, suh=gu_suh, suh_expert_stride=gu_suh.stride(0), src_div=top_k)
+        else:
+            xh = had_rows(x, gu_suh, gu, src_div=top_k, experts=ids, suh_expert_stride=gu_suh.stride(0))
+            exl3_gemv(xh, gu_tr, gu_svh, gu, out=g, experts=ids, tr_expert_stride=gu_tr.stride(0) // 2,
+                      svh_expert_stride=gu_svh.stride(0), split_k=gu_split)
         ah = splitk_silu_had(g.unsqueeze(0), dn_suh, ids, dn_suh.stride(0))
         o = torch.empty((routes, dn.n), dtype=torch.float32, device=dev)
         exl3_gemv(ah, dn_tr, dn_svh, dn, out=o, experts=ids, tr_expert_stride=dn_tr.stride(0) // 2,
                   svh_expert_stride=dn_svh.stride(0), split_k=pick_split_k(routes, dn.n // 128, dn.k, dev))
         return splitk_combine(o.unsqueeze(0), topk_weights, tokens, top_k, x.dtype)
+    xh = had_rows(x, gu_suh, gu, src_div=top_k, experts=ids, suh_expert_stride=gu_suh.stride(0))
     split = pick_split_k(routes, gu.n // 128, gu.k, dev)
     g = torch.empty((routes, gu.n), dtype=torch.float32, device=dev)
     exl3_gemv(xh, gu_tr, gu_svh, gu, out=g, experts=ids, tr_expert_stride=gu_tr.stride(0) // 2,

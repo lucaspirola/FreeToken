@@ -23,6 +23,13 @@ GEMV_MAX_ROWS = 8
 # per row block and runs at ~6.5 TF/s on an RTX 5080, 13-18x slower than reconstruct + cuBLAS at
 # M >= 1024; reconstruct is ahead or level from M=16 on every Ornith shape (bench_dense_crossover-box-2026-09-24.txt).
 RECONSTRUCT_MIN_ROWS = 16
+# Decode GEMVs with at most this many 128-column blocks rotate their input in the GEMV
+# prologue instead of a separate had_rows launch. Every program rotates the 128-blocks of
+# its own K range, so a K block is rotated once per column block: a small projection
+# saves the launch (o_proj 4096->2048, 16 blocks: 22.7 -> 21.1 us per CUDA-graph replay),
+# a wide one pays more rotation than the launch cost (GDN in_proj 2048->12288, 96
+# blocks: 50.4 -> 51.6 us). Box bench, tasks/ornith-exl3/fuse.
+PREROT_MAX_NBLOCKS = 32
 # Output columns per cuBLAS call: bounds the fp32 accumulator at rows x this.
 RECONSTRUCT_SLAB = 2048
 
@@ -50,14 +57,17 @@ def pick_split_k(rows: int, n_blocks: int, k: int, device: torch.device) -> int:
 
 
 def exl3_forward(x2: torch.Tensor, trellis: torch.Tensor, suh: torch.Tensor, svh: torch.Tensor, parts, out_dtype) -> torch.Tensor:
-    from freetoken.kernel.triton.exl3 import exl3_gemm, exl3_gemv, had_rows
+    from freetoken.kernel.triton.exl3 import exl3_gemm, exl3_gemv, gemv_pre_rot, had_rows
 
     rows = x2.shape[0]
-    xh = had_rows(x2, suh, parts)
     if rows <= GEMV_MAX_ROWS:
         split = pick_split_k(rows, parts.n // 128, parts.k, x2.device)
         out = torch.empty((rows, parts.n), dtype=out_dtype, device=x2.device)
-        return exl3_gemv(xh, trellis, svh, parts, out=out, split_k=split)
+        if gemv_pre_rot() and parts.n // 128 <= PREROT_MAX_NBLOCKS:
+            # the input rotation runs in the GEMV prologue: no had_rows launch
+            return exl3_gemv(None, trellis, svh, parts, out=out, split_k=split, x=x2, suh=suh)
+        return exl3_gemv(had_rows(x2, suh, parts), trellis, svh, parts, out=out, split_k=split)
+    xh = had_rows(x2, suh, parts)
     out = torch.empty((rows, parts.n), dtype=out_dtype, device=x2.device)
     if rows >= RECONSTRUCT_MIN_ROWS and parts.sizes:
         return _forward_reconstruct(xh, trellis, svh, parts, out)

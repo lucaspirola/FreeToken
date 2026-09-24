@@ -341,3 +341,53 @@ def test_inkernel_split_k_reduction_matches_torch_sum(monkeypatch, out_dtype):
     monkeypatch.setenv("FREETOKEN_EXL3_SPLITK_INKERNEL", "0")
     summed = exl3_forward(x, *args)
     assert rel_err(fused.float(), summed.float()) < (1e-6 if out_dtype == torch.float32 else 4e-3)
+
+
+@cuda
+@pytest.mark.parametrize("rows", (1, 3, 8))
+@pytest.mark.parametrize("k,sizes", ((2048, (1024,)), (4096, (2048,)), (2048, (512, 256, 256)), (384, (256,))),
+                         ids=("2048x1024", "4096x2048", "3parts", "k384"))
+def test_gemv_prologue_rotation_matches_had_rows(monkeypatch, rows, k, sizes):
+    """The input rotation computed inside the GEMV prologue (H8 x H16 factorisation, per
+    program over the 128-blocks of its K range) against the separate had_rows launch: the
+    rotated inputs differ at most by fp16 rounding of a reordered fp32 sum, and the prologue
+    path is deterministic (repeat == first, bit for bit)."""
+    from freetoken.kernel.triton.exl3 import Exl3Parts, had_rows
+    from freetoken.layers.quantization.linear.exl3 import exl3_forward
+
+    trs, suh, svh = _dense_case(k, sizes, 5, "mul1", seed=31)
+    parts = Exl3Parts.build(k, sizes, 5, "mul1", "cuda")
+    x = torch.randn(rows, k, generator=torch.Generator().manual_seed(32)).to(torch.bfloat16).cuda()
+    tr = torch.cat([t.reshape(-1) for t in trs]).cuda()
+    args = (tr, suh.cuda(), svh.cuda(), parts, torch.float32)
+    monkeypatch.setenv("FREETOKEN_EXL3_GEMV_PREROT", "1")
+    pre = exl3_forward(x, *args)
+    assert all(torch.equal(pre, exl3_forward(x, *args)) for _ in range(3))
+    monkeypatch.setenv("FREETOKEN_EXL3_GEMV_PREROT", "0")
+    sep = exl3_forward(x, *args)
+    assert rel_err(pre, sep) < 2e-3, rel_err(pre, sep)
+    # the rotation itself: FWHT-by-Kronecker in fp32 vs had_rows' split-fp16 tensor-core dot
+    xh = had_rows(x.contiguous(), suh.cuda(), parts).float()
+    from freetoken.kernel.triton.exl3 import hadamard_reference
+    h = hadamard_reference().double().cuda() / 128 ** 0.5
+    want = torch.stack([((x.double() * suh.cuda()[j].double()).view(rows, -1, 128) @ h).view(rows, k)
+                        for j in range(len(sizes))])
+    assert (xh.double() - want).abs().max() <= 2e-3 * want.abs().max()
+
+
+@cuda
+@pytest.mark.parametrize("tokens", (1, 4))
+def test_moe_decode_prologue_rotation_matches_had_rows(monkeypatch, tokens):
+    """Routed gate|up with the rotation in the GEMV prologue (x[p // top_k] * suh[ids[p]])
+    against had_rows + GEMV, at 1 and 4 tokens (routes share the source row)."""
+    from freetoken.moe.fused_exl3 import fused_experts_exl3
+
+    banks = tuple(b.cuda() for b in _moe_banks(5, "mul1", 12, seed=41))
+    x, w, ids = (t.cuda() for t in _routing(tokens, 12, seed=42))
+    kw = dict(bits=5, codebook="mul1", is_prefill=False)
+    monkeypatch.setenv("FREETOKEN_EXL3_GEMV_PREROT", "1")
+    pre = fused_experts_exl3(x, banks, w, ids, **kw)
+    assert torch.equal(pre, fused_experts_exl3(x, banks, w, ids, **kw))
+    monkeypatch.setenv("FREETOKEN_EXL3_GEMV_PREROT", "0")
+    sep = fused_experts_exl3(x, banks, w, ids, **kw)
+    assert rel_err(pre, sep) < 2e-3, rel_err(pre, sep)
