@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """recheck-local.sh verdicts.
 
-  compare_recheck.py <results dir> <label>
+  compare_recheck.py <results dir> <label> [size, default 8000]
 
 8K part: <label>-whole-{1,2,3} and <label>-mirror-{1,2,3} (8K, 512 tokens, passes 1-2).
 Per pass: each arm's decode (monotonic), the ratio of each mirror arm to the whole arm
@@ -47,13 +47,14 @@ def pool(d: Path, name: str):
 
 def main():
     d, lab = Path(sys.argv[1]), sys.argv[2]
+    size = int(sys.argv[3]) if len(sys.argv) > 3 else 8000
     runs = [(probes(d, f"{lab}-whole-{i}"), probes(d, f"{lab}-mirror-{i}")) for i in (1, 2, 3)]
     if any(w or m for w, m in runs):
-        print(f"== 8K, 512 tokens: mirror vs the whole arm run before it")
+        print(f"== {size // 1000}K, 512 tokens: mirror vs the whole arm run before it")
         for p in (1, 2):
             ratios = []
             for i, (w, m) in enumerate(runs, 1):
-                a, b = w.get((8000, p)), m.get((8000, p))
+                a, b = w.get((size, p)), m.get((size, p))
                 if not (a and b and a["dec"] and b["dec"]):
                     print(f"  p{p} run {i}: missing"); continue
                 ratios.append(b["dec"] / a["dec"])

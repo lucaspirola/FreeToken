@@ -11,6 +11,7 @@
 #      the host is stopped.
 #   RC_LABEL  arm prefix (default rc); RC_OUT results dir (default results/recheck-local)
 #   RC_PARTS  "8k ram" (default both)
+#   RC_SIZE   prompt size of the alternated part (default 8000; 80000 for the 80K re-check)
 # Waits for MemAvailable >= 23 GiB and 0 MiB on the GPU before each arm [agent practice].
 # Run as a systemd transient user unit (--setenv=PATH), never from an agent shell.
 set -uo pipefail
@@ -41,8 +42,8 @@ for part in ${RC_PARTS:-8k ram}; do
   case "$part" in
     8k)
       for i in 1 2 3; do
-        one "$L-whole-$i"  FT_ROWS=0 FT_SIZES=8000 FT_GEN=512
-        one "$L-mirror-$i" FT_ROWS=-1 FT_RESERVE=256 FT_SIZES=8000 FT_GEN=512
+        one "$L-whole-$i"  FT_ROWS=0 FT_SIZES=${RC_SIZE:-8000} FT_GEN=512
+        one "$L-mirror-$i" FT_ROWS=-1 FT_RESERVE=256 FT_SIZES=${RC_SIZE:-8000} FT_GEN=512
       done ;;
     ram)
       {
@@ -56,6 +57,6 @@ for part in ${RC_PARTS:-8k ram}; do
       one "$L-mirror-1m" FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 1000000" ;;
   esac
 done
-python3 "$HERE/compare_recheck.py" "$OUT" "$L" > "$OUT/$L-compare.txt" 2>&1 || true
+python3 "$HERE/compare_recheck.py" "$OUT" "$L" "${RC_SIZE:-8000}" > "$OUT/$L-compare.txt" 2>&1 || true
 cat "$OUT/$L-compare.txt"
 echo "recheck done"
