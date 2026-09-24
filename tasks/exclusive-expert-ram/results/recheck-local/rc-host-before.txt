@@ -1,0 +1,39 @@
+date 2026-09-24T19:31:38+04:00
+MemTotal:       34881708 kB
+MemFree:        23166368 kB
+MemAvailable:   31139224 kB
+Cached:          7122256 kB
+Shmem:              3268 kB
+--- processes by RSS (top 25)
+    PID   RSS     ELAPSED COMMAND
+    899 532080   11:04:19 codex
+  20826 454484   11:01:04 claude
+1275511 437704      00:09 julia
+   1983 432656   11:04:06 claude
+  14452 330560   11:01:34 claude
+   8565 269436   11:02:17 claude
+1206949 242048      15:15 julia
+   2134 187968   11:04:04 piro-board-mcp
+1226756 151492      12:06 piro-board-mcp
+    529 62720    11:04:32 dockerd
+   1905 60108    11:04:08 MainThread
+1226773 56448       12:06 MainThread
+    438 30008    11:04:32 containerd
+     41 28424    11:04:43 systemd-journal
+    566 21984    11:04:32 MainThread
+  21368 21884    11:01:02 python
+    564 21792    11:04:32 MainThread
+1226757 20992       12:06 python3
+   2133 19872    11:04:04 python
+   1375 15604    11:04:16 MainThread
+   2132 15248    11:04:04 python
+   1893 15048    11:04:08 python3.12
+  21367 14576    11:01:02 python
+    663 13348    11:04:32 tmux: server
+    479 11136    11:04:32 unattended-upgr
+--- user units active
+  anthropic-proxy@account1.service loaded active running Anthropic OAuth->OpenAI proxy (account1)
+  anthropic-proxy@account2.service loaded active running Anthropic OAuth->OpenAI proxy (account2)
+  dbus.service                     loaded active running D-Bus User Message Bus
+  ft-recheck-local.service         loaded active running /bin/bash -c "/home/lucas/ai/FreeToken-wt/d
+  switchyard-dev.service           loaded active running Switchyard dev router (hidden-state-routing

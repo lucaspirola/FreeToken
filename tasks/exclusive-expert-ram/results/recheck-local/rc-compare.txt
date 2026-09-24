@@ -1,0 +1,21 @@
+== 8K, 512 tokens: mirror vs the whole arm run before it
+  p1 run 1: whole  193.9 (gap1 38.4 ms, median gap 5.0 ms)  mirror  173.8 (gap1 22.6 ms, median gap 5.6 ms)  ratio  89.6%  after gap1: whole 196.6 mirror 174.7
+  p1 run 2: whole  193.0 (gap1 32.7 ms, median gap 5.1 ms)  mirror  173.8 (gap1 23.6 ms, median gap 5.6 ms)  ratio  90.0%  after gap1: whole 195.2 mirror 175.0
+  p1 run 3: whole  192.5 (gap1 31.0 ms, median gap 5.1 ms)  mirror  173.1 (gap1 21.4 ms, median gap 5.6 ms)  ratio  89.9%  after gap1: whole 194.2 mirror 174.1
+  p1 median ratio  89.9%  FAIL (>= 91%)
+  p2 run 1: whole  192.5 (gap1 34.7 ms, median gap 5.1 ms)  mirror  176.2 (gap1 29.2 ms, median gap 5.5 ms)  ratio  91.5%  after gap1: whole 194.4 mirror 177.8
+  p2 run 2: whole  193.8 (gap1 36.2 ms, median gap 5.0 ms)  mirror  175.9 (gap1 29.0 ms, median gap 5.5 ms)  ratio  90.7%  after gap1: whole 196.3 mirror 177.1
+  p2 run 3: whole  192.2 (gap1 36.9 ms, median gap 5.1 ms)  mirror  176.8 (gap1 27.4 ms, median gap 5.5 ms)  ratio  92.0%  after gap1: whole 194.7 mirror 178.1
+  p2 median ratio  91.5%  PASS (>= 91%)
+== 1M RAM: rc-mirror-1m vs ck4 mirror-1m
+  ram_gib        13.06  (ck4 12.65)
+  rss_ready_gib  13.71  (ck4 13.71)
+  rss_gib        14.37  (ck4 14.05)
+  anon_gib       13.23  (ck4 12.92)
+  file_gib       0.11  (ck4 1.5)
+  pool           1830 rows, 9.58 GiB  (ck4 1830 rows, 9.58 GiB)
+  ram 12.26 +/- 0.6  OUT
+  decode 8K p1: 174.5
+  decode 8K p2: 171.9
+  decode 1000K p1: 77.8
+  decode 1000K p2: 90.1

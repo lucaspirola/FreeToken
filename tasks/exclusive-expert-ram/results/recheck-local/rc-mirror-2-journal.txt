@@ -1,0 +1,121 @@
+Started ft-measure-rc-mirror-2.service - /home/lucas/ai/FreeToken-wt/dt-measure/scripts/serve-default.sh.
+[2026-09-24|19:24:31] WARNING  --moe-backend is deprecated; use --moe-strategy
+[2026-09-24|19:24:31] INFO     Parsed arguments:
+ServerArgs(model_path='/home/lucas/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4', tp_info=DistributedInfo(rank=0, size=1), dtype=torch.bfloat16, max_running_req=1, adaptive_scheduler=True, auto_session_grace_seconds=0.0, session_spill_dir='/home/lucas/.cache/freetoken/spill', session_spill_ram_gb=1.0, session_spill_disk_gb=50.0, session_spill_limit_gb=50.0, session_spill_persist=True, session_spill_state_stride=65536, session_spill_capture_states=None, attention_backend='triton', moe_strategy='offload', quant_backend=None, ple_backend='disk', nvfp4_backend='triton', expert_load='auto', host_ram_reserve_gb=0.0, moe_cache_size=0, moe_cache_rate=None, moe_cache_auto=True, kv_reserve_tokens=8192, moe_cache_policy='lfu', moe_prefill_overlap=True, expert_residency='mirror', moe_mirror_host_rows=-1, moe_prefill_hit_d2d=False, moe_extend_cache_tokens=64, moe_collect_stats=False, moe_pageable_profile='off', moe_cpu_threads=0, moe_cpu_layers=None, moe_pageable_gpu=False, moe_hybrid_max_fetch=-1, cuda_graph_bs=None, cuda_graph_max_bs=None, page_size=1, memory_ratio=1.0, linear_state_cache_ratio=2.0, swa_full_tokens_ratio=0.2, swa_num_pages_override=None, distributed_timeout=60.0, use_dummy_weight=False, use_pynccl=True, max_seq_len_override=1048576, rope_yarn_factor=None, rope_yarn_original_context=None, linear_state_slots_override=13, num_page_override=None, num_token_override=1048576, kv_cache_dtype='q8_0', kv_cache_dtype_k=None, kv_cache_dtype_v=None, kv_grow_step_tokens=65536, expert_arena=True, context_preflight=True, json_retry=1, hidden_states_dir='/home/lucas/.cache/freetoken/hidden-states', hidden_states_max_tokens=4096, pooled_sink_dir='/home/lucas/.cache/freetoken/pooled-sink', mm=MultimodalConfig(disabled_encoders=frozenset(), embed_cache_device='cpu', encoder_weights='host', image_min_tokens=None, image_max_tokens=None, processor_kwargs={}), max_extend_tokens=8192, auto_prefill_chunk=False, max_prefill_seqs=None, cache_type='radix', pin_prefix_min_tokens=1024, pin_prefix_max_tokens=65536, pin_prefix_max_slots=-1, pin_prefix_scope='shared', speculative=None, spec_ngram_n=8, spec_draft_len=8, spec_adaptive=True, offline_mode=False, decode_log_interval=40, special_token_ckpt=False, _unique_suffix='.pid=1249032', server_host='127.0.0.1', server_port=1920, num_tokenizer=0, silent_output=False, shell_mode=False, served_model_name='nemotron-3.5-lightning', served_model_aliases=('nemotron-3.5-lightning-judge', 'nemotron-3.5-lightning-collect'), strict_model_name=False, tool_call_parser='qwen3_coder', reasoning_parser='nemotron_v3', sampling_defaults='model', max_output_tokens=65536, enable_cache_report=True, cuda_memory_telemetry=False, force_nonempty_content=True, allowed_media_domains='', allowed_local_media_path='', cors_origins='tauri://localhost,http://tauri.localhost,http://localhost:1420', trace_dir='/home/lucas/.cache/freetoken/trace', trace_include_text=False, gpu=(), gpu_assigned=None)
+[2026-09-24|19:24:31|FrontendAPI] INFO     Default sampling config (source=model): temperature=1.0, top_k=-1, top_p=0.95
+INFO:     Started server process [1249032]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:1920 (Press CTRL+C to quit)
+[2026-09-24|19:24:33|core|rank=0] INFO     WSL detected; using the native CUDA caching allocator
+[2026-09-24|19:24:33|core|rank=0] INFO     Resolved config: moe_strategy='offload', attention_backend='triton', cache_type='hybrid_radix', page_size=1
+[2026-09-24|19:24:33|core|rank=0] INFO     Free memory before loading model: 14.59 GiB
+INFO:     127.0.0.1:48474 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+Loading Nemotron-H weights:   0%|          | 0/52 [00:00<?, ?it/s]Loading Nemotron-H weights:   6%|▌         | 3/52 [00:00<00:01, 27.92it/s]Loading Nemotron-H weights:  15%|█▌        | 8/52 [00:00<00:01, 37.74it/s]Loading Nemotron-H weights:  29%|██▉       | 15/52 [00:00<00:00, 49.24it/s]Loading Nemotron-H weights:  40%|████      | 21/52 [00:00<00:00, 51.10it/s]Loading Nemotron-H weights:  52%|█████▏    | 27/52 [00:00<00:00, 52.31it/s]Loading Nemotron-H weights:  63%|██████▎   | 33/52 [00:01<00:01, 12.30it/s]Loading Nemotron-H weights:  73%|███████▎  | 38/52 [00:01<00:00, 15.60it/s]Loading Nemotron-H weights:  83%|████████▎ | 43/52 [00:01<00:00, 19.31it/s]Loading Nemotron-H weights:  94%|█████████▍| 49/52 [00:02<00:00, 24.45it/s]Loading Nemotron-H weights: 100%|██████████| 52/52 [00:02<00:00, 24.22it/s]
+[2026-09-24|19:24:36|core|rank=0] INFO     Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode graphs enabled, prefill overlap on (layers assembled from resident slots + pool rows, no disk)
+[2026-09-24|19:24:36|core|rank=0] INFO     Mirror pool: reserve resolved to 256 rows (FREETOKEN_MIRROR_RESERVE_ROWS='256')
+INFO:     127.0.0.1:48486 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-24|19:24:40|core|rank=0] INFO     --moe-cache-auto resolved moe_cache_size=2173 num_pages=78574 (prefill_overlap=True)
+[2026-09-24|19:24:40|core|rank=0] INFO     mirror expert pool attached: 1830 host rows, 9.58 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO:     127.0.0.1:45110 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-24|19:24:49|core|rank=0] INFO     mirror warm start: 2173 experts on GPU (slots 0..2173), 771 mirrored, 803 duplicated, 256 rows in reserve (37.0% of evictions skip the writeback)
+[2026-09-24|19:24:49|core|rank=0] INFO     Mirror pool: 1830 rows pinned (9.58 GiB), 771 cover the complement of 2173 GPU residents, 256 reserved, up to 803 duplicates (a duplicate makes its expert's next eviction free of any host traffic)
+[2026-09-24|19:24:49|core|rank=0] INFO     Mirror pool: the coverage floor is 1376 of 2173 arena slots, leaving 797 slots (4.17 GiB) the growable KV may still take
+[2026-09-24|19:24:49|core|rank=0] INFO     Arena compaction 2173 -> 1376: 797 doomed, 0 moved (0.0 MiB D2D, 0.82 ms), 797 dropped with a host copy, 0 left for write-back
+[2026-09-24|19:24:49|core|rank=0] INFO     Expert arena parked 2173 -> 1376 slots (4.17 GiB) until the prefill transient is measured
+[2026-09-24|19:24:49|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+[2026-09-24|19:24:49|core|rank=0] INFO     Triton decode launch: kv_splits=64 block_n=64 warps=8 (q_heads=32 kv_heads=2 head_dim=128 quant=q8_0 sms=84)
+[2026-09-24|19:24:49|core|rank=0] INFO     Triton extend launch: block_m=64 block_n=64 warps=4 stages=1 (head_dim=128 sm=12.0)
+[2026-09-24|19:24:49|core|rank=0] INFO     Free memory after initialization: 4.16 GiB
+[2026-09-24|19:24:50|core|rank=0] INFO     Mamba-2 decode backend: triton
+[2026-09-24|19:24:50|core|rank=0] INFO     Start capturing CUDA graphs with sizes: [1]
+[2026-09-24|19:24:50|core|rank=0] INFO     Free GPU memory before capturing CUDA graphs: 4.16 GiB
+INFO:     127.0.0.1:45120 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-24|19:24:55|core|rank=0] INFO     mirror warm start: 1376 experts on GPU (slots 0..1376), 1568 mirrored, 6 duplicated, 256 rows in reserve (0.4% of evictions skip the writeback)
+Preparing for capturing CUDA graphs...:   0%|          | 0/1 [00:00<?, ?batch/s]Capturing graphs: bs = 1   | avail_mem = 4.16 GiB:   0%|          | 0/1 [00:00<?, ?batch/s]
+INFO:     127.0.0.1:44660 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:44676 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-24|19:25:02|core|rank=0] INFO     mirror warm start: 1376 experts on GPU (slots 0..1376), 1568 mirrored, 6 duplicated, 256 rows in reserve (0.4% of evictions skip the writeback)
+Capturing graphs: bs = 1   | avail_mem = 4.16 GiB: 100%|██████████| 1/1 [00:06<00:00,  6.77s/batch]Capturing graphs: bs = 1   | avail_mem = 4.16 GiB: 100%|██████████| 1/1 [00:06<00:00,  6.77s/batch]
+INFO:     127.0.0.1:45112 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-24|19:25:08|core|rank=0] INFO     mirror warm start: 1376 experts on GPU (slots 0..1376), 1568 mirrored, 6 duplicated, 256 rows in reserve (0.4% of evictions skip the writeback)
+[2026-09-24|19:25:08|core|rank=0] INFO     Free GPU memory after capturing CUDA graphs: 4.13 GiB
+INFO:     127.0.0.1:45118 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-24|19:25:14|core|rank=0] INFO     mirror warm start: 1376 experts on GPU (slots 0..1376), 1568 mirrored, 6 duplicated, 256 rows in reserve (0.4% of evictions skip the writeback)
+[2026-09-24|19:25:14|core|rank=0] INFO     Prefill warmup complete for lengths [80, 128] in 6.878 s
+INFO:     127.0.0.1:48312 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:48320 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-24|19:25:24|core|rank=0] INFO     mirror warm start: 1376 experts on GPU (slots 0..1376), 1568 mirrored, 6 duplicated, 256 rows in reserve (0.4% of evictions skip the writeback)
+[2026-09-24|19:25:24|core|rank=0] INFO     Growable-KV ceiling validated: 1048576 tokens, 3.23 GiB physical, planned final MoE cache 1392 slots
+[2026-09-24|19:25:24|core|rank=0] INFO     Prefill headroom: transient 1.00 GiB measured on a 8192-token chunk (empty prefix 1.00 GiB, after a 8192-token prefix 1.00 GiB, allocator peak 0.59 GiB); headroom 1.00 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 1376 -> 1944 of 2173 slots, 1.15 GiB free (target 1.13 GiB), 229 slots below the ratio plan
+[2026-09-24|19:25:24|core|rank=0] INFO     Cold session tier enabled: RAM 1.00 GiB, disk 50.00 GiB, retained 50.00 GiB total (persistent), host reserve 0.00 GiB
+[2026-09-24|19:25:25|core|rank=0] INFO     Scheduler loop: overlap (kv_grow_step_tokens=65536, growable_overlap=True)
+[2026-09-24|19:25:25|FrontendAPI] INFO     API server is ready to serve on 127.0.0.1:1920
+[2026-09-24|19:25:25|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+[2026-09-24|19:25:29|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 17, #cached-token: 0, token usage: 0.00, #mamba-slot: 0/12, mamba usage: 0.00, #running-req: 0, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 4.30 instant, 4.30 average
+[2026-09-24|19:25:29|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+INFO:     127.0.0.1:47750 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47754 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-24|19:25:30|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8014, #cached-token: 0, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 8372.23 instant, 8372.23 average
+[2026-09-24|19:25:30|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 1944 -> 2088 (0.75 GiB committed, 1.13 GiB free before, target 0.38 GiB, 32.0 ms)
+[2026-09-24|19:25:30|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8055, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 7.62, #queue-req: 0
+[2026-09-24|19:25:30|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+INFO:     127.0.0.1:46836 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-24|19:25:50|core|rank=0] INFO     Arena compaction 2088 -> 1944: 144 doomed, 119 moved (638.0 MiB D2D, 66.46 ms), 0 dropped with a host copy, 25 left for write-back
+[2026-09-24|19:25:50|core|rank=0] INFO     mirror restored coverage for 25 experts (written back from the GPU)
+[2026-09-24|19:25:50|core|rank=0] INFO     Prefill headroom reserved: MoE slots 2088 -> 1944 (0.75 GiB released, 1.13 GiB free, target 1.13 GiB, 130.4 ms)
+[2026-09-24|19:25:50|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 78, #cached-token: 7936, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 3.73 instant, 3.73 average
+[2026-09-24|19:25:51|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 1944 -> 2088 (0.75 GiB committed, 1.13 GiB free before, target 0.38 GiB, 16.6 ms)
+[2026-09-24|19:25:51|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8032, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 1.93, #queue-req: 0
+[2026-09-24|19:25:51|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8072, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 203.75, #queue-req: 0
+[2026-09-24|19:25:51|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+INFO:     127.0.0.1:46846 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-24|19:25:51|core|rank=0] INFO     Arena compaction 2088 -> 1944: 144 doomed, 122 moved (654.1 MiB D2D, 2.82 ms), 21 dropped with a host copy, 1 left for write-back
+[2026-09-24|19:25:51|core|rank=0] INFO     mirror restored coverage for 1 experts (written back from the GPU)
+[2026-09-24|19:25:51|core|rank=0] INFO     Prefill headroom reserved: MoE slots 2088 -> 1944 (0.75 GiB released, 1.13 GiB free, target 1.13 GiB, 17.7 ms)
+[2026-09-24|19:25:51|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 78, #cached-token: 7936, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 130.65 instant, 130.65 average
+[2026-09-24|19:25:51|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 1944 -> 2088 (0.75 GiB committed, 1.13 GiB free before, target 0.38 GiB, 17.5 ms)
+[2026-09-24|19:25:51|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8049, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 82.55, #queue-req: 0
+[2026-09-24|19:25:52|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8089, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 195.38, #queue-req: 0
+[2026-09-24|19:25:52|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8129, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 174.46, #queue-req: 0
+[2026-09-24|19:25:52|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8169, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 181.22, #queue-req: 0
+[2026-09-24|19:25:52|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8209, token usage: 0.13, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 179.16, #queue-req: 0
+[2026-09-24|19:25:52|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8249, token usage: 0.13, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 178.84, #queue-req: 0
+[2026-09-24|19:25:53|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8289, token usage: 0.13, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 171.87, #queue-req: 0
+[2026-09-24|19:25:53|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8329, token usage: 0.13, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 167.19, #queue-req: 0
+[2026-09-24|19:25:53|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8369, token usage: 0.13, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 167.86, #queue-req: 0
+[2026-09-24|19:25:53|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8409, token usage: 0.13, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 167.34, #queue-req: 0
+[2026-09-24|19:25:54|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8449, token usage: 0.13, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 176.93, #queue-req: 0
+[2026-09-24|19:25:54|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8489, token usage: 0.13, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 172.99, #queue-req: 0
+[2026-09-24|19:25:54|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+INFO:     127.0.0.1:46848 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-24|19:25:54|core|rank=0] INFO     Arena compaction 2088 -> 1944: 144 doomed, 85 moved (455.7 MiB D2D, 2.71 ms), 58 dropped with a host copy, 1 left for write-back
+[2026-09-24|19:25:54|core|rank=0] INFO     mirror restored coverage for 1 experts (written back from the GPU)
+[2026-09-24|19:25:54|core|rank=0] INFO     Prefill headroom reserved: MoE slots 2088 -> 1944 (0.75 GiB released, 1.13 GiB free, target 1.13 GiB, 18.8 ms)
+[2026-09-24|19:25:55|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8016, #cached-token: 0, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 2182.67 instant, 2182.67 average
+[2026-09-24|19:25:55|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 1944 -> 2088 (0.75 GiB committed, 1.13 GiB free before, target 0.38 GiB, 21.3 ms)
+[2026-09-24|19:25:55|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8020, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 40.02, #queue-req: 0
+[2026-09-24|19:25:55|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8060, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 181.57, #queue-req: 0
+[2026-09-24|19:25:57|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8100, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 183.01, #queue-req: 0
+[2026-09-24|19:25:57|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8140, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 185.73, #queue-req: 0
+[2026-09-24|19:25:57|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8180, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 177.44, #queue-req: 0
+[2026-09-24|19:25:58|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8220, token usage: 0.13, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 182.45, #queue-req: 0
+[2026-09-24|19:25:58|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8260, token usage: 0.13, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 167.44, #queue-req: 0
+[2026-09-24|19:25:58|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8300, token usage: 0.13, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 172.52, #queue-req: 0
+[2026-09-24|19:25:58|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8340, token usage: 0.13, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 169.73, #queue-req: 0
+[2026-09-24|19:25:59|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8380, token usage: 0.13, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 173.72, #queue-req: 0
+[2026-09-24|19:25:59|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8420, token usage: 0.13, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 181.83, #queue-req: 0
+[2026-09-24|19:25:59|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8460, token usage: 0.13, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 178.06, #queue-req: 0
+[2026-09-24|19:25:59|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8500, token usage: 0.13, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 174.29, #queue-req: 0
+[2026-09-24|19:25:59|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+Stopping ft-measure-rc-mirror-2.service - /home/lucas/ai/FreeToken-wt/dt-measure/scripts/serve-default.sh...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [1249032]
+/usr/lib/python3.12/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 4 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+ft-measure-rc-mirror-2.service: Main process exited, code=exited, status=143/n/a
+ft-measure-rc-mirror-2.service: Failed with result 'exit-code'.
+Stopped ft-measure-rc-mirror-2.service - /home/lucas/ai/FreeToken-wt/dt-measure/scripts/serve-default.sh.
+ft-measure-rc-mirror-2.service: Consumed 45.652s CPU time, 13.3G memory peak, 0B memory swap peak.
