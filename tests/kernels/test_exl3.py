@@ -285,3 +285,21 @@ def test_reconstruct_path_matches_gemm_path(monkeypatch, codebook):
     monkeypatch.setattr(lin, "RECONSTRUCT_SLAB", 128)  # every part split into 128-column slabs
     recon = lin.exl3_forward(*args)
     assert rel_err(recon, gemm) < 1e-5, rel_err(recon, gemm)
+
+
+@cuda
+@pytest.mark.parametrize("codebook", tuple(CODEBOOKS))
+def test_moe_prefill_decoded_scratch_matches_in_kernel_decode(monkeypatch, codebook):
+    """Long prefills decode W_hat into an fp16 scratch a group of experts at a time and the GEMM
+    reads it; the product must match the in-kernel trellis decode (same W_hat, same K loop)."""
+    import freetoken.moe.fused_exl3 as fe
+
+    banks = tuple(b.cuda() for b in _moe_banks(4, codebook, E, seed=11))
+    x, w, ids = (t.cuda() for t in _routing(300, E, seed=12))
+    kw = dict(bits=4, codebook=codebook, is_prefill=True, num_experts=E)
+    monkeypatch.setattr(fe, "PREFILL_DECODED_MIN_TOKENS", 1 << 30)
+    in_kernel = fe.fused_experts_exl3(x, banks, w, ids, **kw)
+    monkeypatch.setattr(fe, "PREFILL_DECODED_MIN_TOKENS", 1)
+    monkeypatch.setattr(fe, "PREFILL_DECODE_GROUP", 5)  # groups that do not divide the expert count
+    scratch = fe.fused_experts_exl3(x, banks, w, ids, **kw)
+    assert rel_err(scratch, in_kernel) < 1e-6, rel_err(scratch, in_kernel)

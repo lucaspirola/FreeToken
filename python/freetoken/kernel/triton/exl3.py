@@ -258,17 +258,22 @@ def _exl3_gemm_kernel(
     part_of_nb_ptr, word_off_ptr, ntiles_ptr, nstart_ptr,
     sorted_ptr, expert_ids_ptr, npad_ptr,
     P, K,
+    w_ptr, w_expert_stride, e_lo, e_hi,
     BM: tl.constexpr, BK: tl.constexpr, BITS: tl.constexpr, CB: tl.constexpr, SORTED: tl.constexpr,
+    DECODED: tl.constexpr,
 ):
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
     if SORTED:
         if pid_m * BM >= tl.load(npad_ptr):
             return
-        rows = tl.load(sorted_ptr + pid_m * BM + tl.arange(0, BM))
         expert = tl.load(expert_ids_ptr + pid_m).to(tl.int64)
         if expert < 0:
             return
+        if DECODED:  # W_hat of experts [e_lo, e_hi) only: other blocks belong to another group's launch
+            if expert < e_lo or expert >= e_hi:
+                return
+        rows = tl.load(sorted_ptr + pid_m * BM + tl.arange(0, BM))
     else:
         rows = pid_m * BM + tl.arange(0, BM)
         expert = tl.zeros([], dtype=tl.int64)
@@ -283,7 +288,11 @@ def _exl3_gemm_kernel(
     for k0 in range(0, K, BK):
         kk = k0 + tl.arange(0, BK)
         a = tl.load(a_ptr + kk[None, :], mask=rmask[:, None], other=0.0)
-        w = _exl3_decode(tr, kk[:, None], n_local[None, :], n_tiles, BITS, CB)
+        if DECODED:
+            w = tl.load(w_ptr + (expert - e_lo) * w_expert_stride + kk[:, None].to(tl.int64) * (tl.num_programs(1) * 128)
+                        + (pid_n * 128 + tl.arange(0, 128))[None, :])
+        else:
+            w = _exl3_decode(tr, kk[:, None], n_local[None, :], n_tiles, BITS, CB)
         acc = tl.dot(a, w, acc)
     idx = tl.arange(0, 128)
     h = tl.load(had_ptr + idx[:, None] * 128 + idx[None, :])
@@ -395,9 +404,14 @@ def exl3_gemm(
     expert_ids: torch.Tensor | None = None,
     num_post_pad: torch.Tensor | None = None,
     block_m: int = 64,
+    decoded: torch.Tensor | None = None,
+    expert_range: tuple[int, int] = (0, 0),
 ) -> torch.Tensor:
     """Grouped GEMM: ``out[p] = svh * H(xh[part(n), p] @ W_hat)``; rows sorted per expert when
-    ``sorted_ids`` is given (``tr_expert_stride`` in int32 words), else every row uses expert 0."""
+    ``sorted_ids`` is given (``tr_expert_stride`` in int32 words), else every row uses expert 0.
+
+    ``decoded`` (sorted mode): W_hat already decoded by ``reconstruct_experts`` for the experts in
+    ``expert_range`` = [lo, hi), fp16 ``[hi - lo, K, N]``; only those experts' row blocks run."""
     rows = xh.shape[1]
     if rows == 0:
         return out
@@ -417,7 +431,10 @@ def exl3_gemm(
         sorted_ids if sorted_mode else dummy, expert_ids if sorted_mode else dummy,
         num_post_pad if sorted_mode else dummy,
         rows, parts.k,
+        decoded if decoded is not None else xh, decoded.stride(0) if decoded is not None else 0,
+        expert_range[0], expert_range[1],
         BM=block_m, BK=32, BITS=parts.bits, CB=CODEBOOKS[parts.codebook], SORTED=sorted_mode,
+        DECODED=decoded is not None,
         num_warps=4, num_stages=2,
     )
     return out
@@ -507,6 +524,41 @@ def _reconstruct_kernel(tr_ptr, out_ptr, n_tiles, N, BITS: tl.constexpr, CB: tl.
     tl.store(out_ptr + kk[:, None].to(tl.int64) * N + nn[None, :], w)
 
 
+@triton.jit
+def _reconstruct_experts_kernel(
+    tr_ptr, tr_expert_stride, out_ptr, out_expert_stride, e_lo,
+    part_of_nb_ptr, word_off_ptr, ntiles_ptr, nstart_ptr,
+    BITS: tl.constexpr, CB: tl.constexpr,
+):
+    pid_k = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    g = tl.program_id(2).to(tl.int64)
+    part = tl.load(part_of_nb_ptr + pid_n)
+    n_tiles = tl.load(ntiles_ptr + part)
+    n_local = pid_n * 128 - tl.load(nstart_ptr + part) + tl.arange(0, 128)
+    tr = tr_ptr + (e_lo + g) * tr_expert_stride + tl.load(word_off_ptr + part)
+    kk = pid_k * 16 + tl.arange(0, 16)
+    w = _exl3_decode(tr, kk[:, None], n_local[None, :], n_tiles, BITS, CB)
+    n = tl.num_programs(1) * 128
+    tl.store(out_ptr + g * out_expert_stride + kk[:, None].to(tl.int64) * n + (pid_n * 128 + tl.arange(0, 128))[None, :], w)
+
+
+def reconstruct_experts(bank: torch.Tensor, parts: Exl3Parts, lo: int, hi: int, out: torch.Tensor | None = None) -> torch.Tensor:
+    """Decode experts ``[lo, hi)`` of a ``[E, words]`` trellis bank (all parts, in the GEMM's column
+    order) to W_hat fp16 ``[hi - lo, K, N]`` -- the ``decoded`` operand of ``exl3_gemm``."""
+    g = hi - lo
+    if out is None:
+        out = torch.empty((g, parts.k, parts.n), dtype=torch.float16, device=bank.device)
+    assert out.shape[1:] == (parts.k, parts.n) and out.shape[0] >= g and out.is_contiguous()
+    if g > 0:
+        _reconstruct_experts_kernel[(parts.k // 16, parts.n // HAD, g)](
+            _words(bank), bank.stride(0) // (2 if bank.dtype == torch.int16 else 1), out, out.stride(0), lo,
+            parts.part_of_nb, parts.word_off, parts.ntiles, parts.nstart,
+            BITS=parts.bits, CB=CODEBOOKS[parts.codebook],
+        )
+    return out
+
+
 def reconstruct(trellis: torch.Tensor, codebook: str) -> torch.Tensor:
     """Triton decode of a ``[K/16, N/16, 16*bits]`` trellis to ``W_hat`` fp16 ``[K, N]`` (tests, tools)."""
     kt, nt, width = trellis.shape
@@ -521,6 +573,6 @@ def reconstruct(trellis: torch.Tensor, codebook: str) -> torch.Tensor:
 
 __all__ = [
     "CODEBOOKS", "Exl3Parts", "HAD", "HAD_SCALE", "MCG_MULT", "MUL1_MULT",
-    "exl3_gemm", "exl3_gemv", "had_cols", "had_rows", "hadamard_pm1", "hadamard_reference",
+    "exl3_gemm", "exl3_gemv", "had_cols", "had_rows", "reconstruct_experts", "hadamard_pm1", "hadamard_reference",
     "linear_reference", "reconstruct", "reconstruct_reference", "tile_stream_index",
 ]

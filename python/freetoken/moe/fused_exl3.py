@@ -13,6 +13,9 @@ Decode (``is_prefill=False``): ``ids`` are slot ids into the GPU cache's ``[S, .
 every step is a fixed-shape launch, so it records in a CUDA graph. Prefill: ``ids`` are expert
 ids into ``[E, ...]`` views; routes are sorted per expert (``moe_align_block_size``) and run
 through the tl.dot GEMM, a chunk of tokens at a time to bound the ``[2, P, H]`` rotation buffer.
+A long prefill chunk touches every expert, so W_hat is decoded once per chunk into an fp16 scratch,
+``PREFILL_DECODE_GROUP`` experts at a time, and the GEMM reads it instead of re-decoding the trellis
+in every row block (tasks/ornith-exl3/perf: the in-kernel decode ran the MoE at 3-6 TF/s).
 """
 
 from __future__ import annotations
@@ -21,10 +24,17 @@ import functools
 
 import torch
 
-from freetoken.kernel.triton.exl3 import Exl3Parts, exl3_gemm, exl3_gemv, had_rows
+from freetoken.kernel.triton.exl3 import Exl3Parts, exl3_gemm, exl3_gemv, had_rows, reconstruct_experts
 
-# tokens per prefill chunk: xh is 2 * chunk * top_k * H fp16 (64 MiB for 1024 x 8 x 2048)
-PREFILL_CHUNK_TOKENS = 1024
+# tokens per prefill chunk: xh is 2 * chunk * top_k * H fp16 (128 MiB for 2048 x 8 x 2048) and the
+# down output chunk * top_k * H fp32 (the same); each chunk decodes every expert once
+PREFILL_CHUNK_TOKENS = 2048
+# a chunk of at least this many tokens decodes W_hat into the scratch; shorter ones (extends of a
+# few hundred tokens touch only part of the experts) keep the in-kernel decode
+PREFILL_DECODED_MIN_TOKENS = 256
+# experts per decoded scratch group: gate_up + down W_hat are 3 * H * I * 2 bytes per expert
+# (6 MiB for Ornith), so 32 experts hold 192 MiB
+PREFILL_DECODE_GROUP = 32
 # the gate/up output and the activation between the two GEMMs: fp16, as in exllamav3 (whose
 # fp16 forward the checkpoint was quantized and calibrated against); bf16 here cost 8x the
 # rounding error for nothing, since the down projection rounds its rotated input to fp16 anyway
@@ -85,6 +95,11 @@ def _prefill(x, banks, topk_weights, topk_ids, top_k, parts, activation, alpha, 
     gu_tr, gu_suh, gu_svh, dn_tr, dn_suh, dn_svh = banks
     gu, dn = parts
     out = torch.empty_like(x)
+    decoded = x.shape[0] >= PREFILL_DECODED_MIN_TOKENS
+    if decoded:
+        group = min(PREFILL_DECODE_GROUP, num_experts)
+        w_gu = torch.empty((group, gu.k, gu.n), dtype=torch.float16, device=x.device)
+        w_dn = torch.empty((group, dn.k, dn.n), dtype=torch.float16, device=x.device)
     for t0 in range(0, x.shape[0], PREFILL_CHUNK_TOKENS):
         t1 = min(t0 + PREFILL_CHUNK_TOKENS, x.shape[0])
         xc = x[t0:t1]
@@ -96,13 +111,27 @@ def _prefill(x, banks, topk_weights, topk_ids, top_k, parts, activation, alpha, 
         sort = dict(sorted_ids=sorted_ids, expert_ids=expert_ids, num_post_pad=npad, block_m=bm)
         xh = had_rows(xc, gu_suh, gu, src_div=top_k, experts=ids, suh_expert_stride=gu_suh.stride(0))
         g = torch.empty((routes, gu.n), dtype=ACT_DTYPE, device=x.device)
-        exl3_gemm(xh, gu_tr, gu_svh, gu, out=g, tr_expert_stride=gu_tr.stride(0) // 2, svh_expert_stride=gu_svh.stride(0), **sort)
+        gu_args = dict(tr_expert_stride=gu_tr.stride(0) // 2, svh_expert_stride=gu_svh.stride(0), **sort)
+        if decoded:
+            for lo in range(0, num_experts, group):
+                hi = min(lo + group, num_experts)
+                reconstruct_experts(gu_tr, gu, lo, hi, out=w_gu)
+                exl3_gemm(xh, gu_tr, gu_svh, gu, out=g, decoded=w_gu, expert_range=(lo, hi), **gu_args)
+        else:
+            exl3_gemm(xh, gu_tr, gu_svh, gu, out=g, **gu_args)
         del xh
         a = _act(g, activation, alpha, limit)
         del g
         ah = had_rows(a, dn_suh, dn, experts=ids, suh_expert_stride=dn_suh.stride(0))
         o = torch.empty((routes, dn.n), dtype=torch.float32, device=x.device)
-        exl3_gemm(ah, dn_tr, dn_svh, dn, out=o, tr_expert_stride=dn_tr.stride(0) // 2, svh_expert_stride=dn_svh.stride(0), **sort)
+        dn_args = dict(tr_expert_stride=dn_tr.stride(0) // 2, svh_expert_stride=dn_svh.stride(0), **sort)
+        if decoded:
+            for lo in range(0, num_experts, group):
+                hi = min(lo + group, num_experts)
+                reconstruct_experts(dn_tr, dn, lo, hi, out=w_dn)
+                exl3_gemm(ah, dn_tr, dn_svh, dn, out=o, decoded=w_dn, expert_range=(lo, hi), **dn_args)
+        else:
+            exl3_gemm(ah, dn_tr, dn_svh, dn, out=o, **dn_args)
         out[t0:t1] = _combine(o, topk_weights[t0:t1], t1 - t0, top_k, x.dtype)
     return out
 
