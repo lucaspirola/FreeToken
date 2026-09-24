@@ -198,3 +198,46 @@ def test_scheduler_tolerates_stub_engines():
 
     sched = SimpleNamespace(engine=SimpleNamespace(), prefill_manager=None, _last_data=None)
     Scheduler._move_prefill_headroom(sched, SimpleNamespace(is_prefill=True))
+
+
+def _kv_shrink(ctl, engine, ledger, returned_bytes):
+    """Run the real ``_shrink_runtime_kv_arena`` (a request's teardown shrink) over a
+    KV pool stub that hands ``returned_bytes`` back to the free-VRAM ledger."""
+    engine.kv_cache = SimpleNamespace(
+        decommit_pages=lambda _pages: ledger.__setitem__("free", ledger["free"] + returned_bytes)
+    )
+    engine.graph_runner = object()
+    return ctl._shrink_runtime_kv_arena(
+        old_pages=131072, target_pages=65536, old_moe=engine.moe_offload_cache.cache_size,
+        old_overlap=True, kv_bytes=returned_bytes, old_kv_bytes=2 * returned_bytes,
+    )
+
+
+def test_release_then_teardown_shrink_still_reserves_before_the_next_prefill():
+    """dyn-g5 (6ec54b1): 80K request -> release to the decode level -> the teardown KV
+    shrink -> the next prefill found no reserve and OOMed in mamba2 prefill on native
+    Linux. The shrink must leave the decode level standing."""
+    ctl, engine, moe, ledger = _controller(free_gib=1.125, size=512)
+    engine._growable_moe_ceiling = 512          # the startup fill
+    # A long request's prefill ran at the prefill level; its decode takes the slots back.
+    assert ctl.prefill_headroom_transition(prefill=False, prefill_pending=False) == "release"
+    ctl.release_prefill_headroom()
+    assert moe.cache_size == 896
+    # Teardown: KV 131072 -> 65536 returns 0.21 GiB. The arena is above the startup
+    # fill, so it does not move, and free VRAM is well below the prefill target.
+    _kv_shrink(ctl, engine, ledger, int(0.21 * GIB))
+    assert moe.cache_size == 896
+    assert ledger["free"] < ctl.prefill_free_target_bytes()
+    # The next request's first prefill chunk must reserve.
+    assert ctl.prefill_headroom_transition(prefill=True, prefill_pending=True) == "reserve"
+    ctl.reserve_prefill_headroom()
+    assert ledger["free"] >= ctl.prefill_free_target_bytes()
+
+
+def test_teardown_shrink_at_the_prefill_level_needs_no_reserve():
+    # Shrink while still at the prefill level (no decode in between): free only rises.
+    ctl, engine, moe, ledger = _controller(free_gib=1.125, size=512)
+    engine._growable_moe_ceiling = 512
+    _kv_shrink(ctl, engine, ledger, int(0.21 * GIB))
+    assert ledger["free"] >= ctl.prefill_free_target_bytes()
+    assert ctl.prefill_headroom_transition(prefill=True, prefill_pending=True) is None

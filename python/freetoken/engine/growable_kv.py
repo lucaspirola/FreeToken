@@ -35,6 +35,7 @@ one-line delegations, so the scheduler's call sites are unchanged.
 from __future__ import annotations
 
 import math
+import time
 
 import torch
 from freetoken.kvcache.linear_state_pool import state_pool_bytes
@@ -611,6 +612,7 @@ class GrowableKvController:
         assert moe is not None
         old_moe = moe.cache_size
         target_free = self.prefill_free_target_bytes()
+        t0 = time.perf_counter()
         torch.cuda.synchronize(self.engine.device)
         self._log_decode_window(moe)
         live_free = self.engine._sync_get_memory()[0]
@@ -638,9 +640,10 @@ class GrowableKvController:
         self._decode_level = False
         logger.info_rank0(
             "Prefill headroom reserved: MoE slots %d -> %d (%s released, %s free, "
-            "target %s)",
+            "target %s, %.1f ms)",
             old_moe, target_moe, mem_GB(released),
             mem_GB(live_free + released), mem_GB(target_free),
+            (time.perf_counter() - t0) * 1e3,
         )
         return old_moe, target_moe
 
@@ -654,6 +657,7 @@ class GrowableKvController:
         moe = self.moe
         assert moe is not None
         old_moe = moe.cache_size
+        t0 = time.perf_counter()
         torch.cuda.synchronize(self.engine.device)
         torch.cuda.empty_cache()
         free = self.engine._sync_get_memory()[0]
@@ -676,8 +680,9 @@ class GrowableKvController:
         self._release_decode_totals = self._decode_totals(moe)
         logger.info_rank0(
             "Prefill headroom released to decode: MoE slots %d -> %d (%s committed, "
-            "%s free before, target %s)",
+            "%s free before, target %s, %.1f ms)",
             old_moe, target_moe, mem_GB(committed), mem_GB(free), mem_GB(target_free),
+            (time.perf_counter() - t0) * 1e3,
         )
         return old_moe, target_moe
 
@@ -933,7 +938,12 @@ class GrowableKvController:
         assert self.engine.graph_runner is runner_before, (
             "expert-arena resize must never replace the decode graphs"
         )
-        self._decode_level = False
+        # The dynamic-headroom level is unchanged by a KV shrink: the regrowth is
+        # funded only by the returned KV bytes and capped at the startup fill, so free
+        # VRAM never falls. An arena held at the decode level (release, then the
+        # request's teardown shrink) is STILL at the decode level, and the next
+        # prefill must reserve. Clearing the flag here skipped that reserve: dyn-g5
+        # OOMed in mamba2 prefill on native Linux (6ec54b1, results/dyn-g5).
         logger.info_rank0(
             "Released growable KV %d -> %d tokens (%s returned); MoE slots %d -> %d",
             old_pages,
