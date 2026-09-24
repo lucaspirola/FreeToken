@@ -42,8 +42,8 @@ for part in ${RC_PARTS:-8k ram}; do
   case "$part" in
     8k)
       for i in 1 2 3; do
-        one "$L-whole-$i"  FT_ROWS=0 FT_SIZES=${RC_SIZE:-8000} FT_GEN=512
-        one "$L-mirror-$i" FT_ROWS=-1 FT_RESERVE=256 FT_SIZES=${RC_SIZE:-8000} FT_GEN=512
+        one "$L-whole-$i"  FT_ROWS=0 FT_SIZES="${RC_SIZE:-8000}" FT_GEN=512
+        one "$L-mirror-$i" FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="${RC_SIZE:-8000}" FT_GEN=512
       done ;;
     ram)
       {
