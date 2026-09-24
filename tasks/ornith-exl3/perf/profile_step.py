@@ -98,6 +98,12 @@ def main(mode, prefix, args, flags):
             lines += ["", "top kernels, last chunk:"] + top(chunks[max(chunks)])
         else:
             n_ctx, n_gen = int(args[0]), int(args[1])
+            cache = llm.engine.moe_offload_cache
+
+            def mstats():
+                torch.cuda.synchronize()
+                return cache.mirror_stats() if cache is not None else {}
+            before = mstats()
             with torch.profiler.profile(activities=acts) as prof:
                 t = time.perf_counter()
                 res = llm.generate([ids(llm, "measured", n_ctx)], SamplingParams(temperature=0.0, max_tokens=n_gen, ignore_eos=True))
@@ -112,6 +118,10 @@ def main(mode, prefix, args, flags):
             lines.append(f"decode at ctx {n_ctx}: {gen} tokens, request wall {wall:.2f} s; decode window {span:.3f} s "
                          f"= {gen / span:.1f} tok/s, {1e3 * span / gen:.2f} ms/token; GPU busy {1e3 * busy / gen:.2f} ms/token "
                          f"({100 * busy / span:.0f}% of the window)")
+            after = mstats()
+            delta = {k: after[k] - before.get(k, 0) for k in after if isinstance(after[k], int)}
+            lines.append(f"mirror counters over the request (prefill of {n_ctx} + {gen} decode tokens): {delta}"
+                         + (f"; {delta.get('swaps', 0) / gen:.1f} swaps and {delta.get('writebacks', 0) / gen:.1f} writebacks per token" if gen else ""))
             lines += table(dec, "decode window")
             lines += ["", "top kernels, decode window:"] + top(dec, 30)
     finally:

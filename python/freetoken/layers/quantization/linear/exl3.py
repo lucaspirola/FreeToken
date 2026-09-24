@@ -39,10 +39,12 @@ def _num_sms(index: int) -> int:
 
 
 def pick_split_k(rows: int, n_blocks: int, k: int, device: torch.device) -> int:
-    """Split K until the decode grid covers the GPU about twice (each split must be >= 256 rows of K)."""
-    target = 2 * _num_sms(device.index or 0)
+    """Split K while the decode grid stays within eight single-warp programs per SM (each split keeps
+    >= 32 rows of K, a whole number of 16-row bands). Box sweep (tasks/ornith-exl3/perf/README.md):
+    every Ornith shape was fastest at 256-768 programs."""
+    target = 8 * _num_sms(device.index or 0)
     split = 1
-    while rows * n_blocks * split < target and k % (split * 2 * 32) == 0 and k // (split * 2) >= 256:
+    while rows * n_blocks * split * 2 <= target and k % (split * 2 * 16) == 0 and k // (split * 2) >= 32:
         split *= 2
     return split
 

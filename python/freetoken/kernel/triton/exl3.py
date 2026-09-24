@@ -17,7 +17,8 @@ Three kernels, all accumulating in fp32:
 * ``exl3_gemm``: grouped ``tl.dot`` GEMM (rows sorted per expert, or one expert for a dense
   layer) with the trellis decoded in registers and the output Hadamard + ``svh`` in the epilogue.
 * ``exl3_gemv``: one program per (row, 128 output columns[, K split]) for decode, where every
-  row may belong to a different expert slot; ``tl.dot`` would waste 15/16 of each MMA there.
+  row may belong to a different expert slot; ``tl.dot`` would waste 15/16 of each MMA there. It
+  walks each tile in bitstream order (see ``_exl3_gemv_kernel``) so all decode indexing is static.
 
 A weight is addressed as *parts*: a fused projection (q|k|v, gate|up) keeps each part's tiles
 contiguous ("part-major"), with its own suh. Every part boundary is a multiple of 128, so each
@@ -306,6 +307,30 @@ def _exl3_gemm_kernel(
 
 
 @triton.jit
+def _decode_words(a, b, shift, CB: tl.constexpr):
+    """W_hat values from the two words around each 16-bit window (32-bit ops only: funnel shift,
+    wrapping multiply, dp4a byte sum). Same values as ``_exl3_decode``."""
+    w = tl.inline_asm_elementwise(
+        "shf.r.wrap.b32 $0, $1, $2, $3;", "=r,r,r,r", [b, a, shift], dtype=tl.uint32, is_pure=True, pack=1,
+    ) & 0xFFFF
+    if CB == 2:
+        x = w * tl.full([], 0x83DCD12D, tl.uint32)
+        s = tl.inline_asm_elementwise(
+            "dp4a.u32.u32 $0, $1, 16843009, 0;", "=r,r", [x], dtype=tl.uint32, is_pure=True, pack=1,
+        )
+        return ((s + 1024).to(tl.float32) * 0.00676727294921875 + (-10.3828125)).to(tl.float16)
+    else:
+        if CB == 1:
+            x = w * tl.full([], 0xCBAC1FED, tl.uint32)
+        else:
+            x = w * tl.full([], 89226354, tl.uint32) + tl.full([], 64248484, tl.uint32)
+        x = (x & tl.full([], 0x8FFF8FFF, tl.uint32)) ^ tl.full([], 0x3B603B60, tl.uint32)
+        lo = (x & 0xFFFF).to(tl.uint16).to(tl.float16, bitcast=True)
+        hi = (x >> 16).to(tl.uint16).to(tl.float16, bitcast=True)
+        return lo + hi
+
+
+@triton.jit
 def _exl3_gemv_kernel(
     xh_ptr, stride_xpart, stride_xm,
     out_ptr, stride_om, stride_osplit,
@@ -314,9 +339,13 @@ def _exl3_gemv_kernel(
     had_ptr,
     part_of_nb_ptr, word_off_ptr, ntiles_ptr, nstart_ptr,
     expert_ptr, K_SPLIT,
-    BK: tl.constexpr, BITS: tl.constexpr, CB: tl.constexpr,
-    HAS_EXPERT: tl.constexpr,
+    BITS: tl.constexpr, CB: tl.constexpr, HAS_EXPERT: tl.constexpr,
 ):
+    """GEMV in bitstream order. Code ``t`` of a 16x16 tile sits at bit ``t * BITS`` of the tile's
+    stream and is W_hat[r, c] with ``t = 32 (c & 7) + 16 r2 + 8 r1 + 4 (c >> 3) + 2 r3 + r0``, so the
+    32 codes of one ``c & 7`` value ("group") are one contiguous bit run. Each lane owns a group of a
+    16-row band: every word, shift and row of its 32 codes is a compile-time constant, the few words
+    are loaded once (identical addresses CSE), and it accumulates columns ``c`` and ``c + 8``."""
     p = tl.program_id(0)
     pid_n = tl.program_id(1)
     pid_k = tl.program_id(2)
@@ -326,24 +355,42 @@ def _exl3_gemv_kernel(
         expert = tl.zeros([], dtype=tl.int64)
     part = tl.load(part_of_nb_ptr + pid_n)
     n_tiles = tl.load(ntiles_ptr + part)
-    n_local = pid_n * 128 - tl.load(nstart_ptr + part) + tl.arange(0, 128)
-    tr = tr_ptr + expert * tr_expert_stride + tl.load(word_off_ptr + part)
+    WORDS: tl.constexpr = 8 * BITS
+    OFF0: tl.constexpr = 257 * BITS - 16  # bit of code 0's window: (BITS - 16 + 256 * BITS)
+    g = tl.arange(0, 64)
+    nt = (pid_n * 128 - tl.load(nstart_ptr + part)) // 16 + g // 8
+    cl = g % 8
+    start = (32 * BITS * cl + OFF0) // 32  # first word of the group's run (before the wrap)
+    tile = tr_ptr + expert * tr_expert_stride + tl.load(word_off_ptr + part) + nt.to(tl.int64) * WORDS
     a_ptr = xh_ptr + part * stride_xpart + p.to(tl.int64) * stride_xm
-    acc = tl.zeros([128], dtype=tl.float32)
+    row_words = n_tiles.to(tl.int64) * WORDS
+    acc_lo = tl.zeros([64], dtype=tl.float32)
+    acc_hi = tl.zeros([64], dtype=tl.float32)
     k_begin = pid_k * K_SPLIT
-    for k0 in range(k_begin, k_begin + K_SPLIT, BK):
-        kk = k0 + tl.arange(0, BK)
-        a = tl.load(a_ptr + kk).to(tl.float32)
-        w = _exl3_decode(tr, kk[:, None], n_local[None, :], n_tiles, BITS, CB).to(tl.float32)
-        acc += tl.sum(a[:, None] * w, axis=0)
+    for k0 in range(k_begin, k_begin + K_SPLIT, 16):
+        band = tile + (k0 // 16) * row_words
+        for i in tl.static_range(32):
+            b0 = (OFF0 % 32) + i * BITS  # relative to word `start`
+            j0 = b0 // 32
+            j1 = (b0 + 15) // 32
+            sh = (j1 + 1) * 32 - (b0 + 16)
+            r = (i & 1) + 8 * ((i >> 1) & 1) + 2 * ((i >> 3) & 1) + 4 * ((i >> 4) & 1)
+            hi = tl.load(band + (start + j0) % WORDS).to(tl.uint32, bitcast=True)
+            lo = tl.load(band + (start + j1) % WORDS).to(tl.uint32, bitcast=True)
+            w = _decode_words(hi, lo, tl.full([64], sh, tl.uint32), CB).to(tl.float32)
+            a = tl.load(a_ptr + k0 + r).to(tl.float32)
+            if (i >> 2) & 1:
+                acc_hi += w * a
+            else:
+                acc_lo += w * a
     idx = tl.arange(0, 128)
-    h = tl.load(had_ptr + idx[:, None] * 128 + idx[None, :]).to(tl.float32)
-    y = tl.sum(acc[:, None] * h, axis=0)
+    col_lo = (g // 8) * 16 + cl
+    h_lo = tl.load(had_ptr + col_lo[:, None] * 128 + idx[None, :]).to(tl.float32)
+    h_hi = tl.load(had_ptr + (col_lo + 8)[:, None] * 128 + idx[None, :]).to(tl.float32)
+    y = tl.sum(acc_lo[:, None] * h_lo, axis=0) + tl.sum(acc_hi[:, None] * h_hi, axis=0)
     cols = pid_n * 128 + idx
     sv = tl.load(svh_ptr + expert * svh_expert_stride + cols).to(tl.float32)
     y = y * sv * 0.08838834764831843
-    # split K: each split writes its own plane; the launcher sums the planes in a fixed order
-    # (atomics would make decode run-to-run nondeterministic)
     tl.store(out_ptr + pid_k * stride_osplit + p.to(tl.int64) * stride_om + cols, y.to(out_ptr.dtype.element_ty))
 
 
@@ -459,10 +506,9 @@ def exl3_gemv(
     rows = xh.shape[1]
     if rows == 0:
         return out
-    bk = 32
     k = parts.k
-    if k % (split_k * bk):
-        raise ValueError(f"split_k {split_k} does not divide K {k} into {bk}-row steps")
+    if k % (split_k * 16):
+        raise ValueError(f"split_k {split_k} does not divide K {k} into 16-row bands")
     dst = out if split_k == 1 else torch.empty((split_k, rows, parts.n), dtype=torch.float32, device=xh.device)
     words = _words(trellis)
     grid = (rows, parts.n // HAD, split_k)
@@ -474,9 +520,9 @@ def exl3_gemv(
         hadamard_pm1(xh.device),
         parts.part_of_nb, parts.word_off, parts.ntiles, parts.nstart,
         experts if experts is not None else parts.part_of_nb, k // split_k,
-        BK=bk, BITS=parts.bits, CB=CODEBOOKS[parts.codebook],
+        BITS=parts.bits, CB=CODEBOOKS[parts.codebook],
         HAS_EXPERT=experts is not None,
-        num_warps=4,
+        num_warps=1,
     )
     if split_k > 1:
         torch.sum(dst, dim=0, out=out) if out.dtype == torch.float32 else out.copy_(dst.sum(dim=0))

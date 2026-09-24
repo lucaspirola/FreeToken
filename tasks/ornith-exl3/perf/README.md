@@ -24,3 +24,47 @@ Projection (not measured): dense 3.5 s -> ~0.2 s via reconstruct+cuBLAS above a 
 MoE 5.6 s -> ~0.5 s via per-layer grouped reconstruct into an fp16 scratch + the existing grouped
 fp16/bf16 MoE GEMM; the 0.59 s mirror assembly copy then becomes the next item. ~1.7 s per 8K chunk
 ~= 4-5K tok/s, the NVFP4 range.
+
+## After dba11a2 + c90a28e: what grows with context, and decode (box numbers, 2026-09-24)
+
+`profile_step.py prefill 128000` (`profile_prefill-128k-box-2026-09-24.txt`): 53.2 s wall (2408 tok/s),
+16 chunks. Every chunk costs ~2.0 s of non-attention work (constant); `_extend_attention_split_kernel`
+(triton, q8_0 KV, 10 full-attention layers) grows linearly from 0.09 s (chunk 0) to ~3 s (chunk 15),
+25.4 s in total, ~56 TF/s effective. The fall from 4.2K tok/s at 8K to 2.4K at 128K is the attention
+kernel, shared code (not EXL3), and it is not far from what a triton fp16 kernel reaches here.
+
+`profile_step.py decode` before the GEMV change (`profile_decode-8k-before-...`, `-128-before-...`;
+profiler on, so absolute rates run below the probe): 30.3 ms/token at ctx 8000, 29.7 at ctx 128
+(context does not matter), GPU busy 96%. `_exl3_gemv_kernel` 18.3 ms/token (241 launches), the mirror
+swap copies (`fast_index_copy_multi`, 120 launches) 7.7 ms/token, everything else ~3 ms.
+
+### GEMV rewrite (bitstream order)
+The old kernel decoded each weight with its own two 32-bit gathers, 64-bit shifts and index math, and
+reduced across the K axis every step: 83-107 GB/s of weights. The new `_exl3_gemv_kernel` walks each
+16x16 tile in bitstream order: code t = 32 (c & 7) + [r2 r1 (c >> 3) r3 r0], so the 32 codes of one
+(c & 7) are one contiguous bit run; a lane owns one run per 16-row band, and every word index, shift
+and row of its 32 codes is a compile-time constant (the few words load once, identical addresses CSE),
+decoded with a funnel shift + dp4a in 32-bit ops, accumulating columns c and c + 8. The Hadamard
+epilogue reads H's rows in that column order. `bench_gemv.py` (`bench_gemv-box-2026-09-24.txt`),
+kernel time at the launcher's split:
+
+| shape | old | new | exllamav3 (`bench_exllamav3_gemv...`, incl. input rotation) |
+|---|---|---|---|
+| GDN in_proj 2048x12288 | 189 us | 46 us | 31 us |
+| attn q+gate/k/v 2048x9216 | 110 us | 28 us | 24 us |
+| o_proj/out_proj 4096x2048 | 64 us | 20 us | 19 us |
+| MoE gate/up x8 routes | 110 us | 32 us | — |
+| MoE down x8 routes | 62 us | 20 us | — |
+
+`pick_split_k` now targets <= 8 single-warp programs per SM (the sweep's best on every shape).
+In decode (`profile_decode-8k-gemv-new-...`): GEMV 18.3 -> 3.9 ms/token, decode window 30.3 -> 16.0
+ms/token (33 -> 62 tok/s with the profiler on).
+
+### Next decode bottleneck: mirror writebacks are SM stores to pinned host memory at 2.3 GB/s
+The swap copies are now 52% of decode (7.7 ms/token for 17.8 swaps + 5.4 writebacks per token).
+`bench_mirror_copy.py` (`bench_mirror_copy-box-2026-09-24.txt`): H2D (SM loads from pinned memory)
+~25.9 GB/s, matching DMA (23.5 GB/s); D2H (SM stores into pinned memory) 2.3 GB/s, 10x below DMA
+D2H (24.4 GB/s): ~0.84 ms per 1.98 MB expert written back. On this box (docker, EPYC 7402P, PCIe gen4)
+the writebacks alone cost ~4.5 ms/token. Shared residency code (`residency.copy_missing_mirror`,
+`fast_index_copy_multi`), not EXL3; whether the owner's WSL2 5080 has the same D2H penalty is not
+measured (run `bench_mirror_copy.py` there with the server down).

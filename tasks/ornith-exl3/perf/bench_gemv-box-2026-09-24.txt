@@ -1,0 +1,14 @@
+GDN in_proj        launcher split 4: 45.9us (343 GB/s)
+GDN in_proj         15.73 MB  v4 40.9us (385 GB/s) w2 s4 | 40.9us (384 GB/s) w2 s8 | 41.4us (380 GB/s) w1 s32
+attn q+gate|k|v    launcher split 8: 27.6us (427 GB/s)
+attn q+gate|k|v     11.80 MB  v4 27.6us (427 GB/s) w1 s8 | 33.6us (352 GB/s) w2 s16 | 35.0us (337 GB/s) w2 s32
+o_proj/out_proj    launcher split 32: 19.6us (267 GB/s)
+o_proj/out_proj      5.24 MB  v4 19.7us (266 GB/s) w1 s32 | 21.6us (243 GB/s) w2 s16 | 21.7us (242 GB/s) w2 s32
+shared gate|up     launcher split 64: 10.9us (120 GB/s)
+shared gate|up       1.31 MB  v4 10.6us (124 GB/s) w2 s32 | 11.5us (114 GB/s) w1 s32 | 12.7us (103 GB/s) w2 s16
+shared down        launcher split 16: 10.0us (66 GB/s)
+shared down          0.66 MB  v4 9.3us (70 GB/s) w2 s16 | 9.9us (66 GB/s) w1 s16 | 10.0us (65 GB/s) w2 s8
+MoE gate|up x8     launcher split 8: 31.7us (330 GB/s)
+MoE gate|up x8      10.49 MB  v4 31.2us (336 GB/s) w2 s32 | 31.4us (334 GB/s) w2 s16 | 31.8us (330 GB/s) w1 s8
+MoE down x8        launcher split 4: 20.4us (257 GB/s)
+MoE down x8          5.24 MB  v4 20.3us (259 GB/s) w1 s4 | 20.9us (251 GB/s) w2 s8 | 21.5us (244 GB/s) w2 s2
