@@ -89,8 +89,9 @@ for a in ${ARMS:-whole mirror-1m mirror whole-close}; do
     # Prefill-transient A/B (-def = default, -t0 = pre-fix cushion-only headroom: no startup
     # measurement, transient 0, so the arena is neither parked nor held 0.65 GiB below the
     # ratio plan through decode). --moe-collect-stats on both sides for the decode hit rate.
-    whole-def|whole-t0|mirror-def|mirror-t0|whole-8k-def|whole-8k-t0|mirror-8k-def|mirror-8k-t0)
-      envs=""; case "$a" in *-t0) envs="$T0" ;; esac
+    whole-def|whole-t0|mirror-def|mirror-t0|whole-8k-def|whole-8k-t0|mirror-8k-def|mirror-8k-t0|whole-st|mirror-st|whole-8k-st|mirror-8k-st)
+      # -st: the static reservation (dynamic prefill headroom off) on a tree that has it
+      envs=""; case "$a" in *-t0) envs="$T0" ;; *-st) envs="FREETOKEN_DYNAMIC_PREFILL_HEADROOM=0" ;; esac
       case "$a" in
         whole-8k-*)  arm $CK-$a FT_ROWS=0 FT_SIZES="8000" FT_EXTRA="--moe-collect-stats" FT_ENVS="$envs" ;;
         mirror-8k-*) arm $CK-$a FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000" FT_EXTRA="--moe-collect-stats" FT_ENVS="$envs" ;;
@@ -125,7 +126,7 @@ done
 # same-commit whole arms (compare_box.py, the owner's gate) and vs the record
 # (compare_records.py).
 python3 "$HERE/compare_needles.py" "$OUT" $CK-whole $CK-mirror-1m > "$OUT/$CK-needles-compare.txt" 2>&1 || true
-python3 "$HERE/compare_transient_ab.py" "$OUT" $CK > "$OUT/$CK-transient-ab.txt" 2>&1 || true
+{ python3 "$HERE/compare_transient_ab.py" "$OUT" $CK; python3 "$HERE/compare_transient_ab.py" "$OUT" $CK st; } > "$OUT/$CK-transient-ab.txt" 2>&1 || true
 python3 "$HERE/compare_box.py" "$OUT" $CK > "$OUT/$CK-box-compare.txt" 2>&1 || true
 python3 "$HERE/compare_records.py" "$OUT" $CK > "$OUT/$CK-records-compare.txt" 2>&1 || true
 cat "$OUT/$CK-transient-ab.txt" "$OUT/$CK-needles-compare.txt" "$OUT/$CK-box-compare.txt" "$OUT/$CK-records-compare.txt"

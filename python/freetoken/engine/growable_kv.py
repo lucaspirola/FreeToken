@@ -511,6 +511,151 @@ class GrowableKvController:
         free_after = self.engine._sync_get_memory()[0]
         return target, free_after, target_free
 
+    # ------------------------------------------------------------------
+    # Dynamic prefill headroom: the measured prefill transient is held free only
+    # while prefill chunks run. Decode gets those slots back.
+    # ------------------------------------------------------------------
+
+    def arena_floor_slots(self) -> int:
+        """The lowest usable-slot count a runtime shrink may reach: the
+        prefill-overlap / ``num_experts`` floor and the residency's coverage floor
+        (``min_gpu_slots``) rounded UP to chunk granularity (a partial chunk is
+        not releasable). The same floor ``_grow_runtime_kv_arena`` shrinks to."""
+        moe = self.moe
+        assert moe is not None
+        floor = 2 * moe.num_experts if moe.prefill_overlap else moe.num_experts
+        need = moe.residency.min_gpu_slots()
+        class_layouts = getattr(moe, "class_arena_layouts", None)
+        cov_step = moe.num_experts if class_layouts is not None else moe.arena_layout[1]
+        cov_floor = -(-need // cov_step) * cov_step
+        return max(floor, cov_floor)
+
+    def prefill_free_target_bytes(self) -> int:
+        """Live free VRAM a prefill chunk needs: the growable headroom (VMM cushion
+        or the measured transient, whichever is larger) plus the margin."""
+        return self.headroom_bytes() + PREFILL_HEADROOM_MARGIN_BYTES
+
+    @staticmethod
+    def decode_free_target_bytes() -> int:
+        """Live free VRAM decode keeps: the bare VMM cushion plus the margin (0.375
+        GiB), the level every start held before the transient was measured. A
+        decode step allocates no activations outside its captured graph pool, so
+        the transient is dead weight between prefills, and the cushion still
+        covers a KV grow at a decode boundary and host-side restores."""
+        return growable_headroom_bytes(0) + PREFILL_HEADROOM_MARGIN_BYTES
+
+    def dynamic_enabled(self) -> bool:
+        """On unless ``FREETOKEN_DYNAMIC_PREFILL_HEADROOM=0`` (the static
+        reservation, 82207c8's behaviour, kept for A/B), and only for a growable
+        expert arena whose transient exceeds the cushion (otherwise both levels
+        are the same)."""
+        import os
+
+        if os.environ.get("FREETOKEN_DYNAMIC_PREFILL_HEADROOM", "1").strip() in (
+            "0", "false", "no", "off",
+        ):
+            return False
+        engine = self.engine
+        if not getattr(engine.config, "kv_grow_step_tokens", 0) or self.moe is None:
+            return False
+        if getattr(engine, "_growable_moe_ceiling", None) is None:
+            return False
+        return self.prefill_free_target_bytes() > self.decode_free_target_bytes()
+
+    def prefill_headroom_transition(self, *, prefill: bool, prefill_pending: bool) -> "str | None":
+        """What the scheduler must do before the batch it just picked: ``"reserve"``
+        (a prefill batch while decode holds the arena full), ``"release"`` (a
+        decode batch with no prefill waiting while the arena is still held at the
+        prefill level), or ``None``. Pure bookkeeping; the scheduler drains the
+        in-flight forward and then calls ``reserve_prefill_headroom`` /
+        ``release_prefill_headroom``."""
+        if not self.dynamic_enabled():
+            return None
+        full = bool(getattr(self, "_decode_level", False))
+        if prefill and full:
+            return "reserve"
+        if not prefill and not prefill_pending and not full:
+            return "release"
+        return None
+
+    @torch.inference_mode()
+    def reserve_prefill_headroom(self) -> tuple[int, int]:
+        """Shrink the arena until live free VRAM holds one prefill chunk's transient
+        plus the margin. Returns (slots before, slots after). No-forward-in-flight
+        boundary required (``set_usable_slots``)."""
+        self._refuse_if_growable_transition_failed()
+        moe = self.moe
+        assert moe is not None
+        old_moe = moe.cache_size
+        target_free = self.prefill_free_target_bytes()
+        torch.cuda.synchronize(self.engine.device)
+        live_free = self.engine._sync_get_memory()[0]
+        target_moe = old_moe
+        released = 0
+        if live_free < target_free:
+            floor = self.arena_floor_slots()
+            capacity_bytes = self._arena_transition_bytes(self._growable_arena_boundaries()[-1])
+            deficit = capacity_bytes - self._arena_transition_bytes(old_moe)
+            target_moe = max(
+                self._growable_usable_for_target_free_bytes(target_free - live_free + deficit),
+                floor,
+            )
+            if target_moe < old_moe:
+                released = int(moe.set_usable_slots(target_moe))
+            # Ledger, not the driver reading (WSL can report 0 free after a real unmap).
+            have = live_free + released
+            while have < target_free and target_moe > floor:
+                target_moe = self._growable_arena_step_down(target_moe, floor)
+                released += int(moe.set_usable_slots(target_moe))
+                have = live_free + released
+            object.__setattr__(self.engine.config, "moe_cache_size", target_moe)
+            if self.engine.config.tp_info.size > 1:
+                self.engine.sync_all_ranks()
+        self._decode_level = False
+        logger.info_rank0(
+            "Prefill headroom reserved: MoE slots %d -> %d (%s released, %s free, "
+            "target %s)",
+            old_moe, target_moe, mem_GB(released),
+            mem_GB(live_free + released), mem_GB(target_free),
+        )
+        return old_moe, target_moe
+
+    @torch.inference_mode()
+    def release_prefill_headroom(self) -> tuple[int, int]:
+        """Give the transient back to the arena once prefill is over: return the
+        caching allocator's idle blocks to the driver, then grow the arena to the
+        largest boundary that leaves ``decode_free_target_bytes`` free. Returns
+        (slots before, slots after). No-forward-in-flight boundary required."""
+        self._refuse_if_growable_transition_failed()
+        moe = self.moe
+        assert moe is not None
+        old_moe = moe.cache_size
+        torch.cuda.synchronize(self.engine.device)
+        torch.cuda.empty_cache()
+        free = self.engine._sync_get_memory()[0]
+        target_free = self.decode_free_target_bytes()
+        current_bytes = self._arena_transition_bytes(old_moe)
+        spendable = free - target_free
+        target_moe = old_moe
+        for boundary in self._growable_arena_boundaries():
+            if boundary <= old_moe:
+                continue
+            if self._arena_transition_bytes(boundary) - current_bytes <= spendable:
+                target_moe = boundary
+        committed = 0
+        if target_moe != old_moe:
+            committed = int(moe.set_usable_slots(target_moe))
+            object.__setattr__(self.engine.config, "moe_cache_size", target_moe)
+            if self.engine.config.tp_info.size > 1:
+                self.engine.sync_all_ranks()
+        self._decode_level = True
+        logger.info_rank0(
+            "Prefill headroom released to decode: MoE slots %d -> %d (%s committed, "
+            "%s free before, target %s)",
+            old_moe, target_moe, mem_GB(committed), mem_GB(free), mem_GB(target_free),
+        )
+        return old_moe, target_moe
+
     def _grow_runtime_kv_arena(
         self,
         *,
@@ -695,6 +840,9 @@ class GrowableKvController:
         assert self.engine.graph_runner is runner_before, (
             "expert-arena resize must never replace the decode graphs"
         )
+        # The grow left the prefill headroom free; decode takes it back at the
+        # next decode-only boundary (release_prefill_headroom).
+        self._decode_level = False
         logger.info_rank0(
             "Committed growable KV through %d tokens (%s physical); MoE slots %d -> %d",
             target_pages,
@@ -760,6 +908,7 @@ class GrowableKvController:
         assert self.engine.graph_runner is runner_before, (
             "expert-arena resize must never replace the decode graphs"
         )
+        self._decode_level = False
         logger.info_rank0(
             "Released growable KV %d -> %d tokens (%s returned); MoE slots %d -> %d",
             old_pages,

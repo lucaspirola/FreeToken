@@ -89,8 +89,9 @@ for a in ${ARMS:-whole mirror-1m mirror whole-close}; do
     # Prefill-transient A/B (-def = default, -t0 = pre-fix cushion-only headroom: no startup
     # measurement, transient 0, so the arena is neither parked nor held 0.65 GiB below the
     # ratio plan through decode). --moe-collect-stats on both sides for the decode hit rate.
-    whole-def|whole-t0|mirror-def|mirror-t0|whole-8k-def|whole-8k-t0|mirror-8k-def|mirror-8k-t0)
-      envs=""; case "$a" in *-t0) envs="$T0" ;; esac
+    whole-def|whole-t0|mirror-def|mirror-t0|whole-8k-def|whole-8k-t0|mirror-8k-def|mirror-8k-t0|whole-st|mirror-st|whole-8k-st|mirror-8k-st)
+      # -st: the static reservation (dynamic prefill headroom off) on a tree that has it
+      envs=""; case "$a" in *-t0) envs="$T0" ;; *-st) envs="FREETOKEN_DYNAMIC_PREFILL_HEADROOM=0" ;; esac
       case "$a" in
         whole-8k-*)  arm $CK-$a FT_ROWS=0 FT_SIZES="8000" FT_EXTRA="--moe-collect-stats" FT_ENVS="$envs" ;;
         mirror-8k-*) arm $CK-$a FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000" FT_EXTRA="--moe-collect-stats" FT_ENVS="$envs" ;;
@@ -129,7 +130,7 @@ python3 "$HERE/compare_needles.py" "$BOX" $CK-whole $CK-mirror-1m > "$BOX/$CK-ne
 cp "$OUT"/nemotron-reserve-2e-record.json "$OUT"/nemotron-reserve-2e-1m-record.json "$BOX/" 2>/dev/null || true
 python3 "$HERE/compare_records.py" "$BOX" $CK > "$BOX/$CK-records-compare.txt" 2>&1 || true
 rm -f "$BOX"/nemotron-reserve-2e-record.json "$BOX"/nemotron-reserve-2e-1m-record.json
-python3 "$HERE/compare_transient_ab.py" "$BOX" $CK > "$BOX/$CK-transient-ab.txt" 2>&1 || true
+{ python3 "$HERE/compare_transient_ab.py" "$BOX" $CK; python3 "$HERE/compare_transient_ab.py" "$BOX" $CK st; } > "$BOX/$CK-transient-ab.txt" 2>&1 || true
 python3 "$HERE/compare_box.py" "$BOX" $CK > "$BOX/$CK-box-compare.txt" 2>&1 || true
 cat "$BOX/$CK-transient-ab.txt" "$BOX/$CK-needles-compare.txt" "$BOX/$CK-records-compare.txt" "$BOX/$CK-box-compare.txt"
 echo "checkpoint $CK (box) arms done $(date -u +%FT%TZ)"

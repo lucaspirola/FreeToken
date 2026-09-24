@@ -2711,6 +2711,28 @@ class Scheduler(SchedulerIOMixin):
         except Exception as e:  # noqa: BLE001
             logger.warning(f"could not log cache geometry: {e!r}")
 
+    def _move_prefill_headroom(self, batch: Batch) -> None:
+        """Dynamic prefill headroom: before a prefill batch the expert arena gives up
+        one prefill chunk's transient; before a decode batch with no prefill waiting it
+        takes it back (engine/growable_kv.py ``prefill_headroom_transition``). Either
+        move resizes the arena, so drain the in-flight forward first (the same
+        no-forward-in-flight boundary ``grow_runtime_kv`` gets). Duck-typed: stub
+        engines in the loop tests have no such method."""
+        ask = getattr(getattr(self, "engine", None), "prefill_headroom_transition", None)
+        if ask is None:
+            return
+        pm = getattr(self, "prefill_manager", None)
+        kind = ask(
+            prefill=bool(getattr(batch, "is_prefill", False)),
+            prefill_pending=bool(getattr(pm, "runnable", False)),
+        )
+        if kind is None:
+            return
+        last_data = getattr(self, "_last_data", None)
+        if last_data is not None:
+            self._last_data = self._drain_inflight(last_data)
+        self.engine.apply_prefill_headroom(kind)
+
     def _batch_needs_kv_growth(self, batch: Batch) -> bool:
         """True when ``_prepare_batch`` would call ``engine.grow_runtime_kv`` for this
         batch, without performing the resize. Mirrors the condition inside
@@ -2853,6 +2875,7 @@ class Scheduler(SchedulerIOMixin):
         self._admission_stalled = batch is None
         if batch is None:
             return None
+        self._move_prefill_headroom(batch)
         # ``_prepare_batch`` below calls ``engine.grow_runtime_kv`` unconditionally when
         # growable KV is on; if this batch actually needs more pages, drain the still
         # in-flight previous forward (overlap_loop only -- ``_last_data`` is always None

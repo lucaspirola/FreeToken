@@ -1568,6 +1568,20 @@ class Engine:
     def shrink_runtime_kv(self, target_pages: int) -> tuple[int, int]:
         return self.growable_kv.shrink_runtime_kv(target_pages)
 
+    # Dynamic prefill headroom (engine/growable_kv.py): the scheduler asks before each
+    # batch whether the arena must give up / take back the prefill transient.
+    def prefill_headroom_transition(self, *, prefill: bool, prefill_pending: bool) -> "str | None":
+        return self.growable_kv.prefill_headroom_transition(
+            prefill=prefill, prefill_pending=prefill_pending
+        )
+
+    def apply_prefill_headroom(self, kind: str) -> tuple[int, int]:
+        if kind == "reserve":
+            return self.growable_kv.reserve_prefill_headroom()
+        if kind == "release":
+            return self.growable_kv.release_prefill_headroom()
+        raise ValueError(f"unknown prefill headroom transition {kind!r}")
+
     @torch.inference_mode()
     def retune_pageable_layers(self, target: frozenset[int]) -> None:
         """Apply an idle-only host-residency swap and recapture decode graphs."""
