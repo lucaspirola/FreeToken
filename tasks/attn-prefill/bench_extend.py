@@ -20,6 +20,7 @@ import sys
 import torch
 import triton.testing as tt
 
+from freetoken.kernel.triton import attention as _attn
 from freetoken.kernel.triton.attention import extend_paged_attention
 from freetoken.kvcache.quant import BLOCK, resolve_kv_quant
 
@@ -116,6 +117,7 @@ def main():
                 for bm, bn, w, s in itertools.product((32, 64, 128), (32, 64, 128), (4, 8), (1, 2, 3)):
                     os.environ.update(FREETOKEN_EXTEND_BLOCK_M=str(bm), FREETOKEN_EXTEND_BLOCK_N=str(bn),
                                       FREETOKEN_EXTEND_NUM_WARPS=str(w), FREETOKEN_EXTEND_NUM_STAGES=str(s))
+                    _attn._extend_launch_env_override.cache_clear()   # read once per process otherwise
                     try:
                         out = run_triton(*args, d)
                         err = (out.float() - ref.float()).abs().max().item()
@@ -128,6 +130,7 @@ def main():
                 for k in ("FREETOKEN_EXTEND_BLOCK_M", "FREETOKEN_EXTEND_BLOCK_N",
                           "FREETOKEN_EXTEND_NUM_WARPS", "FREETOKEN_EXTEND_NUM_STAGES"):
                     os.environ.pop(k, None)
+                _attn._extend_launch_env_override.cache_clear()
                 print(f"    best at P={p}: {best[1]} {best[0]:.2f} ms (default {t:.2f})")
             del args, q, ke, ve, kq, ks, vq, vs, ref
             torch.cuda.empty_cache()
