@@ -1,0 +1,11 @@
+name, driver_version, memory.total [MiB], compute_cap
+NVIDIA GeForce RTX 5080, 580.126.09, 16303 MiB, 12.0
+5.15.0-176-generic
+24
+               total        used        free      shared  buff/cache   available
+Mem:              62           1          39           0          20          60
+Swap:              7           0           7
+64
+torch 2.11.0+cu130 13.0
+Build cuda_13.0.r13.0/compiler.36424714_0
+ba7d1a6 Dynamic headroom: a KV shrink keeps the decode level, so the next prefill reserves
