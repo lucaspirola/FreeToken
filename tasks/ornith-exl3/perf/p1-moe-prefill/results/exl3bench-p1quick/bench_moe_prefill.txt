@@ -1,0 +1,28 @@
+baseline chunk 2048, old tiles {'block_m': 64, 'block_k': 32, 'num_stages': 2, 'num_warps': 4}:    30.08 ms  transient     800 MiB
+/root/venv/lib/python3.12/site-packages/torch/profiler/profiler.py:224: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+       16.28 ms  _exl3_gemm_kernel
+       10.88 ms  _reconstruct_experts_kernel
+        2.26 ms  _had_rows_kernel
+        0.63 ms  _splitk_combine_kernel
+        0.15 ms  void flashinfer::activation::act_and_mul_kernel<__half, &(si
+        0.03 ms  void moe_align_block_size_kernel<int>(int const*, int*, int*
+        0.02 ms  Memcpy DtoD (Device -> Device)
+        0.01 ms  void count_and_sort_expert_tokens_kernel<int>(int const*, in
+shipped defaults (chunk 8192, _prefill_gemm):    12.20 ms  transient    1152 MiB  rel err 0.00e+00
+        6.42 ms  _exl3_gemm_kernel
+        2.65 ms  _reconstruct_experts_kernel
+        2.28 ms  _had_rows_kernel
+        0.65 ms  _splitk_combine_kernel
+        0.19 ms  void flashinfer::activation::act_and_mul_kernel<__half, &(si
+        0.03 ms  Memcpy DtoD (Device -> Device)
+        0.02 ms  void moe_align_block_size_kernel<int>(int const*, int*, int*
+        0.01 ms  void count_and_sort_expert_tokens_kernel<int>(int const*, in
+        6.42 ms  _exl3_gemm_kernel
+        2.66 ms  _reconstruct_experts_kernel
+        2.29 ms  _had_rows_kernel
+        0.65 ms  _splitk_combine_kernel
+        0.18 ms  void flashinfer::activation::act_and_mul_kernel<__half, &(si
+        0.03 ms  Memcpy DtoD (Device -> Device)
+        0.02 ms  void moe_align_block_size_kernel<int>(int const*, int*, int*
+        0.01 ms  void count_and_sort_expert_tokens_kernel<int>(int const*, in

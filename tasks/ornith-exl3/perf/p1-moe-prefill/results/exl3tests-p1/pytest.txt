@@ -1,0 +1,12 @@
+........................................................................ [ 23%]
+........................................................................ [ 46%]
+........................................................................ [ 69%]
+........................................................................ [ 92%]
+.......................                                                  [100%]
+=============================== warnings summary ===============================
+tests/kernels/test_exl3.py::test_moe_matches_reference[prefill-5-3inst-2]
+  /root/venv/lib/python3.12/site-packages/flashinfer/cute_dsl/utils.py:86: DeprecationWarning: Arch from arch.py is deprecated. Use Arch from enums.py instead.
+    from cutlass.base_dsl.arch import Arch
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+311 passed, 1 warning in 122.32s (0:02:02)

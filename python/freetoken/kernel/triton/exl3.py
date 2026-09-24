@@ -507,6 +507,9 @@ def exl3_gemm(
     block_m: int = 64,
     decoded: torch.Tensor | None = None,
     expert_range: tuple[int, int] = (0, 0),
+    block_k: int = 32,
+    num_stages: int = 2,
+    num_warps: int = 4,
 ) -> torch.Tensor:
     """Grouped GEMM: ``out[p] = svh * H(xh[part(n), p] @ W_hat)``; rows sorted per expert when
     ``sorted_ids`` is given (``tr_expert_stride`` in int32 words), else every row uses expert 0.
@@ -534,9 +537,9 @@ def exl3_gemm(
         rows, parts.k,
         decoded if decoded is not None else xh, decoded.stride(0) if decoded is not None else 0,
         expert_range[0], expert_range[1],
-        BM=block_m, BK=32, BITS=parts.bits, CB=CODEBOOKS[parts.codebook], SORTED=sorted_mode,
+        BM=block_m, BK=block_k, BITS=parts.bits, CB=CODEBOOKS[parts.codebook], SORTED=sorted_mode,
         DECODED=decoded is not None,
-        num_warps=4, num_stages=2,
+        num_warps=num_warps, num_stages=num_stages,
     )
     return out
 
@@ -801,6 +804,64 @@ def reconstruct_experts(bank: torch.Tensor, parts: Exl3Parts, lo: int, hi: int, 
     return out
 
 
+@triton.jit
+def _reconstruct_folded_kernel(
+    tr_ptr, tr_expert_stride, out_ptr, out_expert_stride, e_lo,
+    suh_ptr, suh_expert_stride, suh_part_stride, svh_ptr, svh_expert_stride, had_ptr,
+    part_of_nb_ptr, word_off_ptr, ntiles_ptr, nstart_ptr,
+    BITS: tl.constexpr, CB: tl.constexpr,
+):
+    """One 128x128 tile of ``W_full = diag(suh) H W_hat H diag(svh) / 128`` (both rotations and
+    both sign vectors folded into the weight, exllamav3's reconstruct_had): ``x @ W_full`` equals
+    ``svh * H((H(x * suh)) @ W_hat)`` without rotating any activation."""
+    pid_k = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    g = tl.program_id(2).to(tl.int64)
+    e = e_lo + g
+    part = tl.load(part_of_nb_ptr + pid_n)
+    n_tiles = tl.load(ntiles_ptr + part)
+    idx = tl.arange(0, 128)
+    n_local = pid_n * 128 - tl.load(nstart_ptr + part) + idx
+    tr = tr_ptr + e * tr_expert_stride + tl.load(word_off_ptr + part)
+    kk = pid_k * 128 + idx
+    w = _exl3_decode(tr, kk[:, None], n_local[None, :], n_tiles, BITS, CB)
+    h = tl.load(had_ptr + idx[:, None] * 128 + idx[None, :])
+    a = tl.dot(h, w)  # H W: 128 exact +-w terms per entry, fp32
+    hi = a.to(tl.float16)
+    lo = (a - hi.to(tl.float32)).to(tl.float16)
+    b = tl.dot(hi, h) + tl.dot(lo, h)
+    s = tl.load(suh_ptr + e * suh_expert_stride + part * suh_part_stride + kk).to(tl.float32)
+    cols = pid_n * 128 + idx
+    v = tl.load(svh_ptr + e * svh_expert_stride + cols).to(tl.float32)
+    y = b * (s * 0.0078125)[:, None] * v[None, :]
+    n = tl.num_programs(1) * 128
+    tl.store(out_ptr + g * out_expert_stride + kk[:, None].to(tl.int64) * n + cols[None, :], y.to(out_ptr.dtype.element_ty))
+
+
+def reconstruct_folded(
+    trellis: torch.Tensor, suh: torch.Tensor, svh: torch.Tensor, parts: Exl3Parts, *,
+    lo: int = 0, hi: int = 1, suh_expert_stride: int = 0, svh_expert_stride: int = 0,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """``W_full`` fp16 ``[hi - lo, K, N]`` for experts ``[lo, hi)`` of a ``[E, words]`` bank (a dense
+    layer: a flat trellis, ``lo=0, hi=1``): ``x @ W_full[e] = svh * H(H(x * suh) @ W_hat)`` per part,
+    so a plain GEMM on the raw activations replaces had_rows + GEMM + had_cols."""
+    g = hi - lo
+    if out is None:
+        out = torch.empty((g, parts.k, parts.n), dtype=torch.float16, device=trellis.device)
+    assert out.shape[1:] == (parts.k, parts.n) and out.shape[0] >= g and out.is_contiguous()
+    words = _words(trellis)
+    tr_stride = words.stride(0) if words.dim() > 1 else 0
+    if g > 0:
+        _reconstruct_folded_kernel[(parts.k // HAD, parts.n // HAD, g)](
+            words, tr_stride, out, out.stride(0), lo,
+            suh, suh_expert_stride, parts.suh_part_stride, svh, svh_expert_stride, hadamard_pm1(trellis.device),
+            parts.part_of_nb, parts.word_off, parts.ntiles, parts.nstart,
+            BITS=parts.bits, CB=CODEBOOKS[parts.codebook], num_warps=8,
+        )
+    return out
+
+
 def reconstruct(trellis: torch.Tensor, codebook: str) -> torch.Tensor:
     """Triton decode of a ``[K/16, N/16, 16*bits]`` trellis to ``W_hat`` fp16 ``[K, N]`` (tests, tools)."""
     kt, nt, width = trellis.shape
@@ -815,6 +876,6 @@ def reconstruct(trellis: torch.Tensor, codebook: str) -> torch.Tensor:
 
 __all__ = [
     "CODEBOOKS", "Exl3Parts", "HAD", "HAD_SCALE", "MCG_MULT", "MUL1_MULT",
-    "exl3_gemm", "exl3_gemv", "had_cols", "had_rows", "reconstruct_experts", "hadamard_pm1", "hadamard_reference",
+    "exl3_gemm", "exl3_gemv", "had_cols", "had_rows", "reconstruct_experts", "reconstruct_folded", "hadamard_pm1", "hadamard_reference",
     "linear_reference", "reconstruct", "reconstruct_reference", "tile_stream_index",
 ]

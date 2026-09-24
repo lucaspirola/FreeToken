@@ -391,3 +391,45 @@ def test_moe_decode_prologue_rotation_matches_had_rows(monkeypatch, tokens):
     monkeypatch.setenv("FREETOKEN_EXL3_GEMV_PREROT", "0")
     sep = fused_experts_exl3(x, banks, w, ids, **kw)
     assert rel_err(pre, sep) < 2e-3, rel_err(pre, sep)
+
+
+@cuda
+@pytest.mark.parametrize("bits", (2, 5, 8))
+@pytest.mark.parametrize("codebook", tuple(CODEBOOKS))
+def test_folded_reconstruct_path_matches_reference(monkeypatch, bits, codebook):
+    """Prefill with both rotations folded into W_full (reconstruct_folded + one fp16 GEMM on the raw
+    activations) against the fp32 reference and against the rotate-activations reconstruct path:
+    the only new rounding is W_full's (and the fp16 GEMM output), same order as the xh rounding."""
+    from freetoken.kernel.triton.exl3 import Exl3Parts, reconstruct_folded, reconstruct_reference, hadamard_reference
+    from freetoken.layers.quantization.linear import exl3 as lin
+
+    k, sizes, rows = 512, (256, 128, 384), 300
+    trs, suh, svh = _dense_case(k, sizes, bits, codebook, seed=11 + bits)
+    x = torch.randn(rows, k, generator=torch.Generator().manual_seed(12)).to(torch.bfloat16)
+    ref, col = [], 0
+    for j, (tr, s) in enumerate(zip(trs, sizes)):
+        ref.append(linear_reference(x.float(), tr, suh[j], svh[col:col + s], codebook))
+        col += s
+    ref = torch.cat(ref, dim=1)
+    parts = Exl3Parts.build(k, sizes, bits, codebook, "cuda")
+    flat = torch.cat([t.reshape(-1) for t in trs]).cuda()
+    args = (x.cuda(), flat, suh.cuda(), svh.cuda(), parts, torch.float32)
+    monkeypatch.setattr(lin, "FOLD_MIN_ROWS", 16)
+    monkeypatch.setenv("FREETOKEN_EXL3_FOLD", "1")
+    folded = lin.exl3_forward(*args)
+    assert rel_err(folded.cpu(), ref) < REL_TOL, rel_err(folded.cpu(), ref)
+    monkeypatch.setenv("FREETOKEN_EXL3_FOLD", "0")
+    rot = lin.exl3_forward(*args)
+    assert rel_err(folded, rot) < 2e-3, rel_err(folded, rot)
+    # W_full itself against diag(suh) H W_hat H diag(svh) in float64
+    w = reconstruct_folded(flat, suh.cuda(), svh.cuda(), parts)[0].double().cpu()
+    h = hadamard_reference().double() / 128 ** 0.5
+    col = 0
+    for j, (tr, s) in enumerate(zip(trs, sizes)):
+        wh = reconstruct_reference(tr, codebook).double()
+        hk = torch.block_diag(*[h] * (k // 128))
+        hn = torch.block_diag(*[h] * (s // 128))
+        want = suh[j].double()[:, None] * (hk @ wh @ hn) * svh[col:col + s].double()[None, :]
+        got = w[:, col:col + s]
+        assert (got - want).abs().max() <= 2e-3 * want.abs().max(), (got - want).abs().max()
+        col += s

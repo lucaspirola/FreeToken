@@ -32,6 +32,17 @@ RECONSTRUCT_MIN_ROWS = 16
 PREROT_MAX_NBLOCKS = 32
 # Output columns per cuBLAS call: bounds the fp32 accumulator at rows x this.
 RECONSTRUCT_SLAB = 2048
+# From this many rows on, reconstruct W_full = diag(suh) H W_hat H diag(svh) (both rotations folded
+# into the weight, as exllamav3's reconstruct_had) and run one plain GEMM on the raw activations:
+# the per-token had_rows + had_cols passes cost 36-60% of every dense prefill projection at 8K rows
+# (tasks/ornith-exl3/perf/RESEARCH.md). FREETOKEN_EXL3_FOLD=0 keeps the rotate-activations path.
+FOLD_MIN_ROWS = 1024
+
+
+def fold_enabled() -> bool:
+    import os
+
+    return os.getenv("FREETOKEN_EXL3_FOLD", "0").strip() != "0"
 
 
 def exl3_facts(scheme) -> tuple[int, str]:
@@ -67,6 +78,8 @@ def exl3_forward(x2: torch.Tensor, trellis: torch.Tensor, suh: torch.Tensor, svh
             # the input rotation runs in the GEMV prologue: no had_rows launch
             return exl3_gemv(None, trellis, svh, parts, out=out, split_k=split, x=x2, suh=suh)
         return exl3_gemv(had_rows(x2, suh, parts), trellis, svh, parts, out=out, split_k=split)
+    if rows >= FOLD_MIN_ROWS and parts.sizes and fold_enabled():
+        return _forward_folded(x2, trellis, suh, svh, parts, out_dtype)
     xh = had_rows(x2, suh, parts)
     out = torch.empty((rows, parts.n), dtype=out_dtype, device=x2.device)
     if rows >= RECONSTRUCT_MIN_ROWS and parts.sizes:
@@ -92,6 +105,17 @@ def _forward_reconstruct(xh: torch.Tensor, trellis: torch.Tensor, svh: torch.Ten
         off += count
         col += n
     return out
+
+
+def _forward_folded(x2: torch.Tensor, trellis: torch.Tensor, suh: torch.Tensor, svh: torch.Tensor, parts, out_dtype) -> torch.Tensor:
+    """``out = x2 @ W_full``: W_full decoded once with both rotations and sign vectors folded in
+    (fp16, one rounding), the product in cuBLAS (fp16 in, fp32 accumulation, fp16 out)."""
+    from freetoken.kernel.triton.exl3 import reconstruct_folded
+
+    w = reconstruct_folded(trellis, suh, svh, parts)[0]
+    xf = x2 if x2.dtype == torch.float16 else x2.to(torch.float16)
+    y = torch.mm(xf, w)
+    return y if out_dtype == torch.float16 else y.to(out_dtype)
 
 
 class TritonExl3LinearKernel(LinearKernel):

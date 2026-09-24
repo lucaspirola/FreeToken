@@ -36,9 +36,13 @@ from freetoken.kernel.triton.exl3 import (
     splitk_silu_had,
 )
 
-# tokens per prefill chunk: xh is 2 * chunk * top_k * H fp16 (128 MiB for 2048 x 8 x 2048) and the
-# down output chunk * top_k * H fp32 (the same); each chunk decodes every expert once
-PREFILL_CHUNK_TOKENS = 2048
+# tokens per MoE prefill sub-chunk. Each sub-chunk decodes every expert's W_hat once and runs every
+# expert's rows through one grouped GEMM, so the sub-chunk sets how many rows a decoded weight tile
+# serves: at 2048 tokens (~64 rows per expert of 256) the GEMM was bandwidth-starved (25 TF/s) and the
+# reconstruct rewrote all experts 4x per 8K chunk. One sub-chunk per 8K prefill chunk: MoE layer
+# 31.2 -> 13.6 ms at 8192 tokens (bench_moe_prefill.py, box). The rotated input is
+# 2 * tokens * top_k * H fp16 (512 MiB at 8192 x 8 x 2048) and the down output the same in fp32.
+PREFILL_CHUNK_TOKENS = 8192
 # a chunk of at least this many tokens decodes W_hat into the scratch; shorter ones (extends of a
 # few hundred tokens touch only part of the experts) keep the in-kernel decode
 PREFILL_DECODED_MIN_TOKENS = 256
@@ -123,6 +127,20 @@ def _prefill_block_m(routes: int, num_experts: int) -> int:
     return 16 if per_expert < 16 else (32 if per_expert < 64 else 64)
 
 
+# tile config of the decoded-slab grouped GEMM (exl3_gemm with ``decoded``). Box sweep at 8192
+# tokens (bench_moe_prefill.py): BK 64, 3 stages, 8 warps, BM 32 is the best of 72 configs (GEMM
+# 16.3 -> 6.5 ms per layer with the larger sub-chunk); BM 64/128 lose 5-10%. Overridable for sweeps.
+PREFILL_GEMM: dict | None = None
+
+
+def _prefill_gemm(routes: int, num_experts: int) -> dict:
+    per_expert = routes / max(num_experts, 1)
+    cfg = dict(block_m=16 if per_expert < 16 else 32, block_k=64, num_stages=3, num_warps=8)
+    if PREFILL_GEMM:
+        cfg.update(PREFILL_GEMM)
+    return cfg
+
+
 def _prefill(x, banks, topk_weights, topk_ids, top_k, parts, activation, alpha, limit, num_experts):
     from freetoken.moe.fused import moe_align_block_size
 
@@ -140,9 +158,9 @@ def _prefill(x, banks, topk_weights, topk_ids, top_k, parts, activation, alpha, 
         ids2 = topk_ids[t0:t1]
         ids = ids2.reshape(-1).contiguous()
         routes = ids.numel()
-        bm = _prefill_block_m(routes, num_experts)
-        sorted_ids, expert_ids, npad = moe_align_block_size(ids2.contiguous(), bm, num_experts)
-        sort = dict(sorted_ids=sorted_ids, expert_ids=expert_ids, num_post_pad=npad, block_m=bm)
+        cfg = _prefill_gemm(routes, num_experts) if decoded else dict(block_m=_prefill_block_m(routes, num_experts))
+        sorted_ids, expert_ids, npad = moe_align_block_size(ids2.contiguous(), cfg["block_m"], num_experts)
+        sort = dict(sorted_ids=sorted_ids, expert_ids=expert_ids, num_post_pad=npad, **cfg)
         xh = had_rows(xc, gu_suh, gu, src_div=top_k, experts=ids, suh_expert_stride=gu_suh.stride(0))
         g = torch.empty((routes, gu.n), dtype=ACT_DTYPE, device=x.device)
         gu_args = dict(tr_expert_stride=gu_tr.stride(0) // 2, svh_expert_stride=gu_svh.stride(0), **sort)
@@ -166,7 +184,8 @@ def _prefill(x, banks, topk_weights, topk_ids, top_k, parts, activation, alpha, 
                 exl3_gemm(ah, dn_tr, dn_svh, dn, out=o, decoded=w_dn, expert_range=(lo, hi), **dn_args)
         else:
             exl3_gemm(ah, dn_tr, dn_svh, dn, out=o, **dn_args)
-        out[t0:t1] = _combine(o, topk_weights[t0:t1], t1 - t0, top_k, x.dtype)
+        # one kernel, fixed k order, no [routes, H] fp32 temporaries (was: cast, mul, sum)
+        out[t0:t1] = splitk_combine(o.unsqueeze(0), topk_weights[t0:t1], t1 - t0, top_k, x.dtype)
     return out
 
 

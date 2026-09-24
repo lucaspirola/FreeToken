@@ -1,0 +1,66 @@
+baseline chunk 2048, default tiles:    31.21 ms  transient     800 MiB
+/root/venv/lib/python3.12/site-packages/torch/profiler/profiler.py:224: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+       16.27 ms  _exl3_gemm_kernel
+       10.87 ms  _reconstruct_experts_kernel
+        2.27 ms  _had_rows_kernel
+        1.23 ms  void at::native::elementwise_kernel<128, 2, at::native::gpu_
+        0.59 ms  void at::native::reduce_kernel<128, 4, at::native::ReduceOp<
+        0.15 ms  void flashinfer::activation::act_and_mul_kernel<__half, &(si
+        0.04 ms  void moe_align_block_size_kernel<int>(int const*, int*, int*
+        0.04 ms  void at::native::vectorized_elementwise_kernel<4, at::native
+chunk  2048 {'block_k': 32, 'num_stages': 2, 'num_warps': 4}                          31.19 ms  transient     800 MiB  rel err vs baseline 0.00e+00
+chunk  4096 {'block_k': 32, 'num_stages': 2, 'num_warps': 4}                          22.43 ms  transient    1120 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 32, 'num_stages': 2, 'num_warps': 4, 'block_m': 32}           16.42 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 32, 'num_stages': 2, 'num_warps': 8, 'block_m': 32}           16.31 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 32, 'num_stages': 3, 'num_warps': 4, 'block_m': 32}           14.14 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 32, 'num_stages': 3, 'num_warps': 8, 'block_m': 32}           14.13 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 32, 'num_stages': 4, 'num_warps': 4, 'block_m': 32}           13.76 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 32, 'num_stages': 4, 'num_warps': 8, 'block_m': 32}           13.82 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 64, 'num_stages': 2, 'num_warps': 4, 'block_m': 32}           14.47 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 64, 'num_stages': 2, 'num_warps': 8, 'block_m': 32}           14.50 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 64, 'num_stages': 3, 'num_warps': 4, 'block_m': 32}           13.67 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 64, 'num_stages': 3, 'num_warps': 8, 'block_m': 32}           13.56 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 64, 'num_stages': 4, 'num_warps': 4, 'block_m': 32}           15.90 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 64, 'num_stages': 4, 'num_warps': 8, 'block_m': 32}           15.76 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 32, 'num_stages': 2, 'num_warps': 4, 'block_m': 64}           18.46 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 32, 'num_stages': 2, 'num_warps': 8, 'block_m': 64}           18.21 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 32, 'num_stages': 3, 'num_warps': 4, 'block_m': 64}           15.26 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 32, 'num_stages': 3, 'num_warps': 8, 'block_m': 64}           15.01 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 32, 'num_stages': 4, 'num_warps': 4, 'block_m': 64}           14.90 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 32, 'num_stages': 4, 'num_warps': 8, 'block_m': 64}           14.65 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 64, 'num_stages': 2, 'num_warps': 4, 'block_m': 64}           16.59 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 64, 'num_stages': 2, 'num_warps': 8, 'block_m': 64}           16.51 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 64, 'num_stages': 3, 'num_warps': 4, 'block_m': 64}           14.52 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 64, 'num_stages': 3, 'num_warps': 8, 'block_m': 64}           14.49 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 64, 'num_stages': 4, 'num_warps': 4, 'block_m': 64}           14.56 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 64, 'num_stages': 4, 'num_warps': 8, 'block_m': 64}           14.41 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 32, 'num_stages': 2, 'num_warps': 4, 'block_m': 128}          17.14 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 32, 'num_stages': 2, 'num_warps': 8, 'block_m': 128}          16.55 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 32, 'num_stages': 3, 'num_warps': 4, 'block_m': 128}          15.72 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 32, 'num_stages': 3, 'num_warps': 8, 'block_m': 128}          14.75 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 32, 'num_stages': 4, 'num_warps': 4, 'block_m': 128}          15.49 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 32, 'num_stages': 4, 'num_warps': 8, 'block_m': 128}          14.65 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 64, 'num_stages': 2, 'num_warps': 4, 'block_m': 128}          15.93 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 64, 'num_stages': 2, 'num_warps': 8, 'block_m': 128}          15.22 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 64, 'num_stages': 3, 'num_warps': 4, 'block_m': 128}          14.86 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 64, 'num_stages': 3, 'num_warps': 8, 'block_m': 128}          14.15 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 64, 'num_stages': 4, 'num_warps': 4, 'block_m': 128}          14.81 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+chunk  8192 {'block_k': 64, 'num_stages': 4, 'num_warps': 8, 'block_m': 128}          14.14 ms  transient    1696 MiB  rel err vs baseline 0.00e+00
+
+best:
+     13.56 ms chunk 8192 {'block_k': 64, 'num_stages': 3, 'num_warps': 8, 'block_m': 32} transient 1696 MiB err 0.0e+00
+     13.67 ms chunk 8192 {'block_k': 64, 'num_stages': 3, 'num_warps': 4, 'block_m': 32} transient 1696 MiB err 0.0e+00
+     13.76 ms chunk 8192 {'block_k': 32, 'num_stages': 4, 'num_warps': 4, 'block_m': 32} transient 1696 MiB err 0.0e+00
+     13.82 ms chunk 8192 {'block_k': 32, 'num_stages': 4, 'num_warps': 8, 'block_m': 32} transient 1696 MiB err 0.0e+00
+     14.13 ms chunk 8192 {'block_k': 32, 'num_stages': 3, 'num_warps': 8, 'block_m': 32} transient 1696 MiB err 0.0e+00
+     14.14 ms chunk 8192 {'block_k': 32, 'num_stages': 3, 'num_warps': 4, 'block_m': 32} transient 1696 MiB err 0.0e+00
+profile of best (8192, {'block_k': 64, 'num_stages': 3, 'num_warps': 8, 'block_m': 32}):
+        6.47 ms  _exl3_gemm_kernel
+        2.68 ms  _reconstruct_experts_kernel
+        2.30 ms  _had_rows_kernel
+        1.28 ms  void at::native::elementwise_kernel<128, 2, at::native::gpu_
+        0.70 ms  void at::native::reduce_kernel<128, 4, at::native::ReduceOp<
+        0.18 ms  void flashinfer::activation::act_and_mul_kernel<__half, &(si
+        0.09 ms  void at::native::vectorized_elementwise_kernel<4, at::native
+        0.04 ms  Memcpy DtoD (Device -> Device)
