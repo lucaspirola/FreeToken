@@ -1,0 +1,12 @@
+server pid 131177 kv=q8_0 ratio=1.00 slots=default
+SERVER DIED
+DONE
+ratio 1.00 failed, falling back
+server pid 131903 kv=q8_0 ratio=0.95 slots=default
+ready after 80s
+chat1 rc=0
+chat2 rc=0
+probe rc=1
+DONE
+ratio 0.95 failed, falling back
+ALLDONE
