@@ -85,7 +85,7 @@ def _gather_dequant_kernel(
     slot = tl.load(idx + t).to(tl.int64)
     offs = tl.arange(0, BLOCK_D)
     mask = offs < D
-    x = tl.load(src + slot * s_src0 + h * s_src1 + offs, mask=mask, other=0).to(tl.float32)
+    x = tl.load(src + slot * s_src0 + h * s_src1 + offs, mask=mask).to(tl.float32)
     if FORMAT == 1:
         # Same arithmetic as the triton kernels' _load_kv: value * scale in fp32,
         # rounded once to the compute dtype.
