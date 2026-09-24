@@ -18,7 +18,7 @@ Parts:
   NEEDLES_REF=ck4n-whole-1m.
   * Both arms carry needles/recall.
   * 1M decode uses the default 128-token window.
-* `cgroup-samples.tsv` (+ `.procs.tsv`, `.maps/`): the cgroup/smaps sampler over all arms.
+* `cgroup-samples.tsv` (+ `cgroup-samples.tsv.procs.tsv` and the per-mapping snapshots in `cgroup-maps/`): the cgroup/smaps sampler over all arms.
 * `ck4n-host-before.txt`: MemAvailable 29.3 GiB. julia processes had started 6 s and 64 s
   earlier; nothing was stopped.
 
