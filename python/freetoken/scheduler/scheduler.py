@@ -3042,6 +3042,15 @@ class Scheduler(SchedulerIOMixin):
             self.cache_manager.snapshot_toolcall_anchor(batch.reqs)
         forward_output = self.engine.forward_batch(batch, sample_args)
         self.token_pool[output_mapping] = forward_output.next_tokens_gpu
+        if residency is not None:
+            # The step is launched: issue the DMAs of the snapshot taken just
+            # before it, now while the host would otherwise wait on the GPU.
+            # Measured in decode (ft-g5 nsys, 2026-09-24): the host waits for
+            # each step to finish before it launches the next, so the host
+            # time between the two is on the critical path; issuing here
+            # keeps it off, and the previous step's writebacks land while
+            # this one computes.
+            residency.issue_writebacks()
         if profile:
             batch._profile_enqueue_ms = (
                 time.perf_counter() - enqueue_started
