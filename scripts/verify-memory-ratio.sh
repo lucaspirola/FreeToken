@@ -31,6 +31,8 @@
 #
 # Env: VERIFY_RATIO (default 1.00), VERIFY_SIZES (default "8000 80000 256000"),
 #      VERIFY_OUT (TSV, default ~/.cache/freetoken/logs/verify-memory-ratio.tsv),
+#      VERIFY_SERVE (nohup launcher's start script, default scripts/serve-default.sh; a copy
+#      with other profile flags, e.g. a fixed-size KV start without --kv-grow-step-tokens),
 #      FREETOKEN_MODEL / FREETOKEN_EXTRA_ARGS as for serve-default.sh.
 set -u
 HERE=$(dirname "$(readlink -f "$0")")
@@ -65,12 +67,12 @@ if [ "$LAUNCHER" = systemd ]; then
   sudo -n systemctl reset-failed freetoken-serve 2>/dev/null
   sudo -n systemctl restart freetoken-serve
 else
-  FREETOKEN_PORT=$PORT FREETOKEN_MEMORY_RATIO=$RATIO setsid nohup "$HERE/serve-default.sh" >> "$LOG" 2>&1 < /dev/null &
+  FREETOKEN_PORT=$PORT FREETOKEN_MEMORY_RATIO=$RATIO setsid nohup "${VERIFY_SERVE:-$HERE/serve-default.sh}" >> "$LOG" 2>&1 < /dev/null &
   SPID=$!
 fi
 t0=$(date +%s)
 start=""
-until [ -n "$start" ] || [ $(( $(date +%s) - t0 )) -gt 300 ]; do
+until [ -n "$start" ] || ! alive || [ $(( $(date +%s) - t0 )) -gt 300 ]; do
   sleep 2
   start=$(tail -n +"$((before + 1))" "$LOG" | grep -n "ServerArgs(model_path" | tail -1 | cut -d: -f1)
 done
@@ -81,7 +83,7 @@ ready_s=$(( $(date +%s) - t0 ))
 result=PASS; note=""; decode=""
 if [ -z "$start" ] || ! alive || ! run_log | grep -q "API server is ready"; then
   result=FAIL-start
-  note=$(run_log | grep -m1 -E "out of memory|OutOfMemory|CUDA error|Traceback|Error" | cut -c1-120)
+  note=$(run_log | grep -m1 -E "out of memory|OutOfMemory|CUDA error|Traceback|Error|error:" | cut -c1-120)
 else
   for s in $SIZES; do
     d=$(FREETOKEN_URL="http://127.0.0.1:$PORT" timeout 1800 python3 "$HERE/probe_decode.py" "$s" 2>/dev/null | tail -1 \
