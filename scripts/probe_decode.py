@@ -63,11 +63,15 @@ def run(target_tokens: int, tag: str = "") -> dict:
     ttft = (first or t1) - t0
     ttft_m = (mfirst or m1) - m0
     dec = (t1 - first) if first and n > 1 else 0.0
+    dec_m = (m1 - mfirst) if mfirst and n > 1 else 0.0
     pt = (usage or {}).get("prompt_tokens", 0)
     ct = (usage or {}).get("completion_tokens", n)
     return {"prompt_tokens": pt, "ttft_s": round(ttft, 2),
             "prefill_tok_s": round(pt / ttft, 0) if ttft else None,
-            "gen_tokens": ct, "decode_tok_s": round((ct - 1) / dec, 1) if dec else None,
+            # decode from the monotonic clock: a WSL2 wall-clock step inside a 2 s decode
+            # window turned 82.7 tok/s into 56.7 (ck4 mirror-1m, 1M pass 2)
+            "gen_tokens": ct, "decode_tok_s": round((ct - 1) / dec_m, 1) if dec_m else None,
+            "decode_tok_s_wall": round((ct - 1) / dec, 1) if dec else None,
             "total_s": round(t1 - t0, 1),
             "ttft_mono_s": round(ttft_m, 3),
             "prefill_tok_s_mono": round(pt / ttft_m, 0) if ttft_m else None,
