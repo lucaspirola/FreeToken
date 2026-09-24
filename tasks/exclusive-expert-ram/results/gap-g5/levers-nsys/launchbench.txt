@@ -1,0 +1,10 @@
+cudart /usr/local/cuda-13.0/lib64/libcudart.so
+none       replay() host     3.2 us (p90 3.4)
+same       replay() host     3.2 us (p90 3.4)
+distinct   replay() host     3.2 us (p90 3.4)
+pinned     replay() host     3.2 us (p90 3.4)
+hostreg    replay() host     3.2 us (p90 3.3)
+hostreg_w  replay() host     3.2 us (p90 3.3)
+bigparam   replay() host     3.2 us (p90 3.3)
+manyreg    replay() host     3.2 us (p90 3.3)
+none       replay() host     3.1 us (p90 3.3)

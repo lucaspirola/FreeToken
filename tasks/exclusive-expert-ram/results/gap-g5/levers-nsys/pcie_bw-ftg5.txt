@@ -1,0 +1,5 @@
+NVIDIA GeForce RTX 5080 13.0
+H2D    8 MiB    55.9 GB/s
+D2H    8 MiB    39.9 GB/s
+H2D  256 MiB    56.6 GB/s
+D2H  256 MiB    39.9 GB/s
