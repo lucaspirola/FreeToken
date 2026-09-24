@@ -12,7 +12,7 @@
 set -uo pipefail
 cd "$(dirname "$(readlink -f "$0")")/../.."
 HERE="$PWD/tasks/exclusive-expert-ram"
-OUT="$HERE/results/ornith-headroom-local"
+OUT="${HR_OUT:-$HERE/results/ornith-headroom-local}"   # HR_OUT / HR_ARMS: other runs of the same R-S12a arms
 mkdir -p "$OUT"
 quiet() {
   until [ "$(awk '/MemAvailable/ {printf "%d", $2/1048576}' /proc/meminfo)" -ge 23 ]; do sleep 60; done
@@ -25,7 +25,8 @@ export FT_MODEL="$HOME/ai/models/Ornith-1.5-35B-A3B-NVFP4" FT_NAME=ornith
 export FT_EXTRA="--num-tokens 262144 --max-seq-len-override 262144 --served-model-name ornith"
 export FT_SIZES="8000 32000 80000 128000"
 exec 9>/home/lucas/.cache/freetoken/gpu-host.lock
-for arm in "ornith-hr-whole-a 0" "ornith-hr-whole-b 0" "ornith-hr-saver -1"; do
+IFS=";" read -r -a ARMLIST <<< "${HR_ARMS:-ornith-hr-whole-a 0;ornith-hr-whole-b 0;ornith-hr-saver -1}"
+for arm in "${ARMLIST[@]}"; do
   set -- $arm
   quiet
   flock 9
