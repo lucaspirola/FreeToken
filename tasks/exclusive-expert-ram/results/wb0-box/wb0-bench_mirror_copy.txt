@@ -1,0 +1,10 @@
+5.36 MiB/row, 4 banks: 5.31 MiB per row
+  n=1: SM H2D   217.2 us ( 25.6 GB/s)  SM D2H  2608.1 us (  2.1 GB/s)  copy-engine D2H   198.4 us ( 28.1 GB/s)
+  n=2: SM H2D   431.1 us ( 25.8 GB/s)  SM D2H  5235.0 us (  2.1 GB/s)  copy-engine D2H   392.1 us ( 28.4 GB/s)
+  n=4: SM H2D   854.7 us ( 26.1 GB/s)  SM D2H  9436.2 us (  2.4 GB/s)  copy-engine D2H   776.7 us ( 28.7 GB/s)
+  n=8: SM H2D  1705.0 us ( 26.1 GB/s)  SM D2H 20991.5 us (  2.1 GB/s)  copy-engine D2H  1548.0 us ( 28.8 GB/s)
+1.98 MB/row, 6 banks: 1.89 MiB per row
+  n=1: SM H2D   127.8 us ( 15.5 GB/s)  SM D2H   925.1 us (  2.1 GB/s)  copy-engine D2H    90.4 us ( 21.9 GB/s)
+  n=2: SM H2D   156.6 us ( 25.3 GB/s)  SM D2H  1858.4 us (  2.1 GB/s)  copy-engine D2H   178.7 us ( 22.2 GB/s)
+  n=4: SM H2D   308.7 us ( 25.7 GB/s)  SM D2H  3717.8 us (  2.1 GB/s)  copy-engine D2H   288.7 us ( 27.5 GB/s)
+  n=8: SM H2D   614.6 us ( 25.8 GB/s)  SM D2H  7430.2 us (  2.1 GB/s)  copy-engine D2H   571.6 us ( 27.7 GB/s)
