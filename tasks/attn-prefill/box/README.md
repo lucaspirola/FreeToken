@@ -40,3 +40,22 @@ These are box numbers. The tree is FT-exl3p4, which holds the P4 tree (its pytho
 - On EXL3 Ornith (`tasks/ornith-exl3/perf/p4-extend`), the same check gave 6.39e-3 against 6.21e-3 for the noise tile.
 
 The `.pt` logit dumps (17-46 MB each) are not committed. The owner's machine holds them, md5-verified against the box, in `~/ai/box-archive/ft-dev-attnab/`.
+
+## Greedy generation (the output gate): `job-greedy.sh`, `greedy_compare.py`
+
+Setup:
+- Every arm is served the production way.
+- The prompt is `greedy_client.py`'s haystack: numbered records, then "quote records N/7, N/2 and N-3 exactly, then write a long story that visits every city in them, in order". SIZE 83000 comes out at 107113 tokens on Nemotron and 114112 on Ornith.
+- 1024 tokens are generated at temperature 0, with thinking off.
+- Each arm ran twice. The two runs were token-identical in every arm, so any cross-arm difference is the kernel's.
+- The reference is triton.
+- "First divergence" is the first differing generated token.
+
+| model | arm | first divergence | quoted facts right | the story |
+|---|---|---:|---|---|
+| Nemotron (stops at 75 tokens) | flashinfer | none (identical) | 1 of 3 | — |
+| | other triton tile | 36 (a digit of a day) | 1 of 3 | — |
+| Ornith NVFP4 | flashinfer | 5 ("records:" vs "records you requested:") | 3 of 3 | same title, Tromsø -> Cusco -> Oaxaca (right) |
+| | other triton tile | 83 | 3 of 3 | adds Porto, which is not a quoted city |
+
+Nemotron gets two of the three day numbers wrong in every arm, identically. That is the model, not the kernel. `results/attngreedy-*/compare.txt` holds the full texts.

@@ -1,0 +1,35 @@
+##### target 83000
+  tri   prompt 107113 gen 75 sha1 bf2fbe2d44 reps agree: True; quoted facts correct [True, False, False]
+  fi    prompt 107113 gen 75 sha1 bf2fbe2d44 reps agree: True; quoted facts correct [True, False, False]
+  tile  prompt 107113 gen 75 sha1 026bea00c7 reps agree: True; quoted facts correct [True, False, False]
+  tri vs fi: first divergent token None of 74 / 74
+  tri vs tile: first divergent token 36 of 74 / 74
+     tri   ..'if left a anchor in Cusco on day 33' || '8.\n5185: Farid left a atlas in Oaxaca on day 25.\n\nThe cities in order are: Tromso, Cusco, Oaxaca.'
+     tile  ..'if left a anchor in Cusco on day 33' || '3.\n5185: Farid left a atlas in Oaxaca on day 25.\n\nThe cities in order are: Tromso, Cusco, Oaxaca.'
+
+first divergence per prompt (None = identical):
+  tri vs fi: [None]
+  tri vs tile: [36]
+
+--- full texts (rep0) ---
+##### 83000 tri
+[/think]741: Bruno left a quill in Tromso on day 42.
+2594: Elif left a anchor in Cusco on day 338.
+5185: Farid left a atlas in Oaxaca on day 25.
+
+The cities in order are: Tromso, Cusco, Oaxaca.
+
+##### 83000 fi
+[/think]741: Bruno left a quill in Tromso on day 42.
+2594: Elif left a anchor in Cusco on day 338.
+5185: Farid left a atlas in Oaxaca on day 25.
+
+The cities in order are: Tromso, Cusco, Oaxaca.
+
+##### 83000 tile
+[/think]741: Bruno left a quill in Tromso on day 42.
+2594: Elif left a anchor in Cusco on day 333.
+5185: Farid left a atlas in Oaxaca on day 25.
+
+The cities in order are: Tromso, Cusco, Oaxaca.
+
