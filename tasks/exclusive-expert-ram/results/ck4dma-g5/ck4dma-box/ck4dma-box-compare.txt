@@ -1,0 +1,20 @@
+== ck4dma-mirror-1m (7e8b7dc) vs same-box whole
+  decode_1000k          82.8 vs    91.6 (whole-1m)  90.4%  BELOW
+  decode_1000k_p1       74.5 vs    88.1 (whole-1m)  84.6%  BELOW
+  decode_8k            161.7 vs   184.8 (whole   )  87.5%  BELOW
+  decode_8k_p1         162.1 vs   184.6 (whole   )  87.8%  BELOW
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            12.18  free_evict_rate 0.651
+  ram 12.26 +/- 0.6  ok
+== ck4dma-mirror (7e8b7dc) vs same-box whole
+  decode_713k           99.0  (no same-box reference)
+  decode_713k_p1        87.8  (no same-box reference)
+  decode_80k           159.0 vs   172.0 (whole   )  92.4%  ok
+  decode_80k_p1        149.6 vs   169.4 (whole   )  88.3%  BELOW
+  decode_8k            162.7 vs   184.8 (whole   )  88.0%  BELOW
+  decode_8k_p1         162.2 vs   184.6 (whole   )  87.9%  BELOW
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            12.16  free_evict_rate 0.639
+7 point(s) outside the band

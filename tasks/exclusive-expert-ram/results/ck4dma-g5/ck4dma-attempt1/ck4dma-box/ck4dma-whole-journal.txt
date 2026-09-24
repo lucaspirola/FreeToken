@@ -1,0 +1,107 @@
+[1m[2026-09-24|07:18:43][0m [33mWARNING [0m --moe-backend is deprecated; use --moe-strategy
+[1m[2026-09-24|07:18:43][0m [32mINFO    [0m Parsed arguments:
+ServerArgs(model_path='/root/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4', tp_info=DistributedInfo(rank=0, size=1), dtype=torch.bfloat16, max_running_req=1, adaptive_scheduler=True, auto_session_grace_seconds=0.0, session_spill_dir='/root/.cache/freetoken/spill', session_spill_ram_gb=1.0, session_spill_disk_gb=50.0, session_spill_limit_gb=50.0, session_spill_persist=True, session_spill_state_stride=65536, session_spill_capture_states=None, attention_backend='triton', moe_strategy='offload', quant_backend=None, ple_backend='disk', nvfp4_backend='triton', expert_load='auto', host_ram_reserve_gb=0.0, moe_cache_size=0, moe_cache_rate=None, moe_cache_auto=True, kv_reserve_tokens=8192, moe_cache_policy='lfu', moe_prefill_overlap=True, expert_residency='whole', moe_mirror_host_rows=0, moe_prefill_hit_d2d=False, moe_extend_cache_tokens=64, moe_collect_stats=False, moe_pageable_profile='off', moe_cpu_threads=0, moe_cpu_layers=None, moe_pageable_gpu=False, moe_hybrid_max_fetch=-1, cuda_graph_bs=None, cuda_graph_max_bs=None, page_size=1, memory_ratio=1.0, linear_state_cache_ratio=2.0, swa_full_tokens_ratio=0.2, swa_num_pages_override=None, distributed_timeout=60.0, use_dummy_weight=False, use_pynccl=True, max_seq_len_override=1048576, rope_yarn_factor=None, rope_yarn_original_context=None, linear_state_slots_override=13, num_page_override=None, num_token_override=1048576, kv_cache_dtype='q8_0', kv_cache_dtype_k=None, kv_cache_dtype_v=None, kv_grow_step_tokens=65536, expert_arena=True, context_preflight=True, json_retry=1, hidden_states_dir='/root/.cache/freetoken/hidden-states', hidden_states_max_tokens=4096, pooled_sink_dir='/root/.cache/freetoken/pooled-sink', mm=MultimodalConfig(disabled_encoders=frozenset(), embed_cache_device='cpu', encoder_weights='host', image_min_tokens=None, image_max_tokens=None, processor_kwargs={}), max_extend_tokens=8192, auto_prefill_chunk=False, max_prefill_seqs=None, cache_type='radix', pin_prefix_min_tokens=1024, pin_prefix_max_tokens=65536, pin_prefix_max_slots=-1, pin_prefix_scope='shared', speculative=None, spec_ngram_n=8, spec_draft_len=8, spec_adaptive=True, offline_mode=False, decode_log_interval=40, special_token_ckpt=False, _unique_suffix='.pid=11933', server_host='127.0.0.1', server_port=1920, num_tokenizer=0, silent_output=False, shell_mode=False, served_model_name='nemotron-3.5-lightning', served_model_aliases=('nemotron-3.5-lightning-judge', 'nemotron-3.5-lightning-collect'), strict_model_name=False, tool_call_parser='qwen3_coder', reasoning_parser='nemotron_v3', sampling_defaults='model', max_output_tokens=65536, enable_cache_report=True, cuda_memory_telemetry=False, force_nonempty_content=True, allowed_media_domains='', allowed_local_media_path='', cors_origins='tauri://localhost,http://tauri.localhost,http://localhost:1420', trace_dir='/root/.cache/freetoken/trace', trace_include_text=False, gpu=(), gpu_assigned=None)
+[1m[2026-09-24|07:18:43|FrontendAPI][0m [32mINFO    [0m Default sampling config (source=model): temperature=1.0, top_k=-1, top_p=0.95
+INFO:     Started server process [11933]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:1920 (Press CTRL+C to quit)
+/root/FreeToken-dma/python/freetoken/engine/engine.py:2025: FutureWarning: torch.cuda._set_allocator_settings is deprecated. Use torch._C._accelerator_setAllocatorSettings instead.
+  torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+[1m[2026-09-24|07:18:45|core|rank=0][0m [32mINFO    [0m Enabled expandable_segments (override via PYTORCH_ALLOC_CONF)
+[1m[2026-09-24|07:18:45|core|rank=0][0m [32mINFO    [0m Resolved config: moe_strategy='offload', attention_backend='triton', cache_type='hybrid_radix', page_size=1
+[1m[2026-09-24|07:18:45|core|rank=0][0m [32mINFO    [0m Free memory before loading model: 15.12 GiB
+Loading Nemotron-H weights:   0%|          | 0/52 [00:00<?, ?it/s]INFO:     127.0.0.1:38246 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+Loading Nemotron-H weights:   6%|▌         | 3/52 [00:00<00:08,  5.67it/s]Loading Nemotron-H weights:  21%|██        | 11/52 [00:00<00:01, 20.95it/s]Loading Nemotron-H weights:  38%|███▊      | 20/52 [00:00<00:00, 36.15it/s]Loading Nemotron-H weights:  52%|█████▏    | 27/52 [00:00<00:00, 43.56it/s]Loading Nemotron-H weights:  65%|██████▌   | 34/52 [00:00<00:00, 49.43it/s]Loading Nemotron-H weights:  79%|███████▉  | 41/52 [00:01<00:00, 48.77it/s]Loading Nemotron-H weights:  90%|█████████ | 47/52 [00:01<00:00, 35.85it/s]Loading Nemotron-H weights: 100%|██████████| 52/52 [00:01<00:00, 37.61it/s]Loading Nemotron-H weights: 100%|██████████| 52/52 [00:01<00:00, 34.69it/s]
+[1m[2026-09-24|07:18:47|core|rank=0][0m [32mINFO    [0m expert banks: slow path (parallel build)
+Loading experts (parallel):   0%|          | 0.00/18.3G [00:00<?, ?B/s]Loading experts (parallel):   4%|▎         | 697M/18.3G [00:00<00:07, 2.49GB/s]Loading experts (parallel):   7%|▋         | 1.36G/18.3G [00:00<00:05, 3.24GB/s]Loading experts (parallel):  11%|█         | 2.04G/18.3G [00:00<00:04, 3.57GB/s]Loading experts (parallel):  15%|█▍        | 2.72G/18.3G [00:00<00:04, 3.72GB/s]Loading experts (parallel):  19%|█▊        | 3.40G/18.3G [00:00<00:04, 3.99GB/s]Loading experts (parallel):  22%|██▏       | 4.09G/18.3G [00:01<00:03, 4.11GB/s]Loading experts (parallel):  26%|██▌       | 4.77G/18.3G [00:01<00:03, 4.07GB/s]Loading experts (parallel):  30%|██▉       | 5.45G/18.3G [00:01<00:04, 2.96GB/s]Loading experts (parallel):  33%|███▎      | 6.13G/18.3G [00:01<00:04, 3.23GB/s]Loading experts (parallel):  37%|███▋      | 6.81G/18.3G [00:02<00:03, 3.48GB/s]Loading experts (parallel):  41%|████      | 7.49G/18.3G [00:02<00:03, 3.69GB/s]Loading experts (parallel):  45%|████▍     | 8.17G/18.3G [00:02<00:02, 3.81GB/s]Loading experts (parallel):  48%|████▊     | 8.85G/18.3G [00:02<00:02, 3.95GB/s]Loading experts (parallel):  52%|█████▏    | 9.53G/18.3G [00:02<00:02, 4.03GB/s]Loading experts (parallel):  56%|█████▌    | 10.2G/18.3G [00:02<00:02, 4.14GB/s]Loading experts (parallel):  59%|█████▉    | 10.9G/18.3G [00:03<00:01, 4.20GB/s]Loading experts (parallel):  63%|██████▎   | 11.6G/18.3G [00:03<00:01, 4.22GB/s]Loading experts (parallel):  67%|██████▋   | 12.3G/18.3G [00:03<00:01, 4.22GB/s]INFO:     127.0.0.1:38262 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+Loading experts (parallel):  71%|███████   | 12.9G/18.3G [00:03<00:01, 4.21GB/s]Loading experts (parallel):  74%|███████▍  | 13.6G/18.3G [00:04<00:02, 2.51GB/s]Loading experts (parallel):  82%|████████▏ | 15.0G/18.3G [00:04<00:00, 3.67GB/s]                                                                                Process freetoken-TP0-scheduler:
+[1m[2026-09-24|07:18:52|FrontendAPI][0m [31mERROR   [0m Backend supervisor: WeightLoadError: ImportError: freetoken.kernel._pinned_tensor is not installed. Reinstall FreeToken so the pinned tensor CUDA extension is built at install time.
+Traceback (most recent call last):
+  File "/root/FreeToken-dma/python/freetoken/kernel/pinned.py", line 19, in _load_pinned_extension
+    return importlib.import_module("freetoken.kernel._pinned_tensor")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1324, in _find_and_load_unlocked
+ModuleNotFoundError: No module named 'freetoken.kernel._pinned_tensor'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/root/FreeToken-dma/python/freetoken/engine/engine.py", line 514, in _weight_load_context
+    yield
+  File "/root/FreeToken-dma/python/freetoken/engine/engine.py", line 1092, in _init_offload_moe_cache
+    banks = load_expert_banks(
+            ^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-dma/python/freetoken/moe/expert_banks.py", line 773, in load_expert_banks
+    banks = _build(parallel)
+            ^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-dma/python/freetoken/moe/expert_banks.py", line 769, in _build
+    return _legacy_expert_banks(model_path, model_config, device, dtype, dummy, par, workers, chunk, decode_target, layer_sink)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-dma/python/freetoken/moe/expert_banks.py", line 454, in _legacy_expert_banks
+    return _PROVIDERS[expert_quant](
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-dma/python/freetoken/moe/expert_banks.py", line 295, in _nvfp4_banks
+    sources = load_nvfp4_moe_expert_sources(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-dma/python/freetoken/models/weight.py", line 331, in load_nvfp4_moe_expert_sources
+    return loader(model_path, model_config, workers=workers, chunk=chunk, layer_sink=layer_sink)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-dma/python/freetoken/models/nemotron_h/weight.py", line 176, in load_nvfp4_expert_sources_parallel
+    return load_nvfp4_expert_source_banks_parallel(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-dma/python/freetoken/models/nvfp4_banks.py", line 570, in load_nvfp4_expert_source_banks_parallel
+    with PinPipeline() as pins:
+  File "/root/FreeToken-dma/python/freetoken/moe/host_banks.py", line 370, in __exit__
+    self.wait()
+  File "/root/FreeToken-dma/python/freetoken/moe/host_banks.py", line 361, in wait
+    raise self._exc
+  File "/root/FreeToken-dma/python/freetoken/moe/host_banks.py", line 335, in _run
+    _settle(bank, residency)
+  File "/root/FreeToken-dma/python/freetoken/moe/host_banks.py", line 285, in _settle
+    bank.pin()
+  File "/root/FreeToken-dma/python/freetoken/moe/host_banks.py", line 163, in pin
+    host_register(self.addr, len(self._buf))
+  File "/root/FreeToken-dma/python/freetoken/kernel/pinned.py", line 50, in host_register
+    _load_pinned_extension().host_register(addr, nbytes)
+    ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-dma/python/freetoken/kernel/pinned.py", line 21, in _load_pinned_extension
+    raise ImportError(
+ImportError: freetoken.kernel._pinned_tensor is not installed. Reinstall FreeToken so the pinned tensor CUDA extension is built at install time.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/usr/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/root/FreeToken-dma/python/freetoken/server/launch.py", line 81, in _run_scheduler
+    scheduler = Scheduler(args)
+                ^^^^^^^^^^^^^^^
+  File "/root/FreeToken-dma/python/freetoken/scheduler/scheduler.py", line 161, in __init__
+    self.engine = Engine(config)
+                  ^^^^^^^^^^^^^^
+  File "/root/FreeToken-dma/python/freetoken/engine/engine.py", line 651, in __init__
+    self._init_offload_moe_cache(config)
+  File "/root/FreeToken-dma/python/freetoken/engine/engine.py", line 1091, in _init_offload_moe_cache
+    with _weight_load_context():
+  File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+    self.gen.throw(value)
+  File "/root/FreeToken-dma/python/freetoken/engine/engine.py", line 518, in _weight_load_context
+    raise WeightLoadError(f"{type(exc).__name__}: {exc}") from exc
+freetoken.engine.engine.WeightLoadError: ImportError: freetoken.kernel._pinned_tensor is not installed. Reinstall FreeToken so the pinned tensor CUDA extension is built at install time.
+INFO:     127.0.0.1:60818 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:59490 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[1m[2026-09-24|07:19:02|FrontendAPI][0m [31mERROR   [0m Backend worker is gone and cannot be restarted; stopping the API server
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [11933]
+/usr/lib/python3.12/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 3 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '

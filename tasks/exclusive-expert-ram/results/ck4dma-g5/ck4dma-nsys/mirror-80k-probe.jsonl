@@ -1,0 +1,2 @@
+{"target": 80000, "pass": 1, "prompt_tokens": 80028, "ttft_s": 11.35, "prefill_tok_s": 7050.0, "gen_tokens": 127, "decode_tok_s": 145.2, "total_s": 12.2, "ttft_mono_s": 11.352, "prefill_tok_s_mono": 7050.0, "total_mono_s": 12.22, "t_start_wall": 1790243065.509}
+{"target": 80000, "pass": 2, "prompt_tokens": 80030, "ttft_s": 11.35, "prefill_tok_s": 7048.0, "gen_tokens": 127, "decode_tok_s": 153.0, "total_s": 12.2, "ttft_mono_s": 11.354, "prefill_tok_s_mono": 7048.0, "total_mono_s": 12.18, "t_start_wall": 1790243077.729}

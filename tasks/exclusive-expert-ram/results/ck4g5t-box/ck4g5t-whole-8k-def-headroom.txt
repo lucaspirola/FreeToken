@@ -1,0 +1,11 @@
+captures=1 kv_grows=0 tracebacks=0 ooms=0
+[2026-09-24|09:25:47|core|rank=0] INFO     --moe-cache-auto resolved moe_cache_size=2298 num_pages=78305 (prefill_overlap=True)
+[2026-09-24|09:25:48|core|rank=0] INFO     Expert arena parked 2298 -> 256 slots (10.69 GiB) until the prefill transient is measured
+[2026-09-24|09:25:48|core|rank=0] INFO     Free memory after initialization: 10.65 GiB
+[2026-09-24|09:25:48|core|rank=0] INFO     Start capturing CUDA graphs with sizes: [1]
+[2026-09-24|09:25:48|core|rank=0] INFO     Free GPU memory before capturing CUDA graphs: 10.65 GiB
+Preparing for capturing CUDA graphs...:   0%|          | 0/1 [00:00<?, ?batch/s]Capturing graphs: bs = 1   | avail_mem = 10.64 GiB:   0%|          | 0/1 [00:00<?, ?batch/s]INFO:     127.0.0.1:34864 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-24|09:25:52|core|rank=0] INFO     Free GPU memory after capturing CUDA graphs: 10.61 GiB
+[2026-09-24|09:25:53|core|rank=0] INFO     Prefill warmup complete for lengths [80, 128] in 0.672 s
+[2026-09-24|09:25:54|core|rank=0] INFO     Growable-KV ceiling validated: 1048576 tokens, 3.23 GiB physical, planned final MoE cache 1584 slots
+[2026-09-24|09:25:54|core|rank=0] INFO     Prefill headroom: transient 0.65 GiB measured on a 8192-token chunk (empty prefix 0.65 GiB, after a 8192-token prefix 0.65 GiB, allocator peak 0.59 GiB); headroom 0.65 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 256 -> 2136 of 2298 slots, 0.77 GiB free (target 0.77 GiB), 162 slots below the ratio plan

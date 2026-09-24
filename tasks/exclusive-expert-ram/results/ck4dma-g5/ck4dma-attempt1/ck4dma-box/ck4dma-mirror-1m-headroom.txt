@@ -1,0 +1,3 @@
+captures=0 kv_grows=0 tracebacks=2 ooms=0
+Traceback (most recent call last):
+Traceback (most recent call last):

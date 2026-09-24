@@ -1,0 +1,6 @@
+== ck4g5t-mirror-8k: default (-def) vs cushion-only headroom (-t0)
+  def transient ('0.65', 'measured') arena 2136 of 2298 (free 0.78 GiB), min slots over run None, decode hit rate 0.9430, mirror swaps/token 8.0  decode stats {'layer_calls': 8786, 'active': 53552, 'missing': 3051, 'fetched': 0, 'prefill_hit_rows': 12351, 'prefill_rows': 23552, 'pageable_stage_calls': 0, 'pageable_rows': 0}
+  t0: no probe
+== ck4g5t-whole-8k: default (-def) vs cushion-only headroom (-t0)
+  def transient ('0.65', 'measured') arena 2136 of 2298 (free 0.77 GiB), min slots over run None, decode hit rate 0.9227, mirror swaps/token -  decode stats {'layer_calls': 8786, 'active': 53552, 'missing': 4137, 'fetched': 0, 'prefill_hit_rows': 0, 'prefill_rows': 0, 'pageable_stage_calls': 0, 'pageable_rows': 0}
+  t0: no probe
