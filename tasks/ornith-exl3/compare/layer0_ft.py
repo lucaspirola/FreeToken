@@ -99,6 +99,8 @@ def main(root, ref_path):
     worst = max(worst, ep, ed)
     print(f"layer-0 routed MoE (bf16 in/out) vs exllamav3's per-expert linears: prefill {x.shape[0]} tok {ep:.2e}  decode 3 tok via slots {ed:.2e}")
     print(f"WORST rel err {worst:.2e}")
+    if len(sys.argv) > 3:  # keep the MoE outputs for attribution against an exact reference
+        torch.save({"yp": yp.cpu(), "yd": yd.cpu()}, sys.argv[3])
 
 
 if __name__ == "__main__":
