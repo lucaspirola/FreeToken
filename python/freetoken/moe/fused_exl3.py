@@ -32,6 +32,7 @@ from freetoken.kernel.triton.exl3 import (
     gemv_pre_rot,
     had_rows,
     reconstruct_experts,
+    reconstruct_folded,
     splitk_combine,
     splitk_silu_had,
 )
@@ -53,6 +54,15 @@ PREFILL_DECODE_GROUP = 32
 # fp16 forward the checkpoint was quantized and calibrated against); bf16 here cost 8x the
 # rounding error for nothing, since the down projection rounds its rotated input to fp16 anyway
 ACT_DTYPE = torch.float16
+# decoded prefill: fold the input rotation ``diag(suh) H`` into the decoded W_hat
+# (reconstruct_folded(fold_out=False)), so both GEMMs read the raw activations (route p reads
+# token p // top_k) and the two had_rows launches plus the [2, P, H] rotated buffer disappear.
+# OFF by default: unlike a dense layer, the fold pays the 128x128 Hadamard on every expert's weights
+# (256 x 3 x H x I elements, ~206 GFLOP per 8K chunk) instead of on the routed activations (~43
+# GFLOP), so reconstruct_folded costs 6.18 ms against reconstruct 2.69 + had_rows 2.30 ms and the
+# MoE layer goes 12.18 -> 13.24 ms at 8192 tokens (bench_moe_prefill.py --quick, box).
+# FREETOKEN_EXL3_MOE_FOLD=1 turns it on (A/B only).
+PREFILL_FOLD_INPUT = os.environ.get("FREETOKEN_EXL3_MOE_FOLD", "0") == "1"
 
 
 @functools.lru_cache(maxsize=16)
@@ -161,29 +171,47 @@ def _prefill(x, banks, topk_weights, topk_ids, top_k, parts, activation, alpha, 
         cfg = _prefill_gemm(routes, num_experts) if decoded else dict(block_m=_prefill_block_m(routes, num_experts))
         sorted_ids, expert_ids, npad = moe_align_block_size(ids2.contiguous(), cfg["block_m"], num_experts)
         sort = dict(sorted_ids=sorted_ids, expert_ids=expert_ids, num_post_pad=npad, **cfg)
-        xh = had_rows(xc, gu_suh, gu, src_div=top_k, experts=ids, suh_expert_stride=gu_suh.stride(0))
+        fold = decoded and PREFILL_FOLD_INPUT
         g = torch.empty((routes, gu.n), dtype=ACT_DTYPE, device=x.device)
         gu_args = dict(tr_expert_stride=gu_tr.stride(0) // 2, svh_expert_stride=gu_svh.stride(0), **sort)
-        if decoded:
+        if fold:
+            xs = xc.to(torch.float16)
             for lo in range(0, num_experts, group):
                 hi = min(lo + group, num_experts)
-                reconstruct_experts(gu_tr, gu, lo, hi, out=w_gu)
-                exl3_gemm(xh, gu_tr, gu_svh, gu, out=g, decoded=w_gu, expert_range=(lo, hi), **gu_args)
+                reconstruct_folded(gu_tr, gu_suh, gu_svh, gu, lo=lo, hi=hi, suh_expert_stride=gu_suh.stride(0),
+                                   svh_expert_stride=gu_svh.stride(0), out=w_gu, fold_out=False)
+                exl3_gemm(xs, gu_tr, gu_svh, gu, out=g, decoded=w_gu, expert_range=(lo, hi), src_div=top_k, **gu_args)
+            del xs
         else:
-            exl3_gemm(xh, gu_tr, gu_svh, gu, out=g, **gu_args)
-        del xh
+            xh = had_rows(xc, gu_suh, gu, src_div=top_k, experts=ids, suh_expert_stride=gu_suh.stride(0))
+            if decoded:
+                for lo in range(0, num_experts, group):
+                    hi = min(lo + group, num_experts)
+                    reconstruct_experts(gu_tr, gu, lo, hi, out=w_gu)
+                    exl3_gemm(xh, gu_tr, gu_svh, gu, out=g, decoded=w_gu, expert_range=(lo, hi), **gu_args)
+            else:
+                exl3_gemm(xh, gu_tr, gu_svh, gu, out=g, **gu_args)
+            del xh
         a = _act(g, activation, alpha, limit)
         del g
-        ah = had_rows(a, dn_suh, dn, experts=ids, suh_expert_stride=dn_suh.stride(0))
         o = torch.empty((routes, dn.n), dtype=torch.float32, device=x.device)
         dn_args = dict(tr_expert_stride=dn_tr.stride(0) // 2, svh_expert_stride=dn_svh.stride(0), **sort)
-        if decoded:
+        if fold:
             for lo in range(0, num_experts, group):
                 hi = min(lo + group, num_experts)
-                reconstruct_experts(dn_tr, dn, lo, hi, out=w_dn)
-                exl3_gemm(ah, dn_tr, dn_svh, dn, out=o, decoded=w_dn, expert_range=(lo, hi), **dn_args)
+                reconstruct_folded(dn_tr, dn_suh, dn_svh, dn, lo=lo, hi=hi, suh_expert_stride=dn_suh.stride(0),
+                                   svh_expert_stride=dn_svh.stride(0), out=w_dn, fold_out=False)
+                exl3_gemm(a, dn_tr, dn_svh, dn, out=o, decoded=w_dn, expert_range=(lo, hi), src_div=1, **dn_args)
         else:
-            exl3_gemm(ah, dn_tr, dn_svh, dn, out=o, **dn_args)
+            ah = had_rows(a, dn_suh, dn, experts=ids, suh_expert_stride=dn_suh.stride(0))
+            if decoded:
+                for lo in range(0, num_experts, group):
+                    hi = min(lo + group, num_experts)
+                    reconstruct_experts(dn_tr, dn, lo, hi, out=w_dn)
+                    exl3_gemm(ah, dn_tr, dn_svh, dn, out=o, decoded=w_dn, expert_range=(lo, hi), **dn_args)
+            else:
+                exl3_gemm(ah, dn_tr, dn_svh, dn, out=o, **dn_args)
+            del ah
         # one kernel, fixed k order, no [routes, H] fp32 temporaries (was: cast, mul, sum)
         out[t0:t1] = splitk_combine(o.unsqueeze(0), topk_weights[t0:t1], t1 - t0, top_k, x.dtype)
     return out

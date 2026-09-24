@@ -42,7 +42,7 @@ FOLD_MIN_ROWS = 1024
 def fold_enabled() -> bool:
     import os
 
-    return os.getenv("FREETOKEN_EXL3_FOLD", "0").strip() != "0"
+    return os.getenv("FREETOKEN_EXL3_FOLD", "1").strip() != "0"
 
 
 def exl3_facts(scheme) -> tuple[int, str]:
@@ -112,10 +112,21 @@ def _forward_folded(x2: torch.Tensor, trellis: torch.Tensor, suh: torch.Tensor, 
     (fp16, one rounding), the product in cuBLAS (fp16 in, fp32 accumulation, fp16 out)."""
     from freetoken.kernel.triton.exl3 import reconstruct_folded
 
-    w = reconstruct_folded(trellis, suh, svh, parts)[0]
     xf = x2 if x2.dtype == torch.float16 else x2.to(torch.float16)
-    y = torch.mm(xf, w)
-    return y if out_dtype == torch.float16 else y.to(out_dtype)
+    n = parts.n
+    if out_dtype == torch.float16 and n <= RECONSTRUCT_SLAB:
+        return torch.mm(xf, reconstruct_folded(trellis, suh, svh, parts)[0])
+    # column slabs: W_full and the fp16 product exist one slab at a time (the prefill transient
+    # the server reserves), the result lands in out_dtype directly
+    out = torch.empty((x2.shape[0], n), dtype=out_dtype, device=x2.device)
+    for c0 in range(0, n, RECONSTRUCT_SLAB):
+        c1 = min(c0 + RECONSTRUCT_SLAB, n)
+        w = reconstruct_folded(trellis, suh, svh, parts, cols=(c0, c1))[0]
+        if out_dtype == torch.float16:
+            torch.mm(xf, w, out=out[:, c0:c1])
+        else:
+            out[:, c0:c1] = torch.mm(xf, w)
+    return out
 
 
 class TritonExl3LinearKernel(LinearKernel):

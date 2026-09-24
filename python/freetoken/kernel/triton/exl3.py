@@ -226,7 +226,7 @@ def _had_rows_kernel(
     out_ptr, stride_opart, stride_om,
     suh_ptr, suh_expert_stride, suh_part_stride,
     expert_ptr, had_ptr, P,
-    SRC_DIV: tl.constexpr, HAS_EXPERT: tl.constexpr, BM: tl.constexpr,
+    SRC_DIV: tl.constexpr, HAS_EXPERT: tl.constexpr, BM: tl.constexpr, KB: tl.constexpr,
 ):
     pid_m = tl.program_id(0)
     pid_k = tl.program_id(1)
@@ -238,16 +238,17 @@ def _had_rows_kernel(
         e = tl.load(expert_ptr + rows, mask=rmask, other=0).to(tl.int64)
     else:
         e = tl.zeros([BM], dtype=tl.int64)
-    cols = pid_k * 128 + tl.arange(0, 128)
-    x = tl.load(x_ptr + src[:, None].to(tl.int64) * stride_xm + cols[None, :], mask=rmask[:, None], other=0.0).to(tl.float32)
-    s = tl.load(suh_ptr + e[:, None] * suh_expert_stride + part * suh_part_stride + cols[None, :], mask=rmask[:, None], other=0.0).to(tl.float32)
-    xs = x * s
-    hi = xs.to(tl.float16)
-    lo = (xs - hi.to(tl.float32)).to(tl.float16)
     idx = tl.arange(0, 128)
-    h = tl.load(had_ptr + idx[:, None] * 128 + idx[None, :])
-    y = (tl.dot(hi, h) + tl.dot(lo, h)) * 0.08838834764831843
-    tl.store(out_ptr + part * stride_opart + rows[:, None].to(tl.int64) * stride_om + cols[None, :], y.to(tl.float16), mask=rmask[:, None])
+    h = tl.load(had_ptr + idx[:, None] * 128 + idx[None, :])  # once per program, KB column blocks
+    for i in tl.static_range(KB):
+        cols = (pid_k * KB + i) * 128 + idx
+        x = tl.load(x_ptr + src[:, None].to(tl.int64) * stride_xm + cols[None, :], mask=rmask[:, None], other=0.0).to(tl.float32)
+        s = tl.load(suh_ptr + e[:, None] * suh_expert_stride + part * suh_part_stride + cols[None, :], mask=rmask[:, None], other=0.0).to(tl.float32)
+        xs = x * s
+        hi = xs.to(tl.float16)
+        lo = (xs - hi.to(tl.float32)).to(tl.float16)
+        y = (tl.dot(hi, h) + tl.dot(lo, h)) * 0.08838834764831843
+        tl.store(out_ptr + part * stride_opart + rows[:, None].to(tl.int64) * stride_om + cols[None, :], y.to(tl.float16), mask=rmask[:, None])
 
 
 @triton.jit
@@ -262,7 +263,7 @@ def _exl3_gemm_kernel(
     P, K,
     w_ptr, w_expert_stride, e_lo, e_hi,
     BM: tl.constexpr, BK: tl.constexpr, BITS: tl.constexpr, CB: tl.constexpr, SORTED: tl.constexpr,
-    DECODED: tl.constexpr,
+    DECODED: tl.constexpr, SRC_DIV: tl.constexpr,
 ):
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
@@ -285,7 +286,7 @@ def _exl3_gemm_kernel(
     n_tiles = tl.load(ntiles_ptr + part)
     n_local = pid_n * 128 - tl.load(nstart_ptr + part) + tl.arange(0, 128)
     tr = tr_ptr + expert * tr_expert_stride + tl.load(word_off_ptr + part)
-    a_ptr = xh_ptr + part * stride_xpart + rows64[:, None] * stride_xm
+    a_ptr = xh_ptr + part * stride_xpart + (rows64 // SRC_DIV)[:, None] * stride_xm
     acc = tl.zeros([BM, 128], dtype=tl.float32)
     for k0 in range(0, K, BK):
         kk = k0 + tl.arange(0, BK)
@@ -453,6 +454,19 @@ def _exl3_gemv_kernel(
 # ---------------------------------------------------------------------------
 
 
+# had_rows tile: rows per program, warps, 128-column blocks per program (each program loads the
+# 128x128 H once and reuses it across its blocks). The kernel is mma-bound, not DRAM-bound: the
+# exact hi/lo split runs two 128-wide dots per element, 137 GFLOP for the MoE gate_up input at
+# 8192 tokens x top-8 (1.13 ms at 121.5 TF/s). Box sweep (perf/bench_had_rows.py), gate_up input:
+# bm16/4 warps/kb1 2.01-2.08 ms -> kb16 1.46 ms; larger bm or 8 warps spill and lose.
+HAD_ROWS_BM = 16
+HAD_ROWS_WARPS = 4
+HAD_ROWS_KB = 16  # clamped to the divisors of K / 128 (down input: 4)
+# ... only from this many rows on: a decode step (a few rows) needs one program per column block
+# to fill the SMs
+HAD_ROWS_KB_MIN_ROWS = 4096
+
+
 def had_rows(
     x: torch.Tensor,
     suh: torch.Tensor,
@@ -463,6 +477,9 @@ def had_rows(
     experts: torch.Tensor | None = None,
     suh_expert_stride: int = 0,
     out: torch.Tensor | None = None,
+    block_m: int | None = None,
+    num_warps: int | None = None,
+    k_blocks: int | None = None,
 ) -> torch.Tensor:
     """``out[part, p] = H_blocks(x[p // src_div] * suh[experts[p], part])`` as fp16 ``[parts, rows, K]``.
 
@@ -475,15 +492,18 @@ def had_rows(
         out = torch.empty((parts.num_parts, rows, k), dtype=torch.float16, device=x.device)
     if rows == 0:
         return out
-    bm = 16
-    grid = (triton.cdiv(rows, bm), k // HAD, parts.num_parts)
+    bm = block_m or HAD_ROWS_BM
+    kb = k_blocks or (HAD_ROWS_KB if rows >= HAD_ROWS_KB_MIN_ROWS else 1)
+    while (k // HAD) % kb:
+        kb //= 2
+    grid = (triton.cdiv(rows, bm), k // HAD // kb, parts.num_parts)
     _had_rows_kernel[grid](
         x, x.stride(0),
         out, out.stride(0), out.stride(1),
         suh, suh_expert_stride, parts.suh_part_stride,
         experts if experts is not None else x, hadamard_pm1(x.device), rows,
-        SRC_DIV=src_div, HAS_EXPERT=experts is not None, BM=bm,
-        num_warps=4,
+        SRC_DIV=src_div, HAS_EXPERT=experts is not None, BM=bm, KB=kb,
+        num_warps=num_warps or HAD_ROWS_WARPS,
     )
     return out
 
@@ -510,13 +530,19 @@ def exl3_gemm(
     block_k: int = 32,
     num_stages: int = 2,
     num_warps: int = 4,
+    src_div: int = 0,
 ) -> torch.Tensor:
     """Grouped GEMM: ``out[p] = svh * H(xh[part(n), p] @ W_hat)``; rows sorted per expert when
     ``sorted_ids`` is given (``tr_expert_stride`` in int32 words), else every row uses expert 0.
 
     ``decoded`` (sorted mode): W_hat already decoded by ``reconstruct_experts`` for the experts in
-    ``expert_range`` = [lo, hi), fp16 ``[hi - lo, K, N]``; only those experts' row blocks run."""
-    rows = xh.shape[1]
+    ``expert_range`` = [lo, hi), fp16 ``[hi - lo, K, N]``; only those experts' row blocks run.
+
+    ``src_div > 0``: ``xh`` is the RAW activation ``[T, K]`` fp16 shared by all parts (route ``p``
+    reads row ``p // src_div``) and ``decoded`` must carry the input rotation
+    (``reconstruct_folded(..., fold_out=False)``); rows = ``T * src_div``."""
+    raw = src_div > 0
+    rows = xh.shape[0] * src_div if raw else xh.shape[1]
     if rows == 0:
         return out
     words = _words(trellis)
@@ -526,7 +552,7 @@ def exl3_gemm(
     grid = (n_mblocks, parts.n // HAD)
     dummy = parts.part_of_nb
     _exl3_gemm_kernel[grid](
-        xh, xh.stride(0), xh.stride(1),
+        xh, 0 if raw else xh.stride(0), xh.stride(0) if raw else xh.stride(1),
         out, out.stride(0),
         words, tr_expert_stride,
         svh, svh_expert_stride,
@@ -538,7 +564,7 @@ def exl3_gemm(
         decoded if decoded is not None else xh, decoded.stride(0) if decoded is not None else 0,
         expert_range[0], expert_range[1],
         BM=block_m, BK=block_k, BITS=parts.bits, CB=CODEBOOKS[parts.codebook], SORTED=sorted_mode,
-        DECODED=decoded is not None,
+        DECODED=decoded is not None, SRC_DIV=src_div if raw else 1,
         num_warps=num_warps, num_stages=num_stages,
     )
     return out
@@ -806,16 +832,16 @@ def reconstruct_experts(bank: torch.Tensor, parts: Exl3Parts, lo: int, hi: int, 
 
 @triton.jit
 def _reconstruct_folded_kernel(
-    tr_ptr, tr_expert_stride, out_ptr, out_expert_stride, e_lo,
+    tr_ptr, tr_expert_stride, out_ptr, out_expert_stride, out_row_stride, e_lo, nb0,
     suh_ptr, suh_expert_stride, suh_part_stride, svh_ptr, svh_expert_stride, had_ptr,
     part_of_nb_ptr, word_off_ptr, ntiles_ptr, nstart_ptr,
-    BITS: tl.constexpr, CB: tl.constexpr,
+    BITS: tl.constexpr, CB: tl.constexpr, FOLD_OUT: tl.constexpr,
 ):
     """One 128x128 tile of ``W_full = diag(suh) H W_hat H diag(svh) / 128`` (both rotations and
     both sign vectors folded into the weight, exllamav3's reconstruct_had): ``x @ W_full`` equals
     ``svh * H((H(x * suh)) @ W_hat)`` without rotating any activation."""
     pid_k = tl.program_id(0)
-    pid_n = tl.program_id(1)
+    pid_n = tl.program_id(1) + nb0  # global 128-column block; the output holds blocks [nb0, ...)
     g = tl.program_id(2).to(tl.int64)
     e = e_lo + g
     part = tl.load(part_of_nb_ptr + pid_n)
@@ -827,37 +853,48 @@ def _reconstruct_folded_kernel(
     w = _exl3_decode(tr, kk[:, None], n_local[None, :], n_tiles, BITS, CB)
     h = tl.load(had_ptr + idx[:, None] * 128 + idx[None, :])
     a = tl.dot(h, w)  # H W: 128 exact +-w terms per entry, fp32
-    hi = a.to(tl.float16)
-    lo = (a - hi.to(tl.float32)).to(tl.float16)
-    b = tl.dot(hi, h) + tl.dot(lo, h)
     s = tl.load(suh_ptr + e * suh_expert_stride + part * suh_part_stride + kk).to(tl.float32)
     cols = pid_n * 128 + idx
-    v = tl.load(svh_ptr + e * svh_expert_stride + cols).to(tl.float32)
-    y = b * (s * 0.0078125)[:, None] * v[None, :]
-    n = tl.num_programs(1) * 128
-    tl.store(out_ptr + g * out_expert_stride + kk[:, None].to(tl.int64) * n + cols[None, :], y.to(out_ptr.dtype.element_ty))
+    if FOLD_OUT:
+        hi = a.to(tl.float16)
+        lo = (a - hi.to(tl.float32)).to(tl.float16)
+        b = tl.dot(hi, h) + tl.dot(lo, h)
+        v = tl.load(svh_ptr + e * svh_expert_stride + cols).to(tl.float32)
+        y = b * (s * 0.0078125)[:, None] * v[None, :]
+    else:  # input side only: diag(suh) H W_hat / sqrt(128); the GEMM epilogue keeps H + svh
+        y = a * (s * 0.08838834764831843)[:, None]
+    lcols = (pid_n - nb0) * 128 + idx
+    tl.store(out_ptr + g * out_expert_stride + kk[:, None].to(tl.int64) * out_row_stride + lcols[None, :],
+             y.to(out_ptr.dtype.element_ty))
 
 
 def reconstruct_folded(
     trellis: torch.Tensor, suh: torch.Tensor, svh: torch.Tensor, parts: Exl3Parts, *,
     lo: int = 0, hi: int = 1, suh_expert_stride: int = 0, svh_expert_stride: int = 0,
-    out: torch.Tensor | None = None,
+    out: torch.Tensor | None = None, fold_out: bool = True, cols: tuple[int, int] | None = None,
 ) -> torch.Tensor:
     """``W_full`` fp16 ``[hi - lo, K, N]`` for experts ``[lo, hi)`` of a ``[E, words]`` bank (a dense
     layer: a flat trellis, ``lo=0, hi=1``): ``x @ W_full[e] = svh * H(H(x * suh) @ W_hat)`` per part,
-    so a plain GEMM on the raw activations replaces had_rows + GEMM + had_cols."""
+    so a plain GEMM on the raw activations replaces had_rows + GEMM + had_cols.
+
+    ``fold_out=False`` folds the input side only (``diag(suh) H W_hat``): the GEMM then reads raw
+    activations and keeps its Hadamard + svh epilogue (the MoE prefill's decoded operand).
+
+    ``cols=(c0, c1)`` (multiples of 128) builds only those output columns, ``[hi - lo, K, c1 - c0]``."""
     g = hi - lo
+    c0, c1 = cols if cols is not None else (0, parts.n)
+    assert c0 % HAD == 0 and c1 % HAD == 0 and 0 <= c0 < c1 <= parts.n
     if out is None:
-        out = torch.empty((g, parts.k, parts.n), dtype=torch.float16, device=trellis.device)
-    assert out.shape[1:] == (parts.k, parts.n) and out.shape[0] >= g and out.is_contiguous()
+        out = torch.empty((g, parts.k, c1 - c0), dtype=torch.float16, device=trellis.device)
+    assert out.shape[1:] == (parts.k, c1 - c0) and out.shape[0] >= g and out.is_contiguous()
     words = _words(trellis)
     tr_stride = words.stride(0) if words.dim() > 1 else 0
     if g > 0:
-        _reconstruct_folded_kernel[(parts.k // HAD, parts.n // HAD, g)](
-            words, tr_stride, out, out.stride(0), lo,
+        _reconstruct_folded_kernel[(parts.k // HAD, (c1 - c0) // HAD, g)](
+            words, tr_stride, out, out.stride(0), out.stride(1), lo, c0 // HAD,
             suh, suh_expert_stride, parts.suh_part_stride, svh, svh_expert_stride, hadamard_pm1(trellis.device),
             parts.part_of_nb, parts.word_off, parts.ntiles, parts.nstart,
-            BITS=parts.bits, CB=CODEBOOKS[parts.codebook], num_warps=8,
+            BITS=parts.bits, CB=CODEBOOKS[parts.codebook], FOLD_OUT=fold_out, num_warps=8,
         )
     return out
 

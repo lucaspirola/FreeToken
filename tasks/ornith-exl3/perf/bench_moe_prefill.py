@@ -72,13 +72,19 @@ for name, us in profile():
 setcfg(8192, None)
 y = run().float()
 ms, mem = timed()
-print(f"shipped defaults (chunk 8192, _prefill_gemm): {ms:8.2f} ms  transient {mem:7.0f} MiB  rel err {((y - ref).norm() / ref.norm()).item():.2e}", flush=True)
+print(f"shipped defaults (chunk 8192, _prefill_gemm, PREFILL_FOLD_INPUT={fe.PREFILL_FOLD_INPUT}): {ms:8.2f} ms  transient {mem:7.0f} MiB  rel err {((y - ref).norm() / ref.norm()).item():.2e}", flush=True)
 for name, us in profile():
     print(f"    {us / 1e3:8.2f} ms  {name}")
 res = []
+fold0 = fe.PREFILL_FOLD_INPUT
+fe.PREFILL_FOLD_INPUT = not fold0  # the other side of the input-fold A/B (FREETOKEN_EXL3_MOE_FOLD)
+y = run().float()
+ms, mem = timed()
+print(f"same, PREFILL_FOLD_INPUT={fe.PREFILL_FOLD_INPUT}: {ms:8.2f} ms  transient {mem:7.0f} MiB  rel err {((y - ref).norm() / ref.norm()).item():.2e}", flush=True)
+for name, us in profile():
+    print(f"    {us / 1e3:8.2f} ms  {name}")
+fe.PREFILL_FOLD_INPUT = fold0
 if QUICK:
-    for name, us in profile():
-        print(f"    {us / 1e3:8.2f} ms  {name}")
     sys.exit(0)
 chunks = (2048, 4096, 8192)
 grid = itertools.product((32, 64, 128), (32, 64), (2, 3, 4), (4, 8))

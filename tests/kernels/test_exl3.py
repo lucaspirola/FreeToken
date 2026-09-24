@@ -217,6 +217,23 @@ def test_moe_prefill_chunks_agree_with_one_chunk(monkeypatch):
 
 
 @cuda
+@pytest.mark.parametrize("bits", (2, 5, 8))
+def test_moe_prefill_folded_input_matches_rotated_path(monkeypatch, bits):
+    """The decoded prefill with diag(suh) H folded into W_hat (raw activations into both GEMMs)
+    equals the had_rows + GEMM path up to fp16 rounding of the folded weight."""
+    import freetoken.moe.fused_exl3 as fe
+
+    banks = tuple(b.cuda() for b in _moe_banks(bits, "mul1", E, seed=bits))
+    x, w, ids = (t.cuda() for t in _routing(300, E, seed=5))
+    kw = dict(bits=bits, codebook="mul1", is_prefill=True, num_experts=E)
+    monkeypatch.setattr(fe, "PREFILL_FOLD_INPUT", True)
+    folded = fe.fused_experts_exl3(x, banks, w, ids, **kw)
+    monkeypatch.setattr(fe, "PREFILL_FOLD_INPUT", False)
+    rotated = fe.fused_experts_exl3(x, banks, w, ids, **kw)
+    assert rel_err(folded, rotated) < 3e-3, rel_err(folded, rotated)
+
+
+@cuda
 def test_moe_decode_replays_under_a_cuda_graph():
     from freetoken.moe.fused_exl3 import fused_experts_exl3
 
@@ -297,6 +314,7 @@ def test_moe_prefill_decoded_scratch_matches_in_kernel_decode(monkeypatch, codeb
     banks = tuple(b.cuda() for b in _moe_banks(4, codebook, E, seed=11))
     x, w, ids = (t.cuda() for t in _routing(300, E, seed=12))
     kw = dict(bits=4, codebook=codebook, is_prefill=True, num_experts=E)
+    monkeypatch.setattr(fe, "PREFILL_FOLD_INPUT", False)  # the folded weight is a different rounding
     monkeypatch.setattr(fe, "PREFILL_DECODED_MIN_TOKENS", 1 << 30)
     in_kernel = fe.fused_experts_exl3(x, banks, w, ids, **kw)
     monkeypatch.setattr(fe, "PREFILL_DECODED_MIN_TOKENS", 1)
@@ -433,3 +451,11 @@ def test_folded_reconstruct_path_matches_reference(monkeypatch, bits, codebook):
         got = w[:, col:col + s]
         assert (got - want).abs().max() <= 2e-3 * want.abs().max(), (got - want).abs().max()
         col += s
+    # column slabs (crossing part boundaries) build the same W_full columns bit for bit
+    full = reconstruct_folded(flat, suh.cuda(), svh.cuda(), parts)[0]
+    for c0, c1 in ((0, 128), (128, 512), (384, 768)):
+        assert torch.equal(reconstruct_folded(flat, suh.cuda(), svh.cuda(), parts, cols=(c0, c1))[0], full[:, c0:c1])
+    monkeypatch.setenv("FREETOKEN_EXL3_FOLD", "1")
+    monkeypatch.setattr(lin, "RECONSTRUCT_SLAB", 256)
+    slabbed = lin.exl3_forward(*args)
+    assert rel_err(slabbed, folded) < 1e-3, rel_err(slabbed, folded)
