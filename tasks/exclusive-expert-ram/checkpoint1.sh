@@ -76,10 +76,18 @@ preflight
 [ "${1:-}" = "preflight" ] && exit 0
 echo "checkpoint label: $CK"
 
-arm $CK-whole       FT_ROWS=0                                     FT_POST="${NEEDLES//\$ARM_NAME/$CK-whole}"
-arm $CK-mirror-1m   FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 1000000" FT_POST="${NEEDLES//\$ARM_NAME/$CK-mirror-1m}"
-arm $CK-mirror      FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 80000 713000"
-arm $CK-whole-close FT_ROWS=0
+# ARMS picks and orders arms (default: the original four). whole-1m is the whole model at
+# 8K + 1M: the same-commit 1M reference compare_box.py judges mirror-1m against.
+for a in ${ARMS:-whole mirror-1m mirror whole-close}; do
+  case "$a" in
+    whole)       arm $CK-whole       FT_ROWS=0 FT_POST="${NEEDLES//\$ARM_NAME/$CK-whole}" ;;
+    whole-1m)    arm $CK-whole-1m    FT_ROWS=0 FT_SIZES="8000 1000000" ;;
+    mirror-1m)   arm $CK-mirror-1m   FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 1000000" FT_POST="${NEEDLES//\$ARM_NAME/$CK-mirror-1m}" ;;
+    mirror)      arm $CK-mirror      FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 80000 713000" ;;
+    whole-close) arm $CK-whole-close FT_ROWS=0 ;;
+    *) die "unknown arm $a" ;;
+  esac
+done
 
 # R3 from acceptance.sh. Its R6 checks the production system unit freetoken-serve (down by
 # design during measurements) and read /proc/0/limits on checkpoint 1; for an arm only its
@@ -92,11 +100,19 @@ r6_arm() {
     [ "$(systemctl --user show -p DefaultLimitMEMLOCK --value)" = infinity ] &&
     echo "R6(arm) ok: no pageable fallback, no mlock failure, user DefaultLimitMEMLOCK=infinity"
 }
-for a in $CK-whole $CK-mirror-1m $CK-mirror $CK-whole-close; do
+for a in $CK-whole $CK-whole-1m $CK-mirror-1m $CK-mirror $CK-whole-close; do
+  [ -f "$OUT/$a-journal.txt" ] || continue
   printf '%s R3: ' "$a"
   FREETOKEN_LOG="$OUT/$a-journal.txt" bash "$REPO/benchmarks/switchyard_soak/checks/acceptance.sh" R3 \
     > "$OUT/$a-acceptance-R3.txt" 2>&1 && echo PASS || echo "FAIL (see $a-acceptance-R3.txt)"
   printf '%s R6(arm): ' "$a"
   r6_arm "$OUT/$a-journal.txt" > "$OUT/$a-acceptance-R6.txt" 2>&1 && echo PASS || echo "FAIL (see $a-acceptance-R6.txt)"
 done
+# The gate twice: needles/recall vs the same-commit whole arm, decode pass by pass vs the
+# same-commit whole arms (compare_box.py, the owner's gate) and vs the record
+# (compare_records.py).
+python3 "$HERE/compare_needles.py" "$OUT" $CK-whole $CK-mirror-1m > "$OUT/$CK-needles-compare.txt" 2>&1 || true
+python3 "$HERE/compare_box.py" "$OUT" $CK > "$OUT/$CK-box-compare.txt" 2>&1 || true
+python3 "$HERE/compare_records.py" "$OUT" $CK > "$OUT/$CK-records-compare.txt" 2>&1 || true
+cat "$OUT/$CK-needles-compare.txt" "$OUT/$CK-box-compare.txt" "$OUT/$CK-records-compare.txt"
 echo "checkpoint $CK arms done. The embedder stays stopped."
