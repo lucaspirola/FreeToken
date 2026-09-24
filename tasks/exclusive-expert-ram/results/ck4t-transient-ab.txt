@@ -1,0 +1,18 @@
+== ck4t-mirror: default (-def) vs cushion-only headroom (-t0)
+  def transient ('1.00', 'measured') arena 1944 of 2173 (free 1.15 GiB), min slots over run 1560, decode hit rate 0.9234, mirror swaps/token 10.5  decode stats {'layer_calls': 20240, 'active': 122276, 'missing': 9370, 'fetched': 0, 'prefill_hit_rows': 306755, 'prefill_rows': 600576, 'pageable_stage_calls': 0, 'pageable_rows': 0}
+  t0  transient ('0.00', 'estimated') arena 2173 of 2173 (free 0.00 GiB), min slots over run 1704, decode hit rate 0.9407, mirror swaps/token 8.2  decode stats {'layer_calls': 20286, 'active': 122552, 'missing': 7268, 'fetched': 0, 'prefill_hit_rows': 335810, 'prefill_rows': 594688, 'pageable_stage_calls': 0, 'pageable_rows': 0}
+  decode    8K p1  def  160.1  t0  176.7  t0/def  110.4%
+  decode    8K p2  def  163.0  t0  168.7  t0/def  103.5%
+  decode   80K p1  def  133.5  t0  150.9  t0/def  113.1%
+  decode   80K p2  def  158.5  t0  166.9  t0/def  105.3%
+  decode  713K p1  def   82.2  t0   90.0  t0/def  109.4%
+  decode  713K p2  def   98.4  t0  102.2  t0/def  103.8%
+== ck4t-whole: default (-def) vs cushion-only headroom (-t0)
+  def transient ('1.00', 'measured') arena 1944 of 2173 (free 1.15 GiB), min slots over run 1904, decode hit rate 0.9306, mirror swaps/token -  decode stats {'layer_calls': 17549, 'active': 106130, 'missing': 7363, 'fetched': 0, 'prefill_hit_rows': 0, 'prefill_rows': 0, 'pageable_stage_calls': 0, 'pageable_rows': 0}
+  t0  transient ('0.00', 'estimated') arena 2173 of 2173 (free 0.00 GiB), min slots over run 2048, decode hit rate 0.9425, mirror swaps/token -  decode stats {'layer_calls': 17549, 'active': 106130, 'missing': 6104, 'fetched': 0, 'prefill_hit_rows': 0, 'prefill_rows': 0, 'pageable_stage_calls': 0, 'pageable_rows': 0}
+  decode    8K p1  def  164.9  t0  181.0  t0/def  109.8%
+  decode    8K p2  def  182.1  t0  185.8  t0/def  102.1%
+  decode   32K p1  def  178.0  t0  167.3  t0/def   94.0%
+  decode   32K p2  def  178.0  t0  180.0  t0/def  101.1%
+  decode   80K p1  def  165.6  t0  170.7  t0/def  103.1%
+  decode   80K p2  def  184.8  t0  184.2  t0/def   99.7%
