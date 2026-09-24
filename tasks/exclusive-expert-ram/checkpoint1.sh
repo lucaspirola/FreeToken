@@ -76,13 +76,17 @@ preflight
 [ "${1:-}" = "preflight" ] && exit 0
 echo "checkpoint label: $CK"
 
+# WHOLE1M_NEEDLES=1 gives whole-1m the needles/recall post and NEEDLES_REF names the reference
+# arm for compare_needles.py (default $CK-whole).
 # ARMS picks and orders arms (default: the original four). whole-1m is the whole model at
 # 8K + 1M: the same-commit 1M reference compare_box.py judges mirror-1m against.
 T0="FREETOKEN_PREFILL_TRANSIENT_MEASURE=0 FREETOKEN_PREFILL_TRANSIENT_MB=0"
 for a in ${ARMS:-whole mirror-1m mirror whole-close}; do
   case "$a" in
     whole)       arm $CK-whole       FT_ROWS=0 FT_POST="${NEEDLES//\$ARM_NAME/$CK-whole}" ;;
-    whole-1m)    arm $CK-whole-1m    FT_ROWS=0 FT_SIZES="8000 1000000" ;;
+    whole-1m)    if [ "${WHOLE1M_NEEDLES:-0}" = 1 ]; then  # the needles/recall reference when no whole arm runs
+                   arm $CK-whole-1m  FT_ROWS=0 FT_SIZES="8000 1000000" FT_POST="${NEEDLES//\$ARM_NAME/$CK-whole-1m}"
+                 else arm $CK-whole-1m FT_ROWS=0 FT_SIZES="8000 1000000"; fi ;;
     mirror-1m)   arm $CK-mirror-1m   FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 1000000" FT_POST="${NEEDLES//\$ARM_NAME/$CK-mirror-1m}" ;;
     mirror)      arm $CK-mirror      FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 80000 713000" ;;
     whole-close) arm $CK-whole-close FT_ROWS=0 ;;
@@ -127,7 +131,7 @@ done
 # The gate twice: needles/recall vs the same-commit whole arm, decode pass by pass vs the
 # same-commit whole arms (compare_box.py, the owner's gate) and vs the record
 # (compare_records.py).
-python3 "$HERE/compare_needles.py" "$OUT" $CK-whole ${NEEDLES_ARM:-$CK-mirror-1m} > "$OUT/$CK-needles-compare.txt" 2>&1 || true
+python3 "$HERE/compare_needles.py" "$OUT" ${NEEDLES_REF:-$CK-whole} ${NEEDLES_ARM:-$CK-mirror-1m} > "$OUT/$CK-needles-compare.txt" 2>&1 || true
 { python3 "$HERE/compare_transient_ab.py" "$OUT" $CK; python3 "$HERE/compare_transient_ab.py" "$OUT" $CK st; } > "$OUT/$CK-transient-ab.txt" 2>&1 || true
 python3 "$HERE/compare_compaction.py" "$OUT" $CK > "$OUT/$CK-compaction.txt" 2>&1 || true
 python3 "$HERE/compare_box.py" "$OUT" $CK > "$OUT/$CK-box-compare.txt" 2>&1 || true

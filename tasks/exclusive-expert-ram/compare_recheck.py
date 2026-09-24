@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """recheck-local.sh verdicts.
 
-  compare_recheck.py <results dir> <label> [size, default 8000]
+  compare_recheck.py <results dir> <label> ["size ...", default "8000"]
 
 8K part: <label>-whole-{1,2,3} and <label>-mirror-{1,2,3} (8K, 512 tokens, passes 1-2).
 Per pass: each arm's decode (monotonic), the ratio of each mirror arm to the whole arm
@@ -47,24 +47,25 @@ def pool(d: Path, name: str):
 
 def main():
     d, lab = Path(sys.argv[1]), sys.argv[2]
-    size = int(sys.argv[3]) if len(sys.argv) > 3 else 8000
+    sizes = [int(x) for x in sys.argv[3].split()] if len(sys.argv) > 3 else [8000]
     runs = [(probes(d, f"{lab}-whole-{i}"), probes(d, f"{lab}-mirror-{i}")) for i in (1, 2, 3)]
-    if any(w or m for w, m in runs):
-        print(f"== {size // 1000}K, 512 tokens: mirror vs the whole arm run before it")
-        for p in (1, 2):
-            ratios = []
-            for i, (w, m) in enumerate(runs, 1):
-                a, b = w.get((size, p)), m.get((size, p))
-                if not (a and b and a["dec"] and b["dec"]):
-                    print(f"  p{p} run {i}: missing"); continue
-                ratios.append(b["dec"] / a["dec"])
-                print(f"  p{p} run {i}: whole {a['dec']:6.1f} (gap1 {a.get('gap1_ms')} ms, median gap "
-                      f"{a.get('median_gap_ms')} ms)  mirror {b['dec']:6.1f} (gap1 {b.get('gap1_ms')} ms, "
-                      f"median gap {b.get('median_gap_ms')} ms)  ratio {100 * ratios[-1]:5.1f}%  "
-                      f"after gap1: whole {a.get('decode_tok_s_after_gap1')} mirror {b.get('decode_tok_s_after_gap1')}")
-            if ratios:
-                med = statistics.median(ratios)
-                print(f"  p{p} median ratio {100 * med:5.1f}%  {'PASS' if med >= 0.91 else 'FAIL'} (>= 91%)")
+    for size in sizes:
+      if any(w or m for w, m in runs):
+          print(f"== {size // 1000}K, 512 tokens: mirror vs the whole arm run before it")
+          for p in (1, 2):
+              ratios = []
+              for i, (w, m) in enumerate(runs, 1):
+                  a, b = w.get((size, p)), m.get((size, p))
+                  if not (a and b and a["dec"] and b["dec"]):
+                      print(f"  p{p} run {i}: missing"); continue
+                  ratios.append(b["dec"] / a["dec"])
+                  print(f"  p{p} run {i}: whole {a['dec']:6.1f} (gap1 {a.get('gap1_ms')} ms, median gap "
+                        f"{a.get('median_gap_ms')} ms)  mirror {b['dec']:6.1f} (gap1 {b.get('gap1_ms')} ms, "
+                        f"median gap {b.get('median_gap_ms')} ms)  ratio {100 * ratios[-1]:5.1f}%  "
+                        f"after gap1: whole {a.get('decode_tok_s_after_gap1')} mirror {b.get('decode_tok_s_after_gap1')}")
+              if ratios:
+                  med = statistics.median(ratios)
+                  print(f"  p{p} median ratio {100 * med:5.1f}%  {'PASS' if med >= 0.91 else 'FAIL'} (>= 91%)")
     one = d / f"{lab}-mirror-1m-record.json"
     if one.exists():
         r = json.loads(one.read_text())
