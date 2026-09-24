@@ -54,10 +54,25 @@ import triton.language as tl
 from freetoken.moe.mirror_stats import MirrorStat
 
 
+# Copy spaces for ``fast_index_copy_kinds_jit`` descriptors (see resolve_swaps).
+KIND_CACHE = 0   # GPU slot cache
+KIND_POOL = 1    # pinned host pool (mapped)
+KIND_STAGE = 2   # VRAM writeback staging ring
+
+
 def resolve_swaps(cache, layer_id: int) -> None:
-    """Translate this step's misses into mirror copy descriptors (device-side)."""
+    """Translate this step's misses into mirror copy descriptors (device-side).
+
+    Two descriptor groups, each one ``fast_index_copy_kinds_jit`` launch:
+
+    * ``g1`` -- everything that must read a slot BEFORE admissions overwrite
+      slots: victim writebacks (slot -> staging ring, or slot -> pool when the
+      ring is full or disabled) and slot -> slot relocations.
+    * ``g2`` -- admissions: pool -> slot, or staging ring -> slot when the
+      admitted expert's pool row is still waiting for its DMA.
+    """
     m = cache.residency._mirror
-    plan = m["h2d_src"].numel()
+    plan = m["g1"].shape[1]
     # Rows the free stack must keep for this launch's writebacks; retention
     # stops above it. See the kernel's `retain_floor`.
     retain_floor = cache.residency._mirror_pool.reserve_rows
@@ -80,27 +95,30 @@ def resolve_swaps(cache, layer_id: int) -> None:
         m["free_count"],
         m["freed_rows"],
         m["n_freed"],
-        m["h2d_src"],
-        m["h2d_dst"],
-        m["n_h2d"],
-        m["d2h_src"],
-        m["d2h_dst"],
-        m["n_d2h"],
-        m["d2d_src"],
-        m["d2d_dst"],
-        m["n_d2d"],
+        m["g1"],
+        m["n_g1"],
+        m["g2"],
+        m["n_g2"],
+        m["wb_state"],
+        m["wb_pend"],
         m["stats"],
         layer_id,
         cache.num_experts,
         retain_floor,
         buffer_slots,
+        plan,
         SWAPS=MirrorStat.SWAPS,
         FREE_EVICTIONS=MirrorStat.FREE_EVICTIONS,
         WRITEBACKS=MirrorStat.WRITEBACKS,
         VIOLATIONS=MirrorStat.VIOLATIONS,
         STARVED=MirrorStat.STARVED,
         RETAINED=MirrorStat.RETAINED,
-        BLOCK=triton.next_power_of_2(max(plan, 1)),
+        STAGED=MirrorStat.STAGED_WRITEBACKS,
+        REDIRECTS=MirrorStat.STAGE_REDIRECTS,
+        STAGE_ROWS=m["wb_stage_rows"],
+        K_CACHE=KIND_CACHE,
+        K_POOL=KIND_POOL,
+        K_STAGE=KIND_STAGE,
     )
 
 
@@ -116,7 +134,16 @@ def publish_freed_rows(cache) -> None:
     )
 
 
-@triton.jit(do_not_specialize=["layer_id", "num_experts", "retain_floor", "buffer_slots"])
+@triton.jit
+def _emit(desc_ptr, cap, n, dst, src, dst_kind, src_kind):
+    """Append one (dst row, src row, dst space, src space) copy descriptor."""
+    tl.store(desc_ptr + n, dst)
+    tl.store(desc_ptr + cap + n, src)
+    tl.store(desc_ptr + 2 * cap + n, dst_kind)
+    tl.store(desc_ptr + 3 * cap + n, src_kind)
+
+
+@triton.jit(do_not_specialize=["layer_id", "num_experts", "retain_floor", "buffer_slots", "cap"])
 def _resolve_swaps_kernel(
     src_indices_ptr,      # int32 [plan]  layer-local expert id of each miss
     evict_slots_ptr,      # int32 [plan]  GPU slot each miss lands in
@@ -130,46 +157,79 @@ def _resolve_swaps_kernel(
     free_count_ptr,       # int32 [1]     stack depth
     freed_rows_ptr,       # int32 [plan]  rows freed this step (published later)
     n_freed_ptr,          # int32 [1]
-    h2d_src_ptr,          # int32 [plan]  pool row feeding each admission
-    h2d_dst_ptr,          # int32 [plan]  GPU slot receiving it
-    n_h2d_ptr,            # int64 [1]     admission count (<= miss count)
-    d2h_src_ptr,          # int32 [plan]  GPU slot of each victim needing writeback
-    d2h_dst_ptr,          # int32 [plan]  pool row receiving it
-    n_d2h_ptr,            # int64 [1]     writeback count
-    d2d_src_ptr,          # int32 [plan]  GPU slot holding an already-resident expert
-    d2d_dst_ptr,          # int32 [plan]  GPU slot it must appear in
-    n_d2d_ptr,            # int64 [1]     device-to-device relocation count
-    stats_ptr,            # int64 [7]     swaps, free_evict, d2h, violations,
-                          #               starved, retained
+    g1_ptr,               # int32 [4, plan] writebacks + relocations (read slots
+                          #               before any admission writes one)
+    n_g1_ptr,             # int64 [1]
+    g2_ptr,               # int32 [4, plan] admissions
+    n_g2_ptr,             # int64 [1]
+    wb_state_ptr,         # int64 [2 + STAGE_ROWS]: [0] ring head (entries ever
+                          #               staged), [1] entries whose DMA has
+                          #               completed (written by the host's copy
+                          #               stream), [2 + s] pool row of ring slot s
+    wb_pend_ptr,          # int64 [pool cap] ring index of the LATEST staged
+                          #               writeback into each pool row, -1 if none
+    stats_ptr,            # int64 [9]     MirrorStat layout
     layer_id,
     num_experts,
     retain_floor,         # keep this many rows free; retain duplicates above it
     buffer_slots,         # slots < this are the prefill buffer region; an
                           # admission there always retains (see below)
+    cap,                  # descriptor capacity (plan)
     SWAPS: tl.constexpr,          # stats_ptr offsets, from MirrorStat
     FREE_EVICTIONS: tl.constexpr,
     WRITEBACKS: tl.constexpr,
     VIOLATIONS: tl.constexpr,
     STARVED: tl.constexpr,
     RETAINED: tl.constexpr,
-    BLOCK: tl.constexpr,
+    STAGED: tl.constexpr,
+    REDIRECTS: tl.constexpr,
+    STAGE_ROWS: tl.constexpr,     # staging ring rows; 0 = every writeback is an
+                                  # SM store into the pool (the pre-DMA path)
+    K_CACHE: tl.constexpr,
+    K_POOL: tl.constexpr,
+    K_STAGE: tl.constexpr,
 ):
     """One program: the miss count is <= top_k * batch (decode) or num_experts
     (prefill materialize), small either way. Serial within the program so the
     free stack and the ownership updates need no atomics; correctness depends
     on that single-program shape.
+
+    DMA writebacks. SM stores into mapped pinned memory run at 2-14 GB/s
+    depending on the host (box numbers: 2.1-2.4 GB/s on ft-dev, 12.2-13.8 on
+    ft-ck) against 22-29 GB/s for the copy engine, and a captured graph cannot
+    hold a memcpy whose addresses the device decides. So a victim is copied
+    slot -> staging ring (VRAM, fast) here, and the host later issues the ring
+    -> pool DMA (``MirrorResidency.service_writebacks``). Every DECISION --
+    which victims need a writeback, which row each lands in, retention, the
+    free stack -- is exactly the pre-DMA one; only where the bytes travel
+    through changes. Three rules keep the pool byte-exact:
+
+    * A ring slot is reused only after its DMA completed (``head - done <
+      STAGE_ROWS``); when the ring is full the writeback falls back to the SM
+      store.
+    * An admission whose pool row still has a pending DMA (``wb_pend >=
+      done``) reads the ring slot instead of the stale row.
+    * An SM-store fallback never targets a row with a pending DMA (that DMA,
+      landing later, would overwrite it with older bytes): it takes the
+      topmost free row with none pending. Two staged writebacks into one row
+      are safe, the host issues DMAs in ring order.
     """
     n = tl.load(num_indices_ptr)
-    n_h2d = 0
-    n_d2h = 0
-    n_d2d = 0
+    n_g1 = 0
+    n_g2 = 0
     n_freed = 0
     swaps = 0
     free_evict = 0
     violations = 0
     starved = 0
     retained = 0
+    writebacks = 0
+    staged = 0
+    redirects = 0
     free_top = tl.load(free_count_ptr)
+    head = tl.load(wb_state_ptr)
+    # Read once: a stale (smaller) value is always the safe side of both tests.
+    done = tl.load(wb_state_ptr + 1, volatile=True)
 
     for i in range(0, n):
         expert = tl.load(src_indices_ptr + i)
@@ -190,9 +250,13 @@ def _resolve_swaps_kernel(
             here = tl.load(prev_slot_ptr + flat_new)
             src_row = tl.load(pool_row_of_id_ptr + flat_new)
             if here >= 0 and here != slot:
-                tl.store(d2d_src_ptr + n_d2d, here)
-                tl.store(d2d_dst_ptr + n_d2d, slot)
-                n_d2d += 1
+                # Group 1, BEFORE the admissions: a relocation source is a
+                # slot that still holds its old expert, and group 2 is about
+                # to overwrite exactly such slots. Issuing it afterwards read
+                # admitted bytes instead (21K-token completions came out as
+                # noise).
+                _emit(g1_ptr, cap, n_g1, slot, here, K_CACHE, K_CACHE)
+                n_g1 += 1
                 swaps += 1
                 free_evict += 1
                 if victim >= 0:
@@ -211,22 +275,67 @@ def _resolve_swaps_kernel(
                 violations += 1
             else:
                 swaps += 1
-                tl.store(h2d_src_ptr + n_h2d, src_row)
-                tl.store(h2d_dst_ptr + n_h2d, slot)
-                n_h2d += 1
+                if STAGE_ROWS > 0:
+                    pidx = tl.load(wb_pend_ptr + src_row)
+                    if pidx >= done:
+                        # The row's DMA has not landed: its bytes are still
+                        # (only) in the ring.
+                        _emit(g2_ptr, cap, n_g2, slot, pidx % STAGE_ROWS, K_CACHE, K_STAGE)
+                        redirects += 1
+                    else:
+                        _emit(g2_ptr, cap, n_g2, slot, src_row, K_CACHE, K_POOL)
+                else:
+                    _emit(g2_ptr, cap, n_g2, slot, src_row, K_CACHE, K_POOL)
+                n_g2 += 1
                 writeback = False
                 if victim >= 0:
                     if tl.load(pool_row_of_id_ptr + victim) < 0:
                         writeback = True
                 if writeback:
                     if free_top > 0:
-                        free_top -= 1
-                        dst_row = tl.load(free_rows_ptr + free_top)
-                        tl.store(d2h_src_ptr + n_d2h, slot)
-                        tl.store(d2h_dst_ptr + n_d2h, dst_row)
-                        n_d2h += 1
-                        tl.store(id_of_pool_row_ptr + dst_row, victim)
-                        tl.store(pool_row_of_id_ptr + victim, dst_row)
+                        pick = free_top - 1
+                        use_stage = False
+                        if STAGE_ROWS > 0:
+                            if head - done < STAGE_ROWS:
+                                use_stage = True
+                            else:
+                                # Ring full: SM store, into a row no pending
+                                # DMA will overwrite later.
+                                pick = -1
+                                k = free_top - 1
+                                while k >= 0:
+                                    if tl.load(wb_pend_ptr + tl.load(free_rows_ptr + k)) < done:
+                                        pick = k
+                                        k = -1
+                                    else:
+                                        k -= 1
+                        if pick >= 0:
+                            free_top -= 1
+                            dst_row = tl.load(free_rows_ptr + pick)
+                            if pick != free_top:
+                                tl.store(free_rows_ptr + pick, tl.load(free_rows_ptr + free_top))
+                                tl.store(free_rows_ptr + free_top, dst_row)
+                            if STAGE_ROWS > 0:
+                                if use_stage:
+                                    s = head % STAGE_ROWS
+                                    _emit(g1_ptr, cap, n_g1, s, slot, K_STAGE, K_CACHE)
+                                    tl.store(wb_state_ptr + 2 + s, dst_row.to(tl.int64))
+                                    tl.store(wb_pend_ptr + dst_row, head)
+                                    head += 1
+                                    staged += 1
+                                else:
+                                    _emit(g1_ptr, cap, n_g1, dst_row, slot, K_POOL, K_CACHE)
+                            else:
+                                _emit(g1_ptr, cap, n_g1, dst_row, slot, K_POOL, K_CACHE)
+                            n_g1 += 1
+                            writebacks += 1
+                            tl.store(id_of_pool_row_ptr + dst_row, victim)
+                            tl.store(pool_row_of_id_ptr + victim, dst_row)
+                        else:
+                            # Every free row still has a DMA in flight (the
+                            # ring holds at most STAGE_ROWS of them, the
+                            # reserve is several layers): no safe target.
+                            starved += 1
                     else:
                         # Reserve exhausted: the victim's only copy would be
                         # lost. plan_capacity sizes against this; the host
@@ -287,15 +396,17 @@ def _resolve_swaps_kernel(
 
     tl.store(free_count_ptr, free_top)
     tl.store(n_freed_ptr, n_freed)
-    tl.store(n_h2d_ptr, n_h2d)
-    tl.store(n_d2h_ptr, n_d2h)
-    tl.store(n_d2d_ptr, n_d2d)
+    tl.store(n_g1_ptr, n_g1.to(tl.int64))
+    tl.store(n_g2_ptr, n_g2.to(tl.int64))
+    tl.store(wb_state_ptr, head)
     tl.store(stats_ptr + SWAPS, tl.load(stats_ptr + SWAPS) + swaps)
     tl.store(stats_ptr + FREE_EVICTIONS, tl.load(stats_ptr + FREE_EVICTIONS) + free_evict)
-    tl.store(stats_ptr + WRITEBACKS, tl.load(stats_ptr + WRITEBACKS) + n_d2h)
+    tl.store(stats_ptr + WRITEBACKS, tl.load(stats_ptr + WRITEBACKS) + writebacks)
     tl.store(stats_ptr + VIOLATIONS, tl.load(stats_ptr + VIOLATIONS) + violations)
     tl.store(stats_ptr + STARVED, tl.load(stats_ptr + STARVED) + starved)
     tl.store(stats_ptr + RETAINED, tl.load(stats_ptr + RETAINED) + retained)
+    tl.store(stats_ptr + STAGED, tl.load(stats_ptr + STAGED) + staged)
+    tl.store(stats_ptr + REDIRECTS, tl.load(stats_ptr + REDIRECTS) + redirects)
 
 
 @triton.jit

@@ -46,6 +46,9 @@ def _setup(monkeypatch, transient):
         prefill_transient_bytes=transient,
     )
     monkeypatch.setenv("FREETOKEN_ARENA_STEP_SLOTS", "8")
+    # The DMA-writeback staging ring is priced separately
+    # (test_mirror_pool_golden); these identities are about the headroom term.
+    monkeypatch.setenv("FREETOKEN_MIRROR_WB_STAGE_MB", "0")
     monkeypatch.setattr(lsp, "state_pool_bytes", lambda config, num_slots=None: 0)
     return engine, config, per_slot, total
 

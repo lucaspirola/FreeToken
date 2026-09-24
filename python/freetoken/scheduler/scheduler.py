@@ -3022,6 +3022,10 @@ class Scheduler(SchedulerIOMixin):
         residency = getattr(self.engine.moe_offload_cache, "residency", None)
         if residency is not None:
             residency.fault_check()
+            # Bounded mirror: DMA the writebacks of finished steps from the
+            # VRAM staging ring into the host pool, and snapshot this step's
+            # ring for a later call. Non-blocking; no-op for the whole model.
+            residency.service_writebacks()
         profile = self.config.moe_collect_stats
         if profile:
             batch._profile_host_started = time.perf_counter()

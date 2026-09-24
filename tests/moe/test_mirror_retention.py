@@ -89,6 +89,9 @@ def _decode(cache, steps=240, seed=0):
         cache.ensure_experts(layer, ids.reshape(1, 4))
         cache.copy_missing()
         cache.mirror_fault_check()
+    # Staged (DMA) writebacks reach the pool only when the host issues them;
+    # the byte checks below read the pool directly.
+    cache.residency.drain_writebacks()
     torch.cuda.synchronize()
 
 
