@@ -505,79 +505,46 @@ def test_ornith_q4_tuned_decode_matches_dequantized_oracle():
 
 
 @cuda_only
-@pytest.mark.parametrize(
-    "q_heads,head_dim,batch",
-    [(32, 128, 1), (32, 128, 3), (16, 256, 1), (24, 128, 2)],
-    ids=["nemotron", "nemotron-bs3", "ornith", "group12"],
-)
-def test_q8_block_dot_decode_matches_dequantized_oracle(monkeypatch, q_heads, head_dim, batch):
-    """The q8_0 block-dot stage 1 (scales applied to per-block products, no dequantized
-    tile) against the bf16 kernel fed the dequantized pool, at the production launch."""
-    import freetoken.kernel.triton.attention as attention
-
-    kv_heads, per_req = 2, 3001
-    slots = per_req * batch
-    q = _kv(batch, q_heads, head_dim, seed=87)
-    k = _kv(slots, kv_heads, head_dim, seed=88)
-    v = _kv(slots, kv_heads, head_dim, seed=89)
-    kq, ks, vq, vs, k_deq, v_deq = _quantized_pool(Q8_0, k, v)
-    indptr = torch.arange(0, slots + 1, per_req, device="cuda", dtype=torch.int32)
-    # a shuffled page table: slots are gathered, not streamed
-    indices = torch.randperm(slots, device="cuda", generator=torch.Generator("cuda").manual_seed(3)).to(torch.int32)
-    q_pos = torch.tensor([per_req - 1 - 7 * i for i in range(batch)], device="cuda", dtype=torch.int32)
-
-    def run(k_cache, v_cache, splits, k_scale=None, v_scale=None):
-        logits = torch.empty(batch, q_heads, splits, head_dim, device="cuda", dtype=torch.float32)
-        lse = torch.empty(batch, q_heads, splits, device="cuda", dtype=torch.float32)
-        nsplits = torch.full((batch,), splits, device="cuda", dtype=torch.int32)
-        return attention.decode_paged_attention(
-            q, k_cache, v_cache, indptr, indices, q_pos, logits, lse, nsplits,
-            splits, head_dim**-0.5, k_scale=k_scale, v_scale=v_scale,
-        )
-
-    monkeypatch.setattr(attention, "_Q8_NATIVE_QK", False)
-    monkeypatch.setattr(attention, "_Q8_BLOCK_DOT", False)
-    tiles = run(kq, vq, 64, ks, vs)
-    monkeypatch.setattr(attention, "_Q8_BLOCK_DOT", True)
-    got = run(kq, vq, 64, ks, vs)
-    want = run(k_deq, v_deq, 8)
-    torch.testing.assert_close(got, want, rtol=2e-2, atol=2e-2)
-    # and it is no further from the oracle than the dequantize-tile path it replaces
-    assert (got.float() - want.float()).abs().max() <= 2 * (tiles.float() - want.float()).abs().max() + 1e-2
-
-
-@cuda_only
-@pytest.mark.parametrize("split_min", [256, 4096])
-def test_length_bucketed_splits_match_dequantized_oracle(monkeypatch, split_min):
-    """SPLIT_MIN_TOKENS: the captured grid keeps 64 splits, a request uses
-    min(64, cdiv(len, split_min)) of them; stage 1 and stage 2 must agree on the split
-    length for every request of a batch whose lengths straddle the bucket edges."""
-    import freetoken.kernel.triton.attention as attention
+@pytest.mark.parametrize("splits", [84, 5, 128])
+def test_nemotron_decode_splits_match_dequantized_oracle(splits):
+    """Nemotron's grid-filling split count (84 = 2 CTAs per SM on 84 SMs, not a power of
+    two) and the chunked stage-2 merge, over a batch whose contexts leave most splits
+    empty (1 token), some partly filled, and all filled."""
+    from freetoken.kernel.triton.attention import decode_paged_attention
 
     q_heads, kv_heads, head_dim = 32, 2, 128
-    lens = [1, 255, 257, 4097, 20000]
+    lens = [1, 33, 700, 5000, 20011]
     batch, slots = len(lens), sum(lens)
-    q = _kv(batch, q_heads, head_dim, seed=90)
-    k = _kv(slots, kv_heads, head_dim, seed=91)
-    v = _kv(slots, kv_heads, head_dim, seed=92)
+    q = _kv(batch, q_heads, head_dim, seed=93)
+    k = _kv(slots, kv_heads, head_dim, seed=94)
+    v = _kv(slots, kv_heads, head_dim, seed=95)
     kq, ks, vq, vs, k_deq, v_deq = _quantized_pool(Q8_0, k, v)
     indptr = torch.tensor([0] + lens, device="cuda", dtype=torch.int32).cumsum(0).to(torch.int32)
-    indices = torch.arange(slots, device="cuda", dtype=torch.int32)
+    indices = torch.randperm(slots, device="cuda", generator=torch.Generator("cuda").manual_seed(4)).to(torch.int32)
     q_pos = torch.tensor([n - 1 for n in lens], device="cuda", dtype=torch.int32)
 
-    def run(k_cache, v_cache, splits, k_scale=None, v_scale=None):
-        logits = torch.empty(batch, q_heads, splits, head_dim, device="cuda", dtype=torch.float32)
-        lse = torch.empty(batch, q_heads, splits, device="cuda", dtype=torch.float32)
-        nsplits = torch.full((batch,), splits, device="cuda", dtype=torch.int32)
-        return attention.decode_paged_attention(
+    def run(k_cache, v_cache, n, k_scale=None, v_scale=None):
+        logits = torch.empty(batch, q_heads, n, head_dim, device="cuda", dtype=torch.float32)
+        lse = torch.empty(batch, q_heads, n, device="cuda", dtype=torch.float32)
+        nsplits = torch.full((batch,), n, device="cuda", dtype=torch.int32)
+        return decode_paged_attention(
             q, k_cache, v_cache, indptr, indices, q_pos, logits, lse, nsplits,
-            splits, head_dim**-0.5, k_scale=k_scale, v_scale=v_scale,
+            n, head_dim**-0.5, k_scale=k_scale, v_scale=v_scale,
         )
 
+    got = run(kq, vq, splits, ks, vs)
     want = run(k_deq, v_deq, 8)
-    monkeypatch.setattr(attention, "_DECODE_SPLIT_MIN_TOKENS", split_min)
-    got = run(kq, vq, 64, ks, vs)
+    assert torch.isfinite(got).all()
     torch.testing.assert_close(got, want, rtol=2e-2, atol=2e-2)
+    # fp32 reference straight from the dequantized pool
+    ref = []
+    for b, n in enumerate(lens):
+        sl = indices[indptr[b]:indptr[b + 1]].long()
+        kk = k_deq[sl].float().repeat_interleave(q_heads // kv_heads, dim=1)  # [n, H, D]
+        vv = v_deq[sl].float().repeat_interleave(q_heads // kv_heads, dim=1)
+        s_ = torch.einsum("hd,nhd->hn", q[b].float(), kk) * head_dim**-0.5
+        ref.append(torch.einsum("hn,nhd->hd", s_.softmax(-1), vv))
+    torch.testing.assert_close(got.float(), torch.stack(ref), rtol=2e-2, atol=2e-2)
 
 
 @cuda_only

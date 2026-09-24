@@ -59,11 +59,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--splits", type=int, nargs="+", default=[8, 16, 32, 64, 128])
     p.add_argument("--block-n", type=int, nargs="+", default=[32])
     p.add_argument("--warps", type=int, nargs="+", default=[4])
-    p.add_argument("--stages", type=int, nargs="+", default=[2], help="stage-1 num_stages")
-    p.add_argument("--split-min", type=int, nargs="+", default=[0],
-                   help="length-bucketed splits: min tokens per split (0 = off)")
-    p.add_argument("--block-dot", type=int, nargs="+", default=[0],
-                   help="stage-1 Q8_BLOCK_DOT variant off/on (symmetric q8_0 pools only)")
     p.add_argument("--warmup", type=int, default=3)
     p.add_argument("--iters", type=int, default=15)
     p.add_argument("--seed", type=int, default=0)
@@ -171,24 +166,16 @@ def _sweep_case(args, attn_mod, real_config, device, k_spec, v_spec, ctx_len, ba
 
     baseline = None
     if not args.skip_verify:
-        attn_mod._Q8_BLOCK_DOT = False  # the reference is always the dequantize-tile path
-        attn_mod._DECODE_NUM_STAGES = 2
-        attn_mod._DECODE_SPLIT_MIN_TOKENS = 0
         baseline = call(8, 32, 4, k_cache, v_cache, k_scale, v_scale).float()
 
     kv_bytes = slots * args.kv_heads * args.head_dim * (
         k_spec.bytes_per_element(torch.bfloat16) + v_spec.bytes_per_element(torch.bfloat16)
     )
     rows: list[dict] = []
-    points = [(bn, st, bd, sm) for sm in args.split_min for bd in args.block_dot
-              for bn in args.block_n for st in args.stages]
-    for block_n, stages, block_dot, split_min in points:
-        attn_mod._DECODE_NUM_STAGES = stages
-        attn_mod._Q8_BLOCK_DOT = bool(block_dot)
-        attn_mod._DECODE_SPLIT_MIN_TOKENS = split_min
+    for block_n in args.block_n:
         for splits in args.splits:
             for warps in args.warps:
-                label = f"ctx={ctx_len} bs={batch} splits={splits} bn={block_n} w={warps} st={stages} bd={block_dot} sm={split_min}"
+                label = f"ctx={ctx_len} bs={batch} splits={splits} bn={block_n} w={warps}"
                 got = call(splits, block_n, warps, k_cache, v_cache, k_scale, v_scale)
                 base_err = oracle_err = None
                 if baseline is not None:
@@ -215,7 +202,6 @@ def _sweep_case(args, attn_mod, real_config, device, k_spec, v_spec, ctx_len, ba
                     "q_heads": args.q_heads, "kv_heads": args.kv_heads,
                     "head_dim": args.head_dim, "quant": args.quant, "ctx_len": ctx_len,
                     "batch": batch, "splits": splits, "block_n": block_n, "warps": warps,
-                    "stages": stages, "block_dot": block_dot, "split_min": split_min,
                     "ctas": batch * head_blocks * splits, "sms": sm_count, "ms": time_ms,
                     "ms_per_token": time_ms * args.layers,
                     "gbps": kv_bytes / (time_ms * 1e6),
@@ -224,7 +210,7 @@ def _sweep_case(args, attn_mod, real_config, device, k_spec, v_spec, ctx_len, ba
                 rows.append(row)
                 print(
                     f"ctx={ctx_len:>8} bs={batch:>2} splits={splits:>3} bn={block_n:>3} "
-                    f"w={warps} st={stages} bd={block_dot} sm={split_min} ctas={row['ctas']:>5} {time_ms:8.3f} ms "
+                    f"w={warps} ctas={row['ctas']:>5} {time_ms:8.3f} ms "
                     f"{row['gbps']:7.1f} GB/s"
                     + (f"  d8={base_err:.2e}" if base_err is not None else "")
                     + (f"  dq={oracle_err:.2e}" if oracle_err is not None else ""),

@@ -13,19 +13,22 @@ _MIN_BLOCK_KV = 32
 
 # Grid-filling decode fallback. Stage 1 launches ``batch * head_blocks * kv_splits``
 # CTAs and ``head_blocks`` is fixed by the head geometry, so ``kv_splits`` is the only
-# term that scales the decode grid with the GPU. One CTA per SM at batch one is what the
-# 2026-09-04 RTX 5080 sweep measured (benchmarks/bench_decode_launch.py): for 32Q/2KV/D128
-# at 131K-1M, 64 splits (128 CTAs on 84 SMs) beat both 32 and 128 at every length.
+# term that scales the decode grid with the GPU. The 2026-09-04 RTX 5080 sweep compared
+# powers of two only (64 splits = 128 CTAs on 84 SMs beat 32 and 128). The 2026-09-24
+# box sweep (tasks/splitkv-decode) added SM multiples: exactly two CTAs per SM -- 84
+# splits for 32Q/2KV/D128 on 84 SMs, 168 CTAs -- is 9-12% faster than 64 at 80K-1M
+# (1M: 0.797 -> 0.703 ms per layer, 716 -> 812 GB/s) and ties at 8K; 168 and 256
+# splits lose. A power-of-two count leaves 1.5 CTAs per SM, so half the SMs finish a
+# second CTA while the other half idle.
 # ``_MAX_AUTO_KV_SPLITS`` caps the stage-2 reduction and the fp32 scratch.
-_DECODE_CTAS_PER_SM = 1
+_DECODE_CTAS_PER_SM = 2
 _MAX_AUTO_KV_SPLITS = 128
+# Stage 2 merges this many split partials per vector step (was one split per step).
+_STAGE2_SPLIT_CHUNK = 32
 
 # The cache-native Q8 score path is independently switchable so its numerical and
 # performance gates can be compared against the dequantize-to-BF16 implementation.
 _Q8_NATIVE_QK = os.getenv("FREETOKEN_Q8_NATIVE_QK", "1").strip() != "0"
-# Decode stage 1 on a symmetric q8_0 pool: scale the per-block products instead of
-# dequantizing the K/V tiles (see the Q8_BLOCK_DOT branch). Off by default until measured.
-_Q8_BLOCK_DOT = os.getenv("FREETOKEN_DECODE_Q8_BLOCK_DOT", "0").strip() == "1"
 
 
 @functools.lru_cache(maxsize=1)
@@ -46,26 +49,6 @@ def _decode_launch_env_override() -> tuple[int | None, int | None, int | None]:
         _get("FREETOKEN_DECODE_BLOCK_N"),
         _get("FREETOKEN_DECODE_NUM_WARPS"),
     )
-
-
-def _decode_num_stages() -> int:
-    """Software-pipelining depth of the stage-1 KV loop (``FREETOKEN_DECODE_NUM_STAGES``
-    overrides it for A/B sweeps; like the split count it is fixed at graph capture)."""
-    raw = os.getenv("FREETOKEN_DECODE_NUM_STAGES", "").strip()
-    return int(raw) if raw else _DECODE_NUM_STAGES
-
-
-_DECODE_NUM_STAGES = 2
-
-
-def _decode_split_min_tokens() -> int:
-    """Length-bucketed split count (see ``_decode_split_len``); 0 = always all splits.
-    ``FREETOKEN_DECODE_SPLIT_MIN_TOKENS`` overrides it."""
-    raw = os.getenv("FREETOKEN_DECODE_SPLIT_MIN_TOKENS", "").strip()
-    return int(raw) if raw else _DECODE_SPLIT_MIN_TOKENS
-
-
-_DECODE_SPLIT_MIN_TOKENS = 0
 
 
 def _decode_head_blocks(num_q_heads: int, num_kv_heads: int) -> int:
@@ -92,8 +75,7 @@ def _grid_filling_splits(*, num_q_heads: int, num_kv_heads: int, sm_count: int) 
     and only the stage-2 reduction (``splits`` fp32 rows per head) grows.
     """
     head_blocks = _decode_head_blocks(num_q_heads, num_kv_heads)
-    target = -(-(sm_count * _DECODE_CTAS_PER_SM) // head_blocks)
-    splits = 1 << max(0, (target - 1).bit_length())
+    splits = -(-(sm_count * _DECODE_CTAS_PER_SM) // head_blocks)
     return max(_MAX_KV_SPLITS, min(splits, _MAX_AUTO_KV_SPLITS))
 
 
@@ -823,22 +805,6 @@ def _paged_attention_kernel(
 
 
 @triton.jit
-def _decode_split_len(effective_len, KV_SPLITS: tl.constexpr, MIN_BLOCK_KV: tl.constexpr,
-                      SPLIT_MIN_TOKENS: tl.constexpr):
-    """Tokens per KV split; stage 1 and stage 2 must agree on it.
-
-    ``SPLIT_MIN_TOKENS == 0``: the context is cut into all ``KV_SPLITS`` pieces. Otherwise the
-    split count used is ``min(KV_SPLITS, cdiv(len, SPLIT_MIN_TOKENS))``: the grid is still
-    captured at ``KV_SPLITS`` (one CUDA graph for every length), but a short context uses
-    fewer, longer splits -- the programs past the last one find an empty range and exit --
-    and stage 2 merges fewer partials."""
-    if SPLIT_MIN_TOKENS > 0:
-        used = tl.minimum(tl.maximum(tl.cdiv(effective_len, SPLIT_MIN_TOKENS), 1), KV_SPLITS)
-        return tl.cdiv(tl.cdiv(effective_len, used), MIN_BLOCK_KV) * MIN_BLOCK_KV
-    return tl.cdiv(tl.cdiv(effective_len, KV_SPLITS), MIN_BLOCK_KV) * MIN_BLOCK_KV
-
-
-@triton.jit
 def _decode_grouped_stage1_kernel(
     q_ptr,
     k_ptr,
@@ -885,8 +851,6 @@ def _decode_grouped_stage1_kernel(
     KV_SPLITS: tl.constexpr,
     Q8_NATIVE_QK: tl.constexpr,
     SLOT_I64: tl.constexpr,
-    Q8_BLOCK_DOT: tl.constexpr = False,
-    SPLIT_MIN_TOKENS: tl.constexpr = 0,
 ):
     batch_id = tl.program_id(0)
     head_block_id = tl.program_id(1)
@@ -919,7 +883,9 @@ def _decode_grouped_stage1_kernel(
         effective_start = tl.maximum(0, q_pos - SLIDING_WINDOW + 1)
     effective_len = tl.maximum(0, effective_end - effective_start)
 
-    kv_len_per_split = _decode_split_len(effective_len, KV_SPLITS, MIN_BLOCK_KV, SPLIT_MIN_TOKENS)
+    kv_len_per_split = (
+        tl.cdiv(tl.cdiv(effective_len, KV_SPLITS), MIN_BLOCK_KV) * MIN_BLOCK_KV
+    )
     split_start = kv_len_per_split * split_id
     split_end = tl.minimum(split_start + kv_len_per_split, effective_len)
 
@@ -933,88 +899,7 @@ def _decode_grouped_stage1_kernel(
     ks_base_offsets = kv_head * stride_ksh + offs_nb[:, None]
     vs_base_offsets = kv_head * stride_vsh + offs_nbv[None, :]
 
-    if Q8_BLOCK_DOT and split_end > split_start:
-        # Byte-per-value (q8_0) K and V with D == BLOCK_D: keep the pool's integers as they
-        # are and apply each QBLOCK's scale to the small products instead of to the tiles.
-        # The head dim is split into NB blocks and both dots are batched over it:
-        #   scores[h, n] = sum_b ks[b, n] * (q_b[h] . k_int_b[:, n])
-        #   acc_b[h, :] += (p[h, n] * vs[b, n]) @ v_int_b[n, :]
-        # so no [D, N] fp32 dequantized K or V tile is ever built.
-        NB: tl.constexpr = BLOCK_D // QBLOCK
-        offs_b = tl.arange(0, NB)
-        offs_j = tl.arange(0, QBLOCK)
-        q3 = tl.load(
-            q_ptr
-            + batch_id * stride_qt
-            + q_heads[None, :, None] * stride_qh
-            + offs_b[:, None, None] * QBLOCK
-            + offs_j[None, None, :],
-            mask=mask_h[None, :, None],
-            other=0.0,
-        ).to(tl.bfloat16)
-        acc3 = tl.zeros((NB, BLOCK_H, QBLOCK), dtype=tl.float32)
-        for rel_start in tl.range(split_start, split_end, BLOCK_N):
-            rel_offs = rel_start + tl.arange(0, BLOCK_N)
-            mask_n = rel_offs < split_end
-            logical_offs = effective_start + rel_offs
-            slots = tl.load(indices_ptr + kv_start + logical_offs, mask=mask_n, other=0)
-            if SLOT_I64:
-                slots = slots.to(tl.int64)
-            k3 = tl.load(
-                k_ptr
-                + slots[None, None, :] * stride_ks
-                + k_base_offsets
-                + offs_b[:, None, None] * QBLOCK
-                + offs_j[None, :, None],
-                mask=mask_n[None, None, :],
-                other=0,
-            ).to(tl.bfloat16)
-            ksc = tl.load(
-                ks_ptr + slots[None, :] * stride_kss + kv_head * stride_ksh + offs_b[:, None],
-                mask=mask_n[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            s3 = tl.dot(q3, k3)
-            scores = tl.sum(s3 * ksc[:, None, :], axis=0) * sm_scale
-            scores = tl.where(mask_h[:, None] & mask_n[None, :], scores, -float("inf"))
-            v3 = tl.load(
-                v_ptr
-                + slots[None, :, None] * stride_vs
-                + v_base_offsets
-                + offs_b[:, None, None] * QBLOCK
-                + offs_j[None, None, :],
-                mask=mask_n[None, :, None],
-                other=0,
-            ).to(tl.bfloat16)
-            vsc = tl.load(
-                vs_ptr + slots[None, :] * stride_vss + kv_head * stride_vsh + offs_b[:, None],
-                mask=mask_n[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            m_new = tl.maximum(tl.max(scores, axis=1), m_i)
-            alpha = tl.exp(m_i - m_new)
-            p = tl.exp(scores - m_new[:, None])
-            p3 = (p[None, :, :] * vsc[:, None, :]).to(tl.bfloat16)
-            acc3 = acc3 * alpha[None, :, None] + tl.dot(p3, v3)
-            l_i = l_i * alpha + tl.sum(p, axis=1)
-            m_i = m_new
-        out3 = acc3 / l_i[None, :, None]
-        tl.store(
-            mid_o_ptr
-            + batch_id * stride_mid_ob
-            + q_heads[None, :, None] * stride_mid_oh
-            + split_id * stride_mid_os
-            + offs_b[:, None, None] * QBLOCK
-            + offs_j[None, None, :],
-            out3,
-            mask=mask_h[None, :, None],
-        )
-        tl.store(
-            mid_lse_ptr + batch_id * stride_lse_b + q_heads * stride_lse_h + split_id * stride_lse_s,
-            m_i + tl.log(l_i),
-            mask=mask_h,
-        )
-    elif split_end > split_start:
+    if split_end > split_start:
         q = tl.load(q_ptr + q_offsets, mask=mask_h[:, None] & mask_d[None, :], other=0.0)
         if K_FORMAT == 0:
             # Unquantized: match the cache's dtype as before. Quantized: the cache is
@@ -1156,7 +1041,7 @@ def _decode_stage2_kernel(
     SLIDING_WINDOW: tl.constexpr,
     HAS_SINKS: tl.constexpr,
     KV_SPLITS: tl.constexpr,
-    SPLIT_MIN_TOKENS: tl.constexpr = 0,
+    SPLIT_CHUNK: tl.constexpr,
 ):
     batch_id = tl.program_id(0)
     q_head = tl.program_id(1)
@@ -1169,7 +1054,9 @@ def _decode_stage2_kernel(
         effective_start = tl.maximum(0, q_pos - SLIDING_WINDOW + 1)
     effective_len = tl.maximum(0, effective_end - effective_start)
 
-    kv_len_per_split = _decode_split_len(effective_len, KV_SPLITS, MIN_BLOCK_KV, SPLIT_MIN_TOKENS)
+    kv_len_per_split = (
+        tl.cdiv(tl.cdiv(effective_len, KV_SPLITS), MIN_BLOCK_KV) * MIN_BLOCK_KV
+    )
 
     offs_d = tl.arange(0, BLOCK_DV)
     mask_d = offs_d < DV
@@ -1184,23 +1071,31 @@ def _decode_stage2_kernel(
     mid_base = batch_id * stride_mid_ob + q_head * stride_mid_oh + offs_d
     lse_base = batch_id * stride_lse_b + q_head * stride_lse_h
 
-    for split_id in tl.range(0, MAX_KV_SPLITS, num_stages=2):
-        split_start = kv_len_per_split * split_id
-        split_end = tl.minimum(split_start + kv_len_per_split, effective_len)
-
-        if split_end > split_start:
-            partial = tl.load(
-                mid_o_ptr + mid_base + split_id * stride_mid_os,
-                mask=mask_d,
-                other=0.0,
-            )
-            partial_lse = tl.load(mid_lse_ptr + lse_base + split_id * stride_lse_s)
-            m_new = tl.maximum(partial_lse, m_i)
-            alpha = tl.exp(m_i - m_new)
-            beta = tl.exp(partial_lse - m_new)
-            acc = acc * alpha + partial * beta
-            l_i = l_i * alpha + beta
-            m_i = m_new
+    # SPLIT_CHUNK partials per step, not one: the one-split loop was a chain of
+    # MAX_KV_SPLITS dependent loads (~11 us per layer at 64 splits on an RTX 5080,
+    # twice stage 1 at 8K). Within a chunk the partials are combined against the
+    # chunk's max; a split exists iff its first token is inside the context.
+    for chunk in tl.static_range(0, MAX_KV_SPLITS, SPLIT_CHUNK):
+        split_ids = chunk + tl.arange(0, SPLIT_CHUNK)
+        valid = (split_ids < MAX_KV_SPLITS) & (kv_len_per_split * split_ids < effective_len)
+        partial_lse = tl.load(
+            mid_lse_ptr + lse_base + split_ids * stride_lse_s,
+            mask=valid,
+            other=-float("inf"),
+        )
+        partial = tl.load(
+            mid_o_ptr + mid_base[None, :] + split_ids[:, None] * stride_mid_os,
+            mask=valid[:, None] & mask_d[None, :],
+            other=0.0,
+        )
+        m_new = tl.maximum(tl.max(partial_lse, axis=0), m_i)
+        # A chunk past the last split leaves m_new = m_i; before any split (only an
+        # empty context) m_new is -inf, and exp(-inf - -inf) would poison acc.
+        alpha = tl.where(m_new == -float("inf"), 1.0, tl.exp(m_i - m_new))
+        beta = tl.where(valid, tl.exp(partial_lse - m_new), 0.0)
+        acc = acc * alpha + tl.sum(partial * beta[:, None], axis=0)
+        l_i = l_i * alpha + tl.sum(beta, axis=0)
+        m_i = m_new
 
     out = tl.where(l_i == 0.0, 0.0, acc / l_i)
     tl.store(
@@ -1329,16 +1224,6 @@ def decode_paged_attention(
         and num_q_heads == 16
         and num_kv_heads == 2
     )
-    q8_block_dot = (
-        _Q8_BLOCK_DOT
-        and not q8_native_qk
-        and (k_format, v_format) == (1, 1)
-        and k_cache.dtype == torch.int8
-        and v_cache.dtype == torch.int8
-        and qblock >= 16
-        and head_dim == triton.next_power_of_2(head_dim)
-        and q.dtype == torch.bfloat16
-    )
     preferred_splits, block_n, num_warps = decode_launch_config(
         quant_name=quant_name,
         head_dim=head_dim,
@@ -1360,7 +1245,6 @@ def decode_paged_attention(
         num_kv_heads=num_kv_heads,
         compute_capability=capability,
     )
-    split_min = _decode_split_min_tokens()
     # valid_block_h = heads computed per program (drives the grid + head indexing); block_h =
     # power-of-two tile size for tl.arange. They differ only for non-power-of-two GQA groups
     # (e.g. 6), where block_h rounds up and the kernel masks the extra lanes.
@@ -1417,10 +1301,8 @@ def decode_paged_attention(
         SLOT_I64=slot_i64,
         KV_SPLITS=launch_splits,
         Q8_NATIVE_QK=q8_native_qk,
-        Q8_BLOCK_DOT=q8_block_dot,
-        SPLIT_MIN_TOKENS=split_min,
         num_warps=num_warps,
-        num_stages=_decode_num_stages(),
+        num_stages=2,
     )
     _decode_stage2_kernel[(batch, num_q_heads)](
         attn_logits,
@@ -1445,7 +1327,7 @@ def decode_paged_attention(
         SLIDING_WINDOW=sliding_window or 0,
         HAS_SINKS=sinks is not None,
         KV_SPLITS=launch_splits,
-        SPLIT_MIN_TOKENS=split_min,
+        SPLIT_CHUNK=min(_STAGE2_SPLIT_CHUNK, triton.next_power_of_2(launch_splits)),
         num_warps=4,
         num_stages=2,
     )
