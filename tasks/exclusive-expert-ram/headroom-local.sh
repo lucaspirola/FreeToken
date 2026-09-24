@@ -5,7 +5,7 @@
 #      ck4-whole, ck4-mirror-1m, ck4-mirror, ck4-whole-close, needles/recall vs the reference.
 #   2. R-S12a: Ornith NVFP4 whole model, ratio 1.00, 8K/32K/80K/128K, two passes, twice
 #      (a, b: the bimodality needs more than one draw), then the RAM-saver arm.
-# Waits for a quiet host first: no rustc/cargo/julia, MemAvailable >= 23 GiB [agent practice:
+# Waits for a quiet host first: no rustc/cargo, MemAvailable >= 23 GiB [agent practice:
 # the owner's other campaigns share this host; 2026-09-24 a contended host stalled all arms].
 # Run as a systemd transient unit (--setenv=PATH), never from an agent shell.
 set -uo pipefail
@@ -14,7 +14,7 @@ HERE="$PWD/tasks/exclusive-expert-ram"
 OUT="$HERE/results/ornith-headroom-local"
 mkdir -p "$OUT"
 quiet() {
-  until ! pgrep -x rustc >/dev/null && ! pgrep -x cargo >/dev/null && ! pgrep -f 'bin/julia' >/dev/null \
+  until ! pgrep -x rustc >/dev/null && ! pgrep -x cargo >/dev/null \
         && [ "$(awk '/MemAvailable/ {printf "%d", $2/1048576}' /proc/meminfo)" -ge 23 ]; do sleep 60; done
   echo "host quiet at $(date -Is): $(grep MemAvailable /proc/meminfo)"
 }
