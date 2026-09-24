@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/home/lucas/ai/FreeToken-wt/dynamic-transient/tasks/exclusive-expert-ram/compare_needles.py", line 24, in <module>
+    a, b = needles(REF), needles(ARM)
+           ^^^^^^^^^^^^
+  File "/home/lucas/ai/FreeToken-wt/dynamic-transient/tasks/exclusive-expert-ram/compare_needles.py", line 13, in needles
+    d = json.load(open(os.path.join(D, f"{arm}-needles.json")))
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/home/lucas/ai/FreeToken-wt/dynamic-transient/tasks/exclusive-expert-ram/results/ck4d-whole-needles.json'

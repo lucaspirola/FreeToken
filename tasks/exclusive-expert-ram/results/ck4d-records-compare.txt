@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/home/lucas/ai/FreeToken-wt/dynamic-transient/tasks/exclusive-expert-ram/compare_records.py", line 23, in <module>
+    a, r = load(arm), load(ref)
+           ^^^^^^^^^
+  File "/home/lucas/ai/FreeToken-wt/dynamic-transient/tasks/exclusive-expert-ram/compare_records.py", line 20, in <lambda>
+    load = lambda n: json.load(open(os.path.join(d, f"{n}-record.json")))
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/home/lucas/ai/FreeToken-wt/dynamic-transient/tasks/exclusive-expert-ram/results/ck4d-mirror-1m-record.json'

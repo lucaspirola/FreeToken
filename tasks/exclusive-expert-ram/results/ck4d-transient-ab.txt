@@ -1,0 +1,24 @@
+== ck4d-mirror: default (-def) vs -t0
+  def transient ('1.00', 'measured') arena 1944 of 2173 (free 1.15 GiB), slots over run min 1560 max 2088 (releases 8), decode hit rate 0.9344, mirror swaps/token 9.0  decode stats {'layer_calls': 20171, 'active': 121862, 'missing': 7993, 'fetched': 0, 'prefill_hit_rows': 309198, 'prefill_rows': 600576, 'pageable_stage_calls': 0, 'pageable_rows': 0}
+  t0: no probe
+== ck4d-whole: default (-def) vs -t0
+  def transient ('1.00', 'measured') arena 1944 of 2173 (free 1.15 GiB), slots over run min 1904 max 2088 (releases 8), decode hit rate 0.9391, mirror swaps/token -  decode stats {'layer_calls': 17549, 'active': 106130, 'missing': 6468, 'fetched': 0, 'prefill_hit_rows': 0, 'prefill_rows': 0, 'pageable_stage_calls': 0, 'pageable_rows': 0}
+  t0: no probe
+== ck4d-mirror: default (-def) vs -st
+  def transient ('1.00', 'measured') arena 1944 of 2173 (free 1.15 GiB), slots over run min 1560 max 2088 (releases 8), decode hit rate 0.9344, mirror swaps/token 9.0  decode stats {'layer_calls': 20171, 'active': 121862, 'missing': 7993, 'fetched': 0, 'prefill_hit_rows': 309198, 'prefill_rows': 600576, 'pageable_stage_calls': 0, 'pageable_rows': 0}
+  st  transient ('1.00', 'measured') arena 1944 of 2173 (free 1.15 GiB), slots over run min 1560 max 1944 (releases 0), decode hit rate 0.9233, mirror swaps/token 10.5  decode stats {'layer_calls': 20217, 'active': 122138, 'missing': 9364, 'fetched': 0, 'prefill_hit_rows': 306755, 'prefill_rows': 600576, 'pageable_stage_calls': 0, 'pageable_rows': 0}
+  decode    8K p1  def  165.6  st  159.7  st/def   96.5%
+  decode    8K p2  def  163.6  st  164.9  st/def  100.8%
+  decode   80K p1  def  150.4  st  152.9  st/def  101.7%
+  decode   80K p2  def  158.9  st  158.3  st/def   99.6%
+  decode  713K p1  def   92.3  st   84.3  st/def   91.3%
+  decode  713K p2  def   99.8  st   96.6  st/def   96.9%
+== ck4d-whole: default (-def) vs -st
+  def transient ('1.00', 'measured') arena 1944 of 2173 (free 1.15 GiB), slots over run min 1904 max 2088 (releases 8), decode hit rate 0.9391, mirror swaps/token -  decode stats {'layer_calls': 17549, 'active': 106130, 'missing': 6468, 'fetched': 0, 'prefill_hit_rows': 0, 'prefill_rows': 0, 'pageable_stage_calls': 0, 'pageable_rows': 0}
+  st  transient ('1.00', 'measured') arena 1944 of 2173 (free 1.15 GiB), slots over run min 1904 max 1944 (releases 0), decode hit rate 0.9306, mirror swaps/token -  decode stats {'layer_calls': 17549, 'active': 106130, 'missing': 7363, 'fetched': 0, 'prefill_hit_rows': 0, 'prefill_rows': 0, 'pageable_stage_calls': 0, 'pageable_rows': 0}
+  decode    8K p1  def  177.7  st  183.1  st/def  103.1%
+  decode    8K p2  def  192.4  st  181.3  st/def   94.2%
+  decode   32K p1  def  173.6  st  180.0  st/def  103.7%
+  decode   32K p2  def  168.9  st  171.9  st/def  101.8%
+  decode   80K p1  def  175.0  st  163.8  st/def   93.6%
+  decode   80K p2  def  161.3  st  169.1  st/def  104.8%
