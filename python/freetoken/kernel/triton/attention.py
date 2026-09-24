@@ -13,12 +13,18 @@ _MIN_BLOCK_KV = 32
 
 # Grid-filling decode fallback. Stage 1 launches ``batch * head_blocks * kv_splits``
 # CTAs and ``head_blocks`` is fixed by the head geometry, so ``kv_splits`` is the only
-# term that scales the decode grid with the GPU. One CTA per SM at batch one is what the
-# 2026-09-04 RTX 5080 sweep measured (benchmarks/bench_decode_launch.py): for 32Q/2KV/D128
-# at 131K-1M, 64 splits (128 CTAs on 84 SMs) beat both 32 and 128 at every length.
+# term that scales the decode grid with the GPU. The 2026-09-04 RTX 5080 sweep compared
+# powers of two only (64 splits = 128 CTAs on 84 SMs beat 32 and 128). The 2026-09-24
+# box sweep (tasks/splitkv-decode) added SM multiples: exactly two CTAs per SM -- 84
+# splits for 32Q/2KV/D128 on 84 SMs, 168 CTAs -- is 9-12% faster than 64 at 80K-1M
+# (1M: 0.797 -> 0.703 ms per layer, 716 -> 812 GB/s) and ties at 8K; 168 and 256
+# splits lose. A power-of-two count leaves 1.5 CTAs per SM, so half the SMs finish a
+# second CTA while the other half idle.
 # ``_MAX_AUTO_KV_SPLITS`` caps the stage-2 reduction and the fp32 scratch.
-_DECODE_CTAS_PER_SM = 1
+_DECODE_CTAS_PER_SM = 2
 _MAX_AUTO_KV_SPLITS = 128
+# Stage 2 merges this many split partials per vector step (was one split per step).
+_STAGE2_SPLIT_CHUNK = 32
 
 # The cache-native Q8 score path is independently switchable so its numerical and
 # performance gates can be compared against the dequantize-to-BF16 implementation.
@@ -69,8 +75,7 @@ def _grid_filling_splits(*, num_q_heads: int, num_kv_heads: int, sm_count: int) 
     and only the stage-2 reduction (``splits`` fp32 rows per head) grows.
     """
     head_blocks = _decode_head_blocks(num_q_heads, num_kv_heads)
-    target = -(-(sm_count * _DECODE_CTAS_PER_SM) // head_blocks)
-    splits = 1 << max(0, (target - 1).bit_length())
+    splits = -(-(sm_count * _DECODE_CTAS_PER_SM) // head_blocks)
     return max(_MAX_KV_SPLITS, min(splits, _MAX_AUTO_KV_SPLITS))
 
 
@@ -1036,6 +1041,7 @@ def _decode_stage2_kernel(
     SLIDING_WINDOW: tl.constexpr,
     HAS_SINKS: tl.constexpr,
     KV_SPLITS: tl.constexpr,
+    SPLIT_CHUNK: tl.constexpr,
 ):
     batch_id = tl.program_id(0)
     q_head = tl.program_id(1)
@@ -1065,23 +1071,31 @@ def _decode_stage2_kernel(
     mid_base = batch_id * stride_mid_ob + q_head * stride_mid_oh + offs_d
     lse_base = batch_id * stride_lse_b + q_head * stride_lse_h
 
-    for split_id in tl.range(0, MAX_KV_SPLITS, num_stages=2):
-        split_start = kv_len_per_split * split_id
-        split_end = tl.minimum(split_start + kv_len_per_split, effective_len)
-
-        if split_end > split_start:
-            partial = tl.load(
-                mid_o_ptr + mid_base + split_id * stride_mid_os,
-                mask=mask_d,
-                other=0.0,
-            )
-            partial_lse = tl.load(mid_lse_ptr + lse_base + split_id * stride_lse_s)
-            m_new = tl.maximum(partial_lse, m_i)
-            alpha = tl.exp(m_i - m_new)
-            beta = tl.exp(partial_lse - m_new)
-            acc = acc * alpha + partial * beta
-            l_i = l_i * alpha + beta
-            m_i = m_new
+    # SPLIT_CHUNK partials per step, not one: the one-split loop was a chain of
+    # MAX_KV_SPLITS dependent loads (~11 us per layer at 64 splits on an RTX 5080,
+    # twice stage 1 at 8K). Within a chunk the partials are combined against the
+    # chunk's max; a split exists iff its first token is inside the context.
+    for chunk in tl.static_range(0, MAX_KV_SPLITS, SPLIT_CHUNK):
+        split_ids = chunk + tl.arange(0, SPLIT_CHUNK)
+        valid = (split_ids < MAX_KV_SPLITS) & (kv_len_per_split * split_ids < effective_len)
+        partial_lse = tl.load(
+            mid_lse_ptr + lse_base + split_ids * stride_lse_s,
+            mask=valid,
+            other=-float("inf"),
+        )
+        partial = tl.load(
+            mid_o_ptr + mid_base[None, :] + split_ids[:, None] * stride_mid_os,
+            mask=valid[:, None] & mask_d[None, :],
+            other=0.0,
+        )
+        m_new = tl.maximum(tl.max(partial_lse, axis=0), m_i)
+        # A chunk past the last split leaves m_new = m_i; before any split (only an
+        # empty context) m_new is -inf, and exp(-inf - -inf) would poison acc.
+        alpha = tl.where(m_new == -float("inf"), 1.0, tl.exp(m_i - m_new))
+        beta = tl.where(valid, tl.exp(partial_lse - m_new), 0.0)
+        acc = acc * alpha + tl.sum(partial * beta[:, None], axis=0)
+        l_i = l_i * alpha + tl.sum(beta, axis=0)
+        m_i = m_new
 
     out = tl.where(l_i == 0.0, 0.0, acc / l_i)
     tl.store(
@@ -1313,6 +1327,7 @@ def decode_paged_attention(
         SLIDING_WINDOW=sliding_window or 0,
         HAS_SINKS=sinks is not None,
         KV_SPLITS=launch_splits,
+        SPLIT_CHUNK=min(_STAGE2_SPLIT_CHUNK, triton.next_power_of_2(launch_splits)),
         num_warps=4,
         num_stages=2,
     )

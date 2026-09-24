@@ -1,0 +1,1 @@
+{"target": 8000, "pass": 1, "prompt_tokens": 8014, "ttft_s": 2.51, "prefill_tok_s": 3199.0, "gen_tokens": 31, "decode_tok_s": 71.9, "decode_tok_s_wall": 71.9, "total_s": 2.9, "ttft_mono_s": 2.505, "prefill_tok_s_mono": 3199.0, "total_mono_s": 2.92, "t_start_wall": 1790250806.464}
