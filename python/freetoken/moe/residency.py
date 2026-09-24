@@ -345,8 +345,8 @@ class MirrorResidency:
         """Issue the ring -> pool DMAs of every step that has finished, and
         snapshot the step just enqueued.
 
-        Called by the scheduler before each forward is enqueued (and by any
-        driver of ``copy_missing`` that wants its writebacks to land). Two
+        Called by the scheduler right after each forward is launched (and by
+        any driver of ``copy_missing`` that wants its writebacks to land). Two
         halves, both non-blocking in the steady state:
 
         1. For each earlier snapshot whose event has completed, the ring
@@ -355,8 +355,8 @@ class MirrorResidency:
            device (``wb_state[1]``) behind those copies, which is what lets
            the resolve kernel reuse the ring slots and read the pool rows.
         2. Snapshot the device ring state and the fault counters behind
-           everything enqueued so far (i.e. after the previous step) into
-           pinned memory, with an event, for a later call to consume.
+           everything enqueued so far (i.e. after the step just launched)
+           into pinned memory, with an event, for a later call to consume.
 
         The snapshot copies run on a side stream that waits for the compute
         stream, never the other way round: a small D2H on the compute stream
@@ -364,8 +364,9 @@ class MirrorResidency:
         DMA on the decode critical path (ft-g5 nsys, 2026-09-24: ~370 us of a
         6149 us step). The compute stream never waits on either side stream.
 
-        The step's entries are issued by ``issue_writebacks`` once the step
-        is complete and copied while the next step computes. The ring must
+        The step's entries are issued by the next call (or by
+        ``issue_writebacks``) once the step is complete, and copied while the
+        next step computes. The ring must
         hold what is staged meanwhile; when it cannot, the kernel falls back
         to SM stores.
         """

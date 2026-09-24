@@ -3025,12 +3025,6 @@ class Scheduler(SchedulerIOMixin):
         # here beats a quietly wrong completion. Whole-model residency's
         # fault_check is a no-op; a model without an offload cache has none.
         residency = getattr(self.engine.moe_offload_cache, "residency", None)
-        if residency is not None:
-            residency.fault_check()
-            # Bounded mirror: DMA the writebacks of finished steps from the
-            # VRAM staging ring into the host pool, and snapshot this step's
-            # ring for a later call. Non-blocking; no-op for the whole model.
-            residency.service_writebacks()
         profile = self.config.moe_collect_stats
         if profile:
             batch._profile_host_started = time.perf_counter()
@@ -3043,14 +3037,19 @@ class Scheduler(SchedulerIOMixin):
         forward_output = self.engine.forward_batch(batch, sample_args)
         self.token_pool[output_mapping] = forward_output.next_tokens_gpu
         if residency is not None:
-            # The step is launched: issue the DMAs of the snapshot taken just
-            # before it, now while the host would otherwise wait on the GPU.
-            # Measured in decode (ft-g5 nsys, 2026-09-24): the host waits for
-            # each step to finish before it launches the next, so the host
-            # time between the two is on the critical path; issuing here
-            # keeps it off, and the previous step's writebacks land while
-            # this one computes.
-            residency.issue_writebacks()
+            # After the launch, not before it. Measured in decode (ft-g5 nsys,
+            # 2026-09-24): the host waits for each step to finish before it
+            # launches the next, so host work between the two is on the
+            # critical path; here it overlaps the step just launched.
+            # The check reads counters snapshotted after an earlier step (a
+            # fault surfaces one step later than it would before the launch;
+            # the snapshot always lagged).
+            residency.fault_check()
+            # Bounded mirror: DMA the writebacks of finished steps (the
+            # previous step's snapshot has landed by now) from the VRAM
+            # staging ring into the host pool, and snapshot the ring behind
+            # the step just launched. Non-blocking; no-op for the whole model.
+            residency.service_writebacks()
         if profile:
             batch._profile_enqueue_ms = (
                 time.perf_counter() - enqueue_started
