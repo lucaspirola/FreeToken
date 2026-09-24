@@ -44,3 +44,30 @@ their rank. Under the saver, each reserve also re-reads 61-218 GPU-only experts 
 checkpoint ("mirror restored coverage for N experts"). Each request's 127-token decode then
 starts by re-admitting the hot experts it just lost. Arena compaction (5374b4e) exists to
 remove exactly this cost: the dynamic arms are re-run with it on the same host.
+
+## With compaction and the teardown fix (ornith-dc-*, dt-measure at ba7d1a6)
+
+`scan_noreserve.py` finds 0 of 65 prefill batches started at the decode level on both arms.
+The dyn-* arms above had 3 each, from the teardown-shrink bug fixed in ba7d1a6.
+
+| point | st-whole | dc-whole | st-saver | dc-saver |
+|---|---|---|---|---|
+| prefill 32K p2 | 9876 | 9717 | 9957 | 10116 |
+| prefill 80K p1 / p2 | 5742 / 5740 | 5816 / 5806 | 5485 / 5621 | 5639 / 5669 |
+| prefill 128K p2 | 3896 | 3948 | 3874 | 3945 |
+| decode 8K p2 | 158.9 | 147.2 | 149.3 | 155.4 |
+| decode 32K p2 | 154.2 | 149.3 | 151.1 | 147.5 |
+| decode 80K p2 | 138.8 | 134.5 | 121.9 | 122.0 |
+| decode 128K p2 | 127.5 | 124.9 | 118.8 | 113.0 |
+
+**R-S12a holds on the fixed code.** 80K prefill is 1% above static on both arms.
+
+Compaction over 14 reserves:
+* whole: 2401 experts moved (4.26 GB D2D, 2.6 ms per call).
+* saver: 1502 experts moved (2.67 GB), 4735 duplicates dropped, 337 written back from the
+  GPU and 0 re-read from the checkpoint.
+
+Decode against static: the saver is within -5% to +4%. The whole arm is still 2-7% below
+static. These arms run without `--moe-collect-stats`, so they have no hit rates. The Nemotron
+8K re-check (recheck-local.sh) measures the per-request release gap
+directly (gap1_ms).
