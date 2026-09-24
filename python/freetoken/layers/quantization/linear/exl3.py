@@ -110,10 +110,17 @@ def _forward_reconstruct(xh: torch.Tensor, trellis: torch.Tensor, svh: torch.Ten
 def _forward_folded(x2: torch.Tensor, trellis: torch.Tensor, suh: torch.Tensor, svh: torch.Tensor, parts, out_dtype) -> torch.Tensor:
     """``out = x2 @ W_full``: W_full decoded once with both rotations and sign vectors folded in
     (fp16, one rounding), the product in cuBLAS (fp16 in, fp32 accumulation, fp16 out)."""
-    from freetoken.kernel.triton.exl3 import reconstruct_folded
+    from freetoken.kernel.triton.exl3 import f16acc_enabled, gemm_f16acc, reconstruct_folded
 
-    xf = x2 if x2.dtype == torch.float16 else x2.to(torch.float16)
     n = parts.n
+    if f16acc_enabled() and x2.stride(1) == 1:
+        # one Triton GEMM per slab: casts x on load and writes out_dtype, no host-side glue
+        out = torch.empty((x2.shape[0], n), dtype=out_dtype, device=x2.device)
+        for c0 in range(0, n, RECONSTRUCT_SLAB):
+            c1 = min(c0 + RECONSTRUCT_SLAB, n)
+            gemm_f16acc(x2, reconstruct_folded(trellis, suh, svh, parts, cols=(c0, c1))[0], out=out[:, c0:c1])
+        return out
+    xf = x2 if x2.dtype == torch.float16 else x2.to(torch.float16)
     if out_dtype == torch.float16 and n <= RECONSTRUCT_SLAB:
         return torch.mm(xf, reconstruct_folded(trellis, suh, svh, parts)[0])
     # column slabs: W_full and the fp16 product exist one slab at a time (the prefill transient

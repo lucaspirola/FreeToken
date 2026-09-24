@@ -234,6 +234,53 @@ def test_moe_prefill_folded_input_matches_rotated_path(monkeypatch, bits):
 
 
 @cuda
+@pytest.mark.parametrize("m,k,n", ((300, 512, 768), (1024, 2048, 384), (77, 4096, 256)))
+def test_gemm_f16acc_matches_fp32_accumulation(m, k, n):
+    from freetoken.kernel.triton.exl3 import gemm_f16acc
+
+    g = torch.Generator().manual_seed(m)
+    a = (torch.randn(m, k, generator=g) * 0.5).half().cuda()
+    b = (torch.randn(k, n, generator=g) * 0.05).half().cuda()
+    ref = a.float() @ b.float()
+    y = gemm_f16acc(a, b, out_dtype=torch.float32)
+    assert rel_err(y, ref) < 5e-3, rel_err(y, ref)
+    wide = torch.zeros(m, n + 128, dtype=torch.bfloat16, device="cuda")
+    gemm_f16acc(a, b, out=wide[:, 64:64 + n])  # a column slice of a wider bf16 output
+    assert torch.equal(wide[:, 64:64 + n], y.to(torch.bfloat16))
+
+
+@cuda
+def test_f16acc_prefill_paths_match_reference(monkeypatch):
+    """FREETOKEN_EXL3_F16ACC=1: the MoE decoded-slab GEMM and the dense folded GEMM accumulate in
+    fp16; both stay close to the fp32 references (the logits gate decides the default)."""
+    import freetoken.moe.fused_exl3 as fe
+    from freetoken.kernel.triton.exl3 import Exl3Parts
+    from freetoken.layers.quantization.linear import exl3 as lin
+
+    monkeypatch.setenv("FREETOKEN_EXL3_F16ACC", "1")
+    banks = _moe_banks(5, "mul1", E, seed=21)
+    x, w, ids = _routing(300, E, seed=22)
+    ref = fe.fused_experts_exl3_reference(x, banks, w, ids, codebook="mul1")
+    y = fe.fused_experts_exl3(x.cuda(), tuple(b.cuda() for b in banks), w.cuda(), ids.cuda(), bits=5,
+                              codebook="mul1", is_prefill=True, num_experts=E)
+    assert rel_err(y.cpu(), ref) < 1.5e-2, rel_err(y.cpu(), ref)
+    k, sizes = 512, (256, 128, 384)
+    trs, suh, svh = _dense_case(k, sizes, 5, "mul1", seed=23)
+    xd = torch.randn(1100, k, generator=torch.Generator().manual_seed(24)).to(torch.bfloat16)
+    dref, col = [], 0
+    for j, (tr, s) in enumerate(zip(trs, sizes)):
+        dref.append(linear_reference(xd.float(), tr, suh[j], svh[col:col + s], "mul1"))
+        col += s
+    dref = torch.cat(dref, dim=1)
+    parts = Exl3Parts.build(k, sizes, 5, "mul1", "cuda")
+    flat = torch.cat([t.reshape(-1) for t in trs]).cuda()
+    monkeypatch.setattr(lin, "FOLD_MIN_ROWS", 16)
+    monkeypatch.setattr(lin, "RECONSTRUCT_SLAB", 256)
+    yd = lin.exl3_forward(xd.cuda(), flat, suh.cuda(), svh.cuda(), parts, torch.bfloat16)
+    assert rel_err(yd.cpu(), dref) < 1.5e-2, rel_err(yd.cpu(), dref)
+
+
+@cuda
 def test_moe_decode_replays_under_a_cuda_graph():
     from freetoken.moe.fused_exl3 import fused_experts_exl3
 

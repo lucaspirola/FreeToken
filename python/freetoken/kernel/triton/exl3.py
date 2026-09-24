@@ -263,7 +263,7 @@ def _exl3_gemm_kernel(
     P, K,
     w_ptr, w_expert_stride, e_lo, e_hi,
     BM: tl.constexpr, BK: tl.constexpr, BITS: tl.constexpr, CB: tl.constexpr, SORTED: tl.constexpr,
-    DECODED: tl.constexpr, SRC_DIV: tl.constexpr,
+    DECODED: tl.constexpr, SRC_DIV: tl.constexpr, F16ACC: tl.constexpr,
 ):
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
@@ -287,7 +287,10 @@ def _exl3_gemm_kernel(
     n_local = pid_n * 128 - tl.load(nstart_ptr + part) + tl.arange(0, 128)
     tr = tr_ptr + expert * tr_expert_stride + tl.load(word_off_ptr + part)
     a_ptr = xh_ptr + part * stride_xpart + (rows64 // SRC_DIV)[:, None] * stride_xm
-    acc = tl.zeros([BM, 128], dtype=tl.float32)
+    if F16ACC:  # mma.sync with fp16 accumulators: 2x the fp32-accumulate rate on GeForce parts
+        acc = tl.zeros([BM, 128], dtype=tl.float16)
+    else:
+        acc = tl.zeros([BM, 128], dtype=tl.float32)
     for k0 in range(0, K, BK):
         kk = k0 + tl.arange(0, BK)
         a = tl.load(a_ptr + kk[None, :], mask=rmask[:, None], other=0.0)
@@ -296,12 +299,18 @@ def _exl3_gemm_kernel(
                         + (pid_n * 128 + tl.arange(0, 128))[None, :])
         else:
             w = _exl3_decode(tr, kk[:, None], n_local[None, :], n_tiles, BITS, CB)
-        acc = tl.dot(a, w, acc)
+        if F16ACC:
+            acc = tl.dot(a, w, acc, out_dtype=tl.float16)
+        else:
+            acc = tl.dot(a, w, acc)
     idx = tl.arange(0, 128)
     h = tl.load(had_ptr + idx[:, None] * 128 + idx[None, :])
-    hi = acc.to(tl.float16)
-    lo = (acc - hi.to(tl.float32)).to(tl.float16)
-    y = tl.dot(hi, h) + tl.dot(lo, h)
+    if F16ACC:
+        y = tl.dot(acc, h)
+    else:
+        hi = acc.to(tl.float16)
+        lo = (acc - hi.to(tl.float32)).to(tl.float16)
+        y = tl.dot(hi, h) + tl.dot(lo, h)
     cols = pid_n * 128 + idx
     sv = tl.load(svh_ptr + expert * svh_expert_stride + cols).to(tl.float32)
     y = y * (sv * 0.08838834764831843)[None, :]
@@ -531,6 +540,7 @@ def exl3_gemm(
     num_stages: int = 2,
     num_warps: int = 4,
     src_div: int = 0,
+    f16acc: bool = False,
 ) -> torch.Tensor:
     """Grouped GEMM: ``out[p] = svh * H(xh[part(n), p] @ W_hat)``; rows sorted per expert when
     ``sorted_ids`` is given (``tr_expert_stride`` in int32 words), else every row uses expert 0.
@@ -564,7 +574,7 @@ def exl3_gemm(
         decoded if decoded is not None else xh, decoded.stride(0) if decoded is not None else 0,
         expert_range[0], expert_range[1],
         BM=block_m, BK=block_k, BITS=parts.bits, CB=CODEBOOKS[parts.codebook], SORTED=sorted_mode,
-        DECODED=decoded is not None, SRC_DIV=src_div if raw else 1,
+        DECODED=decoded is not None, SRC_DIV=src_div if raw else 1, F16ACC=f16acc,
         num_warps=num_warps, num_stages=num_stages,
     )
     return out
@@ -643,6 +653,12 @@ def exl3_gemv(
 def gemv_pre_rot() -> bool:
     """``FREETOKEN_EXL3_GEMV_PREROT=0`` restores the separate ``had_rows`` launch before a decode GEMV."""
     return os.getenv("FREETOKEN_EXL3_GEMV_PREROT", "1").strip() != "0"
+
+
+def f16acc_enabled() -> bool:
+    """``FREETOKEN_EXL3_F16ACC=1``: prefill GEMMs (MoE decoded slab, dense folded W_full) accumulate
+    in fp16 (A/B, off by default: default-on only after the logits gate)."""
+    return os.getenv("FREETOKEN_EXL3_F16ACC", "0").strip() == "1"
 
 
 def _inkernel_reduce() -> bool:
@@ -899,6 +915,62 @@ def reconstruct_folded(
     return out
 
 
+@triton.jit
+def _gemm_f16acc_kernel(
+    a_ptr, stride_am, b_ptr, stride_bk, c_ptr, stride_cm, M, N, K,
+    BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr, GROUP: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    n_m = tl.cdiv(M, BM)
+    n_n = tl.cdiv(N, BN)
+    per_group = GROUP * n_n
+    first_m = (pid // per_group) * GROUP
+    group_m = tl.minimum(n_m - first_m, GROUP)
+    pid_m = first_m + (pid % per_group) % group_m
+    pid_n = (pid % per_group) // group_m
+    rm = pid_m * BM + tl.arange(0, BM)
+    rn = pid_n * BN + tl.arange(0, BN)
+    rk = tl.arange(0, BK)
+    a = a_ptr + rm[:, None].to(tl.int64) * stride_am + rk[None, :]
+    b = b_ptr + rk[:, None].to(tl.int64) * stride_bk + rn[None, :]
+    acc = tl.zeros([BM, BN], dtype=tl.float16)
+    for k0 in range(0, K, BK):
+        x = tl.load(a, mask=rm[:, None] < M, other=0.0).to(tl.float16)  # bf16 activations cast here
+        w = tl.load(b, mask=rn[None, :] < N, other=0.0)
+        acc = tl.dot(x, w, acc, out_dtype=tl.float16)
+        a += BK
+        b += BK * stride_bk
+    tl.store(c_ptr + rm[:, None].to(tl.int64) * stride_cm + rn[None, :], acc.to(c_ptr.dtype.element_ty),
+             mask=(rm[:, None] < M) & (rn[None, :] < N))
+
+
+# tiles of gemm_f16acc: box sweep at M=8192 (perf/bench_f16acc.py) put BM128/BK32/4 warps/3 stages
+# first on every Ornith shape, BN256 on the wide ones (in_proj 217, qkv 209 TF/s) and BN128 on the
+# narrow ones (o_proj 196, shared 169-172 TF/s); cuBLAS fp32-accumulate reaches 104-120 TF/s
+GEMM_F16ACC_CFG = dict(BM=128, BN=128, BK=32, GROUP=8, num_warps=4, num_stages=3)
+GEMM_F16ACC_WIDE_N = 4096  # BN=256 from this output width on
+
+
+def gemm_f16acc(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor | None = None, *, out_dtype=torch.float16, **cfg) -> torch.Tensor:
+    """``a @ b`` for fp16 ``b [K, N]`` and fp16 or bf16 ``a [M, K]`` (rounded to fp16 on load, as the
+    host cast would) with FP16 accumulation (exllamav3's hgemm numerics); K a multiple of the K
+    tile. ``out`` may be a column slice of a wider tensor."""
+    m, k = a.shape
+    n = b.shape[1]
+    assert a.dtype in (torch.float16, torch.bfloat16) and b.dtype == torch.float16
+    assert a.stride(1) == 1 and b.stride(1) == 1
+    c = {**GEMM_F16ACC_CFG, **({"BN": 256} if n >= GEMM_F16ACC_WIDE_N else {}), **cfg}
+    assert k % c["BK"] == 0
+    if out is None:
+        out = torch.empty((m, n), dtype=out_dtype, device=a.device)
+    assert out.stride(1) == 1
+    grid = (triton.cdiv(m, c["BM"]) * triton.cdiv(n, c["BN"]),)
+    _gemm_f16acc_kernel[grid](a, a.stride(0), b, b.stride(0), out, out.stride(0), m, n, k,
+                              BM=c["BM"], BN=c["BN"], BK=c["BK"], GROUP=c["GROUP"],
+                              num_warps=c["num_warps"], num_stages=c["num_stages"])
+    return out
+
+
 def reconstruct(trellis: torch.Tensor, codebook: str) -> torch.Tensor:
     """Triton decode of a ``[K/16, N/16, 16*bits]`` trellis to ``W_hat`` fp16 ``[K, N]`` (tests, tools)."""
     kt, nt, width = trellis.shape
@@ -913,6 +985,6 @@ def reconstruct(trellis: torch.Tensor, codebook: str) -> torch.Tensor:
 
 __all__ = [
     "CODEBOOKS", "Exl3Parts", "HAD", "HAD_SCALE", "MCG_MULT", "MUL1_MULT",
-    "exl3_gemm", "exl3_gemv", "had_cols", "had_rows", "reconstruct_experts", "reconstruct_folded", "hadamard_pm1", "hadamard_reference",
+    "exl3_gemm", "exl3_gemv", "f16acc_enabled", "gemm_f16acc", "had_cols", "had_rows", "reconstruct_experts", "reconstruct_folded", "hadamard_pm1", "hadamard_reference",
     "linear_reference", "reconstruct", "reconstruct_reference", "tile_stream_index",
 ]

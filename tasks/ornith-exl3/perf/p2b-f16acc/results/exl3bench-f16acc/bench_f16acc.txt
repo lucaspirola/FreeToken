@@ -1,0 +1,25 @@
+GDN in_proj      K= 2048 N= 12288 cuBLAS fp32acc   3422.9 us  120.5 TF/s
+    f16acc   1895.9 us  217.5 TF/s rel err 1.67e-03 {'BM': 128, 'BN': 256, 'BK': 32, 'GROUP': 8, 'num_warps': 4, 'num_stages': 3}
+    f16acc   1963.5 us  210.0 TF/s rel err 1.67e-03 {'BM': 128, 'BN': 128, 'BK': 32, 'GROUP': 8, 'num_warps': 4, 'num_stages': 3}
+    f16acc   2029.5 us  203.2 TF/s rel err 1.67e-03 {'BM': 128, 'BN': 256, 'BK': 64, 'GROUP': 8, 'num_warps': 8, 'num_stages': 3}
+    f16acc default   2182.7 us
+attn qkv         K= 2048 N=  9216 cuBLAS fp32acc   2633.5 us  117.4 TF/s
+    f16acc   1479.0 us  209.1 TF/s rel err 1.67e-03 {'BM': 128, 'BN': 256, 'BK': 32, 'GROUP': 8, 'num_warps': 4, 'num_stages': 3}
+    f16acc   1509.6 us  204.8 TF/s rel err 1.67e-03 {'BM': 128, 'BN': 128, 'BK': 32, 'GROUP': 8, 'num_warps': 4, 'num_stages': 3}
+    f16acc   1566.4 us  197.4 TF/s rel err 1.67e-03 {'BM': 128, 'BN': 256, 'BK': 64, 'GROUP': 8, 'num_warps': 8, 'num_stages': 3}
+    f16acc default   1667.3 us
+o_proj           K= 4096 N=  2048 cuBLAS fp32acc   1193.7 us  115.1 TF/s
+    f16acc    699.9 us  196.4 TF/s rel err 2.35e-03 {'BM': 128, 'BN': 128, 'BK': 32, 'GROUP': 8, 'num_warps': 4, 'num_stages': 3}
+    f16acc    723.8 us  189.9 TF/s rel err 2.35e-03 {'BM': 128, 'BN': 256, 'BK': 32, 'GROUP': 8, 'num_warps': 4, 'num_stages': 3}
+    f16acc    731.4 us  187.9 TF/s rel err 2.35e-03 {'BM': 128, 'BN': 128, 'BK': 32, 'GROUP': 8, 'num_warps': 8, 'num_stages': 4}
+    f16acc default    759.0 us
+shared gate|up   K= 2048 N=  1024 cuBLAS fp32acc    311.0 us  110.5 TF/s
+    f16acc    203.1 us  169.2 TF/s rel err 1.67e-03 {'BM': 128, 'BN': 128, 'BK': 32, 'GROUP': 8, 'num_warps': 4, 'num_stages': 3}
+    f16acc    208.5 us  164.8 TF/s rel err 1.67e-03 {'BM': 128, 'BN': 128, 'BK': 32, 'GROUP': 8, 'num_warps': 8, 'num_stages': 4}
+    f16acc    208.6 us  164.7 TF/s rel err 1.67e-03 {'BM': 128, 'BN': 128, 'BK': 32, 'GROUP': 8, 'num_warps': 4, 'num_stages': 4}
+    f16acc default    219.2 us
+shared down      K=  512 N=  2048 cuBLAS fp32acc    165.4 us  103.8 TF/s
+    f16acc    100.1 us  171.5 TF/s rel err 8.42e-04 {'BM': 128, 'BN': 128, 'BK': 32, 'GROUP': 8, 'num_warps': 4, 'num_stages': 3}
+    f16acc    105.0 us  163.6 TF/s rel err 8.42e-04 {'BM': 64, 'BN': 128, 'BK': 32, 'GROUP': 8, 'num_warps': 4, 'num_stages': 3}
+    f16acc    105.6 us  162.7 TF/s rel err 8.42e-04 {'BM': 128, 'BN': 256, 'BK': 32, 'GROUP': 8, 'num_warps': 4, 'num_stages': 3}
+    f16acc default    120.4 us

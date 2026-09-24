@@ -32,6 +32,7 @@ from freetoken.kernel.triton.exl3 import (
     gemv_pre_rot,
     had_rows,
     reconstruct_experts,
+    f16acc_enabled,
     reconstruct_folded,
     splitk_combine,
     splitk_silu_had,
@@ -169,6 +170,8 @@ def _prefill(x, banks, topk_weights, topk_ids, top_k, parts, activation, alpha, 
         ids = ids2.reshape(-1).contiguous()
         routes = ids.numel()
         cfg = _prefill_gemm(routes, num_experts) if decoded else dict(block_m=_prefill_block_m(routes, num_experts))
+        if decoded and f16acc_enabled():
+            cfg["f16acc"] = True
         sorted_ids, expert_ids, npad = moe_align_block_size(ids2.contiguous(), cfg["block_m"], num_experts)
         sort = dict(sorted_ids=sorted_ids, expert_ids=expert_ids, num_post_pad=npad, **cfg)
         fold = decoded and PREFILL_FOLD_INPUT
