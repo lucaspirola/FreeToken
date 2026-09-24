@@ -1,0 +1,10 @@
+5.36 MiB/row, 4 banks: 5.31 MiB per row
+  n=1: SM H2D   217.3 us ( 25.6 GB/s)  SM D2H  2609.6 us (  2.1 GB/s)  copy-engine D2H   198.3 us ( 28.1 GB/s)  kinds slot->stage    23.2 us (240.1 GB/s)  kinds H2D   218.0 us ( 25.6 GB/s)
+  n=2: SM H2D   431.8 us ( 25.8 GB/s)  SM D2H  5231.1 us (  2.1 GB/s)  copy-engine D2H   391.8 us ( 28.4 GB/s)  kinds slot->stage    40.0 us (278.6 GB/s)  kinds H2D   430.2 us ( 25.9 GB/s)
+  n=4: SM H2D   858.3 us ( 26.0 GB/s)  SM D2H  9395.0 us (  2.4 GB/s)  copy-engine D2H   777.1 us ( 28.7 GB/s)  kinds slot->stage    75.1 us (296.5 GB/s)  kinds H2D   857.9 us ( 26.0 GB/s)
+  n=8: SM H2D  1701.8 us ( 26.2 GB/s)  SM D2H 21006.2 us (  2.1 GB/s)  copy-engine D2H  1551.8 us ( 28.7 GB/s)  kinds slot->stage   137.9 us (323.1 GB/s)  kinds H2D  1707.9 us ( 26.1 GB/s)
+1.98 MB/row, 6 banks: 1.89 MiB per row
+  n=1: SM H2D    95.5 us ( 20.8 GB/s)  SM D2H   928.5 us (  2.1 GB/s)  copy-engine D2H    89.7 us ( 22.1 GB/s)  kinds slot->stage    14.7 us (134.9 GB/s)  kinds H2D    86.5 us ( 22.9 GB/s)
+  n=2: SM H2D   156.3 us ( 25.4 GB/s)  SM D2H  1861.2 us (  2.1 GB/s)  copy-engine D2H   179.0 us ( 22.1 GB/s)  kinds slot->stage    22.5 us (176.2 GB/s)  kinds H2D   166.4 us ( 23.8 GB/s)
+  n=4: SM H2D   308.8 us ( 25.7 GB/s)  SM D2H  3717.2 us (  2.1 GB/s)  copy-engine D2H   289.2 us ( 27.4 GB/s)  kinds slot->stage    38.3 us (207.1 GB/s)  kinds H2D   306.8 us ( 25.8 GB/s)
+  n=8: SM H2D   612.7 us ( 25.9 GB/s)  SM D2H  7441.0 us (  2.1 GB/s)  copy-engine D2H   571.1 us ( 27.8 GB/s)  kinds slot->stage    66.3 us (239.2 GB/s)  kinds H2D   609.7 us ( 26.0 GB/s)
