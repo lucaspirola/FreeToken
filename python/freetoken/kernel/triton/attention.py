@@ -1689,6 +1689,223 @@ def _extend_attention_split_kernel(
     )
 
 
+@triton.jit
+def _extend_attention_split_gqa_kernel(
+    q_ptr,
+    k_extend_ptr,
+    v_extend_ptr,
+    k_cache_ptr,
+    v_cache_ptr,
+    ks_ptr,
+    vs_ptr,
+    o_ptr,
+    qo_indptr_ptr,
+    kv_indptr_ptr,
+    kv_indices_ptr,
+    prefix_lens_ptr,
+    block_ends_ptr,
+    sm_scale,
+    sinks_ptr,
+    stride_qt,
+    stride_qh,
+    stride_ket,
+    stride_keh,
+    stride_vet,
+    stride_veh,
+    stride_kcs,
+    stride_kch,
+    stride_vcs,
+    stride_vch,
+    stride_kss,
+    stride_ksh,
+    stride_vss,
+    stride_vsh,
+    stride_ot,
+    stride_oh,
+    GROUP: tl.constexpr,
+    D: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_DV: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    SLIDING_WINDOW: tl.constexpr,
+    HAS_SINKS: tl.constexpr,
+    K_FORMAT: tl.constexpr,
+    V_FORMAT: tl.constexpr,
+    QBLOCK: tl.constexpr,
+    SLOT_I64: tl.constexpr,
+    HAS_BLOCKS: tl.constexpr,
+):
+    # GQA-packed: one program per (sequence, KV head, block of BLOCK_M // GROUP
+    # tokens); row r is token r // GROUP of the block, query head
+    # kv_head * GROUP + r % GROUP. Every K/V tile is loaded and dequantized once
+    # for all GROUP query heads that read it, instead of once per head.
+    seq_id = tl.program_id(0)
+    kv_head = tl.program_id(1)
+    block_m_id = tl.program_id(2)
+    BLOCK_T: tl.constexpr = BLOCK_M // GROUP
+
+    q_start = tl.load(qo_indptr_ptr + seq_id)
+    q_len = tl.load(qo_indptr_ptr + seq_id + 1) - q_start
+    kv_start = tl.load(kv_indptr_ptr + seq_id)
+    prefix_len = tl.load(prefix_lens_ptr + seq_id)
+
+    rows = tl.arange(0, BLOCK_M)
+    offs_m = block_m_id * BLOCK_T + rows // GROUP      # token index within the chunk
+    q_head = kv_head * GROUP + rows % GROUP            # per-row query head
+    offs_n = tl.arange(0, BLOCK_N)
+    offs_d = tl.arange(0, BLOCK_D)
+    offs_dv = tl.arange(0, BLOCK_DV)
+    mask_m = offs_m < q_len
+    mask_d = offs_d < D
+    mask_dv = offs_dv < D
+    offs_nb = tl.arange(0, BLOCK_D // QBLOCK)
+    offs_nbv = tl.arange(0, BLOCK_DV // QBLOCK)
+    mask_nb = offs_nb < D // QBLOCK
+    mask_nbv = offs_nbv < D // QBLOCK
+    q_abs_pos = prefix_len + offs_m
+
+    q = tl.load(
+        q_ptr
+        + (q_start + offs_m[:, None]) * stride_qt
+        + q_head[:, None] * stride_qh
+        + offs_d[None, :],
+        mask=mask_m[:, None] & mask_d[None, :],
+        other=0.0,
+    )
+
+    if HAS_SINKS:
+        m_i = tl.load(sinks_ptr + q_head).to(tl.float32)
+        l_i = tl.full((BLOCK_M,), 1.0, dtype=tl.float32)
+    else:
+        m_i = tl.zeros((BLOCK_M,), dtype=tl.float32) - float("inf")
+        l_i = tl.zeros((BLOCK_M,), dtype=tl.float32)
+    acc = tl.zeros((BLOCK_M, BLOCK_DV), dtype=tl.float32)
+
+    for start_n in tl.range(0, prefix_len, BLOCK_N):
+        kv_offsets = start_n + offs_n
+        mask_n = kv_offsets < prefix_len
+        key_pos = kv_offsets
+        final_mask = mask_m[:, None] & mask_n[None, :]
+        if SLIDING_WINDOW > 0:
+            window_mask = (key_pos[None, :] + SLIDING_WINDOW) > q_abs_pos[:, None]
+            final_mask = final_mask & window_mask
+
+        skip_tile = False
+        if SLIDING_WINDOW > 0:
+            skip_tile = tl.max(tl.max(final_mask.to(tl.int32), axis=1), axis=0) == 0
+
+        if not skip_tile:
+            slots = tl.load(kv_indices_ptr + kv_start + kv_offsets, mask=mask_n, other=0)
+            if SLOT_I64:
+                # Pools above 2**31 elements overflow a 32-bit slot*stride offset.
+                slots = slots.to(tl.int64)
+            k = _load_kv(
+                k_cache_ptr,
+                ks_ptr,
+                slots[None, :] * stride_kcs + kv_head * stride_kch,
+                offs_d[:, None],
+                slots[None, :] * stride_kss + kv_head * stride_ksh + offs_nb[:, None],
+                mask_n[None, :] & mask_d[:, None],
+                mask_n[None, :] & mask_nb[:, None],
+                q.dtype,
+                K_FORMAT,
+                QBLOCK,
+                True,
+                False,
+            )
+            scores = tl.dot(q.to(k.dtype), k) * sm_scale
+            scores = tl.where(final_mask, scores, -float("inf"))
+
+            row_max = tl.max(scores, axis=1)
+            row_max_fixed = tl.where(row_max == -float("inf"), -1e20, row_max)
+            m_new = tl.maximum(row_max_fixed, m_i)
+            alpha = tl.exp(m_i - m_new)
+            p = tl.exp(scores - m_new[:, None])
+
+            v = _load_kv(
+                v_cache_ptr,
+                vs_ptr,
+                slots[:, None] * stride_vcs + kv_head * stride_vch,
+                offs_dv[None, :],
+                slots[:, None] * stride_vss + kv_head * stride_vsh + offs_nbv[None, :],
+                mask_n[:, None] & mask_dv[None, :],
+                mask_n[:, None] & mask_nbv[None, :],
+                q.dtype,
+                V_FORMAT,
+                QBLOCK,
+                False,
+                False,
+            )
+            acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v)
+            l_i = l_i * alpha + tl.sum(p, axis=1)
+            m_i = m_new
+
+    current_end = tl.minimum(q_len, (block_m_id + 1) * BLOCK_T)
+    if HAS_BLOCKS:
+        # rows inside a multimodal span also attend forward to the span's later keys: the tile loop must reach them
+        block_end = tl.load(block_ends_ptr + q_start + offs_m, mask=mask_m, other=0) - prefix_len
+        current_end = tl.minimum(q_len, tl.maximum(current_end, tl.max(block_end, axis=0)))
+    else:
+        block_end = tl.zeros((BLOCK_M,), dtype=tl.int32)
+    for start_n in tl.range(0, current_end, BLOCK_N):
+        local_kv_offsets = start_n + offs_n
+        mask_n = local_kv_offsets < current_end
+        local_q_pos = offs_m
+        causal_mask = local_kv_offsets[None, :] <= local_q_pos[:, None]
+        if HAS_BLOCKS:
+            causal_mask = causal_mask | (local_kv_offsets[None, :] < block_end[:, None])
+        if SLIDING_WINDOW > 0:
+            causal_mask = causal_mask & (
+                (local_kv_offsets[None, :] + SLIDING_WINDOW) > local_q_pos[:, None]
+            )
+        final_mask = mask_m[:, None] & mask_n[None, :] & causal_mask
+
+        skip_tile = False
+        if SLIDING_WINDOW > 0:
+            skip_tile = tl.max(tl.max(final_mask.to(tl.int32), axis=1), axis=0) == 0
+
+        if not skip_tile:
+            k = tl.load(
+                k_extend_ptr
+                + (q_start + local_kv_offsets[None, :]) * stride_ket
+                + kv_head * stride_keh
+                + offs_d[:, None],
+                mask=mask_n[None, :] & mask_d[:, None],
+                other=0.0,
+            )
+            scores = tl.dot(q.to(k.dtype), k) * sm_scale
+            scores = tl.where(final_mask, scores, -float("inf"))
+
+            row_max = tl.max(scores, axis=1)
+            row_max_fixed = tl.where(row_max == -float("inf"), -1e20, row_max)
+            m_new = tl.maximum(row_max_fixed, m_i)
+            alpha = tl.exp(m_i - m_new)
+            p = tl.exp(scores - m_new[:, None])
+
+            v = tl.load(
+                v_extend_ptr
+                + (q_start + local_kv_offsets[:, None]) * stride_vet
+                + kv_head * stride_veh
+                + offs_dv[None, :],
+                mask=mask_n[:, None] & mask_dv[None, :],
+                other=0.0,
+            )
+            acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v)
+            l_i = l_i * alpha + tl.sum(p, axis=1)
+            m_i = m_new
+
+    out = tl.where(l_i[:, None] == 0.0, 0.0, acc / l_i[:, None])
+    tl.store(
+        o_ptr
+        + (q_start + offs_m[:, None]) * stride_ot
+        + q_head[:, None] * stride_oh
+        + offs_dv[None, :],
+        out.to(o_ptr.dtype.element_ty),
+        mask=mask_m[:, None] & mask_dv[None, :],
+    )
+
+
 def extend_paged_attention(
     q: torch.Tensor,
     k_cache: torch.Tensor,
@@ -1747,6 +1964,23 @@ def extend_paged_attention(
         v_format=v_format,
     )
     grid = (qo_indptr.numel() - 1, num_q_heads, triton.cdiv(max_q_len, block_m))
+    group = num_q_heads // num_kv_heads
+    split_kernel = _extend_attention_split_kernel
+    if os.getenv("FREETOKEN_EXTEND_GQA", "").strip() == "1" and group > 1 and k_extend is not None:
+        # Rows are (token, query head) pairs of one KV head: BLOCK_M must hold a
+        # whole number of tokens' worth of heads.
+        gm = os.getenv("FREETOKEN_EXTEND_GQA_BLOCK_M", "").strip()
+        block_m = int(gm) if gm else block_m
+        block_m = max(block_m, group, 16)
+        assert block_m % group == 0, (block_m, group)
+        gw = os.getenv("FREETOKEN_EXTEND_GQA_NUM_WARPS", "").strip()
+        num_warps = int(gw) if gw else num_warps
+        gn = os.getenv("FREETOKEN_EXTEND_GQA_BLOCK_N", "").strip()
+        block_n = int(gn) if gn else block_n
+        gs = os.getenv("FREETOKEN_EXTEND_GQA_NUM_STAGES", "").strip()
+        num_stages = int(gs) if gs else num_stages
+        split_kernel = _extend_attention_split_gqa_kernel
+        grid = (qo_indptr.numel() - 1, num_kv_heads, triton.cdiv(max_q_len, block_m // group))
     if k_extend is not None or v_extend is not None:
         assert k_extend is not None and v_extend is not None
         assert k_extend.is_cuda and v_extend.is_cuda
@@ -1754,7 +1988,7 @@ def extend_paged_attention(
         assert k_extend.shape[0] == num_q_tokens and v_extend.shape[0] == num_q_tokens
         assert k_extend.shape[1] == num_kv_heads and v_extend.shape[1] == num_kv_heads
         assert k_extend.shape[-1] == head_dim and v_extend.shape[-1] == head_dim
-        _extend_attention_split_kernel[grid](
+        split_kernel[grid](
             q,
             k_extend,
             v_extend,
