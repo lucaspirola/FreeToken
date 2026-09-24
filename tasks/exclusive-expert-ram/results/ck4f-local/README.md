@@ -77,7 +77,7 @@ move.
 
 The hit rates repeat ck4c (mirror 0.9404 / 0.9350, whole 0.9423 / 0.9391) now that every
 prefill reserves. Per-point decode between def and dc stays within ±5%, the same noise as
-whole-close vs whole. Only 713K p1 differs more: mirror def 99.1 vs dc 92.1.
+whole-close vs whole. Only 713K p1 differs more: mirror def (compaction on) 99.1 vs dc (compaction off) 92.1, in favour of compaction.
 
 Reserve and release now carry timings. A release (0.75 GiB committed) takes about 20 ms. A
 reserve takes 15-20 ms, except the first one at 136 ms, when the compaction kernel compiles.
