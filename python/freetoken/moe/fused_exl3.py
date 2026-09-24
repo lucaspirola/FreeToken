@@ -146,7 +146,13 @@ PREFILL_GEMM: dict | None = None
 
 def _prefill_gemm(routes: int, num_experts: int) -> dict:
     per_expert = routes / max(num_experts, 1)
-    cfg = dict(block_m=16 if per_expert < 16 else 32, block_k=64, num_stages=3, num_warps=8)
+    if f16acc_enabled():
+        # fp16 accumulators halve the register tile, so BM 64 / 2 stages wins: GEMM 6.37 -> 4.77 ms
+        # per layer at 8192 tokens (the same 72-config sweep, FREETOKEN_EXL3_F16ACC=1)
+        bm = 16 if per_expert < 16 else (32 if per_expert < 64 else 64)
+        cfg = dict(block_m=bm, block_k=64, num_stages=2, num_warps=8, f16acc=True)
+    else:
+        cfg = dict(block_m=16 if per_expert < 16 else 32, block_k=64, num_stages=3, num_warps=8)
     if PREFILL_GEMM:
         cfg.update(PREFILL_GEMM)
     return cfg
@@ -170,8 +176,6 @@ def _prefill(x, banks, topk_weights, topk_ids, top_k, parts, activation, alpha, 
         ids = ids2.reshape(-1).contiguous()
         routes = ids.numel()
         cfg = _prefill_gemm(routes, num_experts) if decoded else dict(block_m=_prefill_block_m(routes, num_experts))
-        if decoded and f16acc_enabled():
-            cfg["f16acc"] = True
         sorted_ids, expert_ids, npad = moe_align_block_size(ids2.contiguous(), cfg["block_m"], num_experts)
         sort = dict(sorted_ids=sorted_ids, expert_ids=expert_ids, num_post_pad=npad, **cfg)
         fold = decoded and PREFILL_FOLD_INPUT
@@ -197,7 +201,10 @@ def _prefill(x, banks, topk_weights, topk_ids, top_k, parts, activation, alpha, 
             del xh
         a = _act(g, activation, alpha, limit)
         del g
-        o = torch.empty((routes, dn.n), dtype=torch.float32, device=x.device)
+        # FREETOKEN_EXL3_F16ACC also keeps the per-route down output in fp16 (exllamav3 does): the
+        # combine then reads half the bytes (it sums in fp32 either way)
+        o_dtype = torch.float16 if f16acc_enabled() else torch.float32
+        o = torch.empty((routes, dn.n), dtype=o_dtype, device=x.device)
         dn_args = dict(tr_expert_stride=dn_tr.stride(0) // 2, svh_expert_stride=dn_svh.stride(0), **sort)
         if fold:
             for lo in range(0, num_experts, group):

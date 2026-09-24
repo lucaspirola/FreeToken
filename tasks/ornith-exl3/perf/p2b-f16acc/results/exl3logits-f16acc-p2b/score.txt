@@ -1,0 +1,10 @@
+== ref vs f16
+positions 31  vocab 248320
+max|dlogit| 2.4766  mean|dlogit| 0.20294  max|dlogit|/max|logit| 8.92e-02
+top-1 agreement 0.968 (30/31)  first disagreement 7
+top-5 overlap 0.948  KL(exl3||ft) max 1.17e-01 mean 1.05e-02
+== ref vs tile
+positions 31  vocab 248320
+max|dlogit| 2.2344  mean|dlogit| 0.16757  max|dlogit|/max|logit| 8.05e-02
+top-1 agreement 0.935 (29/31)  first disagreement 6
+top-5 overlap 0.955  KL(exl3||ft) max 4.71e-02 mean 7.28e-03
