@@ -1,0 +1,8 @@
+short-mirror rc=0
+short-whole rc=0
+long-mirror rc=0
+long-whole rc=0
+exl3-short rc=0
+exl3-long rc=0
+scored
+ALLDONE

@@ -34,9 +34,21 @@ def main(out, n_new, flags):
     captured = []
     real_sample = sample_mod.Sampler.sample
 
+    # FT_FORCE=<run.pt>:<start> teacher-forces that run's output ids from sampler call <start> on
+    # (its logged "emitted window starts at"), so two code versions are compared on the same ids
+    force = os.environ.get("FT_FORCE", "")
+    forced, force_start = [], 0
+    if force:
+        path, force_start = force.rsplit(":", 1)
+        forced, force_start = torch.load(path)["output_ids"], int(force_start)
+
     def sample(self, logits, args):
+        k = len(captured)
         captured.append(logits[:1].float().cpu())
-        return real_sample(self, logits, args)
+        tokens = real_sample(self, logits, args)
+        if forced and force_start <= k < force_start + len(forced):
+            tokens = torch.full_like(tokens, forced[k - force_start])
+        return tokens
 
     sample_mod.Sampler.sample = sample
     llm = LLM(sa.model_path, dtype=sa.dtype, **kwargs)
@@ -52,7 +64,7 @@ def main(out, n_new, flags):
     # one step past the end, so locate the window whose argmax is exactly the emitted ids.
     n, want = len(out_ids), torch.tensor(out_ids)
     tops = torch.cat(captured).argmax(-1)
-    starts = [k for k in range(len(captured) - n + 1) if torch.equal(tops[k:k + n], want)]
+    starts = [force_start] if forced else [k for k in range(len(captured) - n + 1) if torch.equal(tops[k:k + n], want)]
     assert starts, f"no window of {len(captured)} samples reproduces the {n} greedy ids: {tops.tolist()} vs {out_ids}"
     logits = torch.cat(captured[starts[-1]:starts[-1] + n])
     print(f"{len(captured)} sampler calls; emitted window starts at {starts[-1]}")
