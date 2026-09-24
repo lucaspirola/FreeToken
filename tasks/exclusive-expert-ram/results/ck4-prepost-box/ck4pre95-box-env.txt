@@ -1,0 +1,11 @@
+name, driver_version, memory.total [MiB], compute_cap
+NVIDIA GeForce RTX 5080, 610.43.02, 16303 MiB, 12.0
+6.8.0-136-generic
+24
+               total        used        free      shared  buff/cache   available
+Mem:             251          10         129           0         115         241
+Swap:              7           0           7
+8192
+torch 2.11.0+cu130 13.0
+Build cuda_13.0.r13.0/compiler.36424714_0
+cf5d2c8 Merge reorg-vmm-lock: stale VMM build lock caused every local start stall since 2026-09-23 23:15

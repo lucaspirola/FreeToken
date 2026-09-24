@@ -1,0 +1,8 @@
+7590 bash -c pgrep -af "ft serve|checkpoint-box" | head -2; nvidia-smi --query-gpu=memory.used --format=csv,noheader; cd /root && PYTHONPATH=/root/FreeToken-headroom/python CUDA_HOME=/usr/local/cuda-13.0 PATH=/usr/local/cuda-13.0/bin:$PATH /root/venv/bin/python /root/bench_mirror_copy.py 2>&1 | tail -12
+2 MiB
+expert bytes 1.98 MB over 6 banks
+n=0: bpb8: H2D    4.1us ( 0.0 GB/s) D2H    4.1us ( 0.0) | bpb16: H2D    4.2us ( 0.0 GB/s) D2H    4.1us ( 0.0) | bpb32: H2D    5.1us ( 0.0 GB/s) D2H    5.1us ( 0.0) | bpb64: H2D    6.1us ( 0.0 GB/s) D2H    6.1us ( 0.0) | bpb128: H2D    7.4us ( 0.0 GB/s) D2H    7.5us ( 0.0)
+n=1: bpb8: H2D   82.2us (24.1 GB/s) D2H  143.4us (13.8) | bpb16: H2D   82.2us (24.1 GB/s) D2H  144.6us (13.7) | bpb32: H2D   82.3us (24.1 GB/s) D2H  145.2us (13.6) | bpb64: H2D   82.2us (24.1 GB/s) D2H  145.5us (13.6) | bpb128: H2D   82.2us (24.1 GB/s) D2H  146.1us (13.6)
+n=2: bpb8: H2D  158.7us (25.0 GB/s) D2H  299.5us (13.2) | bpb16: H2D  159.2us (24.9 GB/s) D2H  303.0us (13.1) | bpb32: H2D  159.3us (24.9 GB/s) D2H  304.1us (13.0) | bpb64: H2D  159.3us (24.9 GB/s) D2H  304.5us (13.0) | bpb128: H2D  159.3us (24.9 GB/s) D2H  303.7us (13.0)
+n=4: bpb8: H2D  311.4us (25.5 GB/s) D2H  626.1us (12.7) | bpb16: H2D  311.4us (25.5 GB/s) D2H  633.8us (12.5) | bpb32: H2D  311.5us (25.4 GB/s) D2H  634.5us (12.5) | bpb64: H2D  311.6us (25.4 GB/s) D2H  634.2us (12.5) | bpb128: H2D  311.5us (25.4 GB/s) D2H  634.4us (12.5)
+n=8: bpb8: H2D  616.9us (25.7 GB/s) D2H 1288.9us (12.3) | bpb16: H2D  616.9us (25.7 GB/s) D2H 1295.6us (12.2) | bpb32: H2D  616.9us (25.7 GB/s) D2H 1300.3us (12.2) | bpb64: H2D  617.6us (25.7 GB/s) D2H 1305.1us (12.1) | bpb128: H2D  617.6us (25.7 GB/s) D2H 1303.4us (12.2)

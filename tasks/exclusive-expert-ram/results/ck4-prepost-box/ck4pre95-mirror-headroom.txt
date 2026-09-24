@@ -1,0 +1,14 @@
+captures=1 kv_grows=1 tracebacks=1 ooms=1
+[2026-09-24|04:53:33|core|rank=0] INFO     --moe-cache-auto resolved moe_cache_size=2162 num_pages=77347 (prefill_overlap=True)
+[2026-09-24|04:53:40|core|rank=0] INFO     Growable-KV ceiling validated: 1048576 tokens, 3.23 GiB physical, planned final MoE cache 1536 slots
+[2026-09-24|04:53:40|core|rank=0] INFO     Free memory after initialization: 0.73 GiB
+[2026-09-24|04:53:41|core|rank=0] INFO     Start capturing CUDA graphs with sizes: [1]
+[2026-09-24|04:53:41|core|rank=0] INFO     Free GPU memory before capturing CUDA graphs: 0.73 GiB
+Preparing for capturing CUDA graphs...:   0%|          | 0/1 [00:00<?, ?batch/s]Capturing graphs: bs = 1   | avail_mem = 0.72 GiB:   0%|          | 0/1 [00:00<?, ?batch/s]INFO:     127.0.0.1:58112 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-24|04:54:08|core|rank=0] INFO     Free GPU memory after capturing CUDA graphs: 0.69 GiB
+[2026-09-24|04:54:16|core|rank=0] INFO     Prefill warmup complete for lengths [80, 128] in 7.797 s
+[2026-09-24|04:54:56|core|rank=0] INFO     Growable-KV pre-commit (arena): 0.67 GiB free (driver 0.67 GiB), 0.21 GiB commit, 0.46 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|04:54:56|core|rank=0] INFO     Committed growable KV through 131072 tokens (0.45 GiB physical); MoE slots 2162 -> 2162
+[2026-09-24|04:54:56|core|rank=0] INFO     KV grew 65536 -> 131072 tokens; MoE cache now 2162 slots
+Traceback (most recent call last):
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 128.00 MiB. GPU 0 has a total capacity of 15.51 GiB of which 29.38 MiB is free. Including non-PyTorch memory, this process has 15.45 GiB memory in use. Of the allocated memory 3.27 GiB is allocated by PyTorch, with 22.00 MiB allocated in private pools (e.g., CUDA Graphs), and 25.46 MiB is reserved by PyTorch but unallocated. If reserved

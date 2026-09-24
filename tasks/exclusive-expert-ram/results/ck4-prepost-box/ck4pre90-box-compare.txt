@@ -1,0 +1,8 @@
+== ck4pre90-mirror (cf5d2c8) vs same-box whole
+  decode_0k_p1           0.0  (no same-box reference)
+  decode_80k_p1        116.6  (no same-box reference)
+  decode_8k_p1         118.4  (no same-box reference)
+  coverage_faults    None  NONZERO
+  starved            None  NONZERO
+  ram_gib            11.67  free_evict_rate None
+2 point(s) outside the band

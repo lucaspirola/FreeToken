@@ -1,0 +1,11 @@
+== ck4post90-mirror (9dac3b5) vs same-box whole
+  decode_713k           81.9  (no same-box reference)
+  decode_713k_p1        60.0  (no same-box reference)
+  decode_80k           135.2  (no same-box reference)
+  decode_80k_p1        123.2  (no same-box reference)
+  decode_8k            132.9  (no same-box reference)
+  decode_8k_p1         124.8  (no same-box reference)
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            14.0  free_evict_rate 0.701
+0 point(s) outside the band

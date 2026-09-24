@@ -80,6 +80,22 @@ the arena resizing (2144 -> 2096 -> 2136 slots) around those requests. Extra PCI
 the first requests is the likely reason, but this run cannot confirm it because dmon logged no
 PCIe counters. The second passes, which are the steady state, fit the bandwidth model.
 
+### Write-back copy speed on ft-ck (`bench_mirror_copy.py`, added later the same day)
+
+`tasks/ornith-exl3/perf/bench_mirror_copy.py` (exl3 @ edbbc62) was run on the idle GPU after
+the B runs. It times the mirror's own SM copy kernel (`fast_index_copy_multi`) moving n
+experts. Full output: `../ck4-prepost-box/ftck-bench-mirror-copy.txt`.
+
+| n experts | H2D admission (SM copy) | D2H write-back (SM stores into mapped host) |
+|---|---|---|
+| 1 | 24.1 GB/s | 13.8 GB/s |
+| 8 | 25.7 GB/s | 12.2 GB/s |
+
+The result does not depend on blocks_per_bank. For comparison, DMA on this box is 28.3 H2D /
+28.2 D2H. ft-ck does not show ft-dev's 2.3 GB/s write-back ceiling, but a write-back still
+costs about 2x an admission per byte. That is a second, box-specific penalty on top of gen 4,
+and it lands on the pool arm only, because the whole-model arm never writes back.
+
 ## What would settle decode
 
 Run the mirror arms on a gen 5 x16 host. On the owner's machine that means `checkpoint1.sh ck4`
