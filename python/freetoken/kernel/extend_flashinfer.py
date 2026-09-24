@@ -113,7 +113,9 @@ def extend_attention(
     k_extend, v_extend, sm_scale, out, host_lens,
 ):
     """``host_lens`` = (qo_lens, prefix_lens, kv_lens) per sequence, host ints;
-    kv_indices lists each sequence's kv_lens slots, prefix first."""
+    kv_indices lists each sequence's kv_lens slots, prefix first. ``out`` may be
+    None: a single sequence then returns flashinfer's own output tensor, which
+    saves a q-sized buffer and a copy (the single-lane prefill case)."""
     global _LOGGED
     fi = _flashinfer()
     if not _LOGGED:
@@ -150,8 +152,12 @@ def extend_attention(
                 )
                 fi.merge_state_in_place(o, lse, op, lp)
                 del op, lp
+            if out is None and ql == q.shape[0]:
+                return o
+            if out is None:
+                out = torch.empty_like(q)
             out[qo:qo + ql].copy_(o)
             del o, lse
         qo += ql
         kv += kl
-    return out
+    return out if out is not None else torch.empty_like(q)

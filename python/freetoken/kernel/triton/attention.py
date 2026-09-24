@@ -1968,7 +1968,6 @@ def extend_paged_attention(
 
     if block_ends is not None:
         assert block_ends.is_cuda and block_ends.dtype == torch.int32 and block_ends.numel() == num_q_tokens
-    o = out if out is not None else torch.empty_like(q)
     from freetoken.kernel import extend_flashinfer as _fi_extend
 
     if _fi_extend.eligible(q, k_format, v_format, sliding_window, sinks, block_ends,
@@ -1976,9 +1975,10 @@ def extend_paged_attention(
         return _fi_extend.extend_attention(
             q=q, k_cache=k_cache, v_cache=v_cache, k_scale=k_scale, v_scale=v_scale,
             k_format=k_format, v_format=v_format, kv_indices=kv_indices,
-            k_extend=k_extend, v_extend=v_extend, sm_scale=sm_scale, out=o,
+            k_extend=k_extend, v_extend=v_extend, sm_scale=sm_scale, out=out,
             host_lens=host_lens,
         )
+    o = out if out is not None else torch.empty_like(q)
     sinks_arg = sinks if sinks is not None else q
     block_ends_arg = block_ends if block_ends is not None else qo_indptr
     block_d = triton.next_power_of_2(head_dim)
