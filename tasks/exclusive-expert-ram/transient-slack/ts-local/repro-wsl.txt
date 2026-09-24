@@ -1,0 +1,27 @@
+# 2026-09-24T23:06:42+04:00 host TESSERACT (WSL2 6.6.87.2-microsoft-standard-WSL2); GPU NVIDIA GeForce RTX 5080, 616.92, 0 MiB; torch 2.11.0+cu130
+== part 1: cuMemCreate by handle type
+{
+ "driver": 13040,
+ "rdma_vmm_attr": 0,
+ "NONE/rdma0": {
+  "cuMemCreate": "0 CUDA_SUCCESS",
+  "reserve": "0 CUDA_SUCCESS",
+  "map": "0 CUDA_SUCCESS",
+  "setAccess": "0 CUDA_SUCCESS"
+ },
+ "POSIX_FD/rdma0": {
+  "cuMemCreate": "0 CUDA_SUCCESS",
+  "reserve": "0 CUDA_SUCCESS",
+  "map": "0 CUDA_SUCCESS",
+  "setAccess": "0 CUDA_SUCCESS"
+ },
+ "FABRIC/rdma0": {
+  "cuMemCreate": "1 CUDA_ERROR_INVALID_VALUE"
+ },
+ "reserve_1.125x_vram": "0 CUDA_SUCCESS"
+}
+== part 2: torch expandable segments, one process per setting
+{"conf": "expandable_segments:False", "ipc": null, "peak_alloc_MiB": 304, "peak_reserved_MiB": 556, "graph_ok": true, "segments": 4, "ok": true}
+{"conf": "expandable_segments:True", "ipc": null, "peak_alloc_MiB": 304, "peak_reserved_MiB": 320, "graph_ok": true, "segments": 0, "ok": true}
+{"conf": "expandable_segments:True", "ipc": "0", "peak_alloc_MiB": 304, "peak_reserved_MiB": 320, "graph_ok": true, "segments": 0, "ok": true}
+{"conf": "expandable_segments:True", "ipc": "1", "peak_alloc_MiB": 304, "peak_reserved_MiB": 320, "graph_ok": true, "segments": 0, "ok": true}

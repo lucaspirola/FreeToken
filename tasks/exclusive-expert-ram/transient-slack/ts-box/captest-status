@@ -1,0 +1,31 @@
+== nemo-mirror-cap-ne 18:03:10
+[0m Prefill cap test (prefix 0, pad uncapped MiB): reserved rise 1026 MiB, allocated rise 604 MiB, alloc retries 0, cudaMalloc 12, cudaFree 0, 810.6 ms
+[0m Prefill cap test (prefix 8192, pad uncapped MiB): reserved rise 1026 MiB, allocated rise 604 MiB, alloc retries 0, cudaMalloc 12, cudaFree 0, 890.0 ms
+[0m Prefill cap test (prefix 0, pad 0 MiB): reserved rise 600 MiB, allocated rise 604 MiB, alloc retries 2, cudaMalloc 13, cudaFree 8, 101.0 ms OOM: CUDA out of memory. Tried to allocate 128.00 MiB. GPU 0 has a total capacity of 
+[0m Prefill cap test (prefix 8192, pad 0 MiB): reserved rise 600 MiB, allocated rise 604 MiB, alloc retries 2, cudaMalloc 13, cudaFree 8, 72.3 ms OOM: CUDA out of memory. Tried to allocate 128.00 MiB. GPU 0 has a total capacity o
+[0m Prefill cap test (prefix 0, pad 32 MiB): reserved rise 600 MiB, allocated rise 604 MiB, alloc retries 2, cudaMalloc 13, cudaFree 8, 72.3 ms OOM: CUDA out of memory. Tried to allocate 128.00 MiB. GPU 0 has a total capacity of 
+[0m Prefill cap test (prefix 8192, pad 32 MiB): reserved rise 600 MiB, allocated rise 604 MiB, alloc retries 2, cudaMalloc 13, cudaFree 8, 72.4 ms OOM: CUDA out of memory. Tried to allocate 128.00 MiB. GPU 0 has a total capacity 
+[0m Prefill cap test (prefix 0, pad 64 MiB): reserved rise 600 MiB, allocated rise 604 MiB, alloc retries 2, cudaMalloc 13, cudaFree 8, 72.1 ms OOM: CUDA out of memory. Tried to allocate 128.00 MiB. GPU 0 has a total capacity of 
+[0m Prefill cap test (prefix 8192, pad 64 MiB): reserved rise 600 MiB, allocated rise 604 MiB, alloc retries 2, cudaMalloc 13, cudaFree 8, 72.3 ms OOM: CUDA out of memory. Tried to allocate 128.00 MiB. GPU 0 has a total capacity 
+[0m Prefill headroom: transient 1.00 GiB measured on a 8192-token chunk (empty prefix 1.00 GiB, after a 8192-token prefix 1.00 GiB, allocator peak 0.59 GiB); headroom 1.00 GiB (max of VMM cushion 0.25 GiB and transient) + margin 
+== ornith-cap-ne 18:11:44
+[0m Prefill cap test (prefix 0, pad uncapped MiB): reserved rise 1094 MiB, allocated rise 996 MiB, alloc retries 0, cudaMalloc 14, cudaFree 0, 667.7 ms
+[0m Prefill cap test (prefix 8192, pad uncapped MiB): reserved rise 1094 MiB, allocated rise 996 MiB, alloc retries 0, cudaMalloc 14, cudaFree 0, 829.4 ms
+[0m Prefill cap test (prefix 0, pad 0 MiB): reserved rise 838 MiB, allocated rise 996 MiB, alloc retries 1, cudaMalloc 21, cudaFree 9, 675.6 ms
+[0m Prefill cap test (prefix 8192, pad 0 MiB): reserved rise 838 MiB, allocated rise 996 MiB, alloc retries 1, cudaMalloc 21, cudaFree 9, 836.7 ms
+[0m Prefill cap test (prefix 0, pad 32 MiB): reserved rise 838 MiB, allocated rise 996 MiB, alloc retries 1, cudaMalloc 21, cudaFree 9, 674.9 ms
+[0m Prefill cap test (prefix 8192, pad 32 MiB): reserved rise 838 MiB, allocated rise 996 MiB, alloc retries 1, cudaMalloc 21, cudaFree 9, 836.7 ms
+[0m Prefill cap test (prefix 0, pad 64 MiB): reserved rise 838 MiB, allocated rise 996 MiB, alloc retries 1, cudaMalloc 21, cudaFree 9, 675.7 ms
+[0m Prefill cap test (prefix 8192, pad 64 MiB): reserved rise 838 MiB, allocated rise 996 MiB, alloc retries 1, cudaMalloc 21, cudaFree 9, 836.6 ms
+[0m Prefill headroom: transient 1.07 GiB measured on a 8192-token chunk (empty prefix 1.07 GiB, after a 8192-token prefix 1.07 GiB, allocator peak 0.97 GiB); headroom 1.07 GiB (max of VMM cushion 0.25 GiB and transient) + margin 
+== nemo-mirror-cap 18:24:24
+[0m Prefill cap test (prefix 0, pad uncapped MiB): reserved rise 602 MiB, allocated rise 603 MiB, alloc retries 0, cudaMalloc 10, cudaFree 0, 810.8 ms
+[0m Prefill cap test (prefix 8192, pad uncapped MiB): reserved rise 602 MiB, allocated rise 603 MiB, alloc retries 0, cudaMalloc 10, cudaFree 0, 897.0 ms
+[0m Prefill cap test (prefix 0, pad 0 MiB): reserved rise 602 MiB, allocated rise 603 MiB, alloc retries 0, cudaMalloc 10, cudaFree 0, 809.8 ms
+[0m Prefill cap test (prefix 8192, pad 0 MiB): reserved rise 602 MiB, allocated rise 603 MiB, alloc retries 0, cudaMalloc 10, cudaFree 0, 893.2 ms
+[0m Prefill cap test (prefix 0, pad 32 MiB): reserved rise 602 MiB, allocated rise 603 MiB, alloc retries 0, cudaMalloc 10, cudaFree 0, 807.6 ms
+[0m Prefill cap test (prefix 8192, pad 32 MiB): reserved rise 602 MiB, allocated rise 603 MiB, alloc retries 0, cudaMalloc 10, cudaFree 0, 895.4 ms
+[0m Prefill cap test (prefix 0, pad 64 MiB): reserved rise 602 MiB, allocated rise 603 MiB, alloc retries 0, cudaMalloc 10, cudaFree 0, 809.3 ms
+[0m Prefill cap test (prefix 8192, pad 64 MiB): reserved rise 602 MiB, allocated rise 603 MiB, alloc retries 0, cudaMalloc 10, cudaFree 0, 892.9 ms
+[0m Prefill headroom: transient 0.59 GiB measured on a 8192-token chunk (empty prefix 0.59 GiB, after a 8192-token prefix 0.59 GiB, allocator peak 0.59 GiB); headroom 0.59 GiB (max of VMM cushion 0.25 GiB and transient) + margin 
+ALLDONE

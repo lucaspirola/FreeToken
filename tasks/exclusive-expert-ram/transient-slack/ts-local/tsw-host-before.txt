@@ -1,0 +1,33 @@
+date 2026-09-24T23:31:52+04:00
+MemTotal:       34881708 kB
+MemFree:        22562548 kB
+MemAvailable:   30927252 kB
+Cached:          7279748 kB
+Shmem:              3352 kB
+--- processes by RSS (top 25)
+    PID   RSS     ELAPSED COMMAND
+    899 552480   14:50:29 codex
+  20826 498164   14:47:14 claude
+   1983 406284   14:50:16 claude
+  14452 346932   14:47:44 claude
+2828859 342448   01:22:17 claude
+   8565 278604   14:48:27 claude
+ 136073 152280      03:42 piro-board-mcp
+ 136081 152176      03:42 piro-board-mcp
+2835144 134908   01:22:13 piro-board-mcp
+   2134 89024    14:50:14 piro-board-mcp
+   1905 61232    14:50:18 MainThread
+ 136080 57464       03:42 MainThread
+ 136079 57336       03:42 MainThread
+2835108 56772    01:22:13 python
+2835111 49176    01:22:13 python
+    529 41584    14:50:42 dockerd
+     41 35592    14:50:53 systemd-journal
+    438 22108    14:50:42 containerd
+ 136077 21120       03:42 python3
+ 136089 21120       03:42 python3
+    566 20960    14:50:42 MainThread
+  21368 20860    14:47:12 python
+    564 20512    14:50:42 MainThread
+   1893 16816    14:50:18 python3.12
+   1375 15476    14:50:26 MainThread

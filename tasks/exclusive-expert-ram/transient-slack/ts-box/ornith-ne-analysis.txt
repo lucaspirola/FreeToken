@@ -1,0 +1,40 @@
+== /home/lucas/ai/FreeToken-wt/transient-slack/tasks/exclusive-expert-ram/transient-slack/ts-box/ornith-ne/transient-prefix0.pickle
+   measured: reserved rise 1094 MiB, allocated rise 996 MiB (length 8192, prefix 0)
+   stats num_alloc_retries = 0
+   stats num_device_alloc = 195
+   stats num_device_free = 45
+   stats segment.large_pool.peak = 82
+   stats segment.small_pool.peak = 68
+   stats oversize_allocations.peak = 0
+   stats oversize_segments.peak = 0
+   trace replay: peak reserved (in-window segments) 1094 MiB, peak allocated 996 MiB, allocated at the reserved peak 293 MiB
+   14 segments created in the window, 1094 MiB:
+     >=10 MiB request             x  11      1088 MiB
+     2MiB small                   x   3         6 MiB
+   largest segments (size, the request that created it, cached-free bytes at that moment, site):
+        256.0 MiB for   256.00 MiB  free-cached   801.0 MiB  freetoken/moe/fused_nvfp4.py:696:fused_experts_nvfp4 < freetoken/layers/quantization/moe/nvfp4.py:83:apply < freetoken/layers/quantization/moe/base.py:223:apply
+        192.0 MiB for   192.00 MiB  free-cached   111.7 MiB  freetoken/kernel/triton/fp8_pertensor_linear.py:308:_scaled_mm < freetoken/kernel/triton/fp8_pertensor_linear.py:342:fp8_pertensor_linear < freetoken/layers/quantization/linear/fp8_tensor.py:49:apply
+        128.0 MiB for   128.00 MiB  free-cached    62.8 MiB  freetoken/models/qwen3_5_moe/gdn.py:98:_conv_prefill < freetoken/models/qwen3_5_moe/gdn.py:168:forward < freetoken/models/qwen3_5_moe/model.py:71:forward
+        128.0 MiB for   128.00 MiB  free-cached   -32.2 MiB  freetoken/kernel/fla/chunk_delta_h.py:324:chunk_gated_delta_rule_fwd_h < freetoken/kernel/fla/chunk.py:57:chunk_gated_delta_rule_fwd < freetoken/kernel/fla/chunk.py:109:forward
+         64.0 MiB for    64.00 MiB  free-cached   -65.2 MiB  freetoken/kernel/fla/utils.py:154:<genexpr> < freetoken/kernel/fla/utils.py:178:wrapper < freetoken/kernel/fla/chunk.py:240:chunk_gated_delta_rule
+         64.0 MiB for    64.00 MiB  free-cached   -96.2 MiB  freetoken/kernel/fla/wy_fast.py:130:recompute_w_u_fwd < freetoken/kernel/fla/chunk_fwd.py:407:chunk_gated_delta_rule_fwd_intra < freetoken/kernel/fla/chunk.py:48:chunk_gated_delta_rule_fwd
+         64.0 MiB for    64.00 MiB  free-cached   -96.2 MiB  freetoken/kernel/fla/wy_fast.py:129:recompute_w_u_fwd < freetoken/kernel/fla/chunk_fwd.py:407:chunk_gated_delta_rule_fwd_intra < freetoken/kernel/fla/chunk.py:48:chunk_gated_delta_rule_fwd
+         64.0 MiB for    64.00 MiB  free-cached   -96.2 MiB  freetoken/kernel/fla/chunk_o.py:146:chunk_fwd_o < freetoken/kernel/fla/chunk.py:67:chunk_gated_delta_rule_fwd < freetoken/kernel/fla/chunk.py:109:forward
+         64.0 MiB for    64.00 MiB  free-cached   -96.2 MiB  freetoken/kernel/fla/chunk_delta_h.py:326:chunk_gated_delta_rule_fwd_h < freetoken/kernel/fla/chunk.py:57:chunk_gated_delta_rule_fwd < freetoken/kernel/fla/chunk.py:109:forward
+         32.0 MiB for    32.00 MiB  free-cached  -128.2 MiB  freetoken/kernel/fla/chunk_fwd.py:390:chunk_gated_delta_rule_fwd_intra < freetoken/kernel/fla/chunk.py:48:chunk_gated_delta_rule_fwd < freetoken/kernel/fla/chunk.py:109:forward
+         32.0 MiB for    32.00 MiB  free-cached  -129.2 MiB  freetoken/kernel/fla/l2norm.py:80:l2norm_fwd < freetoken/kernel/fla/chunk.py:102:forward < freetoken/kernel/fla/utils.py:178:wrapper
+          2.0 MiB for     1.00 MiB  free-cached   -63.7 MiB  freetoken/models/qwen3_5_moe/gdn.py:87:_gate_params < freetoken/models/qwen3_5_moe/gdn.py:175:forward < freetoken/models/qwen3_5_moe/model.py:71:forward
+          2.0 MiB for     1.00 MiB  free-cached  -159.2 MiB  freetoken/kernel/fla/cumsum.py:185:chunk_local_cumsum_scalar < freetoken/kernel/fla/cumsum.py:273:chunk_local_cumsum < freetoken/kernel/fla/utils.py:178:wrapper
+          2.0 MiB for     0.00 MiB  free-cached   737.3 MiB  freetoken/moe/offload_cache.py:2291:_invalidate_prefill_buffer < freetoken/moe/offload_cache.py:2339:copy < freetoken/moe/offload_cache.py:2360:prefetch_prefill_layer
+   rounding slack by site (segment - request), top:
+          2.0 MiB  freetoken/moe/offload_cache.py:2291:_invalidate_prefill_buffer < freetoken/moe/offload_cache.py:2339:copy < freetoken/moe/offload_cache.py:2360:prefetch_prefill_layer
+          1.0 MiB  freetoken/models/qwen3_5_moe/gdn.py:87:_gate_params < freetoken/models/qwen3_5_moe/gdn.py:175:forward < freetoken/models/qwen3_5_moe/model.py:71:forward
+          1.0 MiB  freetoken/kernel/fla/cumsum.py:185:chunk_local_cumsum_scalar < freetoken/kernel/fla/cumsum.py:273:chunk_local_cumsum < freetoken/kernel/fla/utils.py:178:wrapper
+          0.0 MiB  freetoken/kernel/triton/fp8_pertensor_linear.py:308:_scaled_mm < freetoken/kernel/triton/fp8_pertensor_linear.py:342:fp8_pertensor_linear < freetoken/layers/quantization/linear/fp8_tensor.py:49:apply
+          0.0 MiB  freetoken/models/qwen3_5_moe/gdn.py:98:_conv_prefill < freetoken/models/qwen3_5_moe/gdn.py:168:forward < freetoken/models/qwen3_5_moe/model.py:71:forward
+          0.0 MiB  freetoken/kernel/fla/utils.py:154:<genexpr> < freetoken/kernel/fla/utils.py:178:wrapper < freetoken/kernel/fla/chunk.py:240:chunk_gated_delta_rule
+          0.0 MiB  freetoken/kernel/fla/l2norm.py:80:l2norm_fwd < freetoken/kernel/fla/chunk.py:102:forward < freetoken/kernel/fla/utils.py:178:wrapper
+          0.0 MiB  freetoken/kernel/fla/chunk_fwd.py:390:chunk_gated_delta_rule_fwd_intra < freetoken/kernel/fla/chunk.py:48:chunk_gated_delta_rule_fwd < freetoken/kernel/fla/chunk.py:109:forward
+          0.0 MiB  freetoken/kernel/fla/wy_fast.py:129:recompute_w_u_fwd < freetoken/kernel/fla/chunk_fwd.py:407:chunk_gated_delta_rule_fwd_intra < freetoken/kernel/fla/chunk.py:48:chunk_gated_delta_rule_fwd
+          0.0 MiB  freetoken/kernel/fla/wy_fast.py:130:recompute_w_u_fwd < freetoken/kernel/fla/chunk_fwd.py:407:chunk_gated_delta_rule_fwd_intra < freetoken/kernel/fla/chunk.py:48:chunk_gated_delta_rule_fwd
+   end-of-run segments: 150 total 4988 MiB, active 3585 MiB
