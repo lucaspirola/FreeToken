@@ -1,0 +1,11 @@
+name, driver_version, memory.total [MiB], compute_cap
+NVIDIA GeForce RTX 5080, 595.58.03, 16303 MiB, 12.0
+5.15.0-179-generic
+48
+               total        used        free      shared  buff/cache   available
+Mem:             251          10          52           0         190         240
+Swap:              7           0           7
+64
+torch 2.11.0+cu130 13.0
+Build cuda_13.0.r13.0/compiler.36424714_0
+326fe6ae5 Mirror DMA writebacks: optional ring-head trace (FREETOKEN_MIRROR_WB_TRACE) and offline ring-size replay
