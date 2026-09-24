@@ -65,6 +65,16 @@ ST-MoE rule instead: a misprediction is fetched on demand, so the outputs never 
 coverage and wasted fetches at d=1 and d=2 for Nemotron before anything is built. The expected
 gain is miss_coverage × 326 us, minus the cost of the wasted fetches.
 
+**Measured** (box ft-dev, exp/layer-ahead a5bd9e3, `results/probe1-box`):
+
+| lookahead | recall | misses covered | wasted fetches per miss |
+|---|---|---|---|
+| d=1 | 0.772 | 72.8% | 0.71 |
+| d=2 | 0.707 | 61.0% | 0.79 |
+
+So d=1 it is. Hiding 72.8% of the misses is worth ~240 us/step (~4%) before the cost of the
+wasted fetches.
+
 ### 2. Per-layer slot budgets from predictability (adopt with item 1)
 
 **Prior art:**
