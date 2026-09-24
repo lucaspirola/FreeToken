@@ -1,0 +1,6 @@
+moe layer    unfused, torch.sum          58.4 us/replay  max|d| vs unfused 0
+dense o_proj unfused, torch.sum          25.3 us/replay  max|d| vs unfused 0
+moe layer    in-kernel sum               56.9 us/replay  max|d| vs unfused 0.000977
+dense o_proj in-kernel sum               24.0 us/replay  max|d| vs unfused 0
+moe layer    in-kernel sum + fused       51.7 us/replay  max|d| vs unfused 0.000977
+dense o_proj in-kernel sum + fused       22.8 us/replay  max|d| vs unfused 0
