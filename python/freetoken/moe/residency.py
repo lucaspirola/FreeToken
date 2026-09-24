@@ -203,22 +203,22 @@ class MirrorResidency:
         return self._mirror_pool.min_gpu_slots
 
     def before_ensure(self, layer_id: int) -> None:
-        """Moved from ``OffloadMoeCache.ensure_experts``' mirror branch."""
-        if getattr(self, "_mirror", None) is not None:
-            # Decode coverage is maintained by construction under the mirror:
-            # prefill runs exclusively through the overlap path
-            # (prefetch_prefill_layer -> _prefetch_split_mirror), which never
-            # empties the mirror the way materialize_layer's whole-layer
-            # invalidation would -- so there is no batch-boundary restore to
-            # run here. (materialize_layer raises under the mirror; see
-            # its docstring.)
-            # Entries linger from a longer previous step; the LRU kernel only
-            # writes one per miss, so clear before it runs.
-            # One launch (mirror_kernels.begin_layer): the two fills plus this
-            # layer's slice of the pre-step slot map.
-            from freetoken.moe.mirror_kernels import begin_layer
+        """Nothing to do before the LRU kernel.
 
-            begin_layer(self.cache, layer_id)
+        Decode coverage is maintained by construction under the mirror: prefill
+        runs exclusively through the overlap path (prefetch_prefill_layer ->
+        _prefetch_split_mirror), which never empties the mirror the way
+        materialize_layer's whole-layer invalidation would -- so there is no
+        batch-boundary restore to run here. (materialize_layer raises under
+        the mirror; see its docstring.)
+
+        The swap kernel's per-layer bookkeeping (clear victim_ids/prior_ids,
+        whose entries linger from a longer previous step, and snapshot the
+        layer's pre-step slot map) is done by the ensure launch itself:
+        inside the v2 LRU kernel, or by ``mirror_kernels.begin_layer`` right
+        before the other variants (``offload_kernels.ensure_experts``). A
+        separate launch here was a graph node per MoE layer.
+        """
         return None
 
     def before_buffer_fill(self, buffer_id: int) -> bool:
