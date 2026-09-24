@@ -333,6 +333,14 @@ def build_moe_counters(moe: Any, collect_decode_stats: bool = False) -> Dict[str
                 doc["mirror"] = stats
         except Exception:  # noqa: BLE001 -- a diagnostic must never break the loop
             doc["mirror"] = None
+    # Arena compaction before a shrink (moe/arena_compaction.py) and the mirror's
+    # coverage refills: plain host dicts, no device read.
+    compaction = getattr(moe, "compaction_totals", None)
+    if isinstance(compaction, dict):
+        doc["arena_compaction"] = dict(compaction)
+    refill = getattr(getattr(moe, "residency", None), "refill_totals", None)
+    if isinstance(refill, dict):
+        doc["mirror_refill"] = dict(refill)
     return doc or None
 
 

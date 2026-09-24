@@ -79,6 +79,10 @@ class ExpertResidency(Protocol):
     def before_shrink(self, n: int, current: int) -> None:
         """Before arena slots ``[n, current)`` are invalidated and unmapped."""
 
+    def host_copy_mask(self):
+        """Per flat expert id: does it have a host copy (dropping its GPU copy is
+        free)? ``None`` means every expert does (``moe/arena_compaction.py``)."""
+
     def fault_check(self) -> None:
         """Raise if coverage was lost (host idle boundary, once per batch)."""
 
@@ -121,6 +125,9 @@ class WholeModelResidency:
 
     def before_shrink(self, n: int, current: int) -> None:
         return None
+
+    def host_copy_mask(self):
+        return None  # the whole model is in host RAM
 
     def fault_check(self) -> None:
         return None
@@ -218,7 +225,13 @@ class MirrorResidency:
         if getattr(self, "_mirror", None) is not None:
             # Slots [n, current) go to the KV arena; any expert held only there
             # must come back to the mirror or coverage breaks.
-            self._mirror_refill_uncovered(n, current)
+            self._mirror_refill_uncovered(n, current, from_gpu=True)
+
+    def host_copy_mask(self):
+        """Duplicates: experts that own a pool row (device map, the kernel's truth)."""
+        if getattr(self, "_mirror", None) is None:
+            return None
+        return [row >= 0 for row in self._mirror["pool_row_of_id"].tolist()]
 
     def fault_check(self) -> None:
         self.mirror_fault_check()
@@ -677,14 +690,17 @@ class MirrorResidency:
             )
         m["free_count"].fill_(len(free))
 
-    def _mirror_refill_uncovered(self, begin: int = 0, end: int | None = None) -> int:
+    def _mirror_refill_uncovered(self, begin: int = 0, end: int | None = None,
+                                 *, from_gpu: bool = False) -> int:
         """Restore coverage for GPU rows about to be dropped.
 
         Invalidating GPU slots (``reset``, or an arena shrink handing slots to
         the KV cache) destroys the only copy of any expert the mirror does not
-        already hold. Those rows are re-read from the checkpoint here. This runs
-        only at host idle boundaries -- never inside a captured graph or a decode
-        step -- so the disk contact is off the hot path.
+        already hold. This runs only at host idle boundaries -- never inside a
+        captured graph or a decode step. ``from_gpu`` (the arena shrink: the
+        doomed slots are still mapped and hold their experts' bytes) writes those
+        rows back device -> pool in one launch, the swap path's D2H; otherwise
+        they are re-read from the checkpoint.
 
         Returns the number of rows re-read.
         """
@@ -714,11 +730,26 @@ class MirrorResidency:
                 f"mirror cannot restore coverage for {len(uncovered)} experts: "
                 f"only {len(spare)} rows are free or duplicated"
             )
-        for flat, row in zip(uncovered, spare):
+        rows = spare[: len(uncovered)]
+        gpu = from_gpu and self.cache.device.type == "cuda"
+        if gpu:
+            from freetoken.kernel.fast_index_copy import fast_index_copy_multi_jit
+
+            slot_of = {flat: begin + i for i, flat in enumerate(doomed.tolist()) if flat >= 0}
+            dev = self.cache.device
+            fast_index_copy_multi_jit(
+                m["pool_ptrs"], m["cache_ptrs"], m["feat_bytes"],
+                torch.tensor(rows, dtype=torch.int32, device=dev),
+                torch.tensor([slot_of[f] for f in uncovered], dtype=torch.int32, device=dev),
+                torch.tensor([len(rows)], dtype=torch.int64, device=dev),
+            )
+            torch.cuda.synchronize(dev)
+        for flat, row in zip(uncovered, rows):
             old = inv[row]
             if old >= 0:
                 fwd[old] = -1
-            pool._read_row(flat, row)
+            if not gpu:
+                pool._read_row(flat, row)
             fwd[flat] = row
             inv[row] = flat
         m["pool_row_of_id"].copy_(torch.tensor(fwd, dtype=torch.int32))
@@ -727,7 +758,11 @@ class MirrorResidency:
         # (the kernel owns them between calls); writing pool.* directly above
         # would have been overwritten by the next publish.
         self._mirror_publish_free_rows()
-        logger.info_rank0("mirror restored coverage for %d experts", len(uncovered))
+        self.refill_totals = getattr(self, "refill_totals", {"rows": 0, "gpu_rows": 0})
+        self.refill_totals["rows"] += len(uncovered)
+        self.refill_totals["gpu_rows"] += len(uncovered) if gpu else 0
+        logger.info_rank0("mirror restored coverage for %d experts (%s)", len(uncovered),
+                          "written back from the GPU" if gpu else "re-read from the checkpoint")
         return len(uncovered)
 
     def _mirror_stage_layer(self, layer_id: int) -> int:

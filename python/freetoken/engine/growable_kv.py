@@ -578,6 +578,29 @@ class GrowableKvController:
             return "release"
         return None
 
+    @staticmethod
+    def _decode_totals(moe) -> "dict | None":
+        if not getattr(moe, "collect_stats", False) or not hasattr(moe, "decode_stat_totals"):
+            return None
+        return moe.decode_stat_totals()
+
+    def _log_decode_window(self, moe) -> None:
+        """Expert misses of the decode since the last release (``--moe-collect-stats``):
+        what the arena at the decode level achieved, including the refill misses a
+        shrink without compaction leaves behind."""
+        start = getattr(self, "_release_decode_totals", None)
+        now = self._decode_totals(moe) if start is not None else None
+        self._release_decode_totals = None
+        if now is None:
+            return
+        d = {k: now.get(k, 0) - start.get(k, 0) for k in ("layer_calls", "active", "missing")}
+        logger.info_rank0(
+            "Decode window since release: %d layer calls, %d active, %d missing "
+            "(hit rate %.4f)",
+            d["layer_calls"], d["active"], d["missing"],
+            1 - d["missing"] / d["active"] if d["active"] else float("nan"),
+        )
+
     @torch.inference_mode()
     def reserve_prefill_headroom(self) -> tuple[int, int]:
         """Shrink the arena until live free VRAM holds one prefill chunk's transient
@@ -589,6 +612,7 @@ class GrowableKvController:
         old_moe = moe.cache_size
         target_free = self.prefill_free_target_bytes()
         torch.cuda.synchronize(self.engine.device)
+        self._log_decode_window(moe)
         live_free = self.engine._sync_get_memory()[0]
         target_moe = old_moe
         released = 0
@@ -649,6 +673,7 @@ class GrowableKvController:
             if self.engine.config.tp_info.size > 1:
                 self.engine.sync_all_ranks()
         self._decode_level = True
+        self._release_decode_totals = self._decode_totals(moe)
         logger.info_rank0(
             "Prefill headroom released to decode: MoE slots %d -> %d (%s committed, "
             "%s free before, target %s)",
