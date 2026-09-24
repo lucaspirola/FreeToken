@@ -1,0 +1,16 @@
+  ck4c-mirror-dc-journal.txt:157 prefill at decode level (shrink after release: True)
+  ck4c-mirror-dc-journal.txt:308 prefill at decode level (shrink after release: True)
+  ck4c-mirror-dc-journal.txt:350 prefill at decode level (shrink after release: True)
+ck4c-mirror-dc-journal.txt: 201 prefill batches, 3 started at the decode level
+  ck4c-mirror-def-journal.txt:159 prefill at decode level (shrink after release: True)
+  ck4c-mirror-def-journal.txt:320 prefill at decode level (shrink after release: True)
+  ck4c-mirror-def-journal.txt:364 prefill at decode level (shrink after release: True)
+ck4c-mirror-def-journal.txt: 201 prefill batches, 3 started at the decode level
+ck4c-mirror-st-journal.txt: 201 prefill batches, 0 started at the decode level
+ck4c-mirror-t0-journal.txt: 201 prefill batches, 0 started at the decode level
+  ck4c-whole-dc-journal.txt:177 prefill at decode level (shrink after release: True)
+ck4c-whole-dc-journal.txt: 33 prefill batches, 1 started at the decode level
+  ck4c-whole-def-journal.txt:213 prefill at decode level (shrink after release: True)
+ck4c-whole-def-journal.txt: 33 prefill batches, 1 started at the decode level
+ck4c-whole-st-journal.txt: 33 prefill batches, 0 started at the decode level
+ck4c-whole-t0-journal.txt: 33 prefill batches, 0 started at the decode level

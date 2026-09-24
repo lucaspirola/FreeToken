@@ -1,0 +1,38 @@
+== ck4c-whole: def, dc, st, t0
+  def hit 0.9423  swaps/tok -  releases 8  slots 1904..2088
+      compactions 9: moved 565 (62.8/call), 336.6 MiB and 10.42 ms per call, 0 left for write-back
+      decode windows 6: misses per window [1339, 269, 659, 685, 626, 679] (mean 710)
+  dc  hit 0.9391  swaps/tok -  releases 8  slots 1904..2088
+      decode windows 6: misses per window [1339, 377, 768, 706, 631, 708] (mean 755)
+  st  hit 0.9309  swaps/tok -  releases 0  slots 1904..1944
+      compactions 3: moved 75 (25.0/call), 134.0 MiB and 2.30 ms per call, 0 left for write-back
+  t0  hit 0.9429  swaps/tok -  releases 0  slots 2048..2096
+      compactions 2: moved 153 (76.5/call), 410.1 MiB and 3.13 ms per call, 0 left for write-back
+  decode tok/s                   def              dc              st              t0
+      8K p1         186.9           177.2 ( 94.8%)  177.2 ( 94.8%)  195.3 (104.5%)
+      8K p2         184.2           174.0 ( 94.5%)  177.0 ( 96.1%)  193.5 (105.1%)
+     32K p1         172.4           182.6 (105.9%)  187.5 (108.8%)  185.6 (107.7%)
+     32K p2         168.0           163.0 ( 97.0%)  176.0 (104.7%)  188.3 (112.1%)
+     80K p1         164.5           154.2 ( 93.8%)  160.1 ( 97.3%)  176.0 (107.0%)
+     80K p2         174.5           167.3 ( 95.9%)  163.2 ( 93.5%)  179.0 (102.6%)
+== ck4c-mirror: def, dc, st, t0
+  def hit 0.9404  swaps/tok 8.3  releases 8  slots 1560..2088
+      compactions 27: moved 845 (31.3/call), 167.8 MiB and 4.00 ms per call, 252 left for write-back
+      mirror refills 17: 252 rows (0 re-read from the checkpoint)
+      decode windows 4: misses per window [889, 298, 658, 951] (mean 699)
+  dc  hit 0.9350  swaps/tok 9.0  releases 8  slots 1560..2088
+      mirror refills 18: 656 rows (0 re-read from the checkpoint)
+      decode windows 4: misses per window [889, 410, 817, 970] (mean 772)
+  st  hit 0.9235  swaps/tok 10.5  releases 0  slots 1560..1944
+      compactions 23: moved 434 (18.9/call), 101.2 MiB and 1.41 ms per call, 195 left for write-back
+      mirror refills 13: 195 rows (0 re-read from the checkpoint)
+  t0  hit 0.9416  swaps/tok 8.0  releases 0  slots 1704..2096
+      compactions 22: moved 521 (23.7/call), 127.0 MiB and 1.69 ms per call, 189 left for write-back
+      mirror refills 14: 189 rows (0 re-read from the checkpoint)
+  decode tok/s                   def              dc              st              t0
+      8K p1         185.8           171.0 ( 92.0%)  166.7 ( 89.7%)  190.6 (102.6%)
+      8K p2         166.2           165.6 ( 99.6%)  165.8 ( 99.7%)  173.3 (104.3%)
+     80K p1         155.7           151.8 ( 97.5%)  151.4 ( 97.2%)  154.8 ( 99.4%)
+     80K p2         160.1           161.1 (100.6%)  159.7 ( 99.7%)  165.8 (103.6%)
+    713K p1          96.7            95.3 ( 98.6%)   87.0 ( 89.9%)   89.2 ( 92.3%)
+    713K p2         104.2           104.0 ( 99.8%)   96.6 ( 92.7%)  100.5 ( 96.4%)

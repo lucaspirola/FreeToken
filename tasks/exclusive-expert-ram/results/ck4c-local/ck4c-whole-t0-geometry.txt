@@ -1,0 +1,2 @@
+Sep 24 16:30:41 TESSERACT serve-default.sh[499915]: [2026-09-24|16:30:41|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+Sep 24 16:30:45 TESSERACT serve-default.sh[499915]: [2026-09-24|16:30:45|core|rank=0] INFO     Prefill headroom: transient 0.00 GiB estimated, not measured; headroom 0.25 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 2173 -> 2173 of 2173 slots, 0.00 GiB free (target 0.38 GiB)
