@@ -1785,6 +1785,10 @@ class Engine:
         dummy_slot = int(dummy_row[0].item())
         peaks: list[int] = []
         alloc_peaks: list[int] = []
+        # Diagnostic: FREETOKEN_TRANSIENT_SNAPSHOT=<dir> records the caching
+        # allocator's history over each measured chunk and writes a
+        # torch.cuda.memory._snapshot() pickle per run (segments, blocks, trace).
+        snap_dir = os.environ.get("FREETOKEN_TRANSIENT_SNAPSHOT", "").strip()
         try:
             for cached_len in prefixes:
                 torch.cuda.synchronize(self.device)
@@ -1792,12 +1796,100 @@ class Engine:
                 reserved0 = torch.cuda.memory_reserved(self.device)
                 allocated0 = torch.cuda.memory_allocated(self.device)
                 torch.cuda.reset_peak_memory_stats(self.device)
+                if snap_dir:
+                    torch.cuda.memory._record_memory_history(
+                        max_entries=1_000_000, stacks="python"
+                    )
                 self._prefill_forward(length, cached_len)
                 torch.cuda.synchronize(self.device)
                 reserved_rise = torch.cuda.max_memory_reserved(self.device) - reserved0
                 allocated_rise = torch.cuda.max_memory_allocated(self.device) - allocated0
+                if snap_dir:
+                    import pickle
+
+                    os.makedirs(snap_dir, exist_ok=True)
+                    snap = torch.cuda.memory._snapshot()
+                    snap["freetoken"] = {
+                        "reserved0": reserved0, "allocated0": allocated0,
+                        "reserved_rise": reserved_rise, "allocated_rise": allocated_rise,
+                        "length": length, "cached_len": cached_len,
+                        "stats": torch.cuda.memory_stats(self.device),
+                    }
+                    with open(os.path.join(snap_dir, f"transient-prefix{cached_len}.pickle"), "wb") as f:
+                        pickle.dump(snap, f)
+                    torch.cuda.memory._record_memory_history(enabled=None)
                 alloc_peaks.append(int(allocated_rise))
                 peaks.append(int(max(reserved_rise, allocated_rise)))
+            # Experiment: FREETOKEN_PREFILL_WORKSPACE_TEST=<pad MiB> repeats each run
+            # after caching ONE free segment of (allocator peak + pad) -- the chunk's
+            # blocks are then carved from it -- and logs the reservation it needed.
+            ws_pad = os.environ.get("FREETOKEN_PREFILL_WORKSPACE_TEST", "").strip()
+            if ws_pad:
+                two_mib = 2 << 20
+                ws = -(-(max(alloc_peaks) + (int(ws_pad) << 20)) // two_mib) * two_mib
+                for cached_len in prefixes:
+                    torch.cuda.synchronize(self.device)
+                    torch.cuda.empty_cache()
+                    reserved0 = torch.cuda.memory_reserved(self.device)
+                    allocated0 = torch.cuda.memory_allocated(self.device)
+                    torch.cuda.reset_peak_memory_stats(self.device)
+                    block = torch.empty(ws, dtype=torch.uint8, device=self.device)
+                    del block
+                    self._prefill_forward(length, cached_len)
+                    torch.cuda.synchronize(self.device)
+                    logger.info_rank0(
+                        "Prefill workspace test (prefix %d): one cached %d MiB segment; "
+                        "reserved rise %d MiB, allocated rise %d MiB, segments %d",
+                        cached_len, ws >> 20,
+                        (torch.cuda.max_memory_reserved(self.device) - reserved0) >> 20,
+                        (torch.cuda.max_memory_allocated(self.device) - allocated0) >> 20,
+                        torch.cuda.memory_stats(self.device).get("segment.all.current", -1),
+                    )
+            # Experiment: FREETOKEN_PREFILL_CAP_TEST=<pad MiB>[,<pad MiB>...] repeats
+            # each run warm-uncapped, then with the caching allocator capped
+            # (set_per_process_memory_fraction) at reserved + allocator peak + pad:
+            # at the cap it frees its idle cached segments and retries instead of
+            # mapping more. Logs reservation, retries and chunk time.
+            cap_pads = os.environ.get("FREETOKEN_PREFILL_CAP_TEST", "").strip()
+            if cap_pads:
+                import time as _time
+
+                total = torch.cuda.get_device_properties(self.device).total_memory
+                peak = max(alloc_peaks)
+                for pad in [None] + [int(x) for x in cap_pads.split(",")]:
+                    for cached_len in prefixes:
+                        torch.cuda.synchronize(self.device)
+                        torch.cuda.empty_cache()
+                        reserved0 = torch.cuda.memory_reserved(self.device)
+                        allocated0 = torch.cuda.memory_allocated(self.device)
+                        stats0 = torch.cuda.memory_stats(self.device)
+                        if pad is not None:
+                            torch.cuda.set_per_process_memory_fraction(
+                                (reserved0 + peak + (pad << 20)) / total, self.device
+                            )
+                        torch.cuda.reset_peak_memory_stats(self.device)
+                        t0 = _time.perf_counter()
+                        err = ""
+                        try:
+                            self._prefill_forward(length, cached_len)
+                            torch.cuda.synchronize(self.device)
+                        except torch.OutOfMemoryError as exc:
+                            err = f" OOM: {str(exc)[:120]}"
+                        dt = _time.perf_counter() - t0
+                        stats1 = torch.cuda.memory_stats(self.device)
+                        torch.cuda.set_per_process_memory_fraction(1.0, self.device)
+                        logger.info_rank0(
+                            "Prefill cap test (prefix %d, pad %s MiB): reserved rise %d MiB, "
+                            "allocated rise %d MiB, alloc retries %d, cudaMalloc %d, cudaFree %d, "
+                            "%.1f ms%s",
+                            cached_len, "uncapped" if pad is None else pad,
+                            (torch.cuda.max_memory_reserved(self.device) - reserved0) >> 20,
+                            (torch.cuda.max_memory_allocated(self.device) - allocated0) >> 20,
+                            stats1["num_alloc_retries"] - stats0["num_alloc_retries"],
+                            stats1["num_device_alloc"] - stats0["num_device_alloc"],
+                            stats1["num_device_free"] - stats0["num_device_free"],
+                            dt * 1e3, err,
+                        )
         finally:
             dummy_row.fill_(dummy_slot)
             if self.moe_offload_cache is not None:
