@@ -592,9 +592,12 @@ def test_ornith_q8_native_score_matches_dequantized_oracle(monkeypatch):
 @cuda_only
 @pytest.mark.parametrize("spec", SPECS, ids=IDS)
 @pytest.mark.parametrize("split", [False, True], ids=["fused", "split"])
-def test_extend_attention_over_quantized_pool(spec, split):
+@pytest.mark.parametrize("gqa", [False, True], ids=["perhead", "gqa"])
+def test_extend_attention_over_quantized_pool(monkeypatch, spec, split, gqa):
     """Both extend paths. The split kernel reads the freshly-computed K/V in bf16 and
-    only the prefix from the quantized pool, so it exercises the mixed case."""
+    only the prefix from the quantized pool, so it exercises the mixed case. ``gqa``
+    runs the split path through the GQA head-packed kernel (FREETOKEN_EXTEND_GQA=1)."""
+    monkeypatch.setenv("FREETOKEN_EXTEND_GQA", "1" if gqa else "0")
     from freetoken.kernel.triton.attention import extend_paged_attention
 
     head_dim, slots, q_heads, kv_heads = 256, 64, 8, 2

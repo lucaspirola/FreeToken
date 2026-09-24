@@ -675,7 +675,10 @@ def test_decode_triton_attention_with_sinks_matches_reference():
         (512, 2, None, [2, 4], [3, 2]),
     ],
 )
+@pytest.mark.parametrize("gqa", [False, True])
 def test_extend_triton_attention_matches_reference(
+    monkeypatch,
+    gqa: bool,
     use_split_inputs: bool,
     head_dim: int,
     num_kv_heads: int,
@@ -685,6 +688,8 @@ def test_extend_triton_attention_matches_reference(
 ):
     from freetoken.kernel.triton.attention import extend_paged_attention
 
+    # GQA-packed split kernel (FREETOKEN_EXTEND_GQA=1) must match the same reference.
+    monkeypatch.setenv("FREETOKEN_EXTEND_GQA", "1" if gqa else "0")
     torch.manual_seed(2)
     device = torch.device("cuda")
     num_q_heads = 16
@@ -758,8 +763,10 @@ def test_extend_triton_attention_matches_reference(
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton attention needs CUDA")
 @pytest.mark.parametrize("use_split_inputs", [False, True])
 @pytest.mark.parametrize("sliding_window", [None, 48])
-def test_extend_triton_attention_with_bidirectional_blocks_matches_reference(use_split_inputs: bool, sliding_window: int | None):
+@pytest.mark.parametrize("gqa", [False, True])
+def test_extend_triton_attention_with_bidirectional_blocks_matches_reference(monkeypatch, gqa: bool, use_split_inputs: bool, sliding_window: int | None):
     """Rows of an image span see the span's later keys across q tiles, text rows stay causal, the window still bounds the past."""
+    monkeypatch.setenv("FREETOKEN_EXTEND_GQA", "1" if gqa else "0")
     from freetoken.kernel.triton.attention import extend_paged_attention
 
     torch.manual_seed(3)
@@ -806,7 +813,9 @@ def test_extend_triton_attention_with_bidirectional_blocks_matches_reference(use
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton attention needs CUDA")
 @pytest.mark.parametrize("use_split_inputs", [False, True])
-def test_extend_triton_attention_with_sinks_matches_reference(use_split_inputs: bool):
+@pytest.mark.parametrize("gqa", [False, True])
+def test_extend_triton_attention_with_sinks_matches_reference(monkeypatch, gqa: bool, use_split_inputs: bool):
+    monkeypatch.setenv("FREETOKEN_EXTEND_GQA", "1" if gqa else "0")
     from freetoken.kernel.triton.attention import extend_paged_attention
 
     torch.manual_seed(12)
