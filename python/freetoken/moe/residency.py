@@ -101,6 +101,10 @@ class ExpertResidency(Protocol):
         """Host step boundary, before a forward is enqueued: move completed
         device-side work that needs a host hand (the mirror's DMA writebacks)."""
 
+    def issue_writebacks(self) -> None:
+        """After the previous step's results were drained (that step is
+        complete): hand its finished device work to the host, no snapshot."""
+
 
 class WholeModelResidency:
     """Whole model pinned in host RAM: nothing to do behind a miss."""
@@ -145,6 +149,9 @@ class WholeModelResidency:
         return None
 
     def service_writebacks(self) -> None:
+        return None
+
+    def issue_writebacks(self) -> None:
         return None
 
     def attach(self, cache, banks) -> None:
@@ -364,6 +371,17 @@ class MirrorResidency:
         event.record()
         pending.append((event, snap))
 
+    def issue_writebacks(self) -> None:
+        """Issue the DMAs of every snapshot whose step has completed.
+
+        The scheduler calls this right after draining the previous step's
+        results: the snapshot taken before the current step was launched is
+        complete then, so its entries are copied while the current step
+        computes (one step of lag instead of two under overlap scheduling).
+        """
+        if self._wb is not None:
+            self._wb_issue_completed()
+
     def _wb_issue_completed(self) -> None:
         wb = self._wb
         pending = wb["pending"]
@@ -380,6 +398,7 @@ class MirrorResidency:
             return
         rows = wb["rows"]
         assert head - issued <= rows, (head, issued, rows)
+        wb["peak_pending"] = max(wb["peak_pending"], head - issued)
         with torch.cuda.stream(wb["stream"]):
             for idx in range(issued, head):
                 s = idx % rows
@@ -659,6 +678,7 @@ class MirrorResidency:
             "pending": [],
             "issued": 0,
             "dma_rows": 0,
+            "peak_pending": 0,
         }
         logger.info_rank0(
             "mirror DMA writebacks: %d-row VRAM staging ring (%.1f MiB); "
@@ -681,6 +701,9 @@ class MirrorResidency:
         # this is what is still in flight or not yet issued).
         out["wb_stage_rows"] = self._mirror.get("wb_stage_rows", 0)
         out["dma_writebacks"] = self._wb["dma_rows"] if self._wb else 0
+        # Most ring entries ever waiting for their DMA at once (a lower bound
+        # on the demand when ring_full_fallbacks > 0).
+        out["wb_peak_pending"] = self._wb["peak_pending"] if self._wb else 0
         return out
 
     def mirror_warm_start(self) -> dict:
@@ -1331,6 +1354,9 @@ def wb_stage_rows(row_bytes: int) -> int:
     is further capped at a third of the pool's reserve (_build_writeback_ring),
     so this is an upper bound, which is the safe side for pricing it.
     """
+    rows_env = os.environ.get("FREETOKEN_MIRROR_WB_STAGE_ROWS", "").strip()
+    if rows_env:                      # measurement override (still capped at reserve/3)
+        return max(int(rows_env), 0)
     raw = os.environ.get("FREETOKEN_MIRROR_WB_STAGE_MB", "").strip()
     budget_mb = float(raw) if raw else 96.0
     if budget_mb <= 0:

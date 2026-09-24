@@ -25,7 +25,7 @@ from enum import IntEnum
 
 
 class MirrorStat(IntEnum):
-    """Index into the mirror's shared ``stats`` / ``stats_host`` int64[9]."""
+    """Index into the mirror's shared ``stats`` / ``stats_host`` int64[10]."""
 
     # Bumped by _resolve_swaps_kernel (decode admissions / prefill materialize).
     SWAPS = 0
@@ -44,6 +44,8 @@ class MirrorStat(IntEnum):
     # SMs), and how many admissions read a still-pending row from that ring.
     STAGED_WRITEBACKS = 7
     STAGE_REDIRECTS = 8
+    # Writebacks that found the ring full and fell back to an SM store.
+    RING_FULL = 9
 
 
 #: Number of counters in the shared ``stats`` tensor. Kept in step with
@@ -82,6 +84,7 @@ def mirror_stats_from_vector(vec) -> dict:
         "retained_rows": values[MirrorStat.RETAINED],
         "staged_writebacks": values[MirrorStat.STAGED_WRITEBACKS],
         "stage_redirects": values[MirrorStat.STAGE_REDIRECTS],
+        "ring_full_fallbacks": values[MirrorStat.RING_FULL],
     }
 
 
