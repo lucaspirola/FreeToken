@@ -171,6 +171,9 @@ class MirrorResidency:
         self._mirror_pool = pool
         # Bound by OffloadMoeCache.attach_residency, before _build_mirror_plan.
         self.cache = cache
+        # Requests decoded per step (--max-running-requests), which scales the
+        # writebacks one step can stage (wb_stage_rows); set by build_residency.
+        self._decode_batch = 1
         # Device-resident residency maps + copy descriptors (_build_mirror_plan).
         self._mirror: dict | None = None
         # Host half of the DMA writebacks (_build_mirror_plan); None when the
@@ -635,22 +638,29 @@ class MirrorResidency:
     def _build_writeback_ring(self, pool, pool_ptrs, cache_ptrs, feat_bytes) -> None:
         """VRAM staging ring for DMA writebacks (see _resolve_swaps_kernel).
 
-        Sized by ``FREETOKEN_MIRROR_WB_STAGE_MB`` (default 96 MiB, clamped to
-        4..32 rows); 0 disables it and every writeback is an SM store into the
-        pool, the pre-DMA path. Allocated here, with the other mirror state and
-        before the first forward, so the arena and KV budgets see it.
+        Sized by wb_stage_rows from the routing geometry and the warm-start
+        arena (``FREETOKEN_MIRROR_WB_STAGE_MB=0`` disables it and every
+        writeback is an SM store into the pool, the pre-DMA path). Allocated
+        here, with the other mirror state and before the first forward, so the
+        arena and KV budgets see it.
         """
         m = self._mirror
         dev = self.cache.device
         row_total = sum(feat_bytes)
-        rows = wb_stage_rows(row_total) if dev.type == "cuda" else 0
-        # At most a third of the pool's reserve. A ring-full fallback needs a
+        # top_k from the model config; a pool built without one (unit tests)
+        # gets the one-layer ceiling, i.e. the reserve cap.
+        top_k = getattr(getattr(pool, "_config", None), "num_experts_per_tok", None)
+        # The cap, a third of the pool's reserve: a ring-full fallback needs a
         # free row with no DMA pending; pending rows are <= ring rows, and the
         # free stack stays near the reserve minus one launch's misses (the
         # reserve is sized for those), so this keeps a clean row available.
         # Measured without the cap: a 32-row ring over an 8-row reserve,
         # never serviced, starved writebacks in tests/moe/test_mirror_retention.
-        rows = min(rows, pool.reserve_rows // 3)
+        rows = wb_stage_rows(
+            top_k=int(top_k or pool.num_experts), moe_layers=pool.num_layers,
+            experts=pool.num_experts, gpu_slots=self.cache.cache_size,
+            reserve_rows=pool.reserve_rows, batch=self._decode_batch,
+        ) if dev.type == "cuda" else 0
         m["wb_stage_rows"] = rows
         # [0] entries ever staged, [1] entries whose DMA has landed, [2 + s]
         # pool row of ring slot s.
@@ -1303,10 +1313,20 @@ class MirrorResidency:
         kv_ceiling = cache_per_page * (ceiling_tokens // config.page_size)
         # The DMA-writeback staging ring (_build_writeback_ring) is VRAM the
         # live arena fill will see; price it here too, or the pool is sized
-        # for an arena that many slots larger than the one it gets.
-        stage = wb_stage_rows(per_slot) * per_slot
-        slots = int(max(budget - kv_ceiling - stage, 0) // per_slot)
+        # for an arena that many slots larger than the one it gets. Priced at
+        # the ceiling's arena, the smallest one, so the rows priced are never
+        # fewer than the rows built from the (larger) warm-start arena.
         total = mc.num_moe_layers * mc.num_experts
+        from freetoken.moe.mirror_pool import resolve_reserve_rows
+
+        stage = wb_stage_rows(
+            top_k=int(getattr(mc, "num_experts_per_tok", 0) or mc.num_experts),
+            moe_layers=mc.num_moe_layers, experts=mc.num_experts,
+            gpu_slots=int(max(budget - kv_ceiling, 0) // per_slot),
+            reserve_rows=resolve_reserve_rows(mc.num_experts),
+            batch=getattr(config, "max_running_req", 1) or 1,
+        ) * per_slot
+        slots = int(max(budget - kv_ceiling - stage, 0) // per_slot)
         # One margin below the plan, the larger of:
         #   * four arena chunks of release granularity (FREETOKEN_ARENA_STEP_
         #     SLOTS, default 8) so chunk-boundary overshoot stays covered, and
@@ -1359,23 +1379,51 @@ def sourced_mirror_hooks(mc):
     return hooks
 
 
-def wb_stage_rows(row_bytes: int) -> int:
-    """Rows of the mirror's DMA-writeback staging ring for one expert row size.
+def wb_stage_rows(*, top_k: int, moe_layers: int, experts: int, gpu_slots: int,
+                  reserve_rows: int, batch: int = 1) -> int:
+    """Rows of the mirror's DMA-writeback staging ring.
 
-    ``FREETOKEN_MIRROR_WB_STAGE_MB`` (default 96) over the row bytes, clamped
-    to 4..32 rows; 0 disables the ring (SM-store writebacks). The ring built
-    is further capped at a third of the pool's reserve (_build_writeback_ring),
-    so this is an upper bound, which is the safe side for pricing it.
+    The ring must hold what the resolve kernels stage between two services.
+    Under lag-1 servicing (issue_writebacks) the previous step's DMAs land
+    early in the next step and every MoE layer's resolve re-reads the landed
+    count, so what the ring really has to hold is about ONE step's
+    writebacks (replay of the box traces: a ring of one step's demand at a
+    given percentile stages about that share of it, ring_replay.py).
+
+    A step's writebacks are its routed misses whose victim has no pool copy.
+    Their ceiling is ``top_k * moe_layers * batch`` (every routed expert
+    missing); what a step actually stages grows with how much of the model
+    is off the GPU, ``uncovered = 1 - gpu_slots / (moe_layers * experts)``.
+    Measured per-step writebacks on the box (FREETOKEN_MIRROR_WB_TRACE,
+    2026-09-24, both at the 99th percentile): EXL3 Ornith 75 (ceiling 320,
+    uncovered 0.41 at the warm-start arena), Nemotron 20 (ceiling 138,
+    uncovered 0.22); half the ceiling times the uncovered share predicts
+    65 and 15. So the ring is
+
+        rows = ceil(top_k * moe_layers * batch * uncovered / 2)
+
+    with no model constant in it. Bigger is not better: every ring row is an
+    arena slot the experts lose for the whole decode (Nemotron 85 rows vs 17:
+    swaps +10%, decode -4%; EXL3 256 vs 32: swaps +11%).
+
+    At least 4 rows, at most a third of the pool's reserve (a ring-full
+    fallback needs a free pool row with no DMA pending; see
+    _build_writeback_ring). ``FREETOKEN_MIRROR_WB_STAGE_ROWS`` overrides the
+    rule (measurement), ``FREETOKEN_MIRROR_WB_STAGE_MB=0`` disables the ring
+    (SM-store writebacks).
     """
-    rows_env = os.environ.get("FREETOKEN_MIRROR_WB_STAGE_ROWS", "").strip()
-    if rows_env:                      # measurement override (still capped at reserve/3)
-        return max(int(rows_env), 0)
-    raw = os.environ.get("FREETOKEN_MIRROR_WB_STAGE_MB", "").strip()
-    budget_mb = float(raw) if raw else 96.0
-    if budget_mb <= 0:
+    off = os.environ.get("FREETOKEN_MIRROR_WB_STAGE_MB", "").strip()
+    if off and float(off) <= 0:
         return 0
-    rows = int(budget_mb * 2**20 // max(int(row_bytes), 1))
-    return max(4, min(rows, 32))
+    cap = max(int(reserve_rows) // 3, 0)
+    rows_env = os.environ.get("FREETOKEN_MIRROR_WB_STAGE_ROWS", "").strip()
+    if rows_env:                      # measurement override (still capped)
+        return min(max(int(rows_env), 0), cap)
+    total = max(int(moe_layers) * int(experts), 1)
+    uncovered = 1.0 - min(max(int(gpu_slots), 0), total) / total
+    per_step = int(top_k) * int(moe_layers) * max(int(batch), 1)
+    rows = math.ceil(per_step * uncovered / 2)
+    return min(max(rows, 4), cap)
 
 
 def build_residency(config, mc, engine) -> ExpertResidency:
@@ -1520,7 +1568,9 @@ def build_residency(config, mc, engine) -> ExpertResidency:
             device=engine.device,
             reserve_rows=mirror_reserve_rows,
         )
-    return MirrorResidency(mirror_pool)
+    residency = MirrorResidency(mirror_pool)
+    residency._decode_batch = max(int(getattr(config, "max_running_req", 1) or 1), 1)
+    return residency
 
 
 # Startup RAM guard (S12c): applies to both NVFP4 and GGUF mirror pools alike.

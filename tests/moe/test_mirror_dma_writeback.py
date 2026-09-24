@@ -58,13 +58,20 @@ _STEP = 4
 _RESERVE = 2 * EXPERTS                # ring rows are capped at reserve // 3
 _CAP = TOTAL                          # complement 28 + reserve 16 + 4 spare
 
-# FREETOKEN_MIRROR_WB_STAGE_MB values: off (SM stores), a 4-row ring (the
-# floor: fills within a few steps), the default (reserve // 3 = 5 rows here).
-_OFF, _TINY, _DEFAULT = "0", "0.0001", ""
+# Ring settings: off (FREETOKEN_MIRROR_WB_STAGE_MB=0, SM stores), a 4-row
+# ring (FREETOKEN_MIRROR_WB_STAGE_ROWS=4: fills within a few steps), the
+# default rule (wb_stage_rows; the toy pool has no top_k, so it answers the
+# reserve cap, reserve // 3 = 5 rows here).
+_OFF, _TINY, _DEFAULT = "off", "4rows", "default"
 
 
 def _cache(root, monkeypatch, stage_mb):
-    monkeypatch.setenv("FREETOKEN_MIRROR_WB_STAGE_MB", stage_mb)
+    monkeypatch.delenv("FREETOKEN_MIRROR_WB_STAGE_MB", raising=False)
+    monkeypatch.delenv("FREETOKEN_MIRROR_WB_STAGE_ROWS", raising=False)
+    if stage_mb == _OFF:
+        monkeypatch.setenv("FREETOKEN_MIRROR_WB_STAGE_MB", "0")
+    elif stage_mb == _TINY:
+        monkeypatch.setenv("FREETOKEN_MIRROR_WB_STAGE_ROWS", "4")
     pool = MirrorExpertPool(
         root, LAYERS, EXPERTS, _CAP, hidden_size=H, intermediate_size=ISZ,
         spec=NEMOTRON_SPEC,
