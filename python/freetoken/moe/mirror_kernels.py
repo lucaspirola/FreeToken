@@ -123,6 +123,58 @@ def resolve_swaps(cache, layer_id: int) -> None:
     )
 
 
+def begin_layer(cache, layer_id: int) -> None:
+    """Per-layer bookkeeping before the LRU kernel runs, in one launch.
+
+    Clears ``victim_ids``/``prior_ids`` (entries linger from a longer
+    previous step; the LRU kernel writes one per miss) and snapshots this
+    layer's slice of ``slot_for_id`` into ``prev_slot_of_id``. The swap kernel
+    reads ``prev_slot_of_id`` only at ``layer_id * E + expert`` of the layer
+    it resolves, so the slice is all it needs. This was two fills and a
+    whole-table D2D memcpy per layer; inside the decode graph each memcpy
+    node was a copy-engine dependency point (ft-g5 nsys, 2026-09-24).
+    """
+    m = cache.residency._mirror
+    plan = cache.victim_ids.numel()
+    E = cache.num_experts
+    if cache.victim_ids.device.type != "cuda":
+        cache.victim_ids.fill_(-1)
+        cache.prior_ids.fill_(-1)
+        m["prev_slot_of_id"][layer_id * E:(layer_id + 1) * E].copy_(cache.slot_for_id[layer_id])
+        return
+    block = 1024
+    _begin_layer_kernel[(triton.cdiv(max(plan, E), block),)](
+        cache.victim_ids,
+        cache.prior_ids,
+        m["prev_slot_of_id"],
+        cache.slot_for_id,
+        layer_id * E,
+        plan,
+        E,
+        BLOCK=block,
+    )
+
+
+@triton.jit(do_not_specialize=["base"])
+def _begin_layer_kernel(
+    victim_ids_ptr,
+    prior_ids_ptr,
+    prev_slot_ptr,
+    slot_for_id_ptr,
+    base,
+    plan,
+    num_experts,
+    BLOCK: tl.constexpr,
+):
+    off = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    in_plan = off < plan
+    tl.store(victim_ids_ptr + off, -1, mask=in_plan)
+    tl.store(prior_ids_ptr + off, -1, mask=in_plan)
+    in_layer = off < num_experts
+    slot = tl.load(slot_for_id_ptr + base + off, mask=in_layer)
+    tl.store(prev_slot_ptr + base + off, slot, mask=in_layer)
+
+
 def publish_freed_rows(cache) -> None:
     """Fold rows freed this step into the free stack (after the copies)."""
     m = cache.residency._mirror

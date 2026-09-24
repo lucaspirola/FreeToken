@@ -179,6 +179,7 @@ class MirrorResidency:
         # Host half of the DMA writebacks (_build_mirror_plan); None when the
         # staging ring is disabled (FREETOKEN_MIRROR_WB_STAGE_MB=0) or on CPU.
         self._wb: dict | None = None
+        self._snap: dict | None = None
         # Mirror-only prefill assembly (see _prefetch_split_mirror), allocated
         # by init_prefill_buffers when the cache has prefill overlap.
         self._mirror_writeback: dict | None = None
@@ -213,9 +214,11 @@ class MirrorResidency:
             # its docstring.)
             # Entries linger from a longer previous step; the LRU kernel only
             # writes one per miss, so clear before it runs.
-            self.cache.victim_ids.fill_(-1)
-            self.cache.prior_ids.fill_(-1)
-            self._mirror["prev_slot_of_id"].copy_(self.cache.slot_for_id.view(-1))
+            # One launch (mirror_kernels.begin_layer): the two fills plus this
+            # layer's slice of the pre-step slot map.
+            from freetoken.moe.mirror_kernels import begin_layer
+
+            begin_layer(self.cache, layer_id)
         return None
 
     def before_buffer_fill(self, buffer_id: int) -> bool:
@@ -339,7 +342,8 @@ class MirrorResidency:
         return True
 
     def service_writebacks(self) -> None:
-        """Issue the ring -> pool DMAs of every step that has finished.
+        """Issue the ring -> pool DMAs of every step that has finished, and
+        snapshot the step just enqueued.
 
         Called by the scheduler before each forward is enqueued (and by any
         driver of ``copy_missing`` that wants its writebacks to land). Two
@@ -350,29 +354,46 @@ class MirrorResidency:
            the writeback stream, then publish the new completed count to the
            device (``wb_state[1]``) behind those copies, which is what lets
            the resolve kernel reuse the ring slots and read the pool rows.
-        2. Snapshot the device ring state behind everything enqueued so far
-           (i.e. after the previous step) into pinned memory, with an event,
-           for a later call to consume.
+        2. Snapshot the device ring state and the fault counters behind
+           everything enqueued so far (i.e. after the previous step) into
+           pinned memory, with an event, for a later call to consume.
 
-        Under overlap scheduling step k's entries are issued at step k+2's
-        boundary and copied while k+2 computes. The ring must hold what is
-        staged meanwhile; when it cannot, the kernel falls back to SM stores.
+        The snapshot copies run on a side stream that waits for the compute
+        stream, never the other way round: a small D2H on the compute stream
+        queues behind the writeback DMAs on the copy engine and put the whole
+        DMA on the decode critical path (ft-g5 nsys, 2026-09-24: ~370 us of a
+        6149 us step). The compute stream never waits on either side stream.
+
+        The step's entries are issued by ``issue_writebacks`` once the step
+        is complete and copied while the next step computes. The ring must
+        hold what is staged meanwhile; when it cannot, the kernel falls back
+        to SM stores.
         """
-        wb = self._wb
-        if wb is None:
+        m = getattr(self, "_mirror", None)
+        if m is None or self._snap is None:
             return
-        self._wb_issue_completed()
-        pending = wb["pending"]
-        if len(pending) == len(wb["snaps"]):
-            pending[0][0].synchronize()
+        wb = self._wb
+        if wb is not None:
             self._wb_issue_completed()
-        slot = wb["next_snap"]
-        wb["next_snap"] = (slot + 1) % len(wb["snaps"])
-        snap = wb["snaps"][slot]
-        event = wb["events"][slot]
-        snap.copy_(self._mirror["wb_state"], non_blocking=True)
-        event.record()
-        pending.append((event, snap))
+            pending = wb["pending"]
+            if len(pending) == len(wb["snaps"]):
+                pending[0][0].synchronize()
+                self._wb_issue_completed()
+        side = self._snap["stream"]
+        after_step = self._snap["after_step"]
+        after_step.record()
+        side.wait_event(after_step)
+        with torch.cuda.stream(side):
+            # Monotone counters: the host check may read one that lags.
+            m["stats_host"].copy_(m["stats"], non_blocking=True)
+            if wb is not None:
+                slot = wb["next_snap"]
+                wb["next_snap"] = (slot + 1) % len(wb["snaps"])
+                snap = wb["snaps"][slot]
+                event = wb["events"][slot]
+                snap.copy_(m["wb_state"], non_blocking=True)
+                event.record()
+                wb["pending"].append((event, snap))
 
     def issue_writebacks(self) -> None:
         """Issue the DMAs of every snapshot whose step has completed.
@@ -680,6 +701,9 @@ class MirrorResidency:
         # KIND_CACHE, KIND_POOL, KIND_STAGE.
         m["kind_ptrs"] = torch.tensor(cache_ptrs + pool_ptrs + stage_ptrs,
                                       dtype=torch.int64, device=dev)
+        # Side stream for the per-step host snapshots (service_writebacks).
+        self._snap = ({"stream": torch.cuda.Stream(device=dev), "after_step": torch.cuda.Event()}
+                      if dev.type == "cuda" else None)
         if not rows:
             self._wb = None
             return
@@ -826,7 +850,7 @@ class MirrorResidency:
         return {"gpu": len(gpu_plan), "mirrored": filled, "duplicates": seeded,
                 "reserve": int(m["free_count"].item())}
 
-    def mirror_fault_check(self) -> None:
+    def mirror_fault_check(self, fresh: bool = False) -> None:
         """Raise if the swap kernel ever lost an expert's only copy.
 
         ``resolve_swaps`` cannot raise from inside a Triton kernel, so it counts
@@ -846,10 +870,18 @@ class MirrorResidency:
         Not a complete detector -- a stale free-row publish once served wrong
         experts with ``violations`` still at 0 (see _mirror_publish_free_rows) --
         so it is a backstop for the sizing, not a substitute for it.
+
+        The scheduler's check reads the pinned snapshot ``service_writebacks``
+        takes once per step (it may lag a step). ``fresh`` syncs and reads the
+        device counters now, for callers that drive the kernels directly.
         """
         m = getattr(self, "_mirror", None)
         if m is None:
             return
+        if fresh:
+            if m["stats"].is_cuda:
+                torch.cuda.current_stream(m["stats"].device).synchronize()
+            m["stats_host"].copy_(m["stats"])
         violations, starved = mirror_fault_counts_from_vector(m["stats_host"].tolist())
         if violations or starved:
             raise RuntimeError(
@@ -1044,9 +1076,9 @@ class MirrorResidency:
         fast_index_copy_kinds_jit(m["kind_ptrs"], m["feat_bytes"], m["g2"], m["n_g2"])
         # 3. only now may this step's vacated rows be reused
         publish_freed_rows(self.cache)
-        # 4. stream-ordered snapshot of the fault counters for the host check at
-        # the next batch boundary (no sync: the copy rides this step's stream).
-        m["stats_host"].copy_(m["stats"], non_blocking=True)
+        # The fault counters reach the host once per step, off this stream
+        # (service_writebacks): a D2H here was a copy-engine node per layer
+        # inside the decode graph, queued behind the writeback DMAs.
         self.cache._pending_src_layer = None
         self.cache._pending_whole_layer = False
 
