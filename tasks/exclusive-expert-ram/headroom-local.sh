@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Local acceptance of the measured prefill headroom (reorg-headroom, 82207c8) on the owner's
 # RTX 5080 (WSL), the machine whose numbers count:
-#   1. checkpoint1.sh ck4 -- Nemotron checkpoint re-pass (the growable-KV path is checkpointed):
+#   1. checkpoint1.sh ck4 (skipped with SKIP_CK4=1: ck4 can gate on a rented box) -- Nemotron checkpoint re-pass (the growable-KV path is checkpointed):
 #      ck4-whole, ck4-mirror-1m, ck4-mirror, ck4-whole-close, needles/recall vs the reference.
 #   2. R-S12a: Ornith NVFP4 whole model, ratio 1.00, 8K/32K/80K/128K, two passes, twice
 #      (a, b: the bimodality needs more than one draw), then the RAM-saver arm.
@@ -19,7 +19,7 @@ quiet() {
   echo "host quiet at $(date -Is): $(grep MemAvailable /proc/meminfo)"
 }
 quiet
-"$HERE/checkpoint1.sh" ck4 || echo "checkpoint ck4 exit $?"
+[ "${SKIP_CK4:-0}" = 1 ] || "$HERE/checkpoint1.sh" ck4 || echo "checkpoint ck4 exit $?"
 export FT_VENV=/home/lucas/ai/FreeToken/.venv FT_RATIO=1.00
 export FT_MODEL="$HOME/ai/models/Ornith-1.5-35B-A3B-NVFP4" FT_NAME=ornith
 export FT_EXTRA="--num-tokens 262144 --max-seq-len-override 262144 --served-model-name ornith"
