@@ -1,0 +1,16 @@
+arm                 point        cg_current    cg_anon    cg_file cg_unevict     vm_rss   rss_anon   rss_file
+ck4m-mirror-1m      at ready          12.68      12.54       0.10       0.00      12.12      11.54       0.49
+ck4m-mirror-1m      after req 1       13.39      13.25       0.10       0.00      12.12      11.55       0.49
+ck4m-mirror-1m      after req 3       13.60      13.46       0.11       0.00      12.13      11.55       0.49
+ck4m-mirror-1m      after req 4       13.34      13.18       0.12       0.00      12.13      11.55       0.49
+ck4m-mirror-1m      max current       13.60      13.46       0.11       0.00      12.13      11.55       0.49
+ref2e-mirror-1m     at ready          13.48      12.11       1.31       0.00      11.26      10.87       0.31
+ref2e-mirror-1m     after req 1       13.70      12.33       1.31       0.00      11.26      10.87       0.31
+ref2e-mirror-1m     after req 3       13.81      12.40       1.35       0.00      11.28      10.89       0.31
+ref2e-mirror-1m     after req 4       14.20      12.78       1.36       0.00      11.30      10.91       0.31
+ref2e-mirror-1m     max current       14.20      12.78       1.36       0.00      11.30      10.91       0.31
+ck4m-whole-1m       at ready          18.65       3.00      15.57       0.00      17.76       1.78       0.49
+ck4m-whole-1m       after req 1       19.14       3.48      15.57       0.00      17.76       1.78       0.49
+ck4m-whole-1m       after req 3       19.07       3.42      15.57       0.00      17.76       1.78       0.49
+ck4m-whole-1m       after req 4       19.30       3.65      15.57       0.00      17.75       1.78       0.48
+ck4m-whole-1m       max current       19.30       3.65      15.57       0.00      17.75       1.78       0.48

@@ -1,0 +1,13 @@
+pool: ck4m-mirror-1m 1866 rows / 9.77 GiB, ref2e-mirror-1m 1765 rows / 9.24 GiB, difference +0.53 GiB
+ready  memory.current  cand  12.68  ref  13.48  delta -0.80  delta without the pool difference -1.33
+ready  anon            cand  12.54  ref  12.11  delta +0.43  delta without the pool difference -0.10
+ready  largest proc RSS cand  12.12  ref  11.26  delta +0.86
+1M p1  memory.current  cand  13.60  ref  13.81  delta -0.21  delta without the pool difference -0.74
+1M p1  anon            cand  13.46  ref  12.40  delta +1.06  delta without the pool difference +0.53
+1M p1  largest proc RSS cand  12.13  ref  11.28  delta +0.85
+1M p2  memory.current  cand  13.34  ref  14.20  delta -0.86  delta without the pool difference -1.39
+1M p2  anon            cand  13.18  ref  12.78  delta +0.41  delta without the pool difference -0.12
+1M p2  largest proc RSS cand  12.13  ref  11.30  delta +0.82
+ck4m-mirror-1m: ram_gib 12.54 (MemAvailable delta), end-of-arm current 13.42, peak 13.67, rss_ready 13.9
+ref2e-mirror-1m: ram_gib 12.74 (MemAvailable delta), end-of-arm current 14.2, peak 14.26, rss_ready 12.97
+gate (raw memory.current delta at 1M p1 and p2 within +/- 0.6 GiB): FAIL
