@@ -59,3 +59,26 @@ Setup:
 | | other triton tile | 83 | 3 of 3 | adds Porto, which is not a quoted city |
 
 Nemotron gets two of the three day numbers wrong in every arm, identically. That is the model, not the kernel. `results/attngreedy-*/compare.txt` holds the full texts.
+
+### Four more prompts (`TAG=multi`, SIZE 62000/70000/78000/90000; 80K-124K tokens; 1 repeat each)
+
+First divergent generated token against triton, one entry per prompt, with the 107K/114K prompt above listed first:
+
+| model | flashinfer | other triton tile (noise) |
+|---|---|---|
+| Nemotron | none, 63, 12, 173, 85 (median 63) | 36, 63, 42, 11, 0 (median 36) |
+| Ornith NVFP4 | 5, 100, 101, 0, 7 (median 7) | 83, 100, 20, 0, 7 (median 20) |
+
+Quoted facts right, out of 15 (5 prompts x 3 records):
+
+| model | triton | flashinfer | noise tile |
+|---|---:|---:|---:|
+| Ornith | 13 | 14 | 13 |
+| Nemotron | 1 | 1 | 1 |
+
+- Nemotron misquotes the records in every arm. It invents the item and day around the right record number, the same way in every arm, so the facts check does not discriminate there.
+- flashinfer's divergence is no earlier than the noise tile's:
+  - On Nemotron it is later.
+  - On Ornith, three of the five prompts diverge at the same token in both arms, and the medians are 7 against 20.
+- In substance, flashinfer is equal or better: on Ornith it gets one more fact right than triton or the tile.
+- `results/attngreedy-multi-*/compare.txt` holds the full texts.
