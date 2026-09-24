@@ -47,12 +47,8 @@ def exl3_forward(x2: torch.Tensor, trellis: torch.Tensor, suh: torch.Tensor, svh
     xh = had_rows(x2, suh, parts)
     if rows <= GEMV_MAX_ROWS:
         split = pick_split_k(rows, parts.n // 128, parts.k, x2.device)
-        if split > 1:
-            acc = torch.zeros((rows, parts.n), dtype=torch.float32, device=x2.device)
-            exl3_gemv(xh, trellis, svh, parts, out=acc, split_k=split)
-            return acc.to(out_dtype)
         out = torch.empty((rows, parts.n), dtype=out_dtype, device=x2.device)
-        return exl3_gemv(xh, trellis, svh, parts, out=out)
+        return exl3_gemv(xh, trellis, svh, parts, out=out, split_k=split)
     out = torch.empty((rows, parts.n), dtype=out_dtype, device=x2.device)
     block_m = 16 if rows <= 32 else (32 if rows <= 128 else 64)
     return exl3_gemm(xh, trellis, svh, parts, out=out, block_m=block_m)

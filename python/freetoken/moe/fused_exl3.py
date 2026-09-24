@@ -62,13 +62,13 @@ def _decode(x, banks, topk_weights, ids, top_k, parts, activation, alpha, limit)
     dev = x.device
     xh = had_rows(x, gu_suh, gu, src_div=top_k, experts=ids, suh_expert_stride=gu_suh.stride(0))
     split = pick_split_k(routes, gu.n // 128, gu.k, dev)
-    g = torch.zeros((routes, gu.n), dtype=torch.float32, device=dev)
+    g = torch.empty((routes, gu.n), dtype=torch.float32, device=dev)
     exl3_gemv(xh, gu_tr, gu_svh, gu, out=g, experts=ids, tr_expert_stride=gu_tr.stride(0) // 2,
               svh_expert_stride=gu_svh.stride(0), split_k=split)
     a = _act(g.to(ACT_DTYPE), activation, alpha, limit)
     ah = had_rows(a, dn_suh, dn, experts=ids, suh_expert_stride=dn_suh.stride(0))
     split = pick_split_k(routes, dn.n // 128, dn.k, dev)
-    o = torch.zeros((routes, dn.n), dtype=torch.float32, device=dev)
+    o = torch.empty((routes, dn.n), dtype=torch.float32, device=dev)
     exl3_gemv(ah, dn_tr, dn_svh, dn, out=o, experts=ids, tr_expert_stride=dn_tr.stride(0) // 2,
               svh_expert_stride=dn_svh.stride(0), split_k=split)
     return _combine(o, topk_weights, tokens, top_k, x.dtype)

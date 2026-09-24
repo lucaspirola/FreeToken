@@ -298,14 +298,14 @@ def _exl3_gemm_kernel(
 @triton.jit
 def _exl3_gemv_kernel(
     xh_ptr, stride_xpart, stride_xm,
-    out_ptr, stride_om,
+    out_ptr, stride_om, stride_osplit,
     tr_ptr, tr_expert_stride,
     svh_ptr, svh_expert_stride,
     had_ptr,
     part_of_nb_ptr, word_off_ptr, ntiles_ptr, nstart_ptr,
     expert_ptr, K_SPLIT,
     BK: tl.constexpr, BITS: tl.constexpr, CB: tl.constexpr,
-    HAS_EXPERT: tl.constexpr, ATOMIC: tl.constexpr,
+    HAS_EXPERT: tl.constexpr,
 ):
     p = tl.program_id(0)
     pid_n = tl.program_id(1)
@@ -332,10 +332,9 @@ def _exl3_gemv_kernel(
     cols = pid_n * 128 + idx
     sv = tl.load(svh_ptr + expert * svh_expert_stride + cols).to(tl.float32)
     y = y * sv * 0.08838834764831843
-    if ATOMIC:
-        tl.atomic_add(out_ptr + p.to(tl.int64) * stride_om + cols, y, sem="relaxed")
-    else:
-        tl.store(out_ptr + p.to(tl.int64) * stride_om + cols, y.to(out_ptr.dtype.element_ty))
+    # split K: each split writes its own plane; the launcher sums the planes in a fixed order
+    # (atomics would make decode run-to-run nondeterministic)
+    tl.store(out_ptr + pid_k * stride_osplit + p.to(tl.int64) * stride_om + cols, y.to(out_ptr.dtype.element_ty))
 
 
 # ---------------------------------------------------------------------------
@@ -435,9 +434,10 @@ def exl3_gemv(
     svh_expert_stride: int = 0,
     split_k: int = 1,
 ) -> torch.Tensor:
-    """Per-row GEMV (decode). With ``split_k > 1`` the partial products are rotated and
-    atomically added into ``out``, which must then be a zeroed fp32 tensor (the output
-    rotation is linear, so rotating each partial sum is exact)."""
+    """Per-row GEMV (decode) into ``out`` ``[rows, N]`` (any float dtype). With ``split_k > 1``
+    each K split writes a rotated fp32 partial to its own plane of a scratch buffer and the
+    planes are summed in order (the output rotation is linear, so rotating partials is exact):
+    deterministic, and fixed-shape for CUDA graphs."""
     rows = xh.shape[1]
     if rows == 0:
         return out
@@ -445,22 +445,23 @@ def exl3_gemv(
     k = parts.k
     if k % (split_k * bk):
         raise ValueError(f"split_k {split_k} does not divide K {k} into {bk}-row steps")
-    if split_k > 1:
-        assert out.dtype == torch.float32
+    dst = out if split_k == 1 else torch.empty((split_k, rows, parts.n), dtype=torch.float32, device=xh.device)
     words = _words(trellis)
     grid = (rows, parts.n // HAD, split_k)
     _exl3_gemv_kernel[grid](
         xh, xh.stride(0), xh.stride(1),
-        out, out.stride(0),
+        dst, dst.stride(-2), dst.stride(0) if split_k > 1 else 0,
         words, tr_expert_stride,
         svh, svh_expert_stride,
         hadamard_pm1(xh.device),
         parts.part_of_nb, parts.word_off, parts.ntiles, parts.nstart,
         experts if experts is not None else parts.part_of_nb, k // split_k,
         BK=bk, BITS=parts.bits, CB=CODEBOOKS[parts.codebook],
-        HAS_EXPERT=experts is not None, ATOMIC=split_k > 1,
+        HAS_EXPERT=experts is not None,
         num_warps=4,
     )
+    if split_k > 1:
+        torch.sum(dst, dim=0, out=out) if out.dtype == torch.float32 else out.copy_(dst.sum(dim=0))
     return out
 
 

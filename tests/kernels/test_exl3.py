@@ -239,4 +239,27 @@ def test_moe_decode_replays_under_a_cuda_graph():
         graph.replay()
         eager = fused_experts_exl3(x2, banks, w2, ids2, **kw)
         torch.cuda.synchronize()
-        assert rel_err(out, eager) < 1e-3
+        assert torch.equal(out, eager)  # deterministic split-K: replay == eager bit for bit
+
+
+@cuda
+def test_split_k_decode_is_deterministic():
+    """Split-K partials are summed in a fixed order, so decode repeats bit for bit (with
+    atomics the real model's saver and whole-model runs drifted apart after ~15 tokens)."""
+    from freetoken.kernel.triton.exl3 import Exl3Parts
+    from freetoken.layers.quantization.linear.exl3 import exl3_forward, pick_split_k
+    from freetoken.moe.fused_exl3 import fused_experts_exl3
+
+    k, n = 2048, 1024
+    assert pick_split_k(1, n // 128, k, torch.device("cuda")) > 1
+    trs, suh, svh = _dense_case(k, (n,), 5, "mul1", seed=3)
+    parts = Exl3Parts.build(k, (n,), 5, "mul1", "cuda")
+    x = torch.randn(1, k, generator=torch.Generator().manual_seed(4)).to(torch.bfloat16).cuda()
+    args = (trs[0].reshape(-1).cuda(), suh.cuda(), svh.cuda(), parts, torch.bfloat16)
+    first = exl3_forward(x, *args)
+    assert all(torch.equal(first, exl3_forward(x, *args)) for _ in range(20))
+
+    banks = tuple(b.cuda() for b in _moe_banks(5, "mul1", 12, seed=5))
+    xm, w, ids = (t.cuda() for t in _routing(1, 12, seed=6))
+    first = fused_experts_exl3(xm, banks, w, ids, bits=5, codebook="mul1", is_prefill=False)
+    assert all(torch.equal(first, fused_experts_exl3(xm, banks, w, ids, bits=5, codebook="mul1", is_prefill=False)) for _ in range(20))

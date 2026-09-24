@@ -16,11 +16,14 @@ def main(model_dir, ft_path, out):
     ids = ft["prompt_ids"] + ft["output_ids"]
     config = Config.from_directory(model_dir)
     model = Model.from_config(config)
-    model.load(device="cuda:0")
+    # the whole 35B model does not fit a 16 GB card: set EXL3_MOE_CPU_OFFLOAD=<n layers> in the
+    # environment to run the routed experts of the first n MoE layers on exllamav3's CPU worker
+    model.load(device="cuda:0", max_chunk_size=max(2048, len(ids)))
+    n = len(ft["output_ids"])
     with torch.inference_mode():
-        logits = model.forward(torch.tensor([ids], dtype=torch.long), {})
-    p = len(ft["prompt_ids"])
-    sel = logits[0, p - 1: len(ids) - 1].float().cpu()
+        # logits of the last n + 1 positions only (a full [T, 248320] would not fit); drop the last
+        logits = model.forward(torch.tensor([ids], dtype=torch.long), {"last_tokens_only": n + 1})
+    sel = logits[0, -(n + 1):-1].float().cpu()
     torch.save({"logits": sel, "ids": ids}, out)
     print("saved", tuple(sel.shape))
 
