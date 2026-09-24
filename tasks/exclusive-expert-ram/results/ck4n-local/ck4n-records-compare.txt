@@ -1,0 +1,17 @@
+== ck4n-mirror-1m (f03c081) vs nemotron-reserve-2e-1m (None)
+  decode_1000k          97.2 vs    72.9  133.3%  ok   total 795.8 s, ttft 794.55 s
+  decode_1000k_p1       89.6 vs    76.9  116.5%  ok   total 795.7 s, ttft 794.31 s
+  decode_8k            175.1 vs   170.7  102.6%  ok   total 1.7 s, ttft 0.98 s
+  decode_8k_p1         189.6 vs   177.0  107.1%  ok   total 0.9 s, ttft 0.21 s
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            11.71 (record 12.26)  free_evict_rate 0.907 (record 0.565)
+  ram 12.26 +/- 0.6  ok
+Traceback (most recent call last):
+  File "/home/lucas/ai/FreeToken-wt/next-measure/tasks/exclusive-expert-ram/compare_records.py", line 23, in <module>
+    a, r = load(arm), load(ref)
+           ^^^^^^^^^
+  File "/home/lucas/ai/FreeToken-wt/next-measure/tasks/exclusive-expert-ram/compare_records.py", line 20, in <lambda>
+    load = lambda n: json.load(open(os.path.join(d, f"{n}-record.json")))
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/home/lucas/ai/FreeToken-wt/next-measure/tasks/exclusive-expert-ram/results/ck4n-mirror-record.json'

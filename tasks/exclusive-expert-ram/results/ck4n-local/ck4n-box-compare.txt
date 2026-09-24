@@ -1,0 +1,10 @@
+== ck4n-mirror-1m (f03c081) vs same-box whole
+  decode_1000k          97.2 vs   104.0 (whole-1m)  93.5%  ok
+  decode_1000k_p1       89.6 vs    99.3 (whole-1m)  90.2%  BELOW
+  decode_8k            175.1 vs   183.0 (whole-1m)  95.7%  ok
+  decode_8k_p1         189.6 vs   202.1 (whole-1m)  93.8%  ok
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            11.71  free_evict_rate 0.907
+  ram 12.26 +/- 0.6  ok
+1 point(s) outside the band
