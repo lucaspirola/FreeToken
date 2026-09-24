@@ -86,6 +86,7 @@ for a in ${ARMS:-whole mirror-1m mirror whole-close}; do
     mirror)      arm $CK-mirror      FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 80000 713000" ;;
     mirror-nd)   arm $CK-mirror-nd   FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 80000" FT_POST="${NEEDLES//\$ARM_NAME/$CK-mirror-nd}" ;;  # pool arm with needles/recall, no 713K
     whole-close) arm $CK-whole-close FT_ROWS=0 ;;
+    mirror-np)   arm $CK-mirror-np   FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 80000" ;;  # pool arm, decode only (no needles)
     *) die "unknown arm $a" ;;
   esac
 done

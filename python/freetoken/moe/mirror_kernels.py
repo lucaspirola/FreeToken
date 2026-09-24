@@ -115,6 +115,7 @@ def resolve_swaps(cache, layer_id: int) -> None:
         RETAINED=MirrorStat.RETAINED,
         STAGED=MirrorStat.STAGED_WRITEBACKS,
         REDIRECTS=MirrorStat.STAGE_REDIRECTS,
+        RING_FULL=MirrorStat.RING_FULL,
         STAGE_ROWS=m["wb_stage_rows"],
         K_CACHE=KIND_CACHE,
         K_POOL=KIND_POOL,
@@ -183,6 +184,7 @@ def _resolve_swaps_kernel(
     RETAINED: tl.constexpr,
     STAGED: tl.constexpr,
     REDIRECTS: tl.constexpr,
+    RING_FULL: tl.constexpr,
     STAGE_ROWS: tl.constexpr,     # staging ring rows; 0 = every writeback is an
                                   # SM store into the pool (the pre-DMA path)
     K_CACHE: tl.constexpr,
@@ -226,6 +228,7 @@ def _resolve_swaps_kernel(
     writebacks = 0
     staged = 0
     redirects = 0
+    ring_full = 0
     free_top = tl.load(free_count_ptr)
     head = tl.load(wb_state_ptr)
     # Read once: a stale (smaller) value is always the safe side of both tests.
@@ -301,6 +304,7 @@ def _resolve_swaps_kernel(
                             else:
                                 # Ring full: SM store, into a row no pending
                                 # DMA will overwrite later.
+                                ring_full += 1
                                 pick = -1
                                 k = free_top - 1
                                 while k >= 0:
@@ -407,6 +411,7 @@ def _resolve_swaps_kernel(
     tl.store(stats_ptr + RETAINED, tl.load(stats_ptr + RETAINED) + retained)
     tl.store(stats_ptr + STAGED, tl.load(stats_ptr + STAGED) + staged)
     tl.store(stats_ptr + REDIRECTS, tl.load(stats_ptr + REDIRECTS) + redirects)
+    tl.store(stats_ptr + RING_FULL, tl.load(stats_ptr + RING_FULL) + ring_full)
 
 
 @triton.jit

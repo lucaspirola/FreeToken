@@ -766,6 +766,11 @@ class Scheduler(SchedulerIOMixin):
         # in-flight forward. copy_done only covers batch N; order against N+1 explicitly.
         self.stream.wait_stream(self.engine.stream)
         self._process_last_data(last_data)
+        # The previous step is complete now: DMA its mirror writebacks while
+        # the step just launched computes (no-op for the whole model).
+        residency = getattr(getattr(self.engine, "moe_offload_cache", None), "residency", None)
+        if residency is not None:
+            residency.issue_writebacks()
         self._flush_abort_acks()
         self._publish_scheduler_counters()
         return ongoing_data
