@@ -1,0 +1,12 @@
+=== verify memory-ratio 1.00 (nohup, port 1920) 07:13:28
+--- startup memory lines
+[2026-09-24|07:13:35|core|rank=0] INFO     Startup memory prediction: prefill transient 0.68 GiB on a 8192-token chunk (peak layer mamba2; full_attention 0.32 GiB, mamba2 0.68 GiB, moe 0.64 GiB); graph pool 0.03 GiB (max bs 1); linear-state pool 0.59 GiB; KV floor 0.00 GiB (0 tokens); non-expert weights 2.20 GiB; runtime reserve 0.83 GiB (one predicted prefill chunk + graph pools + margin, out of 
+[2026-09-24|07:13:35|core|rank=0] INFO     Memory prediction check: non-expert weights predicted 2.20 GiB, measured 2.26 GiB (-2%)
+[2026-09-24|07:13:41|core|rank=0] INFO     --moe-cache-auto resolved moe_cache_size=2032 num_pages=262383 (prefill_overlap=True)
+[2026-09-24|07:13:42|core|rank=0] INFO     Memory prediction check: CUDA graph pool (max bs 1) predicted 0.03 GiB, measured 0.05 GiB (-41%)
+[2026-09-24|07:13:44|core|rank=0] INFO     Prefill headroom: transient 0.59 GiB measured on a 8192-token chunk (empty prefix 0.59 GiB, after a 8192-token prefix 0.59 GiB, allocator peak 0.59 GiB); headroom 0.59 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; 0.75 GiB free
+[2026-09-24|07:13:44|core|rank=0] INFO     Memory prediction check: prefill transient (8192-token chunk, peak layer mamba2) predicted 0.68 GiB, measured 0.59 GiB (+15%)
+[2026-09-24|07:13:44|core|rank=0] INFO     Memory prediction check: linear-state pool predicted 0.59 GiB, measured 0.59 GiB (+0%)
+[2026-09-24|07:13:44|core|rank=0] INFO     Startup geometry: memory ratio 1.00, runtime reserve 0.83 GiB; expert arena 2032 slots; KV 262144 tokens mapped of 262144 (0.80 GiB); 0.75 GiB free
+--- PASS (ratio 1.00, ready 19s, captures 1, decode 146.3/167.0/140.4 tok/s, prediction WARNs 0)
+TSV: /root/FreeToken-ratio/tasks/ratio-default/results-g5/verify-memory-ratio.tsv
