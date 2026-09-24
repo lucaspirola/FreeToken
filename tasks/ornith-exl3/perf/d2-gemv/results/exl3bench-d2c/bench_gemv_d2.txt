@@ -1,0 +1,7 @@
+GDN in_proj         15.73 MB  launcher split 8 bands 1:   27.2 us eff 0.71 | best   25.5 us eff 0.76 s16 b4 |   25.6 us eff 0.75 s16 b2 |   26.1 us eff 0.74 s8 b4
+attn q+gate|k|v     11.80 MB  launcher split 16 bands 1:   21.6 us eff 0.67 | best   21.1 us eff 0.68 s16 b4 |   21.3 us eff 0.68 s16 b2 |   21.6 us eff 0.67 s16 b1
+o_proj/out_proj      5.24 MB  launcher split 64 bands 1:   14.4 us eff 0.44 | best   13.3 us eff 0.48 s32 b1 |   13.7 us eff 0.47 s32 b4 |   13.9 us eff 0.46 s32 b2
+shared gate|up       1.31 MB  launcher split 64 bands 1:    8.5 us eff 0.19 | best    8.0 us eff 0.20 s32 b1 |    8.3 us eff 0.19 s32 b4 |    8.4 us eff 0.19 s32 b2
+shared down          0.66 MB  launcher split 16 bands 1:    5.8 us eff 0.14 | best    5.8 us eff 0.14 s16 b1 |    6.1 us eff 0.13 s16 b2 |    6.7 us eff 0.12 s8 b1
+MoE gate|up x8      10.49 MB  launcher split 16 bands 1:   25.7 us eff 0.50 | best   25.7 us eff 0.50 s16 b1 |   26.3 us eff 0.49 s16 b4 |   26.3 us eff 0.49 s16 b2
+MoE down x8          5.24 MB  launcher split 8 bands 1:   13.7 us eff 0.47 | best   13.7 us eff 0.47 s8 b1 |   13.8 us eff 0.46 s8 b4 |   13.8 us eff 0.46 s8 b2

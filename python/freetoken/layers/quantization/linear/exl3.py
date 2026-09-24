@@ -56,13 +56,22 @@ def _num_sms(index: int) -> int:
     return torch.cuda.get_device_properties(index).multi_processor_count
 
 
+GEMV_PROGRAMS_PER_SM = 20
+# the last split sums every split's partial plane serially: past 32 splits that costs more than the
+# extra programs gain (box: o_proj s32 13.3 us, s64 14.4 us)
+GEMV_MAX_SPLIT = 32
+
+
 def pick_split_k(rows: int, n_blocks: int, k: int, device: torch.device) -> int:
-    """Split K while the decode grid stays within eight single-warp programs per SM (each split keeps
-    >= 32 rows of K, a whole number of 16-row bands). Box sweep (tasks/ornith-exl3/perf/README.md):
-    every Ornith shape was fastest at 256-768 programs."""
-    target = 8 * _num_sms(device.index or 0)
+    """Split K while the decode grid stays within GEMV_PROGRAMS_PER_SM single-warp programs per SM
+    (each split keeps >= 32 rows of K, a whole number of 16-row bands). Box sweep
+    (tasks/ornith-exl3/perf/d2-gemv): with the 64-register GEMV (32 resident warps per SM) the big
+    Ornith shapes are fastest at 1024-1536 programs (GDN in_proj s16, attn qkv s16, MoE gate|up s16,
+    MoE down s8); at 168 registers (12 warps per SM) it was 256-768."""
+    target = GEMV_PROGRAMS_PER_SM * _num_sms(device.index or 0)
     split = 1
-    while rows * n_blocks * split * 2 <= target and k % (split * 2 * 16) == 0 and k // (split * 2) >= 32:
+    while (rows * n_blocks * split * 2 <= target and split * 2 <= GEMV_MAX_SPLIT
+           and k % (split * 2 * 16) == 0 and k // (split * 2) >= 32):
         split *= 2
     return split
 

@@ -342,6 +342,26 @@ def _decode_words(a, b, shift, CB: tl.constexpr):
 
 
 @triton.jit
+def _had128_8x16(v):
+    """128-point Sylvester Hadamard (natural order, unnormalised) of ``v`` viewed ``[8, 16]``
+    (element ``16 a + b``): H128 = H8 (x) H16, so ``Y = H8 @ V @ H16`` -- 8 x 8 x 16 + 8 x 16 x 16
+    fp32 products instead of a 128 x 128 matrix that a single-warp program cannot hold in registers.
+    Entries are (-1)^popcount(i & j), generated, not loaded."""
+    i8 = tl.arange(0, 8)
+    i16 = tl.arange(0, 16)
+    a8 = i8[:, None] & i8[None, :]
+    a8 = a8 ^ (a8 >> 2)
+    a8 = a8 ^ (a8 >> 1)
+    h8 = 1.0 - 2.0 * (a8 & 1).to(tl.float32)
+    a16 = i16[:, None] & i16[None, :]
+    a16 = a16 ^ (a16 >> 2)
+    a16 = a16 ^ (a16 >> 1)
+    h16 = 1.0 - 2.0 * (a16 & 1).to(tl.float32)
+    t = tl.sum(h8[:, :, None] * v[None, :, :], axis=1)
+    return tl.sum(t[:, None, :] * h16[None, :, :], axis=2)
+
+
+@triton.jit
 def _exl3_gemv_kernel(
     xh_ptr, stride_xpart, stride_xm,
     out_ptr, stride_om, stride_osplit,
@@ -354,7 +374,7 @@ def _exl3_gemv_kernel(
     x_ptr, stride_x, suh_ptr, suh_expert_stride, suh_part_stride, rot_ptr,
     BITS: tl.constexpr, CB: tl.constexpr, HAS_EXPERT: tl.constexpr, REDUCE: tl.constexpr,
     PRE_ROT: tl.constexpr = False, SRC_DIV: tl.constexpr = 1, KB: tl.constexpr = 1,
-    K_BLOCKS: tl.constexpr = 1,
+    K_BLOCKS: tl.constexpr = 1, BANDS: tl.constexpr = 1,
 ):
     """GEMV in bitstream order. Code ``t`` of a 16x16 tile sits at bit ``t * BITS`` of the tile's
     stream and is W_hat[r, c] with ``t = 32 (c & 7) + 16 r2 + 8 r1 + 4 (c >> 3) + 2 r3 + r0``, so the
@@ -416,46 +436,60 @@ def _exl3_gemv_kernel(
         a_ptr = rot - blk0 * 128
     else:
         a_ptr = xh_ptr + part * stride_xpart + p.to(tl.int64) * stride_xm
-    for k0 in range(k_begin, k_begin + K_SPLIT, 16):
-        band = tile + (k0 // 16) * row_words
-        for i in tl.static_range(32):
-            b0 = (OFF0 % 32) + i * BITS  # relative to word `start`
-            j0 = b0 // 32
-            j1 = (b0 + 15) // 32
-            sh = (j1 + 1) * 32 - (b0 + 16)
-            r = (i & 1) + 8 * ((i >> 1) & 1) + 2 * ((i >> 3) & 1) + 4 * ((i >> 4) & 1)
-            hi = tl.load(band + (start + j0) % WORDS).to(tl.uint32, bitcast=True)
-            lo = tl.load(band + (start + j1) % WORDS).to(tl.uint32, bitcast=True)
-            w = _decode_words(hi, lo, tl.full([64], sh, tl.uint32), CB).to(tl.float32)
-            a = tl.load(a_ptr + k0 + r).to(tl.float32)
-            if (i >> 2) & 1:
-                acc_hi += w * a
-            else:
-                acc_lo += w * a
-    idx = tl.arange(0, 128)
-    col_lo = (g // 8) * 16 + cl
-    h_lo = tl.load(had_ptr + col_lo[:, None] * 128 + idx[None, :]).to(tl.float32)
-    h_hi = tl.load(had_ptr + (col_lo + 8)[:, None] * 128 + idx[None, :]).to(tl.float32)
-    y = tl.sum(acc_lo[:, None] * h_lo, axis=0) + tl.sum(acc_hi[:, None] * h_hi, axis=0)
-    cols = pid_n * 128 + idx
-    sv = tl.load(svh_ptr + expert * svh_expert_stride + cols).to(tl.float32)
-    y = y * sv * 0.08838834764831843
-    tl.store(out_ptr + pid_k * stride_osplit + p.to(tl.int64) * stride_om + cols, y.to(out_ptr.dtype.element_ty))
+    # BANDS 16-row bands per iteration: their loads are all independent, so a single-warp program
+    # keeps BANDS x more bytes in flight (the GEMV is latency-bound at 8 warps per SM)
+    for k00 in range(k_begin, k_begin + K_SPLIT, 16 * BANDS):
+        for bd in tl.static_range(BANDS):
+            k0 = k00 + 16 * bd
+            band = tile + (k0 // 16) * row_words
+            for i in tl.static_range(32):
+                b0 = (OFF0 % 32) + i * BITS  # relative to word `start`
+                j0 = b0 // 32
+                j1 = (b0 + 15) // 32
+                sh = (j1 + 1) * 32 - (b0 + 16)
+                r = (i & 1) + 8 * ((i >> 1) & 1) + 2 * ((i >> 3) & 1) + 4 * ((i >> 4) & 1)
+                hi = tl.load(band + (start + j0) % WORDS).to(tl.uint32, bitcast=True)
+                lo = tl.load(band + (start + j1) % WORDS).to(tl.uint32, bitcast=True)
+                w = _decode_words(hi, lo, tl.full([64], sh, tl.uint32), CB).to(tl.float32)
+                a = tl.load(a_ptr + k0 + r).to(tl.float32)
+                if (i >> 2) & 1:
+                    acc_hi += w * a
+                else:
+                    acc_lo += w * a
     if REDUCE:
-        # Split-K reduced in place: the last split of this (row, 128 columns) to finish sums
-        # every split's plane in split order -- the same fixed order whichever program is
-        # last, so the result is deterministic -- writes the output, and re-arms the counter
+        # Split-K: each split stores its UNROTATED partial (columns col, col + 8 of its groups);
+        # the last split to finish sums the planes in split order -- the same fixed order whichever
+        # program is last, so the result is deterministic -- and applies the 128-point output
+        # rotation + svh ONCE, instead of every split rotating its own partial. Re-arms the counter
         # for the next launch (CUDA-graph replays included).
+        col_lo = (g // 8) * 16 + cl
+        plane = out_ptr + pid_k * stride_osplit + p.to(tl.int64) * stride_om + pid_n * 128
+        tl.store(plane + col_lo, acc_lo)
+        tl.store(plane + col_lo + 8, acc_hi)
         tl.debug_barrier()
         cnt = count_ptr + p * tl.num_programs(1) + pid_n
         done = tl.atomic_add(cnt, 1, sem="acq_rel")
         if done == tl.num_programs(2) - 1:
-            acc = tl.zeros([128], dtype=tl.float32)
+            i8 = tl.arange(0, 8)
+            i16 = tl.arange(0, 16)
+            o816 = i8[:, None] * 16 + i16[None, :]
+            vsum = tl.zeros([8, 16], dtype=tl.float32)
             for sp in range(0, tl.num_programs(2)):
-                acc += tl.load(out_ptr + sp * stride_osplit + p.to(tl.int64) * stride_om + cols,
-                               cache_modifier=".cg")
-            tl.store(final_ptr + p.to(tl.int64) * stride_fm + cols, acc.to(final_ptr.dtype.element_ty))
+                vsum += tl.load(out_ptr + sp * stride_osplit + p.to(tl.int64) * stride_om + pid_n * 128 + o816,
+                                cache_modifier=".cg")
+            ocols = pid_n * 128 + o816
+            svo = tl.load(svh_ptr + expert * svh_expert_stride + ocols).to(tl.float32)
+            yo = _had128_8x16(vsum) * svo * 0.08838834764831843
+            tl.store(final_ptr + p.to(tl.int64) * stride_fm + ocols, yo.to(final_ptr.dtype.element_ty))
             tl.atomic_xchg(cnt, 0)
+        return
+    # acc_lo[g] / acc_hi[g] hold column 16 (g // 8) + (g % 8) / + 8: as [8 tiles, 16 columns]
+    v = tl.reshape(tl.permute(tl.join(tl.reshape(acc_lo, (8, 8)), tl.reshape(acc_hi, (8, 8))), (0, 2, 1)), (8, 16))
+    o816 = tl.arange(0, 8)[:, None] * 16 + tl.arange(0, 16)[None, :]
+    cols = pid_n * 128 + o816
+    sv = tl.load(svh_ptr + expert * svh_expert_stride + cols).to(tl.float32)
+    y = _had128_8x16(v) * sv * 0.08838834764831843
+    tl.store(out_ptr + pid_k * stride_osplit + p.to(tl.int64) * stride_om + cols, y.to(out_ptr.dtype.element_ty))
 
 
 # ---------------------------------------------------------------------------
@@ -580,6 +614,15 @@ def exl3_gemm(
     return out
 
 
+# 16-row bands per GEMV loop iteration (clamped to divide the split's K range)
+GEMV_BANDS = 1
+# Register cap of the single-warp GEMV program. Uncapped, ptxas gives the loop 80 registers (25
+# warps per SM); 64 is spill-free (ptxas -v, sm_120) and fills the 32 resident blocks an SM allows.
+# The old epilogue (a 128 x 128 H product per program) needed 168 registers plus 1.4 KB of spills,
+# capping the GEMV at 12 warps per SM.
+GEMV_MAXNREG = 64
+
+
 def exl3_gemv(
     xh: torch.Tensor | None,
     trellis: torch.Tensor,
@@ -595,6 +638,7 @@ def exl3_gemv(
     suh: torch.Tensor | None = None,
     suh_expert_stride: int = 0,
     src_div: int = 1,
+    bands: int | None = None,
 ) -> torch.Tensor:
     """Per-row GEMV (decode) into ``out`` ``[rows, N]`` (any float dtype). With ``split_k > 1``
     each K split writes a rotated fp32 partial to its own plane of a scratch buffer and the
@@ -622,6 +666,9 @@ def exl3_gemv(
     grid = (rows, parts.n // HAD, split_k)
     reduce = split_k > 1 and _inkernel_reduce()
     counts = _split_counters(rows * (parts.n // HAD), device) if reduce else parts.part_of_nb
+    nb = bands or GEMV_BANDS
+    while (k // split_k) % (16 * nb):
+        nb //= 2
     kb = 1
     if pre_rot:
         k_split = k // split_k
@@ -642,8 +689,8 @@ def exl3_gemv(
         rot if pre_rot else xh,
         BITS=parts.bits, CB=CODEBOOKS[parts.codebook],
         HAS_EXPERT=experts is not None, REDUCE=reduce,
-        PRE_ROT=pre_rot, SRC_DIV=src_div, KB=kb, K_BLOCKS=k // HAD,
-        num_warps=1,
+        PRE_ROT=pre_rot, SRC_DIV=src_div, KB=kb, K_BLOCKS=k // HAD, BANDS=nb,
+        num_warps=1, maxnreg=GEMV_MAXNREG,
     )
     if split_k > 1 and not reduce:
         torch.sum(dst, dim=0, out=out) if out.dtype == torch.float32 else out.copy_(dst.sum(dim=0))
