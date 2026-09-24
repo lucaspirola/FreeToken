@@ -20,7 +20,7 @@ CK="${1:-ck4}"
 BOX="$OUT/$CK-box"                  # where this run's artefacts end up
 mkdir -p "$BOX"
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-13.0}" PATH="${CUDA_HOME:-/usr/local/cuda-13.0}/bin:$PATH"
-export FT_LAUNCHER=nohup FT_VENV="${FT_VENV:-/root/venv}" FT_RATIO=1.00 FT_PORT=1920
+export FT_LAUNCHER=nohup FT_VENV="${FT_VENV:-/root/venv}" FT_RATIO="${FT_RATIO:-1.00}" FT_PORT=1920
 export FT_MODEL="${FT_MODEL:-/root/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4}"
 POST_TIMEOUT=10800
 die() { echo "checkpoint-box: $*" >&2; exit 1; }
@@ -81,6 +81,7 @@ echo "checkpoint label: $CK (box)"
 for a in ${ARMS:-whole mirror-1m mirror whole-close}; do
   case "$a" in
     whole)       arm $CK-whole       FT_ROWS=0 FT_POST="${NEEDLES//\$ARM_NAME/$CK-whole}" ;;
+    whole-1m)    arm $CK-whole-1m    FT_ROWS=0 FT_SIZES="8000 1000000" ;;  # same-box 1M reference
     mirror-1m)   arm $CK-mirror-1m   FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 1000000" FT_POST="${NEEDLES//\$ARM_NAME/$CK-mirror-1m}" ;;
     mirror)      arm $CK-mirror      FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 80000 713000" ;;
     whole-close) arm $CK-whole-close FT_ROWS=0 ;;
@@ -101,7 +102,7 @@ r6_arm() {
     [ "$lim" = unlimited ] &&
     echo "R6(arm) ok: no pageable fallback, no mlock failure, memlock unlimited"
 }
-for a in $CK-whole $CK-mirror-1m $CK-mirror $CK-whole-close; do
+for a in $CK-whole $CK-whole-1m $CK-mirror-1m $CK-mirror $CK-whole-close; do
   [ -f "$BOX/$a-journal.txt" ] || { echo "$a: no journal"; continue; }
   printf '%s R3: ' "$a"
   FREETOKEN_LOG="$BOX/$a-journal.txt" bash "$REPO/benchmarks/switchyard_soak/checks/acceptance.sh" R3 \
@@ -115,5 +116,6 @@ python3 "$HERE/compare_needles.py" "$BOX" $CK-whole $CK-mirror-1m > "$BOX/$CK-ne
 cp "$OUT"/nemotron-reserve-2e-record.json "$OUT"/nemotron-reserve-2e-1m-record.json "$BOX/" 2>/dev/null || true
 python3 "$HERE/compare_records.py" "$BOX" $CK > "$BOX/$CK-records-compare.txt" 2>&1 || true
 rm -f "$BOX"/nemotron-reserve-2e-record.json "$BOX"/nemotron-reserve-2e-1m-record.json
-cat "$BOX/$CK-needles-compare.txt" "$BOX/$CK-records-compare.txt"
+python3 "$HERE/compare_box.py" "$BOX" $CK > "$BOX/$CK-box-compare.txt" 2>&1 || true
+cat "$BOX/$CK-needles-compare.txt" "$BOX/$CK-records-compare.txt" "$BOX/$CK-box-compare.txt"
 echo "checkpoint $CK (box) arms done $(date -u +%FT%TZ)"
