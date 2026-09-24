@@ -85,7 +85,10 @@ def part1():
 
 def part2_child():
     import torch
-    r = {"conf": os.environ.get("PYTORCH_CUDA_ALLOC_CONF"), "ipc": os.environ.get("TORCH_CUDA_EXPANDABLE_SEGMENTS_IPC")}
+    if os.environ.get("REPRO_RUNTIME_API"):
+        # the engine's path: the runtime API before the first CUDA allocation
+        torch.cuda.memory._set_allocator_settings(os.environ["REPRO_RUNTIME_API"])
+    r = {"conf": os.environ.get("PYTORCH_CUDA_ALLOC_CONF"), "runtime": os.environ.get("REPRO_RUNTIME_API"), "ipc": os.environ.get("TORCH_CUDA_EXPANDABLE_SEGMENTS_IPC")}
     try:
         xs = [torch.empty(n << 20, dtype=torch.uint8, device="cuda") for n in (16, 128, 96, 64)]
         del xs
@@ -123,8 +126,14 @@ if __name__ == "__main__":
         print("part 1 failed:", exc)
     print("== part 2: torch expandable segments, one process per setting"); sys.stdout.flush()
     for conf, ipc in (("expandable_segments:False", None), ("expandable_segments:True", None),
-                      ("expandable_segments:True", "0"), ("expandable_segments:True", "1")):
-        env = dict(os.environ, PYTORCH_CUDA_ALLOC_CONF=conf)
+                      ("expandable_segments:True", "0"), ("expandable_segments:True", "1"),
+                      ("runtime:expandable_segments:True", None), ("runtime:expandable_segments:True", "0")):
+        env = dict(os.environ)
+        env.pop("PYTORCH_CUDA_ALLOC_CONF", None); env.pop("REPRO_RUNTIME_API", None)
+        if conf.startswith("runtime:"):
+            env["REPRO_RUNTIME_API"] = conf[len("runtime:"):]
+        else:
+            env["PYTORCH_CUDA_ALLOC_CONF"] = conf
         env.pop("TORCH_CUDA_EXPANDABLE_SEGMENTS_IPC", None)
         if ipc is not None:
             env["TORCH_CUDA_EXPANDABLE_SEGMENTS_IPC"] = ipc

@@ -5,7 +5,6 @@ import errno
 import gc
 import math
 import os
-import platform
 from datetime import timedelta
 from typing import Any, Dict, Iterable, NamedTuple, Tuple
 
@@ -2120,13 +2119,12 @@ def _ensure_expandable_segments() -> None:
         "PYTORCH_CUDA_ALLOC_CONF"
     ):
         return
-    # PyTorch 2.11 + CUDA 13 currently accepts this allocator setting under WSL but the
-    # first CUDA allocation then fails with ``CUDA driver error: unknown error``.  Keep
-    # WSL on the native caching allocator until the driver/runtime combination supports
-    # expandable segments reliably.
-    if os.environ.get("WSL_DISTRO_NAME") or "microsoft" in platform.release().lower():
-        logger.info_rank0("WSL detected; using the native CUDA caching allocator")
-        return
+    # WSL included. It used to be skipped ("unknown error" on the first allocation,
+    # torch 2.11 + CUDA 13), which left WSL on the native caching allocator: one
+    # segment per temporary size, a 1.00 GiB prefill reservation for a 0.59 GiB
+    # peak (Nemotron, exp/transient-slack). On driver 616.92 torch's expandable
+    # segments work under WSL (ts-local/repro-wsl.txt: alloc churn, graph replay,
+    # memory fraction; the FABRIC handle probe fails and falls back to POSIX_FD).
     try:
         torch.cuda.memory._set_allocator_settings("expandable_segments:True")
     except Exception as exc:  # pragma: no cover - depends on torch build
