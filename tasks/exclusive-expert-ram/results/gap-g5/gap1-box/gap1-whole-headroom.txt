@@ -1,0 +1,79 @@
+captures=1 kv_grows=17 tracebacks=0 ooms=0
+[2026-09-24|10:03:40|core|rank=0] INFO     --moe-cache-auto resolved moe_cache_size=2298 num_pages=78305 (prefill_overlap=True)
+[2026-09-24|10:03:40|core|rank=0] INFO     Expert arena parked 2298 -> 256 slots (10.69 GiB) until the prefill transient is measured
+[2026-09-24|10:03:40|core|rank=0] INFO     Free memory after initialization: 10.65 GiB
+[2026-09-24|10:03:40|core|rank=0] INFO     Start capturing CUDA graphs with sizes: [1]
+[2026-09-24|10:03:40|core|rank=0] INFO     Free GPU memory before capturing CUDA graphs: 10.65 GiB
+Preparing for capturing CUDA graphs...:   0%|          | 0/1 [00:00<?, ?batch/s]Capturing graphs: bs = 1   | avail_mem = 10.64 GiB:   0%|          | 0/1 [00:00<?, ?batch/s]Capturing graphs: bs = 1   | avail_mem = 10.64 GiB: 100%|██████████| 1/1 [00:00<00:00,  2.00batch/s]Capturing graphs: bs = 1   | avail_mem = 10.64 GiB: 100%|██████████| 1/1 [00:00<00:0
+[2026-09-24|10:03:41|core|rank=0] INFO     Free GPU memory after capturing CUDA graphs: 10.61 GiB
+[2026-09-24|10:03:41|core|rank=0] INFO     Prefill warmup complete for lengths [80, 128] in 0.671 s
+[2026-09-24|10:03:43|core|rank=0] INFO     Growable-KV ceiling validated: 1048576 tokens, 3.23 GiB physical, planned final MoE cache 1584 slots
+[2026-09-24|10:03:43|core|rank=0] INFO     Prefill headroom: transient 0.65 GiB measured on a 8192-token chunk (empty prefix 0.65 GiB, after a 8192-token prefix 0.65 GiB, allocator peak 0.59 GiB); headroom 0.65 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 256 -> 2136 of 2298 slots, 0.77 GiB free (target 0.77 GiB), 162 slots below the ratio plan
+[2026-09-24|10:04:21|core|rank=0] INFO     Growable-KV arena shrink: 2136 -> 2088 slots, 0.25 GiB uncommitted (driver-reported free 1.00 GiB)
+[2026-09-24|10:04:21|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.00 GiB free (driver 1.00 GiB), 0.21 GiB commit, 0.86 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|10:04:21|core|rank=0] INFO     Committed growable KV through 131072 tokens (0.45 GiB physical); MoE slots 2136 -> 2088
+[2026-09-24|10:04:21|core|rank=0] INFO     KV grew 65536 -> 131072 tokens; MoE cache now 2088 slots
+[2026-09-24|10:04:38|core|rank=0] INFO     Growable-KV arena shrink: 2128 -> 2088 slots, 0.21 GiB uncommitted (driver-reported free 1.00 GiB)
+[2026-09-24|10:04:38|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.00 GiB free (driver 1.00 GiB), 0.21 GiB commit, 0.86 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|10:04:38|core|rank=0] INFO     Committed growable KV through 131072 tokens (0.45 GiB physical); MoE slots 2128 -> 2088
+[2026-09-24|10:04:38|core|rank=0] INFO     KV grew 65536 -> 131072 tokens; MoE cache now 2088 slots
+[2026-09-24|10:08:36|core|rank=0] INFO     Growable-KV arena shrink: 2128 -> 2088 slots, 0.21 GiB uncommitted (driver-reported free 1.00 GiB)
+[2026-09-24|10:08:36|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.00 GiB free (driver 1.00 GiB), 0.21 GiB commit, 0.86 GiB required (allocator 2.81 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|10:08:36|core|rank=0] INFO     Committed growable KV through 131072 tokens (0.45 GiB physical); MoE slots 2128 -> 2088
+[2026-09-24|10:08:36|core|rank=0] INFO     KV grew 65536 -> 131072 tokens; MoE cache now 2088 slots
+[2026-09-24|10:10:41|core|rank=0] INFO     Growable-KV arena shrink: 2128 -> 2088 slots, 0.21 GiB uncommitted (driver-reported free 1.00 GiB)
+[2026-09-24|10:10:41|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.00 GiB free (driver 1.00 GiB), 0.21 GiB commit, 0.86 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|10:10:41|core|rank=0] INFO     Committed growable KV through 131072 tokens (0.45 GiB physical); MoE slots 2128 -> 2088
+[2026-09-24|10:10:41|core|rank=0] INFO     KV grew 65536 -> 131072 tokens; MoE cache now 2088 slots
+[2026-09-24|10:10:59|core|rank=0] INFO     Growable-KV arena shrink: 2128 -> 2088 slots, 0.21 GiB uncommitted (driver-reported free 1.00 GiB)
+[2026-09-24|10:10:59|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.00 GiB free (driver 1.00 GiB), 0.21 GiB commit, 0.86 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|10:10:59|core|rank=0] INFO     Committed growable KV through 131072 tokens (0.45 GiB physical); MoE slots 2128 -> 2088
+[2026-09-24|10:10:59|core|rank=0] INFO     KV grew 65536 -> 131072 tokens; MoE cache now 2088 slots
+[2026-09-24|10:11:18|core|rank=0] INFO     Growable-KV arena shrink: 2128 -> 2088 slots, 0.21 GiB uncommitted (driver-reported free 1.00 GiB)
+[2026-09-24|10:11:18|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.00 GiB free (driver 1.00 GiB), 0.21 GiB commit, 0.86 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|10:11:18|core|rank=0] INFO     Committed growable KV through 131072 tokens (0.45 GiB physical); MoE slots 2128 -> 2088
+[2026-09-24|10:11:18|core|rank=0] INFO     KV grew 65536 -> 131072 tokens; MoE cache now 2088 slots
+[2026-09-24|10:13:10|core|rank=0] INFO     Growable-KV arena shrink: 2088 -> 2048 slots, 0.21 GiB uncommitted (driver-reported free 1.00 GiB)
+[2026-09-24|10:13:10|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.00 GiB free (driver 1.00 GiB), 0.19 GiB commit, 0.83 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|10:13:10|core|rank=0] INFO     Committed growable KV through 196608 tokens (0.63 GiB physical); MoE slots 2088 -> 2048
+[2026-09-24|10:13:10|core|rank=0] INFO     KV grew 131072 -> 196608 tokens; MoE cache now 2048 slots
+[2026-09-24|10:17:41|core|rank=0] INFO     Growable-KV arena shrink: 2120 -> 2088 slots, 0.17 GiB uncommitted (driver-reported free 1.00 GiB)
+[2026-09-24|10:17:41|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.00 GiB free (driver 1.00 GiB), 0.21 GiB commit, 0.86 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|10:17:41|core|rank=0] INFO     Committed growable KV through 131072 tokens (0.45 GiB physical); MoE slots 2120 -> 2088
+[2026-09-24|10:17:41|core|rank=0] INFO     KV grew 65536 -> 131072 tokens; MoE cache now 2088 slots
+[2026-09-24|10:18:01|core|rank=0] INFO     Growable-KV arena shrink: 2128 -> 2088 slots, 0.21 GiB uncommitted (driver-reported free 1.00 GiB)
+[2026-09-24|10:18:01|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.00 GiB free (driver 1.00 GiB), 0.21 GiB commit, 0.86 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|10:18:01|core|rank=0] INFO     Committed growable KV through 131072 tokens (0.45 GiB physical); MoE slots 2128 -> 2088
+[2026-09-24|10:18:01|core|rank=0] INFO     KV grew 65536 -> 131072 tokens; MoE cache now 2088 slots
+[2026-09-24|10:19:54|core|rank=0] INFO     Growable-KV arena shrink: 2088 -> 2048 slots, 0.21 GiB uncommitted (driver-reported free 1.00 GiB)
+[2026-09-24|10:19:54|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.00 GiB free (driver 1.00 GiB), 0.19 GiB commit, 0.83 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|10:19:54|core|rank=0] INFO     Committed growable KV through 196608 tokens (0.63 GiB physical); MoE slots 2088 -> 2048
+[2026-09-24|10:19:54|core|rank=0] INFO     KV grew 131072 -> 196608 tokens; MoE cache now 2048 slots
+[2026-09-24|10:24:26|core|rank=0] INFO     Growable-KV arena shrink: 2120 -> 2088 slots, 0.17 GiB uncommitted (driver-reported free 1.00 GiB)
+[2026-09-24|10:24:26|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.00 GiB free (driver 1.00 GiB), 0.21 GiB commit, 0.86 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|10:24:26|core|rank=0] INFO     Committed growable KV through 131072 tokens (0.45 GiB physical); MoE slots 2120 -> 2088
+[2026-09-24|10:24:26|core|rank=0] INFO     KV grew 65536 -> 131072 tokens; MoE cache now 2088 slots
+[2026-09-24|10:24:46|core|rank=0] INFO     Growable-KV arena shrink: 2128 -> 2088 slots, 0.21 GiB uncommitted (driver-reported free 1.00 GiB)
+[2026-09-24|10:24:46|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.00 GiB free (driver 1.00 GiB), 0.21 GiB commit, 0.86 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|10:24:46|core|rank=0] INFO     Committed growable KV through 131072 tokens (0.45 GiB physical); MoE slots 2128 -> 2088
+[2026-09-24|10:24:46|core|rank=0] INFO     KV grew 65536 -> 131072 tokens; MoE cache now 2088 slots
+[2026-09-24|10:25:22|core|rank=0] INFO     Growable-KV arena shrink: 2128 -> 2088 slots, 0.21 GiB uncommitted (driver-reported free 1.00 GiB)
+[2026-09-24|10:25:22|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.00 GiB free (driver 1.00 GiB), 0.21 GiB commit, 0.86 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|10:25:22|core|rank=0] INFO     Committed growable KV through 131072 tokens (0.45 GiB physical); MoE slots 2128 -> 2088
+[2026-09-24|10:25:22|core|rank=0] INFO     KV grew 65536 -> 131072 tokens; MoE cache now 2088 slots
+[2026-09-24|10:25:43|core|rank=0] INFO     Growable-KV arena shrink: 2128 -> 2088 slots, 0.21 GiB uncommitted (driver-reported free 1.00 GiB)
+[2026-09-24|10:25:43|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.00 GiB free (driver 1.00 GiB), 0.21 GiB commit, 0.86 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|10:25:43|core|rank=0] INFO     Committed growable KV through 131072 tokens (0.45 GiB physical); MoE slots 2128 -> 2088
+[2026-09-24|10:25:43|core|rank=0] INFO     KV grew 65536 -> 131072 tokens; MoE cache now 2088 slots
+[2026-09-24|10:26:01|core|rank=0] INFO     Growable-KV arena shrink: 2128 -> 2088 slots, 0.21 GiB uncommitted (driver-reported free 1.00 GiB)
+[2026-09-24|10:26:01|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.00 GiB free (driver 1.00 GiB), 0.21 GiB commit, 0.86 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|10:26:01|core|rank=0] INFO     Committed growable KV through 131072 tokens (0.45 GiB physical); MoE slots 2128 -> 2088
+[2026-09-24|10:26:01|core|rank=0] INFO     KV grew 65536 -> 131072 tokens; MoE cache now 2088 slots
+[2026-09-24|10:26:15|core|rank=0] INFO     Growable-KV arena shrink: 2088 -> 2048 slots, 0.21 GiB uncommitted (driver-reported free 1.00 GiB)
+[2026-09-24|10:26:15|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.00 GiB free (driver 1.00 GiB), 0.19 GiB commit, 0.83 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|10:26:15|core|rank=0] INFO     Committed growable KV through 196608 tokens (0.63 GiB physical); MoE slots 2088 -> 2048
+[2026-09-24|10:26:15|core|rank=0] INFO     KV grew 131072 -> 196608 tokens; MoE cache now 2048 slots
+[2026-09-24|10:26:36|core|rank=0] INFO     Growable-KV arena shrink: 2048 -> 2008 slots, 0.21 GiB uncommitted (driver-reported free 1.02 GiB)
+[2026-09-24|10:26:36|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.02 GiB free (driver 1.02 GiB), 0.21 GiB commit, 0.86 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|10:26:36|core|rank=0] INFO     Committed growable KV through 262144 tokens (0.84 GiB physical); MoE slots 2048 -> 2008
+[2026-09-24|10:26:36|core|rank=0] INFO     KV grew 196608 -> 262144 tokens; MoE cache now 2008 slots

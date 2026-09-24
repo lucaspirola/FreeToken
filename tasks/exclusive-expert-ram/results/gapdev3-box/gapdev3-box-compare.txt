@@ -1,0 +1,10 @@
+== gapdev3-mirror-1m (2392b93c6) vs same-box whole
+  decode_1000k          75.4  (no same-box reference)
+  decode_1000k_p1       52.1  (no same-box reference)
+  decode_8k            149.4  (no same-box reference)
+  decode_8k_p1         159.0  (no same-box reference)
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            12.16  free_evict_rate 0.655
+  ram 12.26 +/- 0.6  ok
+0 point(s) outside the band

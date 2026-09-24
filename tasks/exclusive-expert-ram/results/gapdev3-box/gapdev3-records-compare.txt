@@ -1,0 +1,17 @@
+== gapdev3-mirror-1m (2392b93c6) vs nemotron-reserve-2e-1m (None)
+  decode_1000k          75.4 vs    72.9  103.4%  ok   total 793.1 s, ttft 791.4 s
+  decode_1000k_p1       52.1 vs    76.9   67.8%  BELOW   total 795.5 s, ttft 793.04 s
+  decode_8k            149.4 vs   170.7   87.5%  BELOW   total 1.8 s, ttft 0.99 s
+  decode_8k_p1         159.0 vs   177.0   89.8%  BELOW   total 1.2 s, ttft 0.4 s
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            12.16 (record 12.26)  free_evict_rate 0.655 (record 0.565)
+  ram 12.26 +/- 0.6  ok
+Traceback (most recent call last):
+  File "/root/FT-gap2/tasks/exclusive-expert-ram/compare_records.py", line 23, in <module>
+    a, r = load(arm), load(ref)
+           ^^^^^^^^^
+  File "/root/FT-gap2/tasks/exclusive-expert-ram/compare_records.py", line 20, in <lambda>
+    load = lambda n: json.load(open(os.path.join(d, f"{n}-record.json")))
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/root/FT-gap2/tasks/exclusive-expert-ram/results/gapdev3-box/gapdev3-mirror-record.json'
