@@ -303,3 +303,41 @@ def test_moe_prefill_decoded_scratch_matches_in_kernel_decode(monkeypatch, codeb
     monkeypatch.setattr(fe, "PREFILL_DECODE_GROUP", 5)  # groups that do not divide the expert count
     scratch = fe.fused_experts_exl3(x, banks, w, ids, **kw)
     assert rel_err(scratch, in_kernel) < 1e-6, rel_err(scratch, in_kernel)
+
+
+@cuda
+@pytest.mark.parametrize("tokens", (1, 4))
+def test_fused_decode_epilogues_match_the_unfused_path(monkeypatch, tokens):
+    """Split-K reduction folded into silu*up + down rotation and into the top-k combine:
+    the same arithmetic up to summation order and the exp of silu, so within fp16 noise."""
+    from freetoken.moe.fused_exl3 import fused_experts_exl3
+
+    banks = tuple(b.cuda() for b in _moe_banks(5, "mul1", 12, seed=9))
+    x, w, ids = (t.cuda() for t in _routing(tokens, 12, seed=10))
+    kw = dict(bits=5, codebook="mul1", is_prefill=False)
+    fused = fused_experts_exl3(x, banks, w, ids, **kw)
+    monkeypatch.setenv("FREETOKEN_EXL3_FUSED_EPILOGUE", "0")
+    unfused = fused_experts_exl3(x, banks, w, ids, **kw)
+    assert rel_err(fused, unfused) < 2e-3, rel_err(fused, unfused)
+
+
+@cuda
+@pytest.mark.parametrize("out_dtype", (torch.float32, torch.bfloat16))
+def test_inkernel_split_k_reduction_matches_torch_sum(monkeypatch, out_dtype):
+    """The last split of each (row, 128 columns) sums the planes in split order inside the
+    GEMV; the separate torch.sum pass it replaces agrees to fp32 summation-order noise, and
+    the counters are left armed for the next launch (repeat == first, bit for bit)."""
+    from freetoken.kernel.triton.exl3 import Exl3Parts
+    from freetoken.layers.quantization.linear.exl3 import exl3_forward, pick_split_k
+
+    k, n, rows = 2048, 1024, 3
+    assert pick_split_k(rows, n // 128, k, torch.device("cuda")) > 1
+    trs, suh, svh = _dense_case(k, (n,), 5, "mul1", seed=21)
+    parts = Exl3Parts.build(k, (n,), 5, "mul1", "cuda")
+    x = torch.randn(rows, k, generator=torch.Generator().manual_seed(22)).to(torch.bfloat16).cuda()
+    args = (trs[0].reshape(-1).cuda(), suh.cuda(), svh.cuda(), parts, out_dtype)
+    fused = exl3_forward(x, *args)
+    assert all(torch.equal(fused, exl3_forward(x, *args)) for _ in range(5))
+    monkeypatch.setenv("FREETOKEN_EXL3_SPLITK_INKERNEL", "0")
+    summed = exl3_forward(x, *args)
+    assert rel_err(fused.float(), summed.float()) < (1e-6 if out_dtype == torch.float32 else 4e-3)

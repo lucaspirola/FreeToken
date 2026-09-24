@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import functools
 import math
+import os
 from dataclasses import dataclass
 
 import torch
@@ -339,7 +340,8 @@ def _exl3_gemv_kernel(
     had_ptr,
     part_of_nb_ptr, word_off_ptr, ntiles_ptr, nstart_ptr,
     expert_ptr, K_SPLIT,
-    BITS: tl.constexpr, CB: tl.constexpr, HAS_EXPERT: tl.constexpr,
+    final_ptr, stride_fm, count_ptr,
+    BITS: tl.constexpr, CB: tl.constexpr, HAS_EXPERT: tl.constexpr, REDUCE: tl.constexpr,
 ):
     """GEMV in bitstream order. Code ``t`` of a 16x16 tile sits at bit ``t * BITS`` of the tile's
     stream and is W_hat[r, c] with ``t = 32 (c & 7) + 16 r2 + 8 r1 + 4 (c >> 3) + 2 r3 + r0``, so the
@@ -392,6 +394,21 @@ def _exl3_gemv_kernel(
     sv = tl.load(svh_ptr + expert * svh_expert_stride + cols).to(tl.float32)
     y = y * sv * 0.08838834764831843
     tl.store(out_ptr + pid_k * stride_osplit + p.to(tl.int64) * stride_om + cols, y.to(out_ptr.dtype.element_ty))
+    if REDUCE:
+        # Split-K reduced in place: the last split of this (row, 128 columns) to finish sums
+        # every split's plane in split order -- the same fixed order whichever program is
+        # last, so the result is deterministic -- writes the output, and re-arms the counter
+        # for the next launch (CUDA-graph replays included).
+        tl.debug_barrier()
+        cnt = count_ptr + p * tl.num_programs(1) + pid_n
+        done = tl.atomic_add(cnt, 1, sem="acq_rel")
+        if done == tl.num_programs(2) - 1:
+            acc = tl.zeros([128], dtype=tl.float32)
+            for sp in range(0, tl.num_programs(2)):
+                acc += tl.load(out_ptr + sp * stride_osplit + p.to(tl.int64) * stride_om + cols,
+                               cache_modifier=".cg")
+            tl.store(final_ptr + p.to(tl.int64) * stride_fm + cols, acc.to(final_ptr.dtype.element_ty))
+            tl.atomic_xchg(cnt, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +529,8 @@ def exl3_gemv(
     dst = out if split_k == 1 else torch.empty((split_k, rows, parts.n), dtype=torch.float32, device=xh.device)
     words = _words(trellis)
     grid = (rows, parts.n // HAD, split_k)
+    reduce = split_k > 1 and _inkernel_reduce()
+    counts = _split_counters(rows * (parts.n // HAD), xh.device) if reduce else parts.part_of_nb
     _exl3_gemv_kernel[grid](
         xh, xh.stride(0), xh.stride(1),
         dst, dst.stride(-2), dst.stride(0) if split_k > 1 else 0,
@@ -520,12 +539,122 @@ def exl3_gemv(
         hadamard_pm1(xh.device),
         parts.part_of_nb, parts.word_off, parts.ntiles, parts.nstart,
         experts if experts is not None else parts.part_of_nb, k // split_k,
+        out, out.stride(-2), counts,
         BITS=parts.bits, CB=CODEBOOKS[parts.codebook],
-        HAS_EXPERT=experts is not None,
+        HAS_EXPERT=experts is not None, REDUCE=reduce,
         num_warps=1,
     )
-    if split_k > 1:
+    if split_k > 1 and not reduce:
         torch.sum(dst, dim=0, out=out) if out.dtype == torch.float32 else out.copy_(dst.sum(dim=0))
+    return out
+
+
+def _inkernel_reduce() -> bool:
+    """``FREETOKEN_EXL3_SPLITK_INKERNEL=0`` restores the separate ``torch.sum`` reduction."""
+    return os.getenv("FREETOKEN_EXL3_SPLITK_INKERNEL", "1").strip() != "0"
+
+
+_COUNTERS: dict = {}
+
+
+def _split_counters(n: int, device: torch.device) -> torch.Tensor:
+    """Zeroed int32 arrival counters for the in-kernel split-K reduction, one per (row, 128
+    output columns). Every launch leaves them zero again, so one buffer per device serves all
+    GEMVs issued in stream order; it is allocated (or grown) outside graph capture, on the
+    warm-up pass that precedes it."""
+    buf = _COUNTERS.get(device)
+    if buf is None or buf.numel() < n:
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("EXL3 split-K counters must be allocated before CUDA-graph capture")
+        buf = torch.zeros(max(n, 1 << 14), dtype=torch.int32, device=device)
+        _COUNTERS[device] = buf
+    return buf
+
+
+@triton.jit
+def _splitk_silu_had_kernel(
+    pl_ptr, stride_ps, stride_pm,
+    out_ptr, stride_om,
+    suh_ptr, suh_expert_stride, expert_ptr, had_ptr, P, INTER,
+    S: tl.constexpr, BM: tl.constexpr,
+):
+    """Decode epilogue of gate|up and prologue of down in one pass: sum the split-K planes of
+    ``g = [gate | up]`` (fixed order), round to fp16 as the unfused path does, ``a = silu(gate) *
+    up`` in fp32 rounded to fp16, then ``ah = H_blocks(a * suh[expert])`` exactly as had_rows."""
+    pid_m = tl.program_id(0)
+    pid_k = tl.program_id(1)
+    rows = pid_m * BM + tl.arange(0, BM)
+    rmask = rows < P
+    cols = pid_k * 128 + tl.arange(0, 128)
+    base = pl_ptr + rows[:, None].to(tl.int64) * stride_pm + cols[None, :]
+    g = tl.zeros([BM, 128], dtype=tl.float32)
+    u = tl.zeros([BM, 128], dtype=tl.float32)
+    for sp in tl.static_range(S):
+        g += tl.load(base + sp * stride_ps, mask=rmask[:, None], other=0.0)
+        u += tl.load(base + sp * stride_ps + INTER, mask=rmask[:, None], other=0.0)
+    g = g.to(tl.float16).to(tl.float32)
+    u = u.to(tl.float16).to(tl.float32)
+    a = (g / (1.0 + tl.exp(-g)) * u).to(tl.float16)
+    e = tl.load(expert_ptr + rows, mask=rmask, other=0).to(tl.int64)
+    sc = tl.load(suh_ptr + e[:, None] * suh_expert_stride + cols[None, :], mask=rmask[:, None], other=0.0)
+    xs = a.to(tl.float32) * sc.to(tl.float32)
+    hi = xs.to(tl.float16)
+    lo = (xs - hi.to(tl.float32)).to(tl.float16)
+    idx = tl.arange(0, 128)
+    h = tl.load(had_ptr + idx[:, None] * 128 + idx[None, :])
+    y = (tl.dot(hi, h) + tl.dot(lo, h)) * 0.08838834764831843
+    tl.store(out_ptr + rows[:, None].to(tl.int64) * stride_om + cols[None, :], y.to(tl.float16), mask=rmask[:, None])
+
+
+def splitk_silu_had(planes: torch.Tensor, suh: torch.Tensor, experts: torch.Tensor, suh_expert_stride: int) -> torch.Tensor:
+    """``planes`` ``[S, P, 2I]`` fp32 gate|up partials -> ``[1, P, I]`` fp16 rotated down input
+    (the ``xh`` layout ``exl3_gemv`` reads)."""
+    splits, rows, n2 = planes.shape
+    inter = n2 // 2
+    assert inter % HAD == 0 and planes.stride(-1) == 1 and suh.stride(-1) == 1
+    out = torch.empty((1, rows, inter), dtype=torch.float16, device=planes.device)
+    if rows:
+        bm = 16
+        _splitk_silu_had_kernel[(triton.cdiv(rows, bm), inter // HAD)](
+            planes, planes.stride(0), planes.stride(1),
+            out, out.stride(1),
+            suh, suh_expert_stride, experts, hadamard_pm1(planes.device), rows, inter,
+            S=splits, BM=bm, num_warps=4,
+        )
+    return out
+
+
+@triton.jit
+def _splitk_combine_kernel(
+    pl_ptr, stride_ps, stride_pm, w_ptr, out_ptr, stride_ot,
+    S: tl.constexpr, TOP_K: tl.constexpr, BN: tl.constexpr,
+):
+    """``out[t] = sum_k w[t, k] * sum_s planes[s, t * TOP_K + k]`` in fp32, fixed order."""
+    t = tl.program_id(0)
+    cols = tl.program_id(1) * BN + tl.arange(0, BN)
+    acc = tl.zeros([BN], dtype=tl.float32)
+    for k in tl.static_range(TOP_K):
+        p = t * TOP_K + k
+        o = tl.zeros([BN], dtype=tl.float32)
+        for sp in tl.static_range(S):
+            o += tl.load(pl_ptr + sp * stride_ps + p.to(tl.int64) * stride_pm + cols)
+        acc += o * tl.load(w_ptr + p).to(tl.float32)
+    tl.store(out_ptr + t.to(tl.int64) * stride_ot + cols, acc.to(out_ptr.dtype.element_ty))
+
+
+def splitk_combine(planes: torch.Tensor, topk_weights: torch.Tensor, tokens: int, top_k: int, dtype: torch.dtype) -> torch.Tensor:
+    """Down-projection split-K partials ``[S, tokens * top_k, H]`` -> routed output ``[tokens, H]``."""
+    splits, rows, n = planes.shape
+    assert rows == tokens * top_k and n % HAD == 0 and planes.stride(-1) == 1
+    w = topk_weights.reshape(tokens * top_k)
+    if w.stride(0) != 1:
+        w = w.contiguous()
+    out = torch.empty((tokens, n), dtype=dtype, device=planes.device)
+    if tokens:
+        _splitk_combine_kernel[(tokens, n // HAD)](
+            planes, planes.stride(0), planes.stride(1), w, out, out.stride(0),
+            S=splits, TOP_K=top_k, BN=HAD, num_warps=4,
+        )
     return out
 
 
