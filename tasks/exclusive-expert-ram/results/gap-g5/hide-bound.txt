@@ -1,0 +1,5 @@
+node-level trace mirror-node (ft-g5, pre-L1 code 773d9f8, 8K probe), graph launches: 254
+all: n=254 moe layers/step 23.0; median per step: fetch 295 us, preceding blocks 2129 us, hideable min(fetch,block) 202 us, graph span 5246 us
+fetch<3ms (steady): n=244 moe layers/step 23.0; median per step: fetch 276 us, preceding blocks 2129 us, hideable min(fetch,block) 181 us, graph span 5227 us
+fetch per step deciles: [43, 44, 44, 169, 295, 421, 663, 904, 1259]
+MEAN per step: fetch 631 us (of which ~46 us is the empty-launch floor), hideable min(fetch,block) 326 us, graph span 5593 us -> hideable 5.8% of the graph
