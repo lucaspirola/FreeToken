@@ -4,12 +4,13 @@ One 8192-token chunk attending to a q8_0-quantized prefix of P tokens plus itsel
 per attention layer, for the two production geometries. Reports ms/layer and the effective
 TFLOP/s against the causal FLOP count.
 
-    python bench_extend.py [sweep] [fi] [gqa]
+    python bench_extend.py [sweep] [fi] [gqa] [path]
 
   default : the current kernel (extend_launch_config) for every geometry and prefix
   sweep   : also every (BLOCK_M, BLOCK_N, num_warps, num_stages) the env override accepts
   fi      : also flashinfer on a bf16 copy of the prefix (dequant timed separately)
   gqa     : also the GQA head-packed split kernel (FREETOKEN_EXTEND_GQA=1) at several tiles
+  path    : also the integrated flashinfer path (host_lens), per BENCH_FI_BLOCKS block size
 """
 from __future__ import annotations
 
@@ -59,11 +60,16 @@ def setup(hq, hkv, d, p):
     return q, ke, ve, kq, ks, vq, vs, meta
 
 
-def run_triton(q, ke, ve, kq, ks, vq, vs, meta, d):
+def run_triton(q, ke, ve, kq, ks, vq, vs, meta, d, host_lens=None):
     return extend_paged_attention(
         q=q, k_cache=kq, v_cache=vq, max_q_len=CHUNK, sm_scale=d ** -0.5,
-        k_extend=ke, v_extend=ve, k_scale=ks, v_scale=vs, **meta,
+        k_extend=ke, v_extend=ve, k_scale=ks, v_scale=vs, host_lens=host_lens, **meta,
     )
+
+
+def run_fi_path(args, d, p):
+    """The integrated path: extend_paged_attention with host lengths (flashinfer)."""
+    return run_triton(*args, d, host_lens=([CHUNK], [p], [p + CHUNK]))
 
 
 def dequant(xq, xs):
@@ -83,6 +89,17 @@ def main():
             ref = run_triton(*args, d)
             t = tt.do_bench(lambda: run_triton(*args, d), rep=200)
             line = f"  P={p:6d}: triton default {t:8.2f} ms ({f / t / 1e9:6.1f} TFLOP/s)"
+            if "path" in sys.argv:
+                for blk in os.getenv("BENCH_FI_BLOCKS", "16384").split():
+                    os.environ["FREETOKEN_EXTEND_FI_BLOCK"] = blk
+                    torch.cuda.reset_peak_memory_stats()
+                    base = torch.cuda.memory_allocated()
+                    out = run_fi_path(args, d, p)
+                    peak = (torch.cuda.max_memory_allocated() - base) / 2**20
+                    err = (out.float() - ref.float()).abs().max().item()
+                    tp = tt.do_bench(lambda: run_fi_path(args, d, p), rep=200)
+                    line += (f"\n      fi path blk{blk}: {tp:8.2f} ms ({f / tp / 1e9:6.1f} TFLOP/s)"
+                             f" x{t / tp:4.2f}  max|d| {err:.3g}  peak +{peak:.0f} MiB")
             if do_fi:
                 try:
                     import flashinfer

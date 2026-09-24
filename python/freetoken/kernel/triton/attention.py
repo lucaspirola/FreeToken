@@ -1924,8 +1924,14 @@ def extend_paged_attention(
     k_scale: torch.Tensor | None = None,
     v_scale: torch.Tensor | None = None,
     block_ends: torch.Tensor | None = None,
+    host_lens: tuple[list[int], list[int], list[int]] | None = None,
 ) -> torch.Tensor:
-    """Block-tiled causal prefill/extend attention over paged KV cache; block_ends holds per query token the end of the multimodal span it sits in (0 for none), whose later keys the row also attends."""
+    """Block-tiled causal prefill/extend attention over paged KV cache; block_ends holds per query token the end of the multimodal span it sits in (0 for none), whose later keys the row also attends.
+
+    ``host_lens`` (per-sequence query, prefix and KV lengths as host ints) lets
+    an eligible call run on flashinfer's prefill kernel instead
+    (freetoken/kernel/extend_flashinfer.py, ``FREETOKEN_EXTEND_BACKEND=triton``
+    forces this kernel)."""
 
     assert q.is_cuda and k_cache.is_cuda and v_cache.is_cuda
     assert q.dim() == 3 and k_cache.dim() == 3 and v_cache.dim() == 3
@@ -1948,6 +1954,16 @@ def extend_paged_attention(
     if block_ends is not None:
         assert block_ends.is_cuda and block_ends.dtype == torch.int32 and block_ends.numel() == num_q_tokens
     o = out if out is not None else torch.empty_like(q)
+    from freetoken.kernel import extend_flashinfer as _fi_extend
+
+    if _fi_extend.eligible(q, k_format, v_format, sliding_window, sinks, block_ends,
+                           k_extend, host_lens):
+        return _fi_extend.extend_attention(
+            q=q, k_cache=k_cache, v_cache=v_cache, k_scale=k_scale, v_scale=v_scale,
+            k_format=k_format, v_format=v_format, kv_indices=kv_indices,
+            k_extend=k_extend, v_extend=v_extend, sm_scale=sm_scale, out=o,
+            host_lens=host_lens,
+        )
     sinks_arg = sinks if sinks is not None else q
     block_ends_arg = block_ends if block_ends is not None else qo_indptr
     block_d = triton.next_power_of_2(head_dim)
