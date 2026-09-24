@@ -25,6 +25,9 @@ from freetoken.engine.engine import Engine
 from freetoken.engine.growable_kv import GrowableKvController
 from freetoken.moe.residency import WholeModelResidency
 
+# These drive the arena transaction through torch.cuda (memory queries, device tensors).
+needs_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+
 MiB = 1024 * 1024
 GRANULE = 2 * MiB
 # One VMM granule per slot per bank: chunk_slots * row_bytes is always an exact multiple
@@ -126,6 +129,7 @@ def _dynamic_free(moe: FakeArenaMoe, capacity: int):
     return fn
 
 
+@needs_cuda
 def test_grow_funds_kv_via_set_usable_slots_never_rebuild():
     capacity, step = 1024, 64
     moe = FakeArenaMoe(cache_size=capacity, capacity=capacity, step=step)
@@ -151,6 +155,7 @@ def test_grow_funds_kv_via_set_usable_slots_never_rebuild():
     assert engine.config.moe_cache_size == 768
 
 
+@needs_cuda
 def test_grow_rollback_regrows_experts_on_failed_commit():
     capacity, step = 1024, 64
     moe = FakeArenaMoe(cache_size=capacity, capacity=capacity, step=step)
@@ -169,6 +174,7 @@ def test_grow_rollback_regrows_experts_on_failed_commit():
     assert getattr(engine, "_growable_transition_failed", False) is False
 
 
+@needs_cuda
 def test_shrink_regrows_experts_via_set_usable_slots_never_rebuild():
     capacity, step = 1024, 64
     moe = FakeArenaMoe(cache_size=768, capacity=capacity, step=step)
@@ -191,6 +197,7 @@ def test_shrink_regrows_experts_via_set_usable_slots_never_rebuild():
     assert engine.config.moe_cache_size == 832
 
 
+@needs_cuda
 def test_shrink_no_regrow_when_released_bytes_are_too_small():
     capacity, step = 1024, 64
     moe = FakeArenaMoe(cache_size=768, capacity=capacity, step=step)
