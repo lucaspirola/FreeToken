@@ -41,6 +41,12 @@ FREETOKEN_EXPERT_ARENA = False
 # comparison without detaching the mirror itself.
 FREETOKEN_MIRROR_TIEBREAK = os.getenv("FREETOKEN_MIRROR_TIEBREAK", "1").strip() == "1"
 
+# Duplicate-aware eviction (mirror-attached LFU only; see DUP_BAND in
+# _ensure_experts_sized_kernel_v2): the victim is the coldest candidate that
+# has a pool row among those whose LFU count is within the count's own noise
+# of the coldest one. 0 restores the one-bucket tie-break above.
+FREETOKEN_MIRROR_DUP_BAND = os.getenv("FREETOKEN_MIRROR_DUP_BAND", "1").strip() == "1"
+
 
 def _lfu_recency_config(cache) -> tuple[int, int]:
     tokens = (
@@ -143,6 +149,7 @@ def _ensure_experts_sized_gpu(cache, layer_id, expert_ids, begin, end) -> None:
             COLLECT_STATS=cache.collect_stats,
             POLICY_LFU=cache.cache_policy_id == 1,
             HAS_MIRROR=has_mirror,
+            DUP_BAND=has_mirror and FREETOKEN_MIRROR_DUP_BAND and cache.cache_policy_id == 1,
             MIRROR_BOOK=mirror is not None,
             LFU_RECENCY_CALLS=recency_tokens * cache.num_layers,
             LFU_RECENCY_BONUS=recency_bonus,
@@ -669,6 +676,7 @@ def _ensure_experts_sized_kernel_v2(
     LFU_RECENCY_BONUS: tl.constexpr,
     HAS_MIRROR: tl.constexpr,
     MIRROR_BOOK: tl.constexpr,
+    DUP_BAND: tl.constexpr = False,
 ):
     """Gated (``FREETOKEN_EXPERT_ARENA=1``) twin of ``_ensure_experts_sized_kernel``.
 
@@ -687,6 +695,16 @@ def _ensure_experts_sized_kernel_v2(
     expert that is genuinely colder than every copied candidate is still
     evicted. When ``HAS_MIRROR`` is False the pointer is never read and victim
     choice is byte-identical to the pre-Lever-2 kernel.
+
+    ``DUP_BAND`` (mirror attached, LFU): duplicate-aware eviction, replacing
+    the one-bucket tie-break. LFU counts are event counts over the aging
+    window, so two counts within one standard deviation (sqrt of the count)
+    of each other are statistically tied. Among the candidates whose count is
+    within max(1, sqrt(min)) of the coldest candidate's, the coldest one that
+    has a pool row is evicted (usage breaks ties), which makes the eviction
+    free: no VRAM->RAM writeback. When no candidate in that band has a pool
+    row, the plain LFU choice stands. Hotter experts are never considered, so
+    the hot set is untouched.
 
     ``MIRROR_BOOK`` (mirror attached): also does the swap kernel's per-layer
     bookkeeping that ``mirror_kernels.begin_layer`` does as a separate launch
@@ -786,15 +804,35 @@ def _ensure_experts_sized_kernel_v2(
                     mask=allowed & (oid >= 0),
                     other=-1,
                 ) >= 0
-                owner_frequency += tl.where(has_copy, 0, 1)
+                if not DUP_BAND:
+                    owner_frequency += tl.where(has_copy, 0, 1)
             owner_frequency = tl.where(
                 owner_active | (~candidate), 2147483647, owner_frequency
             )
         for i in tl.range(num_missing):
             if POLICY_LFU:
                 min_frequency = tl.min(owner_frequency, axis=0)
+                if DUP_BAND:
+                    # Candidates hold counts < 2**31 - 1; the sentinel marks the rest.
+                    band = min_frequency.to(tl.int64) + tl.maximum(
+                        tl.sqrt(min_frequency.to(tl.float32)).to(tl.int64), 1
+                    )
+                    dup = (
+                        has_copy
+                        & (owner_frequency < 2147483647)
+                        & (owner_frequency.to(tl.int64) <= band)
+                    )
+                    dup_frequency = tl.where(dup, owner_frequency, 2147483647)
+                    dup_min = tl.min(dup_frequency, axis=0)
+                    pick = tl.where(
+                        dup_min < 2147483647,
+                        dup & (owner_frequency == dup_min),
+                        owner_frequency == min_frequency,
+                    )
+                else:
+                    pick = owner_frequency == min_frequency
                 victim_usage = tl.where(
-                    owner_frequency == min_frequency,
+                    pick,
                     usage,
                     9223372036854775807,
                 )

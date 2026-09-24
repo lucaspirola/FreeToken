@@ -436,3 +436,70 @@ def test_free_eviction_rate_rises_with_the_pool_row_tiebreak():
         f"the tie-break bought nothing on this geometry: "
         f"{rate[False]:.4f} (off) -> {rate[True]:.4f} (on)"
     )
+
+
+# --- Duplicate-aware eviction: the noise band (DUP_BAND) -------------------
+
+def _evict_one(frequency, pool_row_of_id, dup_band):
+    from freetoken.moe import offload_kernels as ok
+
+    device = torch.device("cuda")
+    prev = ok.FREETOKEN_MIRROR_DUP_BAND
+    ok.FREETOKEN_MIRROR_DUP_BAND = dup_band
+    try:
+        cache = _direct_cache(num_layers=2, num_experts=4, cache_size=4, device=device)
+        _seat(
+            cache,
+            slot_of_expert={0: 0, 1: 1, 2: 2, 3: 3},
+            usage={0: 10, 1: 10, 2: 10, 3: 10},
+            frequency=frequency,
+        )
+        _attach_fake_mirror(cache, pool_row_of_id)
+        cache.ensure_experts(1, torch.tensor([[0]], dtype=torch.int32, device=device))
+        torch.cuda.synchronize()
+        return int(cache.victim_ids[0].item())
+    finally:
+        ok.FREETOKEN_MIRROR_DUP_BAND = prev
+
+
+def test_band_evicts_a_duplicate_within_the_count_noise():
+    """Counts 9 (no pool row) and 11 (pool row): 11 <= 9 + sqrt(9), a statistical
+    tie, so the duplicate goes (a free eviction). The one-bucket tie-break
+    (band off) evicts the copy-less 9 and pays a writeback."""
+    freq = {0: 9, 1: 11, 2: 50, 3: 50}
+    rows = [-1, 0, -1, -1, -1, -1, -1, -1]
+    assert _evict_one(freq, rows, dup_band=True) == 1
+    assert _evict_one(freq, rows, dup_band=False) == 0
+
+
+def test_band_never_reaches_past_the_noise():
+    """Counts 9 and 13: 13 > 9 + 3, a real difference, so the colder copy-less
+    expert is evicted even though the warmer one has a pool row."""
+    freq = {0: 9, 1: 13, 2: 50, 3: 50}
+    rows = [-1, 0, -1, -1, -1, -1, -1, -1]
+    assert _evict_one(freq, rows, dup_band=True) == 0
+
+
+def test_free_eviction_rate_rises_with_the_band():
+    """Same deterministic decode as the tie-break test: the band must buy free
+    evictions over the one-bucket tie-break on this geometry."""
+    from freetoken.moe import offload_kernels as ok
+
+    rate = {}
+    with tempfile.TemporaryDirectory() as root:
+        write_nvfp4_checkpoint(root, LAYERS, EXPERTS, H, ISZ)
+        for band in (False, True):
+            cache, pool = _cache(root, _CAP_FULL)
+            prev = ok.FREETOKEN_MIRROR_DUP_BAND
+            ok.FREETOKEN_MIRROR_DUP_BAND = band
+            try:
+                _decode(cache)
+                st = cache.mirror_stats()
+                assert st["coverage_faults"] == 0
+                assert st["starved_writebacks"] == 0
+                rate[band] = st["free_eviction_rate"]
+            finally:
+                ok.FREETOKEN_MIRROR_DUP_BAND = prev
+                pool.close()
+    print(f"free eviction rate: tie-break {rate[False]:.4f}, band {rate[True]:.4f}")
+    assert rate[True] > rate[False], rate
