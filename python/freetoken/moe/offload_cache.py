@@ -2216,8 +2216,16 @@ class OffloadMoeCache:
         return self.residency.stats()
 
     def mirror_fault_check(self) -> None:
-        """Raise if the bounded mirror lost coverage (no-op for the whole model)."""
-        self.residency.fault_check()
+        """Raise if the bounded mirror lost coverage (no-op for the whole model).
+
+        Reads the device counters now (a sync): this is the entry point for
+        callers that drive the kernels directly. The scheduler calls
+        ``residency.fault_check()``, which reads the per-step snapshot."""
+        check = getattr(self.residency, "mirror_fault_check", None)
+        if check is not None:
+            check(fresh=True)
+        else:
+            self.residency.fault_check()
     def _init_prefill_overlap_buffers(self) -> None:
         assert self.banks or self._size_class_enabled, (
             "set_bank_sources must register the banks first"

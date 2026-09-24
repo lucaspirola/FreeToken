@@ -1,0 +1,15 @@
+........................................................................ [ 13%]
+........................................................................ [ 26%]
+........................................................................ [ 39%]
+........................................................................ [ 52%]
+........................................................................ [ 65%]
+........................................................................ [ 78%]
+........................................................................ [ 91%]
+............................................                           [100%]
+=============================== warnings summary ===============================
+tests/moe/test_mirror_pool_gguf.py::test_pool_row_matches_the_loader_row
+  /root/FT-wb1/python/freetoken/models/gguf/reader.py:112: UserWarning: The given NumPy array is not writable, and PyTorch does not support non-writable tensors. This means writing to this tensor will result in undefined behavior. You may want to copy the array to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at /pytorch/torch/csrc/utils/tensor_numpy.cpp:213.)
+    return torch.from_numpy(self._raw)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+548 passed, 1 warning, 2 subtests passed in 30.48s

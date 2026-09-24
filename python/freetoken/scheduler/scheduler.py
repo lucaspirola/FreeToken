@@ -766,6 +766,11 @@ class Scheduler(SchedulerIOMixin):
         # in-flight forward. copy_done only covers batch N; order against N+1 explicitly.
         self.stream.wait_stream(self.engine.stream)
         self._process_last_data(last_data)
+        # The previous step is complete now: DMA its mirror writebacks while
+        # the step just launched computes (no-op for the whole model).
+        residency = getattr(getattr(self.engine, "moe_offload_cache", None), "residency", None)
+        if residency is not None:
+            residency.issue_writebacks()
         self._flush_abort_acks()
         self._publish_scheduler_counters()
         return ongoing_data
@@ -3043,8 +3048,6 @@ class Scheduler(SchedulerIOMixin):
         # here beats a quietly wrong completion. Whole-model residency's
         # fault_check is a no-op; a model without an offload cache has none.
         residency = getattr(self.engine.moe_offload_cache, "residency", None)
-        if residency is not None:
-            residency.fault_check()
         profile = self.config.moe_collect_stats
         if profile:
             batch._profile_host_started = time.perf_counter()
@@ -3056,6 +3059,20 @@ class Scheduler(SchedulerIOMixin):
             self.cache_manager.snapshot_toolcall_anchor(batch.reqs)
         forward_output = self.engine.forward_batch(batch, sample_args)
         self.token_pool[output_mapping] = forward_output.next_tokens_gpu
+        if residency is not None:
+            # After the launch, not before it. Measured in decode (ft-g5 nsys,
+            # 2026-09-24): the host waits for each step to finish before it
+            # launches the next, so host work between the two is on the
+            # critical path; here it overlaps the step just launched.
+            # The check reads counters snapshotted after an earlier step (a
+            # fault surfaces one step later than it would before the launch;
+            # the snapshot always lagged).
+            residency.fault_check()
+            # Bounded mirror: DMA the writebacks of finished steps (the
+            # previous step's snapshot has landed by now) from the VRAM
+            # staging ring into the host pool, and snapshot the ring behind
+            # the step just launched. Non-blocking; no-op for the whole model.
+            residency.service_writebacks()
         if profile:
             batch._profile_enqueue_ms = (
                 time.perf_counter() - enqueue_started

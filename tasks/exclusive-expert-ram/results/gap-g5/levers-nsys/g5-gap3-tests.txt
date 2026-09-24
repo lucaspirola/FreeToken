@@ -1,0 +1,949 @@
+........................................................................ [  9%]
+........................................................................ [ 18%]
+........................................................................ [ 27%]
+....................................................sss......s.......... [ 37%]
+......s................................................................. [ 46%]
+........................................................................ [ 55%]
+........................................................................ [ 65%]
+........................................................................ [ 74%]
+........................................................................ [ 83%]
+........................................................................ [ 93%]
+.....................................................                  [100%]
+=============================== warnings summary ===============================
+tests/moe/test_cpu_moe.py::test_cpu_decode_matches_gpu_decode_kernel[1]
+  /root/venv/lib/python3.12/site-packages/flashinfer/cute_dsl/utils.py:86: DeprecationWarning: Arch from arch.py is deprecated. Use Arch from enums.py instead.
+    from cutlass.base_dsl.arch import Arch
+
+tests/moe/test_mirror_pool_gguf.py::test_pool_row_matches_the_loader_row
+  /root/FreeToken-gap4/python/freetoken/models/gguf/reader.py:112: UserWarning: The given NumPy array is not writable, and PyTorch does not support non-writable tensors. This means writing to this tensor will result in undefined behavior. You may want to copy the array to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at /pytorch/torch/csrc/utils/tensor_numpy.cpp:213.)
+    return torch.from_numpy(self._raw)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+==================================== PASSES ====================================
+____________ test_report_and_json_survive_a_missing_cpu_moe_result _____________
+----------------------------- Captured stdout call -----------------------------
+    format      expert       CPU-MoE   PCIe-gather  CPU/PCIe  backend
+    nvfp4      5.36 MB           n/a     21.5 GB/s         —  offload
+           └─ cpu moe unavailable (no avx512)
+
+  host h   gpu cuda:0 (gpu)   cpu 8c/8t
+  ceilings: CPU STREAM read 30.0  |  PCIe linear H2D 25.0  D2H 25.0  GB/s   (threshold 2.0x)
+
+  nemotron3.5-lightning  H=2688 I=1856 E=128 top_k=6
+    format      expert       CPU-MoE   PCIe-gather  CPU/PCIe  backend
+    nvfp4      5.36 MB           n/a     21.5 GB/s         —  offload
+           └─ cpu moe unavailable (no avx512)
+
+  saved: /dev/null
+
+_____________ test_coverage_holds_at_the_floor_and_breaks_below_it _____________
+----------------------------- Captured stdout call -----------------------------
+[1/2] c++ -MMD -MF vmm_tensor.o.d -DTORCH_EXTENSION_NAME=freetoken_vmm_tensor -DTORCH_API_INCLUDE_EXTENSION_H -I/usr/local/cuda-13.0/include -isystem /root/venv/lib/python3.12/site-packages/torch/include -isystem /root/venv/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /usr/include/python3.12 -fPIC -std=c++17 -O3 -std=c++17 -c /root/FreeToken-gap4/python/freetoken/kernel/csrc/vmm_tensor.cpp -o vmm_tensor.o 
+[2/2] c++ vmm_tensor.o -shared -L/usr/local/cuda-13.0/lib64/stubs -L/usr/local/cuda-13.0/targets/x86_64-linux/lib -lcuda -lcudart -L/root/venv/lib/python3.12/site-packages/torch/lib -lc10 -ltorch_cpu -ltorch -ltorch_python -o freetoken_vmm_tensor.so
+[1m[2026-09-24|12:29:30|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 8-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:29:30|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 42 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:29:33|core|rank=0][0m [32mINFO    [0m mirror warm start: 30 experts on GPU (slots 0..30), 18 mirrored, 0 duplicated, 24 rows in reserve (0.0% of evictions skip the writeback)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 8-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 42 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 30 experts on GPU (slots 0..30), 18 mirrored, 0 duplicated, 24 rows in reserve (0.0% of evictions skip the writeback)
+________________ test_a_lost_copy_is_a_hard_error_not_a_counter ________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:33|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 8-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:29:33|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 42 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:29:33|core|rank=0][0m [32mINFO    [0m mirror warm start: 30 experts on GPU (slots 0..30), 18 mirrored, 0 duplicated, 24 rows in reserve (0.0% of evictions skip the writeback)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 8-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 42 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 30 experts on GPU (slots 0..30), 18 mirrored, 0 duplicated, 24 rows in reserve (0.0% of evictions skip the writeback)
+______________ test_fault_counters_reach_the_host_without_a_sync _______________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:33|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 8-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:29:33|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 42 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:29:33|core|rank=0][0m [32mINFO    [0m mirror warm start: 30 experts on GPU (slots 0..30), 18 mirrored, 0 duplicated, 24 rows in reserve (0.0% of evictions skip the writeback)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 8-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 42 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 30 experts on GPU (slots 0..30), 18 mirrored, 0 duplicated, 24 rows in reserve (0.0% of evictions skip the writeback)
+_________________ test_cpu_decode_matches_gpu_decode_kernel[1] _________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:33|core|rank=0][0m [32mINFO    [0m torch intra-op threads: 24 -> 1 (cores reserved for the pinned CPU MoE pool)
+[1m[2026-09-24|12:29:33|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2 fmt=bf16 H=1024 I=512 experts=16 layers=4 top_k=4 act=silu max_tokens=1
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 torch intra-op threads: 24 -> 1 (cores reserved for the pinned CPU MoE pool)
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2 fmt=bf16 H=1024 I=512 experts=16 layers=4 top_k=4 act=silu max_tokens=1
+_________________ test_cpu_decode_matches_gpu_decode_kernel[2] _________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:34|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2 fmt=bf16 H=1024 I=512 experts=16 layers=4 top_k=4 act=silu max_tokens=2
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2 fmt=bf16 H=1024 I=512 experts=16 layers=4 top_k=4 act=silu max_tokens=2
+_________________ test_cpu_decode_matches_gpu_decode_kernel[5] _________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:35|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2 fmt=bf16 H=1024 I=512 experts=16 layers=4 top_k=4 act=silu max_tokens=5
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2 fmt=bf16 H=1024 I=512 experts=16 layers=4 top_k=4 act=silu max_tokens=5
+________________ test_cpu_decode_matches_gpu_decode_kernel[16] _________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:35|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2 fmt=bf16 H=1024 I=512 experts=16 layers=4 top_k=4 act=silu max_tokens=16
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2 fmt=bf16 H=1024 I=512 experts=16 layers=4 top_k=4 act=silu max_tokens=16
+______________ test_cpu_decode_nvfp4_matches_dequant_then_gpu[1] _______________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:36|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2+vnni(nvfp4-w4a8) fmt=nvfp4 H=1024 I=512 experts=16 layers=3 top_k=4 act=silu max_tokens=1
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2+vnni(nvfp4-w4a8) fmt=nvfp4 H=1024 I=512 experts=16 layers=3 top_k=4 act=silu max_tokens=1
+______________ test_cpu_decode_nvfp4_matches_dequant_then_gpu[3] _______________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:36|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2+vnni(nvfp4-w4a8) fmt=nvfp4 H=1024 I=512 experts=16 layers=3 top_k=4 act=silu max_tokens=3
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2+vnni(nvfp4-w4a8) fmt=nvfp4 H=1024 I=512 experts=16 layers=3 top_k=4 act=silu max_tokens=3
+______________ test_cpu_decode_nvfp4_matches_dequant_then_gpu[8] _______________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:36|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2+vnni(nvfp4-w4a8) fmt=nvfp4 H=1024 I=512 experts=16 layers=3 top_k=4 act=silu max_tokens=8
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2+vnni(nvfp4-w4a8) fmt=nvfp4 H=1024 I=512 experts=16 layers=3 top_k=4 act=silu max_tokens=8
+________ test_cpu_decode_nvfp4_ungated_relu2_matches_dequant_reference _________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:36|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=4 (pinned to cores 0..3) isa=avx2+vnni(nvfp4-w4a8) fmt=nvfp4 H=256 I=128 experts=8 layers=2 top_k=2 act=relu2 max_tokens=3
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=4 (pinned to cores 0..3) isa=avx2+vnni(nvfp4-w4a8) fmt=nvfp4 H=256 I=128 experts=8 layers=2 top_k=2 act=relu2 max_tokens=3
+_________ test_cpu_decode_nvfp4_swigluoai_matches_dequant_reference[1] _________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:36|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2+vnni(nvfp4-w4a8) fmt=nvfp4 H=1024 I=512 experts=16 layers=2 top_k=4 act=swigluoai max_tokens=1
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2+vnni(nvfp4-w4a8) fmt=nvfp4 H=1024 I=512 experts=16 layers=2 top_k=4 act=swigluoai max_tokens=1
+_________ test_cpu_decode_nvfp4_swigluoai_matches_dequant_reference[4] _________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:36|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2+vnni(nvfp4-w4a8) fmt=nvfp4 H=1024 I=512 experts=16 layers=2 top_k=4 act=swigluoai max_tokens=4
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2+vnni(nvfp4-w4a8) fmt=nvfp4 H=1024 I=512 experts=16 layers=2 top_k=4 act=swigluoai max_tokens=4
+_________________ test_stale_extension_rejected_for_swigluoai __________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:36|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2+vnni(nvfp4-w4a8) fmt=nvfp4 H=256 I=128 experts=4 layers=1 top_k=2 act=silu max_tokens=1
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2+vnni(nvfp4-w4a8) fmt=nvfp4 H=256 I=128 experts=4 layers=1 top_k=2 act=silu max_tokens=1
+_________________ test_cpu_decode_mxfp4_matches_gpu_splitk[1] __________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:36|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2 fmt=mxfp4_triton H=256 I=256 experts=8 layers=2 top_k=2 act=gpt_oss_swiglu max_tokens=1
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2 fmt=mxfp4_triton H=256 I=256 experts=8 layers=2 top_k=2 act=gpt_oss_swiglu max_tokens=1
+_________________ test_cpu_decode_mxfp4_matches_gpu_splitk[4] __________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:37|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2 fmt=mxfp4_triton H=256 I=256 experts=8 layers=2 top_k=2 act=gpt_oss_swiglu max_tokens=4
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2 fmt=mxfp4_triton H=256 I=256 experts=8 layers=2 top_k=2 act=gpt_oss_swiglu max_tokens=4
+_________________ test_cpu_decode_mxfp4_matches_gpu_splitk[8] __________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:37|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2 fmt=mxfp4_triton H=256 I=256 experts=8 layers=2 top_k=2 act=gpt_oss_swiglu max_tokens=8
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2 fmt=mxfp4_triton H=256 I=256 experts=8 layers=2 top_k=2 act=gpt_oss_swiglu max_tokens=8
+_____________________ test_cpu_decode_dsfp4_matches_gpu[1] _____________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:37|core|rank=0][0m [32mINFO    [0m ds_fp4: input FP8 round-trip moved to the GPU (bit-identical grid; the CPU-side scalar round-trip is skipped)
+[1m[2026-09-24|12:29:37|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2 fmt=ds_fp4 H=256 I=256 experts=8 layers=2 top_k=4 act=silu max_tokens=1
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 ds_fp4: input FP8 round-trip moved to the GPU (bit-identical grid; the CPU-side scalar round-trip is skipped)
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2 fmt=ds_fp4 H=256 I=256 experts=8 layers=2 top_k=4 act=silu max_tokens=1
+_____________________ test_cpu_decode_dsfp4_matches_gpu[3] _____________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:37|core|rank=0][0m [32mINFO    [0m ds_fp4: input FP8 round-trip moved to the GPU (bit-identical grid; the CPU-side scalar round-trip is skipped)
+[1m[2026-09-24|12:29:37|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2 fmt=ds_fp4 H=256 I=256 experts=8 layers=2 top_k=4 act=silu max_tokens=3
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 ds_fp4: input FP8 round-trip moved to the GPU (bit-identical grid; the CPU-side scalar round-trip is skipped)
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2 fmt=ds_fp4 H=256 I=256 experts=8 layers=2 top_k=4 act=silu max_tokens=3
+_____________________ test_cpu_decode_dsfp4_matches_gpu[8] _____________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:37|core|rank=0][0m [32mINFO    [0m ds_fp4: input FP8 round-trip moved to the GPU (bit-identical grid; the CPU-side scalar round-trip is skipped)
+[1m[2026-09-24|12:29:37|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2 fmt=ds_fp4 H=256 I=256 experts=8 layers=2 top_k=4 act=silu max_tokens=8
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 ds_fp4: input FP8 round-trip moved to the GPU (bit-identical grid; the CPU-side scalar round-trip is skipped)
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2 fmt=ds_fp4 H=256 I=256 experts=8 layers=2 top_k=4 act=silu max_tokens=8
+____________________ test_cpu_moe_decode_cuda_graph_replay _____________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:37|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=8 (pinned to cores 0..7) isa=avx2 fmt=bf16 H=512 I=256 experts=8 layers=3 top_k=2 act=silu max_tokens=4
+cpu moe cuda graph replay OK
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=8 (pinned to cores 0..7) isa=avx2 fmt=bf16 H=512 I=256 experts=8 layers=3 top_k=2 act=silu max_tokens=4
+_________________ test_cpu_moe_decode_cuda_graph_replay_mxfp4 __________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:37|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=8 (pinned to cores 0..7) isa=avx2 fmt=mxfp4_triton H=256 I=256 experts=8 layers=2 top_k=2 act=gpt_oss_swiglu max_tokens=4
+cpu moe cuda graph replay (mxfp4) OK
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=8 (pinned to cores 0..7) isa=avx2 fmt=mxfp4_triton H=256 I=256 experts=8 layers=2 top_k=2 act=gpt_oss_swiglu max_tokens=4
+_________________ test_cpu_moe_decode_cuda_graph_replay_dsfp4 __________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:37|core|rank=0][0m [32mINFO    [0m ds_fp4: input FP8 round-trip moved to the GPU (bit-identical grid; the CPU-side scalar round-trip is skipped)
+[1m[2026-09-24|12:29:37|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=8 (pinned to cores 0..7) isa=avx2 fmt=ds_fp4 H=256 I=256 experts=8 layers=2 top_k=4 act=silu max_tokens=4
+cpu moe cuda graph replay (ds_fp4) OK
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 ds_fp4: input FP8 round-trip moved to the GPU (bit-identical grid; the CPU-side scalar round-trip is skipped)
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=8 (pinned to cores 0..7) isa=avx2 fmt=ds_fp4 H=256 I=256 experts=8 layers=2 top_k=4 act=silu max_tokens=4
+_____________________ test_cpu_moe_executor_is_collectable _____________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:37|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=2 (pinned to cores 0..1) isa=avx2 fmt=bf16 H=64 I=32 experts=4 layers=2 top_k=2 act=silu max_tokens=1
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=2 (pinned to cores 0..1) isa=avx2 fmt=bf16 H=64 I=32 experts=4 layers=2 top_k=2 act=silu max_tokens=1
+_______________ test_cpu_decode_q4_0_matches_dequant_then_gpu[1] _______________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:40|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2+vnni(q4_0-w4a8) fmt=q4_0 H=2816 I=704 experts=16 layers=3 top_k=8 act=gelu_tanh max_tokens=1
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2+vnni(q4_0-w4a8) fmt=q4_0 H=2816 I=704 experts=16 layers=3 top_k=8 act=gelu_tanh max_tokens=1
+_______________ test_cpu_decode_q4_0_matches_dequant_then_gpu[3] _______________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:41|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2+vnni(q4_0-w4a8) fmt=q4_0 H=2816 I=704 experts=16 layers=3 top_k=8 act=gelu_tanh max_tokens=3
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2+vnni(q4_0-w4a8) fmt=q4_0 H=2816 I=704 experts=16 layers=3 top_k=8 act=gelu_tanh max_tokens=3
+_______________ test_cpu_decode_q4_0_matches_dequant_then_gpu[8] _______________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:43|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2+vnni(q4_0-w4a8) fmt=q4_0 H=2816 I=704 experts=16 layers=3 top_k=8 act=gelu_tanh max_tokens=8
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2+vnni(q4_0-w4a8) fmt=q4_0 H=2816 I=704 experts=16 layers=3 top_k=8 act=gelu_tanh max_tokens=8
+____________________ test_cpu_decode_q4_0_matches_ggml_mmvq ____________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:29:44|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2+vnni(q4_0-w4a8) fmt=q4_0 H=2816 I=704 experts=16 layers=2 top_k=8 act=gelu_tanh max_tokens=4
+[1/2] /usr/local/cuda-13.0/bin/nvcc -MD -MF gguf_kernel.cuda.o.d -ccbin /usr/bin/gcc-13 -DTORCH_EXTENSION_NAME=freetoken_gguf_kernels -DTORCH_API_INCLUDE_EXTENSION_H -I/root/FreeToken-gap4/python/freetoken/kernel/csrc/gguf -isystem /root/venv/lib/python3.12/site-packages/torch/include -isystem /root/venv/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda-13.0/include -isystem /usr/include/python3.12 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr -gencode=arch=compute_120,code=compute_120 -gencode=arch=compute_120,code=sm_120 --compiler-options '-fPIC' -O3 --expt-relaxed-constexpr -ccbin /usr/bin/g++-13 -std=c++17 -c /root/FreeToken-gap4/python/freetoken/kernel/csrc/gguf/gguf_kernel.cu -o gguf_kernel.cuda.o 
+nvcc warning : incompatible redefinition for option 'compiler-bindir', the last value of this option was used
+[2/2] /usr/bin/g++-13 gguf_kernel.cuda.o -shared -L/root/venv/lib/python3.12/site-packages/torch/lib -lc10 -lc10_cuda -ltorch_cpu -ltorch_cuda -ltorch -ltorch_python -L/usr/local/cuda-13.0/lib64 -lcudart -o freetoken_gguf_kernels.so
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=23 (pinned to cores 0..22) isa=avx2+vnni(q4_0-w4a8) fmt=q4_0 H=2816 I=704 experts=16 layers=2 top_k=8 act=gelu_tanh max_tokens=4
+__________________ test_cpu_moe_decode_q4_0_cuda_graph_replay __________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:30:19|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=8 (pinned to cores 0..7) isa=avx2+vnni(q4_0-w4a8) fmt=q4_0 H=2816 I=704 experts=8 layers=2 top_k=8 act=gelu_tanh max_tokens=4
+cpu moe cuda graph replay (q4_0) OK
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=8 (pinned to cores 0..7) isa=avx2+vnni(q4_0-w4a8) fmt=q4_0 H=2816 I=704 experts=8 layers=2 top_k=8 act=gelu_tanh max_tokens=4
+______________________ test_dsfp4_gpu_prequant_bit_parity ______________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:30:22|core|rank=0][0m [32mINFO    [0m ds_fp4: input FP8 round-trip moved to the GPU (bit-identical grid; the CPU-side scalar round-trip is skipped)
+[1m[2026-09-24|12:30:22|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=4 (pinned to cores 0..3) isa=avx2 fmt=ds_fp4 H=1024 I=512 experts=16 layers=1 top_k=4 act=silu max_tokens=2
+[1m[2026-09-24|12:30:22|core|rank=0][0m [32mINFO    [0m ds_fp4: input FP8 round-trip moved to the GPU (bit-identical grid; the CPU-side scalar round-trip is skipped)
+[1m[2026-09-24|12:30:22|core|rank=0][0m [32mINFO    [0m CPU MoE executor ready: threads=4 (pinned to cores 0..3) isa=avx2 fmt=ds_fp4 H=1024 I=512 experts=16 layers=1 top_k=4 act=silu max_tokens=2
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.cpu_executor:logger.py:111 ds_fp4: input FP8 round-trip moved to the GPU (bit-identical grid; the CPU-side scalar round-trip is skipped)
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=4 (pinned to cores 0..3) isa=avx2 fmt=ds_fp4 H=1024 I=512 experts=16 layers=1 top_k=4 act=silu max_tokens=2
+INFO     freetoken.moe.cpu_executor:logger.py:111 ds_fp4: input FP8 round-trip moved to the GPU (bit-identical grid; the CPU-side scalar round-trip is skipped)
+INFO     freetoken.moe.cpu_executor:logger.py:111 CPU MoE executor ready: threads=4 (pinned to cores 0..3) isa=avx2 fmt=ds_fp4 H=1024 I=512 experts=16 layers=1 top_k=4 act=silu max_tokens=2
+________________ test_cached_extend_matches_the_full_layer_path ________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:30:22|core|rank=0][0m [33mWARNING [0m NVFP4 prefill GEMM E=8 N=128 K=256 on NVIDIA_GeForce_RTX_5080 has no tuned table; using the MiniMax-M2 default tiles. Tune with benchmarks/bench_moe_prefill_gemm.py and drop the JSON in moe/configs/triton_<ver>/ (nvfp4,E=8,N=128,K=256,device_name=NVIDIA_GeForce_RTX_5080.json).
+[1m[2026-09-24|12:30:22|core|rank=0][0m [33mWARNING [0m NVFP4 prefill GEMM E=8 N=256 K=128 on NVIDIA_GeForce_RTX_5080 has no tuned table; using the MiniMax-M2 default tiles. Tune with benchmarks/bench_moe_prefill_gemm.py and drop the JSON in moe/configs/triton_<ver>/ (nvfp4,E=8,N=256,K=128,device_name=NVIDIA_GeForce_RTX_5080.json).
+__________ test_fused_copy_variable_source_rows_fill_cache_prefix[0] ___________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:30:35|core|rank=0][0m [32mINFO    [0m mixed-GGUF size-class cache ACTIVE: classes=[((256, 512), 4), ((512, 256), 4)], decode_slots=8 (including 0 borrowed prefill slots), saved=0.0 MiB
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.offload_cache:offload_cache.py:1033 mixed-GGUF size-class cache ACTIVE: classes=[((256, 512), 4), ((512, 256), 4)], decode_slots=8 (including 0 borrowed prefill slots), saved=0.0 MiB
+__________ test_fused_copy_variable_source_rows_fill_cache_prefix[1] ___________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:30:35|core|rank=0][0m [32mINFO    [0m mixed-GGUF size-class cache ACTIVE: classes=[((256, 512), 4), ((512, 256), 4)], decode_slots=8 (including 0 borrowed prefill slots), saved=0.0 MiB
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.offload_cache:offload_cache.py:1033 mixed-GGUF size-class cache ACTIVE: classes=[((256, 512), 4), ((512, 256), 4)], decode_slots=8 (including 0 borrowed prefill slots), saved=0.0 MiB
+______________ test_arena_no_longer_refuses_mixed_gguf_signatures ______________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:30:35|core|rank=0][0m [32mINFO    [0m mixed-GGUF size-class cache ACTIVE: classes=[((16, 8), 6), ((16, 12), 6)], decode_slots=12 (including 0 borrowed prefill slots), saved=0.0 MiB
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.offload_cache:offload_cache.py:1033 mixed-GGUF size-class cache ACTIVE: classes=[((16, 8), 6), ((16, 12), 6)], decode_slots=12 (including 0 borrowed prefill slots), saved=0.0 MiB
+_________ test_one_arena_per_class_with_its_own_ceiling_and_row_bytes __________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:30:35|core|rank=0][0m [32mINFO    [0m mixed-GGUF size-class cache ACTIVE: classes=[((16, 8), 8), ((16, 12), 8)], decode_slots=16 (including 0 borrowed prefill slots), saved=0.0 MiB
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.offload_cache:offload_cache.py:1033 mixed-GGUF size-class cache ACTIVE: classes=[((16, 8), 8), ((16, 12), 8)], decode_slots=16 (including 0 borrowed prefill slots), saved=0.0 MiB
+_________ test_set_class_usable_slots_shrinks_and_regrows_exact_bytes __________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:30:35|core|rank=0][0m [32mINFO    [0m mixed-GGUF size-class cache ACTIVE: classes=[((16, 8), 8), ((16, 12), 8)], decode_slots=16 (including 0 borrowed prefill slots), saved=0.0 MiB
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.offload_cache:offload_cache.py:1033 mixed-GGUF size-class cache ACTIVE: classes=[((16, 8), 8), ((16, 12), 8)], decode_slots=16 (including 0 borrowed prefill slots), saved=0.0 MiB
+___________ test_set_class_usable_slots_rejects_non_boundary_target ____________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:30:35|core|rank=0][0m [32mINFO    [0m mixed-GGUF size-class cache ACTIVE: classes=[((16, 8), 8), ((16, 12), 8)], decode_slots=16 (including 0 borrowed prefill slots), saved=0.0 MiB
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.offload_cache:offload_cache.py:1033 mixed-GGUF size-class cache ACTIVE: classes=[((16, 8), 8), ((16, 12), 8)], decode_slots=16 (including 0 borrowed prefill slots), saved=0.0 MiB
+____________ test_set_class_usable_slots_rejects_below_joint_floor _____________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:30:35|core|rank=0][0m [32mINFO    [0m mixed-GGUF size-class cache ACTIVE: classes=[((16, 8), 8), ((16, 12), 8)], decode_slots=16 (including 0 borrowed prefill slots), saved=0.0 MiB
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.offload_cache:offload_cache.py:1033 mixed-GGUF size-class cache ACTIVE: classes=[((16, 8), 8), ((16, 12), 8)], decode_slots=16 (including 0 borrowed prefill slots), saved=0.0 MiB
+_________________ test_set_class_usable_slots_off_gate_raises __________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:30:35|core|rank=0][0m [32mINFO    [0m mixed-GGUF size-class cache ACTIVE: classes=[((16, 8), 6), ((16, 12), 6)], decode_slots=12 (including 0 borrowed prefill slots), saved=0.0 MiB
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.offload_cache:offload_cache.py:1033 mixed-GGUF size-class cache ACTIVE: classes=[((16, 8), 6), ((16, 12), 6)], decode_slots=12 (including 0 borrowed prefill slots), saved=0.0 MiB
+_______ test_mixed_gguf_borrows_largest_decode_class_for_prefill_buffers _______
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:30:35|core|rank=0][0m [32mINFO    [0m mixed-GGUF size-class cache ACTIVE: classes=[((16, 8), 4), ((16, 12), 8)], decode_slots=12 (including 4 borrowed prefill slots), saved=0.0 MiB
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.offload_cache:offload_cache.py:1033 mixed-GGUF size-class cache ACTIVE: classes=[((16, 8), 4), ((16, 12), 8)], decode_slots=12 (including 4 borrowed prefill slots), saved=0.0 MiB
+___________________ test_mixed_gguf_size_class_rebuild_floor ___________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:30:35|core|rank=0][0m [32mINFO    [0m mixed-GGUF size-class cache ACTIVE: classes=[((16, 8), 4), ((16, 12), 8)], decode_slots=12 (including 4 borrowed prefill slots), saved=0.0 MiB
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.offload_cache:offload_cache.py:1033 mixed-GGUF size-class cache ACTIVE: classes=[((16, 8), 4), ((16, 12), 8)], decode_slots=12 (including 4 borrowed prefill slots), saved=0.0 MiB
+____________ test_mixed_gguf_cuda_lru_and_copy_use_class_local_rows ____________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:30:35|core|rank=0][0m [32mINFO    [0m mixed-GGUF size-class cache ACTIVE: classes=[((16, 16), 4), ((16, 32), 4)], decode_slots=8 (including 0 borrowed prefill slots), saved=0.0 MiB
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.offload_cache:offload_cache.py:1033 mixed-GGUF size-class cache ACTIVE: classes=[((16, 16), 4), ((16, 32), 4)], decode_slots=8 (including 0 borrowed prefill slots), saved=0.0 MiB
+_______________ test_offload_decode_bit_identical_under_eviction _______________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:30:36|core|rank=0][0m [32mINFO    [0m kernel triton_gptoss selected; skipped triton: standard MXFP4 kernel reads the concatenated gate|up row order
+[1m[2026-09-24|12:30:36|core|rank=0][0m [32mINFO    [0m kernel triton_gptoss selected; skipped triton: standard MXFP4 kernel reads the concatenated gate|up row order
+[1m[2026-09-24|12:30:36|core|rank=0][0m [32mINFO    [0m kernel triton_gptoss selected; skipped triton: standard MXFP4 kernel reads the concatenated gate|up row order
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.layers.quantization.method:method.py:41 kernel triton_gptoss selected; skipped triton: standard MXFP4 kernel reads the concatenated gate|up row order
+INFO     freetoken.layers.quantization.method:method.py:41 kernel triton_gptoss selected; skipped triton: standard MXFP4 kernel reads the concatenated gate|up row order
+INFO     freetoken.layers.quantization.method:method.py:41 kernel triton_gptoss selected; skipped triton: standard MXFP4 kernel reads the concatenated gate|up row order
+______________ test_offload_prefill_overlap_matches_reference[16] ______________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:30:36|core|rank=0][0m [32mINFO    [0m kernel triton_gptoss selected; skipped triton: standard MXFP4 kernel reads the concatenated gate|up row order
+[1m[2026-09-24|12:30:36|core|rank=0][0m [32mINFO    [0m kernel triton_gptoss selected; skipped triton: standard MXFP4 kernel reads the concatenated gate|up row order
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.layers.quantization.method:method.py:41 kernel triton_gptoss selected; skipped triton: standard MXFP4 kernel reads the concatenated gate|up row order
+INFO     freetoken.layers.quantization.method:method.py:41 kernel triton_gptoss selected; skipped triton: standard MXFP4 kernel reads the concatenated gate|up row order
+______________ test_pageable_split_uses_post_weight_memavailable _______________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:30:36|core|rank=0][0m [32mINFO    [0m --moe-pageable-gpu: banks 0.00 GiB > pin budget 0.00 GiB effective bank budget after 0.0 MiB staging; 1 MoE layers use pageable staging (head+tail) and GPU compute ([0])
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.engine.engine:logger.py:111 --moe-pageable-gpu: banks 0.00 GiB > pin budget 0.00 GiB effective bank budget after 0.0 MiB staging; 1 MoE layers use pageable staging (head+tail) and GPU compute ([0])
+_____________ test_pageable_split_charges_staging_to_host_reserve ______________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:30:36|core|rank=0][0m [32mINFO    [0m --moe-pageable-gpu: banks 0.00 GiB > pin budget 0.00 GiB effective bank budget after 0.2 MiB staging; 2 MoE layers use pageable staging (head+tail) and GPU compute ([0, 1])
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.engine.engine:logger.py:111 --moe-pageable-gpu: banks 0.00 GiB > pin budget 0.00 GiB effective bank budget after 0.2 MiB staging; 2 MoE layers use pageable staging (head+tail) and GPU compute ([0, 1])
+_________ test_ornith_q6_pageable_split_uses_profiled_low_miss_layers __________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:30:36|core|rank=0][0m [32mINFO    [0m --moe-pageable-gpu: banks 24.61 GiB > pin budget 18.15 GiB effective bank budget after 0.0 MiB staging; 11 MoE layers use pageable staging (Ornith-Q6 measured-low-miss) and GPU compute ([7, 8, 12, 14, 15, 17, 18, 19, 20, 30, 39])
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.engine.engine:logger.py:111 --moe-pageable-gpu: banks 24.61 GiB > pin budget 18.15 GiB effective bank budget after 0.0 MiB staging; 11 MoE layers use pageable staging (Ornith-Q6 measured-low-miss) and GPU compute ([7, 8, 12, 14, 15, 17, 18, 19, 20, 30, 39])
+_________________ test_ornith_q6_pageable_profile_is_explicit __________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:30:36|core|rank=0][0m [32mINFO    [0m --moe-pageable-gpu: banks 24.61 GiB > pin budget 18.13 GiB effective bank budget after 19.7 MiB staging; 11 MoE layers use pageable staging (persisted measured-time-cost) and GPU compute ([19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29])
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.engine.engine:logger.py:111 --moe-pageable-gpu: banks 24.61 GiB > pin budget 18.13 GiB effective bank budget after 19.7 MiB staging; 11 MoE layers use pageable staging (persisted measured-time-cost) and GPU compute ([19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29])
+_______________________ test_load_hybrid_fetch_fraction ________________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:30:36|core|rank=0][0m [33mWARNING [0m benchbw profile /tmp/pytest-of-root/pytest-1/test_load_hybrid_fetch_fractio0/benchbw.json was measured on 'FAKE GPU', not this GPU ('OTHER'); ignoring it
+------------------------------ Captured log call -------------------------------
+WARNING  freetoken.moe.bench_profile:bench_profile.py:106 benchbw profile /tmp/pytest-of-root/pytest-1/test_load_hybrid_fetch_fractio0/benchbw.json was measured on 'FAKE GPU', not this GPU ('OTHER'); ignoring it
+________________ test_profile_lookup_prefers_the_gpu_uuid_file _________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:30:36|core|rank=0][0m [33mWARNING [0m benchbw profile /tmp/pytest-of-root/pytest-1/test_profile_lookup_prefers_th0/freetoken/benchbw.json was measured on 'FAKE GPU', not this GPU ('OTHER'); ignoring it
+------------------------------ Captured log call -------------------------------
+WARNING  freetoken.moe.bench_profile:bench_profile.py:106 benchbw profile /tmp/pytest-of-root/pytest-1/test_profile_lookup_prefers_th0/freetoken/benchbw.json was measured on 'FAKE GPU', not this GPU ('OTHER'); ignoring it
+_________________ test_written_back_rows_are_byte_exact[off-1] _________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:30:59|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:30:59|core|rank=0][0m [32mINFO    [0m mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 4 duplicated, 16 rows in reserve (20.0% of evictions skip the writeback)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 4 duplicated, 16 rows in reserve (20.0% of evictions skip the writeback)
+_______________ test_written_back_rows_are_byte_exact[default-1] _______________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:03|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 5-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:31:03|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:31:03|core|rank=0][0m [32mINFO    [0m mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 4 duplicated, 16 rows in reserve (20.0% of evictions skip the writeback)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 5-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 4 duplicated, 16 rows in reserve (20.0% of evictions skip the writeback)
+_______________ test_written_back_rows_are_byte_exact[default-5] _______________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:03|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 5-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:31:03|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:31:03|core|rank=0][0m [32mINFO    [0m mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 4 duplicated, 16 rows in reserve (20.0% of evictions skip the writeback)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 5-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 4 duplicated, 16 rows in reserve (20.0% of evictions skip the writeback)
+________________ test_written_back_rows_are_byte_exact[4rows-3] ________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:03|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 4-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:31:03|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:31:03|core|rank=0][0m [32mINFO    [0m mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 4 duplicated, 16 rows in reserve (20.0% of evictions skip the writeback)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 4-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 4 duplicated, 16 rows in reserve (20.0% of evictions skip the writeback)
+________________ test_written_back_rows_are_byte_exact[4rows-0] ________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:03|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 4-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:31:03|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:31:03|core|rank=0][0m [32mINFO    [0m mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 4 duplicated, 16 rows in reserve (20.0% of evictions skip the writeback)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 4-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 4 duplicated, 16 rows in reserve (20.0% of evictions skip the writeback)
+___________________ test_dma_writebacks_keep_every_decision ____________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:03|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:31:03|core|rank=0][0m [32mINFO    [0m mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 4 duplicated, 16 rows in reserve (20.0% of evictions skip the writeback)
+[1m[2026-09-24|12:31:03|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 5-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:31:03|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:31:03|core|rank=0][0m [32mINFO    [0m mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 4 duplicated, 16 rows in reserve (20.0% of evictions skip the writeback)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 4 duplicated, 16 rows in reserve (20.0% of evictions skip the writeback)
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 5-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 4 duplicated, 16 rows in reserve (20.0% of evictions skip the writeback)
+_________________ test_dma_writebacks_under_graph_replay[off] __________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:03|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:31:03|core|rank=0][0m [32mINFO    [0m mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 4 duplicated, 16 rows in reserve (20.0% of evictions skip the writeback)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 4 duplicated, 16 rows in reserve (20.0% of evictions skip the writeback)
+_______________ test_dma_writebacks_under_graph_replay[default] ________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:03|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 5-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:31:03|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:31:03|core|rank=0][0m [32mINFO    [0m mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 4 duplicated, 16 rows in reserve (20.0% of evictions skip the writeback)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 5-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 4 duplicated, 16 rows in reserve (20.0% of evictions skip the writeback)
+____________________ test_warm_start_seats_the_whole_arena _____________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 5-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror warm start: 32 experts on GPU (slots 0..32), 16 mirrored, 16 duplicated, 16 rows in reserve (50.0% of evictions skip the writeback)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 5-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 32 experts on GPU (slots 0..32), 16 mirrored, 16 duplicated, 16 rows in reserve (50.0% of evictions skip the writeback)
+_______ test_a_prefill_layer_is_assembled_without_reading_the_checkpoint _______
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 5-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror warm start: 32 experts on GPU (slots 0..32), 16 mirrored, 16 duplicated, 16 rows in reserve (50.0% of evictions skip the writeback)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 5-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 32 experts on GPU (slots 0..32), 16 mirrored, 16 duplicated, 16 rows in reserve (50.0% of evictions skip the writeback)
+________________ test_a_prefill_sweep_leaves_coverage_standing _________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 5-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror warm start: 32 experts on GPU (slots 0..32), 16 mirrored, 16 duplicated, 16 rows in reserve (50.0% of evictions skip the writeback)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 5-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 32 experts on GPU (slots 0..32), 16 mirrored, 16 duplicated, 16 rows in reserve (50.0% of evictions skip the writeback)
+____ test_decode_may_admit_into_the_prefill_buffer_and_prefill_still_covers ____
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 5-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror warm start: 32 experts on GPU (slots 0..32), 16 mirrored, 16 duplicated, 16 rows in reserve (50.0% of evictions skip the writeback)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 5-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 32 experts on GPU (slots 0..32), 16 mirrored, 16 duplicated, 16 rows in reserve (50.0% of evictions skip the writeback)
+___________________ test_writeback_skips_retained_duplicates ___________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 5-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 5-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+_________________ test_writeback_preserves_a_sole_copys_bytes __________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 5-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 5-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+____________ test_admission_into_the_buffer_region_forces_retention ____________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 5-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 5-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+________________ test_materialize_layer_raises_under_the_mirror ________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 5-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror warm start: 32 experts on GPU (slots 0..32), 16 mirrored, 16 duplicated, 16 rows in reserve (50.0% of evictions skip the writeback)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 5-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 32 experts on GPU (slots 0..32), 16 mirrored, 16 duplicated, 16 rows in reserve (50.0% of evictions skip the writeback)
+____________________ test_a_bigger_pool_buys_free_evictions ____________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 2-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 36 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 0 duplicated, 8 rows in reserve (0.0% of evictions skip the writeback)
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 2-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 12 duplicated, 8 rows in reserve (60.0% of evictions skip the writeback)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 2-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 36 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 0 duplicated, 8 rows in reserve (0.0% of evictions skip the writeback)
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 2-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 12 duplicated, 8 rows in reserve (60.0% of evictions skip the writeback)
+________________ test_a_retained_row_still_holds_its_own_expert ________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 2-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 12 duplicated, 8 rows in reserve (60.0% of evictions skip the writeback)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 2-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 12 duplicated, 8 rows in reserve (60.0% of evictions skip the writeback)
+______________ test_the_free_stack_never_starves_under_retention _______________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 2-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:31:04|core|rank=0][0m [32mINFO    [0m mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 12 duplicated, 8 rows in reserve (60.0% of evictions skip the writeback)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 2-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 12 duplicated, 8 rows in reserve (60.0% of evictions skip the writeback)
+___________ test_free_eviction_rate_rises_with_the_pool_row_tiebreak ___________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:05|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 2-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:31:05|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:31:05|core|rank=0][0m [32mINFO    [0m mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 12 duplicated, 8 rows in reserve (60.0% of evictions skip the writeback)
+[1m[2026-09-24|12:31:05|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 2-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:31:05|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:31:05|core|rank=0][0m [32mINFO    [0m mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 12 duplicated, 8 rows in reserve (60.0% of evictions skip the writeback)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 2-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 12 duplicated, 8 rows in reserve (60.0% of evictions skip the writeback)
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 2-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 12 duplicated, 8 rows in reserve (60.0% of evictions skip the writeback)
+_________________ test_free_eviction_rate_rises_with_the_band __________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:05|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 2-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:31:05|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:31:05|core|rank=0][0m [32mINFO    [0m mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 12 duplicated, 8 rows in reserve (60.0% of evictions skip the writeback)
+[1m[2026-09-24|12:31:05|core|rank=0][0m [32mINFO    [0m mirror DMA writebacks: 2-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[1m[2026-09-24|12:31:05|core|rank=0][0m [32mINFO    [0m mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+[1m[2026-09-24|12:31:05|core|rank=0][0m [32mINFO    [0m mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 12 duplicated, 8 rows in reserve (60.0% of evictions skip the writeback)
+free eviction rate: tie-break 0.8850, band 0.9809
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 2-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 12 duplicated, 8 rows in reserve (60.0% of evictions skip the writeback)
+INFO     freetoken.moe.residency:logger.py:111 mirror DMA writebacks: 2-row VRAM staging ring (0.0 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+INFO     freetoken.moe.offload_cache:logger.py:111 mirror expert pool attached: 48 host rows, 0.00 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO     freetoken.moe.residency:logger.py:111 mirror warm start: 20 experts on GPU (slots 0..20), 28 mirrored, 12 duplicated, 8 rows in reserve (60.0% of evictions skip the writeback)
+____________ test_triton_overlap_prefill_matches_dequant_reference _____________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:06|core|rank=0][0m [33mWARNING [0m NVFP4 prefill GEMM E=8 N=256 K=256 on NVIDIA_GeForce_RTX_5080 has no tuned table; using the MiniMax-M2 default tiles. Tune with benchmarks/bench_moe_prefill_gemm.py and drop the JSON in moe/configs/triton_<ver>/ (nvfp4,E=8,N=256,K=256,device_name=NVIDIA_GeForce_RTX_5080.json).
+------------------------------ Captured log call -------------------------------
+WARNING  freetoken.moe.fused_nvfp4:fused_nvfp4.py:492 NVFP4 prefill GEMM E=8 N=256 K=256 on NVIDIA_GeForce_RTX_5080 has no tuned table; using the MiniMax-M2 default tiles. Tune with benchmarks/bench_moe_prefill_gemm.py and drop the JSON in moe/configs/triton_<ver>/ (nvfp4,E=8,N=256,K=256,device_name=NVIDIA_GeForce_RTX_5080.json).
+_____________ test_b12x_pack_is_byte_compatible_with_native_banks ______________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:07|core|rank=0][0m [33mWARNING [0m b12x pack: this checkpoint's gate and up global scales differ, so the ratio is folded into the block scales, which are e4m3 (3 mantissa bits) in this kernel's format. Worst-case block scale error after the fold is ~0%. Marlin's bf16 block scales do not pay this; --nvfp4-backend=marlin is the exact-fold alternative where it runs (sm_80-99).
+________________ test_nvfp4_backend_selection_activation_matrix ________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:12|core|rank=0][0m [32mINFO    [0m NVFP4 auto backend: ungated relu2 experts use the Triton kernels (faster than b12x on the offload path; --nvfp4-backend flashinfer forces b12x)
+[1m[2026-09-24|12:31:12|core|rank=0][0m [32mINFO    [0m NVFP4 auto backend: ungated relu2 experts use the Triton kernels (faster than b12x on the offload path; --nvfp4-backend flashinfer forces b12x)
+[1m[2026-09-24|12:31:12|core|rank=0][0m [32mINFO    [0m NVFP4 auto backend: routed experts use 'swigluoai', which only the Triton kernels support; using the Triton inline-dequant kernels
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.nvfp4_backends:nvfp4_backends.py:313 NVFP4 auto backend: ungated relu2 experts use the Triton kernels (faster than b12x on the offload path; --nvfp4-backend flashinfer forces b12x)
+INFO     freetoken.moe.nvfp4_backends:nvfp4_backends.py:313 NVFP4 auto backend: ungated relu2 experts use the Triton kernels (faster than b12x on the offload path; --nvfp4-backend flashinfer forces b12x)
+INFO     freetoken.moe.nvfp4_backends:nvfp4_backends.py:273 NVFP4 auto backend: routed experts use 'swigluoai', which only the Triton kernels support; using the Triton inline-dequant kernels
+__________________ test_nvfp4_backend_selection_decode_target __________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:12|core|rank=0][0m [32mINFO    [0m NVFP4 auto backend: MoE decode target is 'cpu' (experts read on the CPU); using the native-layout Triton inline-dequant kernels
+[1m[2026-09-24|12:31:12|core|rank=0][0m [32mINFO    [0m NVFP4 auto backend: MoE decode target is 'hybrid' (experts read on the CPU); using the native-layout Triton inline-dequant kernels
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.moe.nvfp4_backends:nvfp4_backends.py:259 NVFP4 auto backend: MoE decode target is 'cpu' (experts read on the CPU); using the native-layout Triton inline-dequant kernels
+INFO     freetoken.moe.nvfp4_backends:nvfp4_backends.py:259 NVFP4 auto backend: MoE decode target is 'hybrid' (experts read on the CPU); using the native-layout Triton inline-dequant kernels
+____________ test_nvfp4_moe_config_falls_back_without_a_tuned_file _____________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:12|core|rank=0][0m [33mWARNING [0m NVFP4 prefill GEMM E=128 N=1856 K=2688 on No_Such_GPU_9999 has no tuned table; using the MiniMax-M2 default tiles. Tune with benchmarks/bench_moe_prefill_gemm.py and drop the JSON in moe/configs/triton_<ver>/ (nvfp4,E=128,N=1856,K=2688,device_name=No_Such_GPU_9999.json).
+------------------------------ Captured log call -------------------------------
+WARNING  freetoken.moe.fused_nvfp4:fused_nvfp4.py:492 NVFP4 prefill GEMM E=128 N=1856 K=2688 on No_Such_GPU_9999 has no tuned table; using the MiniMax-M2 default tiles. Tune with benchmarks/bench_moe_prefill_gemm.py and drop the JSON in moe/configs/triton_<ver>/ (nvfp4,E=128,N=1856,K=2688,device_name=No_Such_GPU_9999.json).
+_____________ test_nvfp4_moe_config_reads_and_buckets_a_tuned_file _____________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:12|core|rank=0][0m [33mWARNING [0m NVFP4 prefill GEMM E=128 N=999 K=999 on Test_GPU has no tuned table; using the MiniMax-M2 default tiles. Tune with benchmarks/bench_moe_prefill_gemm.py and drop the JSON in moe/configs/triton_<ver>/ (nvfp4,E=128,N=999,K=999,device_name=Test_GPU.json).
+------------------------------ Captured log call -------------------------------
+WARNING  freetoken.moe.fused_nvfp4:fused_nvfp4.py:492 NVFP4 prefill GEMM E=128 N=999 K=999 on Test_GPU has no tuned table; using the MiniMax-M2 default tiles. Tune with benchmarks/bench_moe_prefill_gemm.py and drop the JSON in moe/configs/triton_<ver>/ (nvfp4,E=128,N=999,K=999,device_name=Test_GPU.json).
+_________ test_skip_buckets_env_restores_the_previous_bucket_boundary __________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:12|core|rank=0][0m [33mWARNING [0m NVFP4 prefill GEMM E=128 N=1856 K=2688 on NVIDIA_GeForce_RTX_5080 has no tuned table; using the MiniMax-M2 default tiles. Tune with benchmarks/bench_moe_prefill_gemm.py and drop the JSON in moe/configs/triton_<ver>/ (nvfp4,E=128,N=1856,K=2688,device_name=NVIDIA_GeForce_RTX_5080.json).
+------------------------------ Captured log call -------------------------------
+WARNING  freetoken.moe.fused_nvfp4:fused_nvfp4.py:492 NVFP4 prefill GEMM E=128 N=1856 K=2688 on NVIDIA_GeForce_RTX_5080 has no tuned table; using the MiniMax-M2 default tiles. Tune with benchmarks/bench_moe_prefill_gemm.py and drop the JSON in moe/configs/triton_<ver>/ (nvfp4,E=128,N=1856,K=2688,device_name=NVIDIA_GeForce_RTX_5080.json).
+___________ test_adjust_config_converts_moe_cache_rate_to_cache_size ___________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:12|core|rank=0][0m [32mINFO    [0m Auto-selected MoE strategy: offload
+[1m[2026-09-24|12:31:12|core|rank=0][0m [32mINFO    [0m Resolved config: moe_strategy='offload', attention_backend='fi', cache_type='radix', page_size=1
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.engine.engine:logger.py:111 Auto-selected MoE strategy: offload
+INFO     freetoken.engine.engine:logger.py:111 Resolved config: moe_strategy='offload', attention_backend='fi', cache_type='radix', page_size=1
+_________ test_graph_capture_reuses_warm_offload_cache_before_capture __________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:12|core|rank=0][0m [32mINFO    [0m Start capturing CUDA graphs with sizes: [1]
+[1m[2026-09-24|12:31:12|core|rank=0][0m [32mINFO    [0m Free GPU memory before capturing CUDA graphs: 0.00 GiB
+[1m[2026-09-24|12:31:12|core|rank=0][0m [32mINFO    [0m Free GPU memory after capturing CUDA graphs: 0.00 GiB
+----------------------------- Captured stderr call -----------------------------
+Preparing for capturing CUDA graphs...:   0%|          | 0/1 [00:00<?, ?batch/s]Capturing graphs: bs = 1   | avail_mem = 0.00 GiB:   0%|          | 0/1 [00:00<?, ?batch/s]Capturing graphs: bs = 1   | avail_mem = 0.00 GiB: 100%|██████████| 1/1 [00:00<00:00, 9619.96batch/s]
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.engine.graph:logger.py:111 Start capturing CUDA graphs with sizes: [1]
+INFO     freetoken.engine.graph:logger.py:111 Free GPU memory before capturing CUDA graphs: 0.00 GiB
+INFO     freetoken.engine.graph:logger.py:111 Free GPU memory after capturing CUDA graphs: 0.00 GiB
+______ test_offload_cache_rebuild_disables_prefill_overlap_when_too_small ______
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:12|core|rank=0][0m [33mWARNING [0m Disabling MoE prefill overlap on rebuild: cache_size 5 < 2*num_experts 8.
+------------------------------ Captured log call -------------------------------
+WARNING  freetoken.moe.offload_cache:offload_cache.py:1351 Disabling MoE prefill overlap on rebuild: cache_size 5 < 2*num_experts 8.
+_______________ test_echo_residency_stamps_honored_requests_only _______________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:12|core|rank=0][0m [33mWARNING [0m --moe-cpu-layers: this checkpoint's bank loader settles banks without per-layer residency (pre-pins everything); CPU-layer decode still works but saves no pinned quota
+------------------------------ Captured log call -------------------------------
+WARNING  freetoken.moe.expert_banks:logger.py:111 --moe-cpu-layers: this checkpoint's bank loader settles banks without per-layer residency (pre-pins everything); CPU-layer decode still works but saves no pinned quota
+________________ test_lock_failure_downgrades_echoed_residency _________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:12|core|rank=0][0m [33mWARNING [0m bank lock failed; leaving this and later banks pageable: [Errno 12] mlock denied
+[1m[2026-09-24|12:31:12|core|rank=0][0m [33mWARNING [0m --moe-cpu-layers: layers [1] settled pageable instead of OS-locked (lock failed); they still decode on the CPU executor but may swap under memory pressure
+[1m[2026-09-24|12:31:12|core|rank=0][0m [33mWARNING [0m bank lock failed; leaving this and later banks pageable: [Errno 12] mlock denied
+------------------------------ Captured log call -------------------------------
+WARNING  freetoken.moe.host_banks:host_banks.py:189 bank lock failed; leaving this and later banks pageable: [Errno 12] mlock denied
+WARNING  freetoken.moe.expert_banks:logger.py:111 --moe-cpu-layers: layers [1] settled pageable instead of OS-locked (lock failed); they still decode on the CPU executor but may swap under memory pressure
+WARNING  freetoken.moe.host_banks:host_banks.py:189 bank lock failed; leaving this and later banks pageable: [Errno 12] mlock denied
+________________ test_prefill_hit_d2d_noop_without_spare_slots _________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:16|core|rank=0][0m [33mWARNING [0m MoE prefill hit-D2D requested but unavailable (cache_size 16 leaves no hit region (needs > 16 slots)); falling back to full-layer copies
+------------------------------ Captured log call -------------------------------
+WARNING  freetoken.moe.offload_cache:offload_cache.py:2267 MoE prefill hit-D2D requested but unavailable (cache_size 16 leaves no hit region (needs > 16 slots)); falling back to full-layer copies
+__ test_reclaim_for_blocked_prefill_spills_a_lease_for_a_blocked_continuation __
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Released soft session idle KV protection (admission pressure); cached prefix is now evictable
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Released soft session idle KV protection (admission pressure); cached prefix is now evictable
+__________ test_reclaim_still_restores_a_checkpoint_for_a_fresh_admit __________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Released soft session idle KV protection (admission pressure); cached prefix is now evictable
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Released soft session idle KV protection (admission pressure); cached prefix is now evictable
+____________ test_scheduler_rejection_emits_error_but_no_admission _____________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [33mWARNING [0m Input sequence length 4 exceeds 4, request 8 is dropped.
+------------------------------ Captured log call -------------------------------
+WARNING  freetoken.scheduler.scheduler:logger.py:111 Input sequence length 4 exceeds 4, request 8 is dropped.
+_________ test_long_to_short_queued_handoff_shrinks_one_or_more_steps __________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m KV shrank 32 -> 16 tokens after agent teardown; MoE cache restored to 99 slots
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 KV shrank 32 -> 16 tokens after agent teardown; MoE cache restored to 99 slots
+____ test_shrink_supplies_all_resident_session_handles_including_protected _____
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m KV shrank 32 -> 8 tokens after agent teardown; MoE cache restored to 99 slots
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 KV shrank 32 -> 8 tokens after agent teardown; MoE cache restored to 99 slots
+___ test_handoff_releases_long_outgoing_session_to_reach_active_agent_floor ____
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m KV shrank 64 -> 8 tokens after agent teardown; MoE cache restored to 99 slots
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 KV shrank 64 -> 8 tokens after agent teardown; MoE cache restored to 99 slots
+__________ test_supported_growable_dispatch_uses_drained_normal_loop ___________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Scheduler loop: normal (kv_grow_step_tokens=8, growable_overlap=False)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Scheduler loop: normal (kv_grow_step_tokens=8, growable_overlap=False)
+__________ test_chunked_pending_borrower_is_enumerated_for_compaction __________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m KV shrank 32 -> 16 tokens after agent teardown; MoE cache restored to 99 slots
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 KV shrank 32 -> 16 tokens after agent teardown; MoE cache restored to 99 slots
+____________ test_handoff_checkpoint_failure_keeps_protected_handle ____________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Kept soft session A protected: handoff checkpoint unavailable (queued-agent handoff)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Kept soft session A protected: handoff checkpoint unavailable (queued-agent handoff)
+________ test_a_to_b_to_a_handoff_releases_only_after_valid_checkpoint _________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Released soft session A KV protection (queued-agent handoff); cached prefix is now evictable
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Released soft session A KV protection (queued-agent handoff); cached prefix is now evictable
+_______________ test_shrink_path_drains_before_shrink_runtime_kv _______________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m KV shrank 32 -> 8 tokens after agent teardown; MoE cache restored to 99 slots
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 KV shrank 32 -> 8 tokens after agent teardown; MoE cache restored to 99 slots
+________ test_message_path_drain_resyncs_last_data_before_shrink_drain _________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m KV shrank 32 -> 8 tokens after agent teardown; MoE cache restored to 99 slots
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 KV shrank 32 -> 8 tokens after agent teardown; MoE cache restored to 99 slots
+_______ test_shrink_in_flight_guard_still_refuses_release_under_overlap ________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Kept soft session idle protected: growable KV shrink in flight (reentrant)
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m KV shrank 32 -> 8 tokens after agent teardown; MoE cache restored to 99 slots
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Released soft session idle KV protection (post-shrink); cached prefix is now evictable
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Kept soft session idle protected: growable KV shrink in flight (reentrant)
+INFO     freetoken.scheduler.scheduler:logger.py:111 KV shrank 32 -> 8 tokens after agent teardown; MoE cache restored to 99 slots
+INFO     freetoken.scheduler.scheduler:logger.py:111 Released soft session idle KV protection (post-shrink); cached prefix is now evictable
+_______________ test_flag_off_selects_normal_loop_when_growable ________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Scheduler loop: normal (kv_grow_step_tokens=8, growable_overlap=False)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Scheduler loop: normal (kv_grow_step_tokens=8, growable_overlap=False)
+_______________ test_flag_on_selects_overlap_loop_when_growable ________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Scheduler loop: overlap (kv_grow_step_tokens=8, growable_overlap=True)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Scheduler loop: overlap (kv_grow_step_tokens=8, growable_overlap=True)
+____________ test_flag_has_no_effect_when_kv_grow_step_tokens_unset ____________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Scheduler loop: overlap (kv_grow_step_tokens=0, growable_overlap=False)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Scheduler loop: overlap (kv_grow_step_tokens=0, growable_overlap=False)
+______ test_gdn_state_slot_pressure_refuses_release_without_a_checkpoint _______
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Kept soft session A protected: handoff checkpoint unavailable (GDN state-slot pressure)
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Kept soft session B protected: handoff checkpoint unavailable (GDN state-slot pressure)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Kept soft session A protected: handoff checkpoint unavailable (GDN state-slot pressure)
+INFO     freetoken.scheduler.scheduler:logger.py:111 Kept soft session B protected: handoff checkpoint unavailable (GDN state-slot pressure)
+_________ test_admission_pressure_refuses_release_without_a_checkpoint _________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Kept soft session A protected: handoff checkpoint unavailable (admission pressure)
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Kept soft session B protected: handoff checkpoint unavailable (admission pressure)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Kept soft session A protected: handoff checkpoint unavailable (admission pressure)
+INFO     freetoken.scheduler.scheduler:logger.py:111 Kept soft session B protected: handoff checkpoint unavailable (admission pressure)
+________ test_a_successful_checkpoint_still_releases_under_gdn_pressure ________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Released soft session A KV protection (GDN state-slot pressure); cached prefix is now evictable
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Released soft session A KV protection (GDN state-slot pressure); cached prefix is now evictable
+___ test_refused_gdn_reclaim_degrades_reserve_mamba_slots_to_a_false_return ____
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Kept soft session A protected: handoff checkpoint unavailable (GDN state-slot pressure)
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Kept soft session B protected: handoff checkpoint unavailable (GDN state-slot pressure)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Kept soft session A protected: handoff checkpoint unavailable (GDN state-slot pressure)
+INFO     freetoken.scheduler.scheduler:logger.py:111 Kept soft session B protected: handoff checkpoint unavailable (GDN state-slot pressure)
+_______ test_real_scheduler_hook_spills_the_lease_and_lands_the_donation _______
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Released soft session a KV protection (GDN state-slot pressure); cached prefix is now evictable
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Released soft session a KV protection (GDN state-slot pressure); cached prefix is now evictable
+_________ test_admission_reserves_state_slots_through_the_lease_spill __________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Released soft session a KV protection (GDN state-slot pressure); cached prefix is now evictable
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Released soft session a KV protection (GDN state-slot pressure); cached prefix is now evictable
+_ test_a_pin_that_outlives_its_session_no_longer_starves_a_later_fresh_request _
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m pin_prefix_max_tokens clamped from unlimited to 10 (25% of the 40-token KV pool)
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Released prefix pin (admission pressure): 10 tokens now evictable
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.cache:cache.py:166 pin_prefix_max_tokens clamped from unlimited to 10 (25% of the 40-token KV pool)
+INFO     freetoken.scheduler.cache:cache.py:914 Released prefix pin (admission pressure): 10 tokens now evictable
+________ test_a_request_that_fits_without_release_leaves_the_pin_alone _________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m pin_prefix_max_tokens clamped from unlimited to 10 (25% of the 40-token KV pool)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.cache:cache.py:166 pin_prefix_max_tokens clamped from unlimited to 10 (25% of the 40-token KV pool)
+_______ test_a_request_too_big_even_with_every_pin_released_is_unchanged _______
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m pin_prefix_max_tokens clamped from unlimited to 10 (25% of the 40-token KV pool)
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Released prefix pin (admission pressure): 10 tokens now evictable
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.cache:cache.py:166 pin_prefix_max_tokens clamped from unlimited to 10 (25% of the 40-token KV pool)
+INFO     freetoken.scheduler.cache:cache.py:914 Released prefix pin (admission pressure): 10 tokens now evictable
+__ test_the_reclaim_releases_a_lease_the_pre_lock_budget_said_was_not_needed ___
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Released soft session idle KV protection (admission pressure); cached prefix is now evictable
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Released soft session idle KV protection (admission pressure); cached prefix is now evictable
+_____________ test_the_blocked_prefill_reclaim_looks_past_the_head _____________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Released soft session idle KV protection (admission pressure); cached prefix is now evictable
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Released soft session idle KV protection (admission pressure); cached prefix is now evictable
+______________ test_the_memo_is_dropped_when_a_lease_is_released _______________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Released soft session idle KV protection (admission pressure); cached prefix is now evictable
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Released soft session idle KV protection (admission pressure); cached prefix is now evictable
+_________ test_close_releases_retained_kv_and_requests_growable_shrink _________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Closed session helper; retained KV is now reclaimable
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Closed session helper; retained KV is now reclaimable
+________________ test_idle_expiry_closes_only_inactive_sessions ________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Session expired expired after idle timeout
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Closed session expired; retained KV is now reclaimable
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Session expired expired after idle timeout
+INFO     freetoken.scheduler.scheduler:logger.py:111 Closed session expired; retained KV is now reclaimable
+_____ test_soft_session_releases_protection_after_grace_but_keeps_identity _____
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Released soft session auto KV protection (grace expired); cached prefix is now evictable
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Released soft session auto KV protection (grace expired); cached prefix is now evictable
+________ test_admission_pressure_releases_oldest_idle_soft_session_only ________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Released soft session old-soft KV protection (admission pressure); cached prefix is now evictable
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Released soft session old-soft KV protection (admission pressure); cached prefix is now evictable
+_ test_blocked_admission_checkpoints_the_finished_session_and_admits_the_queued_request _
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Spilled soft session A: 4 tokens, ram, 0.00 GiB in 0.000 s (189.18 GiB/s)
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Released soft session A KV protection (admission pressure); cached prefix is now evictable
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Spilled soft session A: 4 tokens, ram, 0.00 GiB in 0.000 s (189.18 GiB/s)
+INFO     freetoken.scheduler.scheduler:logger.py:111 Released soft session A KV protection (admission pressure); cached prefix is now evictable
+_____ test_idle_expiry_reaps_a_checkpointed_lease_but_keeps_the_checkpoint _____
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Session A expired after idle timeout
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Closed session A; retained KV is now reclaimable
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Session A expired after idle timeout
+INFO     freetoken.scheduler.scheduler:logger.py:111 Closed session A; retained KV is now reclaimable
+_________________ test_explicit_delete_discards_the_checkpoint _________________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Closed session A; retained KV is now reclaimable
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Closed session A; retained KV is now reclaimable
+________ test_restore_finds_a_checkpoint_left_behind_by_a_closed_lease _________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Restored cold session A: 4/4 tokens from ram, 0.00 GiB in 0.000 s (2113.80 GiB/s)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Restored cold session A: 4/4 tokens from ram, 0.00 GiB in 0.000 s (2113.80 GiB/s)
+________ test_client_disconnect_ends_the_lease_but_keeps_the_checkpoint ________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Closed session A; retained KV is now reclaimable
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Closed session A; retained KV is now reclaimable
+__ test_resident_session_outlives_its_ttl_and_is_checkpointed_only_on_demand ___
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Spilled soft session A: 4 tokens, ram, 0.00 GiB in 0.000 s (261.67 GiB/s)
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Released soft session A KV protection (admission pressure); cached prefix is now evictable
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Session A expired after idle timeout
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Closed session A; retained KV is now reclaimable
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Restored cold session A: 4/4 tokens from ram, 0.00 GiB in 0.000 s (2189.59 GiB/s)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Spilled soft session A: 4 tokens, ram, 0.00 GiB in 0.000 s (261.67 GiB/s)
+INFO     freetoken.scheduler.scheduler:logger.py:111 Released soft session A KV protection (admission pressure); cached prefix is now evictable
+INFO     freetoken.scheduler.scheduler:logger.py:111 Session A expired after idle timeout
+INFO     freetoken.scheduler.scheduler:logger.py:111 Closed session A; retained KV is now reclaimable
+INFO     freetoken.scheduler.scheduler:logger.py:111 Restored cold session A: 4/4 tokens from ram, 0.00 GiB in 0.000 s (2189.59 GiB/s)
+___________ test_spill_and_restore_logs_report_sub_second_durations ____________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Spilled soft session A: 4 tokens, ram, 0.00 GiB in 0.000 s (282.08 GiB/s)
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Restored cold session A: 4/4 tokens from ram, 0.00 GiB in 0.000 s (3288.04 GiB/s)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Spilled soft session A: 4 tokens, ram, 0.00 GiB in 0.000 s (282.08 GiB/s)
+INFO     freetoken.scheduler.scheduler:logger.py:111 Restored cold session A: 4/4 tokens from ram, 0.00 GiB in 0.000 s (3288.04 GiB/s)
+___________ test_an_aborted_request_cancels_its_in_flight_look_ahead ___________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Closed session B; retained KV is now reclaimable
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Closed session B; retained KV is now reclaimable
+__ test_restore_resumes_at_the_deepest_boundary_the_client_tokens_still_match __
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Restored cold session A: 4/6 tokens from ram, 0.00 GiB in 0.000 s (1086.88 GiB/s)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Restored cold session A: 4/6 tokens from ram, 0.00 GiB in 0.000 s (1086.88 GiB/s)
+_________ test_an_unchanged_prompt_still_restores_the_whole_checkpoint _________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Restored cold session A: 6/6 tokens from ram, 0.00 GiB in 0.000 s (1698.36 GiB/s)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Restored cold session A: 6/6 tokens from ram, 0.00 GiB in 0.000 s (1698.36 GiB/s)
+________ test_a_drift_before_the_first_boundary_discards_the_checkpoint ________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Discarded cold session A: client tokens diverge at 1, before the first stored state boundary
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Discarded cold session A: client tokens diverge at 1, before the first stored state boundary
+__ test_a_restore_blocked_by_the_resident_session_is_retried_before_admission __
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [33mWARNING [0m Cold restore for session B failed (RuntimeError('no GDN snapshot slot available for cold session restore')); will retry before admission
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Released soft session A KV protection (admission pressure); cached prefix is now evictable
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Restored cold session B: 4/4 tokens from ram, 0.00 GiB in 0.000 s (1397.08 GiB/s)
+------------------------------ Captured log call -------------------------------
+WARNING  freetoken.scheduler.scheduler:scheduler.py:1969 Cold restore for session B failed (RuntimeError('no GDN snapshot slot available for cold session restore')); will retry before admission
+INFO     freetoken.scheduler.scheduler:logger.py:111 Released soft session A KV protection (admission pressure); cached prefix is now evictable
+INFO     freetoken.scheduler.scheduler:logger.py:111 Restored cold session B: 4/4 tokens from ram, 0.00 GiB in 0.000 s (1397.08 GiB/s)
+_ test_a_drift_in_the_last_tokens_of_a_200k_session_resumes_at_the_last_capture _
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Spilled soft session A: 200000 tokens, ram, 0.00 GiB in 0.000 s (131.33 GiB/s)
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Restored cold session A: 196608/200000 tokens from ram, 0.00 GiB in 0.000 s (1233.94 GiB/s)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Spilled soft session A: 200000 tokens, ram, 0.00 GiB in 0.000 s (131.33 GiB/s)
+INFO     freetoken.scheduler.scheduler:logger.py:111 Restored cold session A: 196608/200000 tokens from ram, 0.00 GiB in 0.000 s (1233.94 GiB/s)
+_______ test_captured_states_are_released_once_the_checkpoint_owns_them ________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Spilled soft session A: 4 tokens, ram, 0.00 GiB in 0.000 s (218.67 GiB/s)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Spilled soft session A: 4 tokens, ram, 0.00 GiB in 0.000 s (218.67 GiB/s)
+______ test_state_capture_defaults_on_only_when_snapshot_slots_are_scarce ______
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Capturing session recurrent state every 65536 prefilled tokens (5 slots for 1 running request(s); at most 8 x 1 MiB of host RAM per resident turn)
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Capturing session recurrent state every 65536 prefilled tokens (16 slots for 3 running request(s); at most 8 x 1 MiB of host RAM per resident turn)
+[1m[2026-09-24|12:31:19|core|rank=0][0m [32mINFO    [0m Capturing session recurrent state every 65536 prefilled tokens (9 slots for 1 running request(s); at most 8 x 1 MiB of host RAM per resident turn)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.scheduler:logger.py:111 Capturing session recurrent state every 65536 prefilled tokens (5 slots for 1 running request(s); at most 8 x 1 MiB of host RAM per resident turn)
+INFO     freetoken.scheduler.scheduler:logger.py:111 Capturing session recurrent state every 65536 prefilled tokens (16 slots for 3 running request(s); at most 8 x 1 MiB of host RAM per resident turn)
+INFO     freetoken.scheduler.scheduler:logger.py:111 Capturing session recurrent state every 65536 prefilled tokens (9 slots for 1 running request(s); at most 8 x 1 MiB of host RAM per resident turn)
+___________ test_restart_adopts_matching_checkpoint_and_restores_it ____________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:20|core|rank=0][0m [32mINFO    [0m Session spill root /tmp/pytest-of-root/pytest-1/test_restart_adopts_matching_c0: adopted 1 checkpoint(s), removed 0 stale entr(ies)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.session_spill:logger.py:111 Session spill root /tmp/pytest-of-root/pytest-1/test_restart_adopts_matching_c0: adopted 1 checkpoint(s), removed 0 stale entr(ies)
+___________ test_restart_deletes_foreign_or_incompatible_checkpoints ___________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:20|core|rank=0][0m [32mINFO    [0m Session spill root /tmp/pytest-of-root/pytest-1/test_restart_deletes_foreign_o0: adopted 0 checkpoint(s), removed 1 stale entr(ies)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.session_spill:logger.py:111 Session spill root /tmp/pytest-of-root/pytest-1/test_restart_deletes_foreign_o0: adopted 0 checkpoint(s), removed 1 stale entr(ies)
+__________ test_restart_rejects_checkpoints_written_by_another_model ___________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:20|core|rank=0][0m [32mINFO    [0m Session spill root /tmp/pytest-of-root/pytest-1/test_restart_rejects_checkpoin0: adopted 0 checkpoint(s), removed 1 stale entr(ies)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.session_spill:logger.py:111 Session spill root /tmp/pytest-of-root/pytest-1/test_restart_rejects_checkpoin0: adopted 0 checkpoint(s), removed 1 stale entr(ies)
+___________ test_startup_collects_leaked_and_unreadable_directories ____________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:20|core|rank=0][0m [33mWARNING [0m Ignoring unrecognized entry /tmp/pytest-of-root/pytest-1/test_startup_collects_leaked_a0/operator-notes.txt in the session spill root
+[1m[2026-09-24|12:31:20|core|rank=0][0m [32mINFO    [0m Session spill root /tmp/pytest-of-root/pytest-1/test_startup_collects_leaked_a0: adopted 0 checkpoint(s), removed 3 stale entr(ies)
+------------------------------ Captured log call -------------------------------
+WARNING  freetoken.scheduler.session_spill:session_spill.py:458 Ignoring unrecognized entry /tmp/pytest-of-root/pytest-1/test_startup_collects_leaked_a0/operator-notes.txt in the session spill root
+INFO     freetoken.scheduler.session_spill:logger.py:111 Session spill root /tmp/pytest-of-root/pytest-1/test_startup_collects_leaked_a0: adopted 0 checkpoint(s), removed 3 stale entr(ies)
+___________ test_capacity_cap_evicts_least_recently_used_checkpoint ____________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:20|core|rank=0][0m [32mINFO    [0m Evicting cold session checkpoint agent-2 (0.00 GiB, disk) to stay inside the session spill cap
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.session_spill:logger.py:111 Evicting cold session checkpoint agent-2 (0.00 GiB, disk) to stay inside the session spill cap
+__________ test_prefetch_promotes_a_queued_session_checkpoint_to_ram ___________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:20|core|rank=0][0m [32mINFO    [0m Prefetched cold session agent-a to RAM (0.00 GiB in 0.00 s)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.session_spill:logger.py:111 Prefetched cold session agent-a to RAM (0.00 GiB in 0.00 s)
+_________ test_prefetch_result_survives_the_reap_inside_the_next_start _________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:20|core|rank=0][0m [32mINFO    [0m Prefetched cold session agent-a to RAM (0.00 GiB in 0.00 s)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.session_spill:logger.py:111 Prefetched cold session agent-a to RAM (0.00 GiB in 0.00 s)
+______ test_prefetch_demotes_an_lru_ram_record_but_never_a_protected_one _______
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:20|core|rank=0][0m [32mINFO    [0m Prefetched cold session queued to RAM (0.00 GiB in 0.00 s)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.session_spill:logger.py:111 Prefetched cold session queued to RAM (0.00 GiB in 0.00 s)
+___________ test_a_cancelled_prefetch_leaves_the_checkpoint_on_disk ____________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:20|core|rank=0][0m [32mINFO    [0m Prefetched cold session agent-a to RAM (0.00 GiB in 0.00 s)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.session_spill:logger.py:111 Prefetched cold session agent-a to RAM (0.00 GiB in 0.00 s)
+_____ test_durable_barrier_persists_ram_and_resident_then_restart_restores _____
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:20|core|rank=0][0m [32mINFO    [0m Session spill root /tmp/pytest-of-root/pytest-1/test_durable_barrier_persists_0: adopted 2 checkpoint(s), removed 0 stale entr(ies)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.session_spill:logger.py:111 Session spill root /tmp/pytest-of-root/pytest-1/test_durable_barrier_persists_0: adopted 2 checkpoint(s), removed 0 stale entr(ies)
+_________ test_adoption_keeps_backward_compatible_fixed_token_filename _________
+----------------------------- Captured stdout call -----------------------------
+[1m[2026-09-24|12:31:20|core|rank=0][0m [32mINFO    [0m Session spill root /tmp/pytest-of-root/pytest-1/test_adoption_keeps_backward_c0: adopted 1 checkpoint(s), removed 0 stale entr(ies)
+------------------------------ Captured log call -------------------------------
+INFO     freetoken.scheduler.session_spill:logger.py:111 Session spill root /tmp/pytest-of-root/pytest-1/test_adoption_keeps_backward_c0: adopted 1 checkpoint(s), removed 0 stale entr(ies)
+______ StaticSpillFactoryTest.test_factory_retains_non_growability_guards ______
+----------------------------- Captured stdout call -----------------------------
+uu
+768 passed, 5 skipped, 2 warnings, 2 subtests passed in 124.15s (0:02:04)

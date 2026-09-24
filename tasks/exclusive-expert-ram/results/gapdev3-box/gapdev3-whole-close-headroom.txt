@@ -1,0 +1,19 @@
+captures=1 kv_grows=2 tracebacks=0 ooms=0
+[2026-09-24|10:51:19|core|rank=0] INFO     --moe-cache-auto resolved moe_cache_size=2296 num_pages=77312 (prefill_overlap=True)
+[2026-09-24|10:51:19|core|rank=0] INFO     Expert arena parked 2296 -> 256 slots (10.68 GiB) until the prefill transient is measured
+[2026-09-24|10:51:19|core|rank=0] INFO     Free memory after initialization: 10.65 GiB
+[2026-09-24|10:51:19|core|rank=0] INFO     Start capturing CUDA graphs with sizes: [1]
+[2026-09-24|10:51:19|core|rank=0] INFO     Free GPU memory before capturing CUDA graphs: 10.65 GiB
+Preparing for capturing CUDA graphs...:   0%|          | 0/1 [00:00<?, ?batch/s]Capturing graphs: bs = 1   | avail_mem = 10.65 GiB:   0%|          | 0/1 [00:00<?, ?batch/s]INFO:     127.0.0.1:37766 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-24|10:51:28|core|rank=0] INFO     Free GPU memory after capturing CUDA graphs: 10.62 GiB
+[2026-09-24|10:51:30|core|rank=0] INFO     Prefill warmup complete for lengths [80, 128] in 1.352 s
+[2026-09-24|10:51:31|core|rank=0] INFO     Growable-KV ceiling validated: 1048576 tokens, 3.23 GiB physical, planned final MoE cache 1584 slots
+[2026-09-24|10:51:31|core|rank=0] INFO     Prefill headroom: transient 0.65 GiB measured on a 8192-token chunk (empty prefix 0.65 GiB, after a 8192-token prefix 0.65 GiB, allocator peak 0.59 GiB); headroom 0.65 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 256 -> 2136 of 2296 slots, 0.78 GiB free (target 0.77 GiB), 160 slots below the ratio plan
+[2026-09-24|10:52:17|core|rank=0] INFO     Growable-KV arena shrink: 2136 -> 2088 slots, 0.25 GiB uncommitted (driver-reported free 1.01 GiB)
+[2026-09-24|10:52:17|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.01 GiB free (driver 1.01 GiB), 0.21 GiB commit, 0.86 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|10:52:17|core|rank=0] INFO     Committed growable KV through 131072 tokens (0.45 GiB physical); MoE slots 2136 -> 2088
+[2026-09-24|10:52:17|core|rank=0] INFO     KV grew 65536 -> 131072 tokens; MoE cache now 2088 slots
+[2026-09-24|10:52:35|core|rank=0] INFO     Growable-KV arena shrink: 2128 -> 2088 slots, 0.21 GiB uncommitted (driver-reported free 1.00 GiB)
+[2026-09-24|10:52:35|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.00 GiB free (driver 1.00 GiB), 0.21 GiB commit, 0.86 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|10:52:35|core|rank=0] INFO     Committed growable KV through 131072 tokens (0.45 GiB physical); MoE slots 2128 -> 2088
+[2026-09-24|10:52:35|core|rank=0] INFO     KV grew 65536 -> 131072 tokens; MoE cache now 2088 slots

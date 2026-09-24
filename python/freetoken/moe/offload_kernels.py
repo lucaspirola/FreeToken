@@ -41,6 +41,12 @@ FREETOKEN_EXPERT_ARENA = False
 # comparison without detaching the mirror itself.
 FREETOKEN_MIRROR_TIEBREAK = os.getenv("FREETOKEN_MIRROR_TIEBREAK", "1").strip() == "1"
 
+# Duplicate-aware eviction (mirror-attached LFU only; see DUP_BAND in
+# _ensure_experts_sized_kernel_v2): the victim is the coldest candidate that
+# has a pool row among those whose LFU count is within the count's own noise
+# of the coldest one. 0 restores the one-bucket tie-break above.
+FREETOKEN_MIRROR_DUP_BAND = os.getenv("FREETOKEN_MIRROR_DUP_BAND", "1").strip() == "1"
+
 
 def _lfu_recency_config(cache) -> tuple[int, int]:
     tokens = (
@@ -70,6 +76,15 @@ def ensure_experts(cache, layer_id: int, expert_ids: torch.Tensor) -> None:
     if (cache._size_class_enabled or cache.cache_policy_id == 1
             or getattr(cache, "_mirror", None) is not None):
         begin, end = cache.lru_slot_range(layer_id)
+        mirror = getattr(cache, "_mirror", None)
+        if expert_ids.is_cuda and FREETOKEN_EXPERT_ARENA:
+            # The v2 kernel also does the mirror's per-layer bookkeeping.
+            _ensure_experts_sized_gpu(cache, layer_id, expert_ids, begin, end)
+            return
+        if mirror is not None:
+            from freetoken.moe.mirror_kernels import begin_layer
+
+            begin_layer(cache, layer_id)
         if expert_ids.is_cuda:
             _ensure_experts_sized_gpu(cache, layer_id, expert_ids, begin, end)
         else:
@@ -102,6 +117,9 @@ def _ensure_experts_sized_gpu(cache, layer_id, expert_ids, begin, end) -> None:
         # entirely), so any existing int32 device tensor works; reuse
         # victim_ids to avoid an extra allocation on the hot path.
         pool_row_of_id = mirror["pool_row_of_id"] if has_mirror else cache.victim_ids
+        # Mirror bookkeeping (MIRROR_BOOK): see the kernel. Dummy pointer without a mirror.
+        prev_slot = mirror["prev_slot_of_id"] if mirror is not None else cache.victim_ids
+        plan = cache.victim_ids.numel()
         _ensure_experts_sized_kernel_v2[(1,)](
             expert_ids,
             cache.slot_for_id,
@@ -121,13 +139,18 @@ def _ensure_experts_sized_gpu(cache, layer_id, expert_ids, begin, end) -> None:
             cache.victim_ids,
             cache.prior_ids,
             pool_row_of_id,
+            prev_slot,
+            plan,
             cache.num_experts,
             cache.slot_capacity,
             BLOCK_E=block_e,
             BLOCK_C=block_c,
+            BLOCK_P=triton.next_power_of_2(plan),
             COLLECT_STATS=cache.collect_stats,
             POLICY_LFU=cache.cache_policy_id == 1,
             HAS_MIRROR=has_mirror,
+            DUP_BAND=has_mirror and FREETOKEN_MIRROR_DUP_BAND and cache.cache_policy_id == 1,
+            MIRROR_BOOK=mirror is not None,
             LFU_RECENCY_CALLS=recency_tokens * cache.num_layers,
             LFU_RECENCY_BONUS=recency_bonus,
             num_warps=8 if block_c >= 2048 else 4,
@@ -618,7 +641,7 @@ def _ensure_experts_sized_kernel(
         tl.store(expert_ids_ptr + i, global_slot - class_begin)
 
 
-@triton.jit(do_not_specialize=["layer_id", "num_active", "pool_row_of_id_ptr"])
+@triton.jit(do_not_specialize=["layer_id", "num_active", "pool_row_of_id_ptr", "prev_slot_ptr"])
 def _ensure_experts_sized_kernel_v2(
     expert_ids_ptr,
     slot_for_id_ptr,
@@ -640,15 +663,20 @@ def _ensure_experts_sized_kernel_v2(
     prior_ids_ptr,   # [plan] int32: slot's owner before this admission, -1 if empty
     pool_row_of_id_ptr,  # int32 [L*E]: pool row holding each id, or -1 (mirror's residency
                           # map -- see mirror_kernels.py). Dummy/unused when HAS_MIRROR=False.
+    prev_slot_ptr,       # int32 [L*E]: the mirror's pre-step slot map. Unused unless MIRROR_BOOK.
+    plan,                # victim_ids / prior_ids length
     num_experts: tl.constexpr,
     cache_size: tl.constexpr,  # == slot_capacity: fixed arena size, not the live usable count
     BLOCK_E: tl.constexpr,
     BLOCK_C: tl.constexpr,
+    BLOCK_P: tl.constexpr,
     COLLECT_STATS: tl.constexpr,
     POLICY_LFU: tl.constexpr,
     LFU_RECENCY_CALLS: tl.constexpr,
     LFU_RECENCY_BONUS: tl.constexpr,
     HAS_MIRROR: tl.constexpr,
+    MIRROR_BOOK: tl.constexpr,
+    DUP_BAND: tl.constexpr = False,
 ):
     """Gated (``FREETOKEN_EXPERT_ARENA=1``) twin of ``_ensure_experts_sized_kernel``.
 
@@ -667,7 +695,29 @@ def _ensure_experts_sized_kernel_v2(
     expert that is genuinely colder than every copied candidate is still
     evicted. When ``HAS_MIRROR`` is False the pointer is never read and victim
     choice is byte-identical to the pre-Lever-2 kernel.
+
+    ``DUP_BAND`` (mirror attached, LFU): duplicate-aware eviction, replacing
+    the one-bucket tie-break. LFU counts are event counts over the aging
+    window, so two counts within one standard deviation (sqrt of the count)
+    of each other are statistically tied. Among the candidates whose count is
+    within max(1, sqrt(min)) of the coldest candidate's, the coldest one that
+    has a pool row is evicted (usage breaks ties), which makes the eviction
+    free: no VRAM->RAM writeback. When no candidate in that band has a pool
+    row, the plain LFU choice stands. Hotter experts are never considered, so
+    the hot set is untouched.
+
+    ``MIRROR_BOOK`` (mirror attached): also does the swap kernel's per-layer
+    bookkeeping that ``mirror_kernels.begin_layer`` does as a separate launch
+    on the other paths -- clear ``victim_ids``/``prior_ids`` and snapshot this
+    layer's pre-step ``slot_for_id`` slice into ``prev_slot_of_id`` -- before
+    anything below writes them. One graph node per MoE layer fewer.
     """
+    if MIRROR_BOOK:
+        off_p = tl.arange(0, BLOCK_P)
+        tl.store(victim_ids_ptr + off_p, -1, mask=off_p < plan)
+        tl.store(prior_ids_ptr + off_p, -1, mask=off_p < plan)
+        # The per-miss stores below are scalar stores by other threads.
+        tl.debug_barrier()
     class_begin = tl.load(bounds_ptr + 0)
     class_end = tl.load(bounds_ptr + 1)
     usable = tl.load(usable_ptr)
@@ -692,6 +742,8 @@ def _ensure_experts_sized_kernel_v2(
         frequency += active_count
         tl.store(frequency_ptr + base + off_e, frequency, mask=e_mask)
     slot = tl.load(slot_for_id_ptr + base + off_e, mask=e_mask, other=-1)
+    if MIRROR_BOOK:
+        tl.store(prev_slot_ptr + base + off_e, slot, mask=e_mask)
     is_missing = is_active & (slot < 0) & e_mask
     num_missing = tl.sum(is_missing.to(tl.int32))
     tl.store(num_indices_ptr, num_missing.to(tl.int64))
@@ -752,15 +804,35 @@ def _ensure_experts_sized_kernel_v2(
                     mask=allowed & (oid >= 0),
                     other=-1,
                 ) >= 0
-                owner_frequency += tl.where(has_copy, 0, 1)
+                if not DUP_BAND:
+                    owner_frequency += tl.where(has_copy, 0, 1)
             owner_frequency = tl.where(
                 owner_active | (~candidate), 2147483647, owner_frequency
             )
         for i in tl.range(num_missing):
             if POLICY_LFU:
                 min_frequency = tl.min(owner_frequency, axis=0)
+                if DUP_BAND:
+                    # Candidates hold counts < 2**31 - 1; the sentinel marks the rest.
+                    band = min_frequency.to(tl.int64) + tl.maximum(
+                        tl.sqrt(min_frequency.to(tl.float32)).to(tl.int64), 1
+                    )
+                    dup = (
+                        has_copy
+                        & (owner_frequency < 2147483647)
+                        & (owner_frequency.to(tl.int64) <= band)
+                    )
+                    dup_frequency = tl.where(dup, owner_frequency, 2147483647)
+                    dup_min = tl.min(dup_frequency, axis=0)
+                    pick = tl.where(
+                        dup_min < 2147483647,
+                        dup & (owner_frequency == dup_min),
+                        owner_frequency == min_frequency,
+                    )
+                else:
+                    pick = owner_frequency == min_frequency
                 victim_usage = tl.where(
-                    owner_frequency == min_frequency,
+                    pick,
                     usage,
                     9223372036854775807,
                 )

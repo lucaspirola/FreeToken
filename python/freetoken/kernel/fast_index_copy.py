@@ -248,3 +248,45 @@ def update_copy_flag_jit(sync_flag: torch.Tensor, delta: int) -> None:
     assert sync_flag.numel() == 1
     assert sync_flag.dtype == torch.int32
     _jit_update_flag_module().update_copy_flag(sync_flag, delta)
+
+
+@lru_cache(maxsize=None)
+def _jit_fast_index_copy_kinds_module(*, num_threads: int, blocks_per_bank: int) -> Module:
+    args = make_cpp_args(num_threads, blocks_per_bank)
+    return load_jit(
+        "fast_index_copy_kinds",
+        *args,
+        cuda_files=["fast_index_copy.cuh"],
+        cuda_wrappers=[("launch", f"&KindsIndexCopyKernel<{args}>::run")],
+    )
+
+
+def fast_index_copy_kinds_jit(
+    base_ptrs: torch.Tensor,
+    feat_bytes: torch.Tensor,
+    desc: torch.Tensor,
+    num_indices: torch.Tensor,
+    *,
+    num_threads: int = 1024,
+    blocks_per_bank: int | None = None,
+) -> None:
+    """Multi-bank index copy where every entry names its own source/destination space.
+
+    ``base_ptrs`` is int64 ``[K * B]`` (space ``k``'s base address of bank ``b`` at
+    ``k * B + b``, all GPU-visible), ``feat_bytes`` int64 ``[B]``, ``desc`` int32
+    ``[4, cap]`` = (dst row, src row, dst space, src space) per entry, and
+    ``num_indices`` int64 ``[1]`` the live entry count -- device-side, so the launch
+    is CUDA-graph capturable with a count decided on the device. Geometry matches
+    ``fast_index_copy_multi_jit`` (one launch, ``blocks_per_bank`` blocks per bank).
+    """
+    if _skip_fast_index_copy_enabled():
+        return
+    if blocks_per_bank is None:
+        device_index = base_ptrs.device.index
+        if device_index is None:
+            device_index = torch.cuda.current_device()
+        blocks_per_bank = _default_pcie_blocks_per_bank(device_index)
+    module = _jit_fast_index_copy_kinds_module(
+        num_threads=num_threads, blocks_per_bank=blocks_per_bank
+    )
+    module.launch(base_ptrs, feat_bytes, desc, num_indices)

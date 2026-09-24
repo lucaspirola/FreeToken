@@ -1,0 +1,19 @@
+===== /root/FreeToken-gap4/tasks/exclusive-expert-ram/results/levers-nsys/L4.sqlite
+-- pass 1: idle between graphs mean 500.3 us; host sync-end -> next launch mean 253.4 us (API 71.8, rest 181.6); launch call -> graph start 177.3 us
+     cudaMemcpyAsync                              45.7 us/step
+     cudaLaunchKernel                             19.9 us/step
+     cudaEventRecordWithFlags                      2.0 us/step
+     cudaStreamIsCapturing                         1.5 us/step
+     cudaStreamWaitEvent                           1.2 us/step
+     cudaEventCreateWithFlags                      0.8 us/step
+     cudaEventDestroy                              0.4 us/step
+     cuKernelGetName                               0.3 us/step
+-- pass 2: idle between graphs mean 501.2 us; host sync-end -> next launch mean 253.8 us (API 72.3, rest 181.5); launch call -> graph start 177.4 us
+     cudaMemcpyAsync                              45.9 us/step
+     cudaLaunchKernel                             20.3 us/step
+     cudaEventRecordWithFlags                      1.9 us/step
+     cudaStreamIsCapturing                         1.5 us/step
+     cudaStreamWaitEvent                           1.2 us/step
+     cudaEventCreateWithFlags                      0.8 us/step
+     cudaEventDestroy                              0.4 us/step
+     cuKernelGetName                               0.3 us/step

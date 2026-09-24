@@ -85,8 +85,8 @@ for a in ${ARMS:-whole mirror-1m mirror whole-close}; do
     whole-1m)    arm $CK-whole-1m    FT_ROWS=0 FT_SIZES="8000 1000000" ;;  # same-box 1M reference
     mirror-1m)   arm $CK-mirror-1m   FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 1000000" FT_POST="${NEEDLES//\$ARM_NAME/$CK-mirror-1m}" ;;
     mirror)      arm $CK-mirror      FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 80000 713000" ;;
-    whole-close) arm $CK-whole-close FT_ROWS=0 ;;
     mirror-nd)   arm $CK-mirror-nd   FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 80000" FT_POST="${NEEDLES//\$ARM_NAME/$CK-mirror-nd}" ;;  # pool arm with needles/recall, no 713K
+    whole-close) arm $CK-whole-close FT_ROWS=0 ;;
     # Prefill-transient A/B (-def = default, -t0 = pre-fix cushion-only headroom: no startup
     # measurement, transient 0, so the arena is neither parked nor held 0.65 GiB below the
     # ratio plan through decode). --moe-collect-stats on both sides for the decode hit rate.
@@ -99,6 +99,7 @@ for a in ${ARMS:-whole mirror-1m mirror whole-close}; do
         whole-*)     arm $CK-$a FT_ROWS=0 FT_EXTRA="--moe-collect-stats" FT_ENVS="$envs" ;;
         mirror-*)    arm $CK-$a FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 80000 713000" FT_EXTRA="--moe-collect-stats" FT_ENVS="$envs" ;;
       esac ;;
+    mirror-np)   arm $CK-mirror-np   FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 80000" ;;  # pool arm, decode only (no needles)
     *) die "unknown arm $a" ;;
   esac
 done

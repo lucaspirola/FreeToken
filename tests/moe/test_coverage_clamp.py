@@ -186,19 +186,25 @@ def test_a_lost_copy_is_a_hard_error_not_a_counter():
         cap = plan_capacity(LAYERS, EXPERTS, _GPU)
         cache, pool = _cache_and_pool(root, cap)
         try:
+            stats = cache._mirror["stats"]
             # Clean state: the check is silent.
-            cache._mirror["stats_host"].zero_()
+            stats.zero_()
             cache.mirror_fault_check()
             # An admission with no host copy (violations).
-            cache._mirror["stats_host"][3] = 1
+            stats[3] = 1
             with pytest.raises(RuntimeError, match=r"--moe-mirror-host-rows"):
                 cache.mirror_fault_check()
             # A dropped writeback (starved) is equally fatal.
-            cache._mirror["stats_host"].zero_()
-            cache._mirror["stats_host"][4] = 7
+            stats.zero_()
+            stats[4] = 7
             with pytest.raises(RuntimeError, match=r"7 dropped writebacks"):
                 cache.mirror_fault_check()
+            # The scheduler's check reads the pinned per-step snapshot.
+            cache._mirror["stats_host"][4] = 7
+            with pytest.raises(RuntimeError, match=r"7 dropped writebacks"):
+                cache.residency.fault_check()
         finally:
+            cache._mirror["stats"].zero_()
             pool.close()
 
 
@@ -213,7 +219,8 @@ def test_fault_counters_reach_the_host_without_a_sync():
             assert host.is_pinned(), "an unpinned buffer would sync on every copy"
             assert host.shape == cache._mirror["stats"].shape
             cache._mirror["stats"][3] = 5
-            host.copy_(cache._mirror["stats"], non_blocking=True)
+            # The per-step snapshot, on a side stream behind the compute stream.
+            cache.residency.service_writebacks()
             torch.cuda.synchronize()
             assert host[3].item() == 5
         finally:

@@ -1,0 +1,18 @@
+SAME needles   21000 arithmetic   
+SAME needles   21000 codes        
+SAME needles   21000 contradiction
+SAME needles   21000 counting     
+SAME needles   21000 multihop     
+SAME needles   21000 negative     
+SAME needles   21000 ordering     
+SAME needles  120000 arithmetic   
+SAME needles  120000 codes        
+SAME needles  120000 contradiction
+SAME needles  120000 counting     
+SAME needles  120000 multihop     
+SAME needles  120000 negative     
+SAME needles  120000 ordering     
+SAME recall    21000
+SAME recall   120000
+SAME recall   240000
+0 difference(s)

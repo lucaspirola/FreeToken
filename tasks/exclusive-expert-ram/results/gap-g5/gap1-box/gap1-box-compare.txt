@@ -1,0 +1,20 @@
+== gap1-mirror-1m (d1ed596) vs same-box whole
+  decode_1000k          86.5 vs    91.7 (whole-1m)  94.3%  ok
+  decode_1000k_p1       81.1 vs    88.5 (whole-1m)  91.6%  ok
+  decode_8k            166.5 vs   184.8 (whole   )  90.1%  BELOW
+  decode_8k_p1         172.5 vs   184.5 (whole   )  93.5%  ok
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            12.24  free_evict_rate 0.667
+  ram 12.26 +/- 0.6  ok
+== gap1-mirror (d1ed596) vs same-box whole
+  decode_713k          105.2  (no same-box reference)
+  decode_713k_p1        97.1  (no same-box reference)
+  decode_80k           165.4 vs   172.3 (whole   )  96.0%  ok
+  decode_80k_p1        159.9 vs   169.6 (whole   )  94.3%  ok
+  decode_8k            168.9 vs   184.8 (whole   )  91.4%  ok
+  decode_8k_p1         172.5 vs   184.5 (whole   )  93.5%  ok
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            12.24  free_evict_rate 0.64
+1 point(s) outside the band

@@ -193,6 +193,7 @@ def test_mirror_final_gpu_slots_prices_what_the_ceiling_plan_prices(monkeypatch)
         _baseline_free=budget, _weights_bytes=0,
     )
     monkeypatch.setenv("FREETOKEN_ARENA_STEP_SLOTS", "8")
+    monkeypatch.setenv("FREETOKEN_MIRROR_WB_STAGE_MB", "0")
     monkeypatch.setattr(lsp, "state_pool_bytes", lambda config, num_slots=None: 0)
     base = MirrorResidency._mirror_final_gpu_slots(engine, config)
     assert base == total - 4
@@ -201,3 +202,18 @@ def test_mirror_final_gpu_slots_prices_what_the_ceiling_plan_prices(monkeypatch)
     monkeypatch.setattr(lsp, "state_pool_bytes",
                         lambda config, num_slots=None: state_slots * per_slot)
     assert MirrorResidency._mirror_final_gpu_slots(engine, config) == base - state_slots
+    # The DMA-writeback staging ring is VRAM the live arena fill sees: it
+    # must come out of the estimate slot for slot (4 rows at this budget:
+    # almost the whole model fits, so the rule answers its floor).
+    from freetoken.moe.mirror_pool import resolve_reserve_rows
+    from freetoken.moe.residency import wb_stage_rows
+
+    monkeypatch.setattr(lsp, "state_pool_bytes", lambda config, num_slots=None: 0)
+    monkeypatch.delenv("FREETOKEN_MIRROR_WB_STAGE_MB")
+    assert wb_stage_rows(top_k=EXPERTS, moe_layers=LAYERS, experts=EXPERTS,
+                         gpu_slots=total, reserve_rows=resolve_reserve_rows(EXPERTS)) == 4
+    # Four more slots of VRAM than `base` needed: all four go to the ring
+    # (unpriced, the answer would be the `total` cap instead).
+    roomier = SimpleNamespace(**{**vars(engine),
+                                 "_baseline_free": budget + 4 * per_slot})
+    assert MirrorResidency._mirror_final_gpu_slots(roomier, config) == base
