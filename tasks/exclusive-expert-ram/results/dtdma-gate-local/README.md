@@ -37,7 +37,8 @@ Parts:
 | item | result | |
 |---|---|---|
 | 8K, median of 3 alternated pairs, >= 91% pass by pass | p1 **95.0%** (98.0/95.0/94.1), p2 **97.1%** (92.5/98.3/97.1) | PASS |
-| 80K mirror vs ck4m-whole | p1 99.5%, p2 98.5% | PASS (see drift below) |
+| 80K, median of 3 alternated pairs (`d80-compare.txt`), >= 91% pass by pass | p1 **95.9%** (95.5/95.9/97.7), p2 **95.7%** (95.9/95.1/95.7) | PASS |
+| 80K single arms, mirror vs ck4m-whole | p1 99.5%, p2 98.5% (superseded by the alternated run) | - |
 | 1M mirror-1m vs whole-1m (same session) | p1 98.9% (88.5 vs 89.5), p2 96.5% (92.1 vs 95.4) | PASS |
 | 1M vs owner record (76.9 / 72.9) | 88.5 / 92.1 (115% / 126%) | PASS |
 | 713K vs owner record (91.7 / 107.6) | 106.4 / 109.7 (116% / 102%) | PASS |
@@ -72,8 +73,11 @@ extra pool-path cost per step.
   7-14% above it.
 * Against whole-close, 80K is 92.8% (p1) and 88.1% (p2).
 * Against the median of the four whole 80K draws (175.05), it is 93.2% / 93.5%.
-* 80K was measured with single arms, and the bracket spread (12% at 80K p2) is larger than the
-  8.7% noise floor. An alternated x3 run at 80K would settle it the way `dd` settled 8K.
+* The single arms' bracket spread (12% at 80K p2) was larger than the 8.7% noise floor, so 80K
+  was re-run alternated x3 like `dd` (`d80-*`, 512 decode tokens):
+  * whole 179-187 tok/s, mirror 171-179 tok/s;
+  * medians 95.9% / 95.7%, PASS;
+  * 0 faults/starved, captures=1, 0 prefills at the decode level.
 
 ### 1M RAM by cgroup (`ram-cgroup-compare.txt`, `cgroup-summary.txt`)
 
