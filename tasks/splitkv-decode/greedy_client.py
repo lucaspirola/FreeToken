@@ -36,6 +36,9 @@ def prompt(size):
     return "\n".join(lines) + "\n\n" + q
 
 
+if sys.argv[1] == "--dump":  # greedy_client.py --dump SIZE FILE: write the prompt text only
+    open(sys.argv[3], "w").write(prompt(int(sys.argv[2])))
+    sys.exit(0)
 out = open(sys.argv[1], "a")
 for size in map(int, sys.argv[2:]):
     p = prompt(size)

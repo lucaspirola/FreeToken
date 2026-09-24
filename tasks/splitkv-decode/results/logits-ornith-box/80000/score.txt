@@ -1,0 +1,41 @@
+== v2 vs base
+positions 31  vocab 248320
+max|dlogit| 2.1250  mean|dlogit| 0.11631  max|dlogit|/max|logit| 9.19e-02
+top-1 agreement 1.000 (31/31)  first disagreement None
+top-5 overlap 0.974  KL(exl3||ft) max 1.02e-02 mean 4.33e-04
+== base rerun vs base
+positions 31  vocab 248320
+max|dlogit| 0.0000  mean|dlogit| 0.00000  max|dlogit|/max|logit| 0.00e+00
+top-1 agreement 1.000 (31/31)  first disagreement None
+top-5 overlap 1.000  KL(exl3||ft) max 0.00e+00 mean 0.00e+00
+pos  0 base top1-top2 gap  0.6250  max|dlogit|  0.0000
+pos  1 base top1-top2 gap  0.2500  max|dlogit|  0.0000
+pos  2 base top1-top2 gap  3.6250  max|dlogit|  0.0000
+pos  3 base top1-top2 gap  9.3203  max|dlogit|  0.0000
+pos  4 base top1-top2 gap 11.1055  max|dlogit|  0.0000
+pos  5 base top1-top2 gap  9.9136  max|dlogit|  0.0000
+pos  6 base top1-top2 gap  8.1250  max|dlogit|  0.0000
+pos  7 base top1-top2 gap 10.4922  max|dlogit|  0.0000
+pos  8 base top1-top2 gap  9.5347  max|dlogit|  0.0000
+pos  9 base top1-top2 gap  8.3906  max|dlogit|  0.2422
+pos 10 base top1-top2 gap  9.1016  max|dlogit|  0.2188
+pos 11 base top1-top2 gap  9.6055  max|dlogit|  0.4375
+pos 12 base top1-top2 gap  4.2500  max|dlogit|  0.6562
+pos 13 base top1-top2 gap  4.2500  max|dlogit|  2.1250
+pos 14 base top1-top2 gap 10.3291  max|dlogit|  0.4375
+pos 15 base top1-top2 gap  9.9116  max|dlogit|  0.3125
+pos 16 base top1-top2 gap  9.1211  max|dlogit|  0.3750
+pos 17 base top1-top2 gap 10.1953  max|dlogit|  0.4922
+pos 18 base top1-top2 gap  9.3750  max|dlogit|  1.0312
+pos 19 base top1-top2 gap  4.1875  max|dlogit|  1.4062
+pos 20 base top1-top2 gap  1.5000  max|dlogit|  0.7656
+pos 21 base top1-top2 gap  8.6172  max|dlogit|  0.2500
+pos 22 base top1-top2 gap  8.6406  max|dlogit|  0.8340
+pos 23 base top1-top2 gap 10.0293  max|dlogit|  0.3438
+pos 24 base top1-top2 gap  8.6797  max|dlogit|  0.5938
+pos 25 base top1-top2 gap  9.4219  max|dlogit|  0.9375
+pos 26 base top1-top2 gap  6.6250  max|dlogit|  1.2500
+pos 27 base top1-top2 gap 12.3750  max|dlogit|  2.1172
+pos 28 base top1-top2 gap  9.1875  max|dlogit|  1.1250
+pos 29 base top1-top2 gap  9.2500  max|dlogit|  1.9395
+pos 30 base top1-top2 gap  3.3750  max|dlogit|  0.9766
