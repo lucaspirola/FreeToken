@@ -1,0 +1,9 @@
+== 8K, 512 tokens: mirror vs the whole arm run before it
+  p1 run 1: whole  189.7 (gap1 32.6 ms, median gap 5.1 ms)  mirror  185.9 (gap1 22.6 ms, median gap 5.3 ms)  ratio  98.0%  after gap1: whole 191.5 mirror 187.3
+  p1 run 2: whole  189.2 (gap1 32.0 ms, median gap 5.2 ms)  mirror  179.6 (gap1 28.3 ms, median gap 5.5 ms)  ratio  95.0%  after gap1: whole 191.4 mirror 180.9
+  p1 run 3: whole  194.4 (gap1 29.5 ms, median gap 5.0 ms)  mirror  182.9 (gap1 20.5 ms, median gap 5.4 ms)  ratio  94.1%  after gap1: whole 195.8 mirror 183.9
+  p1 median ratio  95.0%  PASS (>= 91%)
+  p2 run 1: whole  197.6 (gap1 34.4 ms, median gap 4.9 ms)  mirror  182.9 (gap1 25.0 ms, median gap 5.4 ms)  ratio  92.5%  after gap1: whole 200.0 mirror 184.2
+  p2 run 2: whole  188.4 (gap1 36.9 ms, median gap 5.2 ms)  mirror  185.1 (gap1 29.8 ms, median gap 5.3 ms)  ratio  98.3%  after gap1: whole 190.3 mirror 186.6
+  p2 run 3: whole  190.9 (gap1 36.2 ms, median gap 5.1 ms)  mirror  185.3 (gap1 28.0 ms, median gap 5.3 ms)  ratio  97.1%  after gap1: whole 193.3 mirror 186.7
+  p2 median ratio  97.1%  PASS (>= 91%)
