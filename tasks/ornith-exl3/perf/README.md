@@ -68,3 +68,10 @@ D2H (24.4 GB/s): ~0.84 ms per 1.98 MB expert written back. On this box (docker, 
 the writebacks alone cost ~4.5 ms/token. Shared residency code (`residency.copy_missing_mirror`,
 `fast_index_copy_multi`), not EXL3; whether the owner's WSL2 5080 has the same D2H penalty is not
 measured (run `bench_mirror_copy.py` there with the server down).
+`bench_sm_d2h.py` (`bench_sm_d2h-box-2026-09-24.txt`): no store pattern gets around the cap. SM stores
+into pinned memory run at 2.1-2.2 GB/s for 16 KiB to 256 KiB per program, with default, `.wt` or
+`.cs` stores and 4 or 8 warps, and at 3.4-3.8 GB/s with just 2 programs. DMA of the same 2 MB runs at
+22.9 GB/s. On this host only a copy engine gets full-speed writebacks. That means a DMA path
+(cudaMemcpyAsync / batched memcpy) with the device-side writeback list, which is a design change in the
+shared mirror, not a kernel tweak. After the GEMV rewrite it is the largest decode cost left on this box
+(pass 1 decode 40-59 tok/s vs 116-119 warm).
