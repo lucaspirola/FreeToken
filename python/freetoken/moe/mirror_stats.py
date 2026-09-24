@@ -25,7 +25,7 @@ from enum import IntEnum
 
 
 class MirrorStat(IntEnum):
-    """Index into the mirror's shared ``stats`` / ``stats_host`` int64[7]."""
+    """Index into the mirror's shared ``stats`` / ``stats_host`` int64[9]."""
 
     # Bumped by _resolve_swaps_kernel (decode admissions / prefill materialize).
     SWAPS = 0
@@ -39,6 +39,11 @@ class MirrorStat(IntEnum):
     # admissions, so folding them into slot 1 (whose denominator is SWAPS,
     # bumped only by _resolve_swaps_kernel) let free_eviction_rate exceed 1.0.
     BUFFER_FREE_EVICTIONS = 6
+    # DMA writebacks (``FREETOKEN_MIRROR_WB_STAGE_MB``): of WRITEBACKS, how many
+    # went through the VRAM staging ring (the rest were stored to the pool by
+    # SMs), and how many admissions read a still-pending row from that ring.
+    STAGED_WRITEBACKS = 7
+    STAGE_REDIRECTS = 8
 
 
 #: Number of counters in the shared ``stats`` tensor. Kept in step with
@@ -48,10 +53,10 @@ MIRROR_STAT_COUNT = len(MirrorStat)
 
 
 def mirror_stats_from_vector(vec) -> dict:
-    """Unpack a 7-element stats vector (list, tuple or tensor) BY NAME.
+    """Unpack a stats vector (list, tuple or tensor) BY NAME.
 
     ``vec`` is whatever ``.tolist()`` on the ``stats`` / ``stats_host`` tensor
-    produces: a length-7 sequence in ``MirrorStat`` order. Returns the same
+    produces: a ``MIRROR_STAT_COUNT``-long sequence in ``MirrorStat`` order. Returns the same
     keys ``OffloadMoeCache.mirror_stats()`` has always returned, computed from
     named lookups instead of positional unpacking.
     """
@@ -75,11 +80,13 @@ def mirror_stats_from_vector(vec) -> dict:
         "free_eviction_rate": (free_evictions / swaps) if swaps else 0.0,
         "buffer_free_evictions": buffer_free_evictions,
         "retained_rows": values[MirrorStat.RETAINED],
+        "staged_writebacks": values[MirrorStat.STAGED_WRITEBACKS],
+        "stage_redirects": values[MirrorStat.STAGE_REDIRECTS],
     }
 
 
 def mirror_fault_counts_from_vector(vec) -> tuple[int, int]:
-    """Return ``(violations, starved)`` from a 7-element stats vector BY NAME."""
+    """Return ``(violations, starved)`` from a stats vector BY NAME."""
     values = list(vec)
     if len(values) != MIRROR_STAT_COUNT:
         raise ValueError(

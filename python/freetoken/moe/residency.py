@@ -97,6 +97,10 @@ class ExpertResidency(Protocol):
     def after_reset(self) -> None:
         """After ``reset_cache`` dropped every GPU resident."""
 
+    def service_writebacks(self) -> None:
+        """Host step boundary, before a forward is enqueued: move completed
+        device-side work that needs a host hand (the mirror's DMA writebacks)."""
+
 
 class WholeModelResidency:
     """Whole model pinned in host RAM: nothing to do behind a miss."""
@@ -140,6 +144,9 @@ class WholeModelResidency:
     def after_reset(self) -> None:
         return None
 
+    def service_writebacks(self) -> None:
+        return None
+
     def attach(self, cache, banks) -> None:
         """Engine entry point: bind to ``cache`` and register the host banks."""
         cache.attach_residency(self)
@@ -159,6 +166,9 @@ class MirrorResidency:
         self.cache = cache
         # Device-resident residency maps + copy descriptors (_build_mirror_plan).
         self._mirror: dict | None = None
+        # Host half of the DMA writebacks (_build_mirror_plan); None when the
+        # staging ring is disabled (FREETOKEN_MIRROR_WB_STAGE_MB=0) or on CPU.
+        self._wb: dict | None = None
         # Mirror-only prefill assembly (see _prefetch_split_mirror), allocated
         # by init_prefill_buffers when the cache has prefill overlap.
         self._mirror_writeback: dict | None = None
@@ -265,7 +275,7 @@ class MirrorResidency:
             )
             # Dedicated writeback descriptors for _mirror_writeback_buffer, sized
             # for a whole buffer half (<= E occupants) rather than reusing the
-            # decode step's d2h_src/d2h_dst (sized for one admission batch,
+            # decode step's g1/g2 descriptors (sized for one admission batch,
             # which can be far smaller): the two run at different points in the
             # request lifecycle (prefill vs decode) but on the same device
             # state, so aliasing their descriptor buffers would let one
@@ -299,6 +309,12 @@ class MirrorResidency:
             # whose sources are the two residency maps rather than the host
             # banks. One sync per chunk buys pure host math for every layer.
             self.cache._prefill_hit_d2d_active = False
+            # Prefill reads pool rows (_prefetch_split_mirror) and SM-stores
+            # buffer occupants into free rows (_mirror_writeback_buffer); both
+            # need every staged writeback landed first. begin_prefill already
+            # waits for the preceding decode (the synchronize below), so this
+            # adds only the DMA tail.
+            self.drain_writebacks()
             with torch.cuda.stream(self.cache.prefill_copy_stream):
                 self.cache._prefill_slot_snapshot.copy_(self.cache.slot_for_id, non_blocking=True)
                 self._mirror_prefill_pool_snapshot.copy_(
@@ -311,6 +327,85 @@ class MirrorResidency:
     def copy_missing(self) -> bool:
         self.copy_missing_mirror()
         return True
+
+    def service_writebacks(self) -> None:
+        """Issue the ring -> pool DMAs of every step that has finished.
+
+        Called by the scheduler before each forward is enqueued (and by any
+        driver of ``copy_missing`` that wants its writebacks to land). Two
+        halves, both non-blocking in the steady state:
+
+        1. For each earlier snapshot whose event has completed, the ring
+           entries it names are complete in VRAM: copy each to its pool row on
+           the writeback stream, then publish the new completed count to the
+           device (``wb_state[1]``) behind those copies, which is what lets
+           the resolve kernel reuse the ring slots and read the pool rows.
+        2. Snapshot the device ring state behind everything enqueued so far
+           (i.e. after the previous step) into pinned memory, with an event,
+           for a later call to consume.
+
+        Under overlap scheduling step k's entries are issued at step k+2's
+        boundary and copied while k+2 computes. The ring must hold what is
+        staged meanwhile; when it cannot, the kernel falls back to SM stores.
+        """
+        wb = self._wb
+        if wb is None:
+            return
+        self._wb_issue_completed()
+        pending = wb["pending"]
+        if len(pending) == len(wb["snaps"]):
+            pending[0][0].synchronize()
+            self._wb_issue_completed()
+        slot = wb["next_snap"]
+        wb["next_snap"] = (slot + 1) % len(wb["snaps"])
+        snap = wb["snaps"][slot]
+        event = wb["events"][slot]
+        snap.copy_(self._mirror["wb_state"], non_blocking=True)
+        event.record()
+        pending.append((event, snap))
+
+    def _wb_issue_completed(self) -> None:
+        wb = self._wb
+        pending = wb["pending"]
+        while pending and pending[0][0].query():
+            _event, snap = pending.pop(0)
+            self._wb_issue(snap.tolist())
+
+    def _wb_issue(self, state: list) -> None:
+        """DMA ring entries [issued, state[0]) to their pool rows, in ring order."""
+        wb = self._wb
+        head = int(state[0])
+        issued = wb["issued"]
+        if head <= issued:
+            return
+        rows = wb["rows"]
+        assert head - issued <= rows, (head, issued, rows)
+        with torch.cuda.stream(wb["stream"]):
+            for idx in range(issued, head):
+                s = idx % rows
+                row = int(state[2 + s])
+                for pool_view, stage_view in wb["views"]:
+                    pool_view[row].copy_(stage_view[s], non_blocking=True)
+            # Stream-ordered behind the copies: only now may the resolve
+            # kernel reuse these ring slots or read these pool rows.
+            self._mirror["wb_state"][1:2].fill_(head)
+        wb["issued"] = head
+        wb["dma_rows"] += head - issued
+
+    def drain_writebacks(self) -> None:
+        """Land every staged writeback in the pool (host sync).
+
+        Required before anything reads or writes pool rows outside the decode
+        kernels: prefill, arena shrink/refill, warm start, tests that inspect
+        the pool. After it returns, no ring entry is pending.
+        """
+        wb = self._wb
+        if wb is None:
+            return
+        torch.cuda.synchronize(self.cache.device)
+        self._wb_issue(self._mirror["wb_state"].tolist())
+        wb["pending"].clear()
+        wb["stream"].synchronize()
 
     def after_reset(self) -> None:
         """Moved from ``OffloadMoeCache.reset``'s mirror branch.
@@ -472,24 +567,21 @@ class MirrorResidency:
         self._mirror = {
             "pool_row_of_id": torch.tensor(fwd, dtype=torch.int32, device=dev),
             "id_of_pool_row": torch.tensor(host_rows, dtype=torch.int32, device=dev),
-            # Admissions, compacted: an expert already in its target slot emits
-            # no descriptor, so this count can be below the miss count.
-            "h2d_src": torch.zeros((plan,), dtype=torch.int32, device=dev),
-            "h2d_dst": torch.zeros((plan,), dtype=torch.int32, device=dev),
-            "n_h2d": torch.zeros((1,), dtype=torch.int64, device=dev),
-            # Writebacks: GPU slot -> mirror row, for victims with no duplicate.
-            "d2h_src": torch.zeros((plan,), dtype=torch.int32, device=dev),
-            "d2h_dst": torch.zeros((plan,), dtype=torch.int32, device=dev),
-            "n_d2h": torch.zeros((1,), dtype=torch.int64, device=dev),
-            # Slot -> slot moves for experts a materialize reinstalls that are
-            # already GPU-resident: no PCIe traffic, no mirror row required.
+            # Copy descriptors, (dst row, src row, dst space, src space) per
+            # entry (mirror_kernels.KIND_*), one fast_index_copy_kinds launch
+            # per group. g1: victim writebacks (slot -> staging ring, or slot
+            # -> pool) and slot -> slot relocations of experts a materialize
+            # reinstalls that are already GPU-resident (no PCIe traffic, no
+            # mirror row). g2: admissions (pool or ring -> slot), compacted:
+            # an expert already in its target slot emits nothing.
+            "g1": torch.zeros((4, plan), dtype=torch.int32, device=dev),
+            "n_g1": torch.zeros((1,), dtype=torch.int64, device=dev),
+            "g2": torch.zeros((4, plan), dtype=torch.int32, device=dev),
+            "n_g2": torch.zeros((1,), dtype=torch.int64, device=dev),
             # Pre-step slot of every expert: the LRU/materialize kernels rewrite
             # slot_for_id before the swap kernel runs, so a "where was it?"
             # question must be asked of this snapshot.
             "prev_slot_of_id": torch.zeros((pool.total,), dtype=torch.int32, device=dev),
-            "d2d_src": torch.zeros((plan,), dtype=torch.int32, device=dev),
-            "d2d_dst": torch.zeros((plan,), dtype=torch.int32, device=dev),
-            "n_d2d": torch.zeros((1,), dtype=torch.int64, device=dev),
             # Rows owned by nobody, usable as writeback targets. A swap pops
             # at most one per miss; it pushes one back only once retention has
             # filled the pool down to the reserve (see mirror_kernels), so the
@@ -511,7 +603,68 @@ class MirrorResidency:
             "cache_ptrs": torch.tensor(cache_ptrs, dtype=torch.int64, device=dev),
             "feat_bytes": torch.tensor(feat_bytes, dtype=torch.int64, device=dev),
         }
+        self._build_writeback_ring(pool, pool_ptrs, cache_ptrs, feat_bytes)
         self.cache._copy_fused_ok = False  # the mirror path drives the copies itself
+
+    def _build_writeback_ring(self, pool, pool_ptrs, cache_ptrs, feat_bytes) -> None:
+        """VRAM staging ring for DMA writebacks (see _resolve_swaps_kernel).
+
+        Sized by ``FREETOKEN_MIRROR_WB_STAGE_MB`` (default 96 MiB, clamped to
+        4..32 rows); 0 disables it and every writeback is an SM store into the
+        pool, the pre-DMA path. Allocated here, with the other mirror state and
+        before the first forward, so the arena and KV budgets see it.
+        """
+        m = self._mirror
+        dev = self.cache.device
+        row_total = sum(feat_bytes)
+        rows = wb_stage_rows(row_total) if dev.type == "cuda" else 0
+        # At most a third of the pool's reserve. A ring-full fallback needs a
+        # free row with no DMA pending; pending rows are <= ring rows, and the
+        # free stack stays near the reserve minus one launch's misses (the
+        # reserve is sized for those), so this keeps a clean row available.
+        # Measured without the cap: a 32-row ring over an 8-row reserve,
+        # never serviced, starved writebacks in tests/moe/test_mirror_retention.
+        rows = min(rows, pool.reserve_rows // 3)
+        m["wb_stage_rows"] = rows
+        # [0] entries ever staged, [1] entries whose DMA has landed, [2 + s]
+        # pool row of ring slot s.
+        m["wb_state"] = torch.zeros((2 + rows,), dtype=torch.int64, device=dev)
+        # Ring index of the latest staged writeback into each pool row.
+        m["wb_pend"] = torch.full((pool.capacity,), -1, dtype=torch.int64, device=dev)
+        stage_ptrs = list(cache_ptrs)   # placeholders when the ring is off
+        views = []
+        if rows:
+            for name, row_bytes in zip(self.cache.bank_schema, feat_bytes):
+                stage = torch.empty((rows, row_bytes), dtype=torch.uint8, device=dev)
+                host = pool.banks[name]
+                views.append((host.view(-1).view(torch.uint8).view(host.shape[0], row_bytes),
+                              stage))
+            stage_ptrs = [stage.data_ptr() for _pool_view, stage in views]
+        # Space-major pointer table for fast_index_copy_kinds_jit:
+        # KIND_CACHE, KIND_POOL, KIND_STAGE.
+        m["kind_ptrs"] = torch.tensor(cache_ptrs + pool_ptrs + stage_ptrs,
+                                      dtype=torch.int64, device=dev)
+        if not rows:
+            self._wb = None
+            return
+        n_snaps = 4
+        self._wb = {
+            "rows": rows,
+            "views": views,
+            "stream": torch.cuda.Stream(device=dev),
+            "snaps": [torch.zeros((2 + rows,), dtype=torch.int64, pin_memory=True)
+                      for _ in range(n_snaps)],
+            "events": [torch.cuda.Event() for _ in range(n_snaps)],
+            "next_snap": 0,
+            "pending": [],
+            "issued": 0,
+            "dma_rows": 0,
+        }
+        logger.info_rank0(
+            "mirror DMA writebacks: %d-row VRAM staging ring (%.1f MiB); "
+            "FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks",
+            rows, rows * row_total / 2**20,
+        )
 
     def mirror_stats(self) -> dict:
         """Swap counters (swaps, free evictions, writebacks, coverage faults).
@@ -523,7 +676,12 @@ class MirrorResidency:
         if getattr(self, "_mirror", None) is None:
             return {}
         stats = self._mirror["stats"]
-        return mirror_stats_from_vector(stats.tolist())
+        out = mirror_stats_from_vector(stats.tolist())
+        # Host-side: ring size and rows DMA'd so far (staged_writebacks minus
+        # this is what is still in flight or not yet issued).
+        out["wb_stage_rows"] = self._mirror.get("wb_stage_rows", 0)
+        out["dma_writebacks"] = self._wb["dma_rows"] if self._wb else 0
+        return out
 
     def mirror_warm_start(self) -> dict:
         """Establish coverage at startup: fill the GPU, then mirror the rest.
@@ -538,6 +696,8 @@ class MirrorResidency:
         order: every token routes through all ``L`` layers, so a GPU holding
         layers 0..k entirely and nothing of the rest would miss constantly.
         """
+        # Host writes pool rows below: no staged DMA may land on them later.
+        self.drain_writebacks()
         pool = self._mirror_pool
         m = self._mirror
         from freetoken.kernel.fast_index_copy import fast_index_copy_multi_jit
@@ -688,6 +848,8 @@ class MirrorResidency:
 
         Returns the number of rows re-read.
         """
+        # Host writes pool rows below: no staged DMA may land on them later.
+        self.drain_writebacks()
         pool = self._mirror_pool
         m = self._mirror
         if end is None:
@@ -755,6 +917,8 @@ class MirrorResidency:
 
         Returns the number of rows read from the checkpoint.
         """
+        # Host writes pool rows below: no staged DMA may land on them later.
+        self.drain_writebacks()
         pool = self._mirror_pool
         m = self._mirror
         base = layer_id * self.cache.num_experts
@@ -805,15 +969,17 @@ class MirrorResidency:
 
         Ordering is load-bearing and stream-ordered, not synchronized:
 
-          1. D2H  gpu[slot] -> pool[row]   reads the slot's *old* (victim) bytes
-          2. H2D  pool[row] -> gpu[slot]   overwrites the slot with the admission
+          1. g1: gpu[slot] -> ring/pool   reads the slots' *old* (victim)
+             bytes, and moves already-resident experts slot -> slot
+          2. g2: pool/ring -> gpu[slot]   overwrites the slots with admissions
 
-        The writeback target is never the row the upload reads (``resolve_swaps``
+        The writeback target is never the row an upload reads (``resolve_swaps``
         takes it from the free stack), and rows freed this step are only
         recycled in step 3, after both copies are issued. The GPU slot's own
-        read-after-write is resolved by stream order.
+        read-after-write is resolved by stream order. A staged writeback
+        reaches its pool row later, by DMA (``service_writebacks``).
         """
-        from freetoken.kernel.fast_index_copy import fast_index_copy_multi_jit
+        from freetoken.kernel.fast_index_copy import fast_index_copy_kinds_jit
         from freetoken.moe.mirror_kernels import publish_freed_rows, resolve_swaps
 
         layer_id = self.cache._pending_src_layer
@@ -822,29 +988,17 @@ class MirrorResidency:
         )
         m = self._mirror
         resolve_swaps(self.cache, layer_id)
-        # 1. victims leave the GPU (empty when every victim is already mirrored)
-        fast_index_copy_multi_jit(
-            m["pool_ptrs"], m["cache_ptrs"], m["feat_bytes"],
-            m["d2h_dst"], m["d2h_src"], m["n_d2h"],
-        )
-        # 2. experts already resident elsewhere move slot -> slot on the device.
-        # BEFORE the uploads: a D2D source is a slot that still holds its old
-        # expert, and step 3 is about to overwrite exactly such slots. Issuing
-        # the relocation afterwards read admitted bytes instead of the expert
-        # being relocated (21K-token completions came out as noise).
-        fast_index_copy_multi_jit(
-            m["cache_ptrs"], m["cache_ptrs"], m["feat_bytes"],
-            m["d2d_dst"], m["d2d_src"], m["n_d2d"],
-        )
-        # 3. admissions enter the GPU, from the compacted descriptor: an expert
-        # already sitting in its target slot emitted nothing.
-        fast_index_copy_multi_jit(
-            m["cache_ptrs"], m["pool_ptrs"], m["feat_bytes"],
-            m["h2d_dst"], m["h2d_src"], m["n_h2d"],
-        )
-        # 4. only now may this step's vacated rows be reused
+        # 1. victims leave their slots and relocations move, BEFORE the
+        # uploads: a relocation source is a slot that still holds its old
+        # expert, and step 2 is about to overwrite exactly such slots.
+        # Issuing the relocation afterwards read admitted bytes instead of
+        # the expert being relocated (21K-token completions came out as noise).
+        fast_index_copy_kinds_jit(m["kind_ptrs"], m["feat_bytes"], m["g1"], m["n_g1"])
+        # 2. admissions enter the GPU, from the compacted descriptor.
+        fast_index_copy_kinds_jit(m["kind_ptrs"], m["feat_bytes"], m["g2"], m["n_g2"])
+        # 3. only now may this step's vacated rows be reused
         publish_freed_rows(self.cache)
-        # 5. stream-ordered snapshot of the fault counters for the host check at
+        # 4. stream-ordered snapshot of the fault counters for the host check at
         # the next batch boundary (no sync: the copy rides this step's stream).
         m["stats_host"].copy_(m["stats"], non_blocking=True)
         self.cache._pending_src_layer = None
@@ -1111,7 +1265,11 @@ class MirrorResidency:
             (config.num_page_override or 0) * config.page_size
         )
         kv_ceiling = cache_per_page * (ceiling_tokens // config.page_size)
-        slots = int(max(budget - kv_ceiling, 0) // per_slot)
+        # The DMA-writeback staging ring (_build_writeback_ring) is VRAM the
+        # live arena fill will see; price it here too, or the pool is sized
+        # for an arena that many slots larger than the one it gets.
+        stage = wb_stage_rows(per_slot) * per_slot
+        slots = int(max(budget - kv_ceiling - stage, 0) // per_slot)
         total = mc.num_moe_layers * mc.num_experts
         # One margin below the plan, the larger of:
         #   * four arena chunks of release granularity (FREETOKEN_ARENA_STEP_
@@ -1163,6 +1321,22 @@ def sourced_mirror_hooks(mc):
             f"checkpoint. Export {export} once its layout is verified."
         )
     return hooks
+
+
+def wb_stage_rows(row_bytes: int) -> int:
+    """Rows of the mirror's DMA-writeback staging ring for one expert row size.
+
+    ``FREETOKEN_MIRROR_WB_STAGE_MB`` (default 96) over the row bytes, clamped
+    to 4..32 rows; 0 disables the ring (SM-store writebacks). The ring built
+    is further capped at a third of the pool's reserve (_build_writeback_ring),
+    so this is an upper bound, which is the safe side for pricing it.
+    """
+    raw = os.environ.get("FREETOKEN_MIRROR_WB_STAGE_MB", "").strip()
+    budget_mb = float(raw) if raw else 96.0
+    if budget_mb <= 0:
+        return 0
+    rows = int(budget_mb * 2**20 // max(int(row_bytes), 1))
+    return max(4, min(rows, 32))
 
 
 def build_residency(config, mc, engine) -> ExpertResidency:

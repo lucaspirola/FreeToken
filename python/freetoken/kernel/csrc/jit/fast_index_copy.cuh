@@ -587,3 +587,98 @@ struct MultiIndexCopyKernel {
         );
     }
 };
+
+// ---------------------------------------------------------------------------
+// Multi-bank index copy whose entries each name their own source and
+// destination SPACE. The bounded expert mirror moves rows between three
+// spaces per bank -- the GPU slot cache, the pinned host pool and a small
+// VRAM staging ring (kind 0, 1, 2) -- and one decode step mixes several of
+// those directions. Encoding the space per entry lets the mirror issue a
+// step's copies as two launches (one per ordering group) instead of one
+// launch per direction, and the step's device-side resolve kernel decides
+// every entry's direction without a host round trip, so it stays inside the
+// captured decode graph.
+//
+// base_ptrs is int64 [kKinds * B]: base_ptrs[k * B + b] is bank b's base in
+// space k (a GPU-visible address; the host pool's is its mapped device
+// pointer). desc is int32 [4, cap]: row 0 destination row, row 1 source row,
+// row 2 destination kind, row 3 source kind; valid_length[0] entries are live.
+struct KindsIndexCopyParams {
+    const int64_t* __restrict__ base_ptrs;   // [K*B]
+    const int64_t* __restrict__ feat_bytes;  // [B] per-row bytes (multiple of 16)
+    const int32_t* __restrict__ desc;        // [4, cap]
+    const int64_t* __restrict__ valid_length;// [1]
+    int64_t cap;
+    int num_banks;
+    int num_kinds;
+};
+
+template <std::size_t kNumThreads, std::size_t kBlocksPerBank>
+__global__ __launch_bounds__(kNumThreads) void fast_index_copy_kinds(
+    const __grid_constant__ KindsIndexCopyParams p
+) {
+    const int b = static_cast<int>(blockIdx.x / kBlocksPerBank);
+    if (b >= p.num_banks) {
+        return;
+    }
+    const int blk = static_cast<int>(blockIdx.x % kBlocksPerBank);
+    const int64_t feat = p.feat_bytes[b];
+    const int64_t n = p.valid_length[0];
+    const int64_t units = feat >> 4;
+    const int64_t total = n * units;
+    const int32_t* di = p.desc;
+    const int32_t* si = p.desc + p.cap;
+    const int32_t* dk = p.desc + 2 * p.cap;
+    const int32_t* sk = p.desc + 3 * p.cap;
+    const int64_t stride = static_cast<int64_t>(kBlocksPerBank) * kNumThreads;
+    for (int64_t u = static_cast<int64_t>(blk) * kNumThreads + threadIdx.x; u < total; u += stride) {
+        const int64_t row = u / units;
+        const int64_t col = (u - row * units) << 4;
+        const auto* src = reinterpret_cast<const uint8_t*>(p.base_ptrs[sk[row] * p.num_banks + b]);
+        auto* dst = reinterpret_cast<uint8_t*>(p.base_ptrs[dk[row] * p.num_banks + b]);
+        const int64_t pd = static_cast<int64_t>(di[row]);
+        const int64_t ps = static_cast<int64_t>(si[row]);
+        const uint4 v = *reinterpret_cast<const uint4*>(src + ps * feat + col);
+        *reinterpret_cast<uint4*>(dst + pd * feat + col) = v;
+    }
+}
+
+template <std::size_t kNumThreads, std::size_t kBlocksPerBank>
+struct KindsIndexCopyKernel {
+    static void run(
+        tvm::ffi::TensorView base_ptrs,
+        tvm::ffi::TensorView feat_bytes,
+        tvm::ffi::TensorView desc,
+        tvm::ffi::TensorView num_indices
+    ) {
+        using namespace host;
+        auto device = SymbolicDevice{};
+        auto B = SymbolicSize{"num_banks"};
+        auto KB = SymbolicSize{"kinds x banks"};
+        auto C = SymbolicSize{"descriptor capacity"};
+        auto i64 = SymbolicDType{};
+        auto i32 = SymbolicDType{};
+        auto n64 = SymbolicDType{};
+
+        TensorMatcher({KB}).with_dtype<int64_t>(i64).with_device<kDLCUDA>(device).verify(base_ptrs);
+        TensorMatcher({B}).with_dtype<int64_t>(i64).with_device<kDLCUDA>(device).verify(feat_bytes);
+        TensorMatcher({4, C}).with_dtype<int32_t>(i32).with_device<kDLCUDA>(device).verify(desc);
+        TensorMatcher({1}).with_dtype<int64_t>(n64).with_device<kDLCUDA>(device).verify(num_indices);
+
+        const int num_banks = static_cast<int>(B.unwrap());
+        const int64_t kb = static_cast<int64_t>(KB.unwrap());
+        RuntimeCheck(num_banks > 0 && kb % num_banks == 0,
+                     "fast_index_copy_kinds: base_ptrs must hold kinds x banks entries");
+        const auto params = KindsIndexCopyParams{
+            static_cast<const int64_t*>(base_ptrs.data_ptr()),
+            static_cast<const int64_t*>(feat_bytes.data_ptr()),
+            static_cast<const int32_t*>(desc.data_ptr()),
+            static_cast<const int64_t*>(num_indices.data_ptr()),
+            static_cast<int64_t>(C.unwrap()),
+            num_banks,
+            static_cast<int>(kb / num_banks),
+        };
+        LaunchKernel(static_cast<std::size_t>(kBlocksPerBank) * num_banks, kNumThreads,
+                     device.unwrap())(fast_index_copy_kinds<kNumThreads, kBlocksPerBank>, params);
+    }
+};
