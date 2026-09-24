@@ -73,10 +73,10 @@ fi
 echo "installed /etc/systemd/system/freetoken-serve.service for $USER_NAME ($REPO)"
 echo "installed ft-up / ft-down in $HOME_DIR/.local/bin (bring the server up / hand the GPU back)"
 echo "installed memlock=unlimited for $USER_NAME: user@$UID_NUM drop-in, system/user manager defaults, limits.d"
-echo "NEXT (as $USER_NAME, after the first successful start): scripts/tune-memory-ratio.sh"
-echo "  -> binary-searches the largest --memory-ratio THIS GPU + model can serve (tries 1.00 first,"
-echo "     bisects down only on failure) and persists it in $HOME_DIR/.config/freetoken/serve.env."
-echo "     Free VRAM is wasted expert slots; another host's ratio does not transfer."
+echo "NEXT (as $USER_NAME, after the first successful start): scripts/verify-memory-ratio.sh"
+echo "  -> one start at the default --memory-ratio 1.00, serves 8K/80K/256K, PASS/FAIL, plus the"
+echo "     engine's prediction-vs-measurement lines. No tuning: 1.00 is the default everywhere and"
+echo "     the engine reserves its own runtime headroom. Report a FAIL or a prediction WARN."
 
 # 4. WSL: the VM's RAM cap is set on the Windows side and must hold the pinned banks.
 if grep -qi microsoft /proc/version; then

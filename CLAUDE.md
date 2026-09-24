@@ -67,18 +67,19 @@ Never run torch-backed pytest beside the live model; stop the server first
 4. Start as above, then verify with `benchmarks/switchyard_soak/checks/acceptance.sh R3`
    (one graph capture, KV growth, no tracebacks) after a couple of long requests, and
    `... R6` (banks pinned, memlock unlimited).
-5. **Fill the VRAM: `scripts/tune-memory-ratio.sh`** (part of the installation on EVERY
-   machine, for whatever GPU and model that host runs — the 5080 result does not transfer
-   to the Ada box or to another checkpoint; ~20 min, restarts the server several times).
-   Free VRAM is wasted expert slots, so the target is
-   `--memory-ratio 1.00`; the script tries 1.00 first and, only if the server fails to start,
-   capture its graphs or serve 8K/80K/256K prompts, bisects downward between the last good
-   and the last bad ratio (step 0.005). The winner is written to
-   `~/.config/freetoken/serve.env` as `FREETOKEN_MEMORY_RATIO` (the launcher's own 0.91 is
-   just the safe fallback until this has run) and the server is left running on it. Trials
-   are logged in `~/.cache/freetoken/logs/tune-memory-ratio.tsv`. Re-run after a driver,
-   VRAM or model change. Do not "leave 1 GB free for safety" by hand: the bisection already
-   found the edge on this host.
+5. **Verify ratio 1.00: `scripts/verify-memory-ratio.sh`** (part of the installation on
+   EVERY machine, for whatever GPU and model that host runs; one restart, ~5 min).
+   `--memory-ratio` is 1.00 by default (engine and launcher) and is an override, not a
+   tuning knob: the engine predicts its runtime headroom from the config
+   (`engine/memory_prediction.py`), measures the prefill transient at startup, and leaves
+   it free itself (growable arena filled back around it; a fixed-size start takes the
+   predicted reserve out of its budget). The script starts once at 1.00, serves
+   8K/80K/256K prompts, and prints PASS/FAIL with the "Memory prediction check" lines
+   (prediction vs measurement, WARN outside ±25%). One row goes to
+   `~/.cache/freetoken/logs/verify-memory-ratio.tsv`. It does not bisect and does not
+   write `serve.env`. A FAIL or a prediction WARN is a finding to report, not a ratio to
+   search for. Re-run after a driver, VRAM or model change. Do not "leave 1 GB free for
+   safety" by hand. `tune-memory-ratio.sh` is retired and now runs the verify.
 
 ## Working on the code
 

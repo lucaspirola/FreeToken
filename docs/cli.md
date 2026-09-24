@@ -69,7 +69,7 @@ ft serve --model ... --gpu GPU-9e8d7c6b  # the same card by UUID (a unique prefi
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--memory-ratio` | 0.9 | Fraction of free VRAM the engine may use (weights + MoE cache + KV) |
+| `--memory-ratio` | 1.00 | Fraction of free VRAM the engine may plan for (weights + MoE cache + KV). An override, not a tuning knob: the runtime headroom is predicted from the config and reserved (fixed-size KV) or measured and left free (growable KV); see `engine/memory_prediction.py` |
 | `--num-pages` / `--num-tokens` | auto | KV capacity override in pages / tokens (mutually exclusive; auto sizes from VRAM left after weights and MoE cache) |
 | `--page-size` | 1 | KV page size; DSV4 forces 128, the TRTLLM backend needs 16/32/64, SWA models require 1 |
 | `--cache-type` | radix | `radix` (prefix reuse; SWA/GDN-aware variants picked automatically) or `naive` |

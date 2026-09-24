@@ -38,13 +38,15 @@
 #   FREETOKEN_PORT                default 1919
 #   FREETOKEN_PIN_BUDGET_GB       default 17 (>= expert banks; lower only if RAM is short)
 #   FREETOKEN_HOST_RAM_RESERVE_GB default 0 (RAM the preflight keeps free; owner's choice)
-#   FREETOKEN_MEMORY_RATIO        default 1.00 of FREE VRAM (KV ceiling + expert cache).
-#                                 tune-memory-ratio.sh measured 1.00 on this 5080 on
-#                                 2026-09-17 (2056 expert slots vs 1985 at 0.91) and the
-#                                 owner chose it everywhere on 2026-09-22. It is a
-#                                 fraction of FREE VRAM, so it sizes itself to whatever
-#                                 else holds the card -- which is also why a measurement
-#                                 taken beside another GPU process is not comparable.
+#   FREETOKEN_MEMORY_RATIO        default 1.00 of FREE VRAM (KV ceiling + expert cache),
+#                                 the engine's default too (2026-09-24, owner decision):
+#                                 an override, not a tuning knob. The engine reserves its
+#                                 own runtime headroom (predicted from the config, measured
+#                                 at startup); scripts/verify-memory-ratio.sh checks a host.
+#                                 It is a fraction of FREE VRAM, so it sizes itself to
+#                                 whatever else holds the card -- which is also why a
+#                                 measurement taken beside another GPU process is not
+#                                 comparable.
 #   FREETOKEN_CACHE_DIR           default $HOME/.cache/freetoken (spill, traces, logs)
 #   FREETOKEN_EXTRA_ARGS          appended verbatim (last flag wins for repeated options)
 #   TVM_FFI_CUDA_ARCH_LIST        auto-detected from nvidia-smi (12.0 Blackwell, 8.9 Ada)
