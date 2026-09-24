@@ -1,4 +1,4 @@
-"""EXL3 (exllamav3 trellis) linears: decoded in the kernel, never materialized.
+"""EXL3 (exllamav3 trellis) linears: decoded in the kernel; long prefills decode one part at a time.
 
 The layer holds ``trellis`` int16 flat and part-major (a fused projection's parts back to back,
 each ``[K/16, N_j/16, 16*bits]``), ``suh`` fp16 ``[parts, K]`` and ``svh`` fp16 ``[N]``; see
@@ -18,6 +18,13 @@ from .base import LinearConfig, LinearKernel, LinearMethod
 
 # At most this many rows go through the per-row GEMV; more use the tl.dot GEMM.
 GEMV_MAX_ROWS = 8
+# From this many rows on, decode W_hat once per part to fp16 and let cuBLAS (fp32 accumulation) do
+# the product, then the Hadamard/svh epilogue: the tl.dot GEMM re-decodes each weight column once
+# per row block and runs at ~6.5 TF/s on an RTX 5080, 13-18x slower than reconstruct + cuBLAS at
+# M >= 1024; reconstruct is ahead or level from M=16 on every Ornith shape (bench_dense_crossover-box-2026-09-24.txt).
+RECONSTRUCT_MIN_ROWS = 16
+# Output columns per cuBLAS call: bounds the fp32 accumulator at rows x this.
+RECONSTRUCT_SLAB = 2048
 
 
 def exl3_facts(scheme) -> tuple[int, str]:
@@ -50,8 +57,29 @@ def exl3_forward(x2: torch.Tensor, trellis: torch.Tensor, suh: torch.Tensor, svh
         out = torch.empty((rows, parts.n), dtype=out_dtype, device=x2.device)
         return exl3_gemv(xh, trellis, svh, parts, out=out, split_k=split)
     out = torch.empty((rows, parts.n), dtype=out_dtype, device=x2.device)
+    if rows >= RECONSTRUCT_MIN_ROWS and parts.sizes:
+        return _forward_reconstruct(xh, trellis, svh, parts, out)
     block_m = 16 if rows <= 32 else (32 if rows <= 128 else 64)
     return exl3_gemm(xh, trellis, svh, parts, out=out, block_m=block_m)
+
+
+def _forward_reconstruct(xh: torch.Tensor, trellis: torch.Tensor, svh: torch.Tensor, parts, out: torch.Tensor) -> torch.Tensor:
+    """``out = svh * H(xh[part] @ W_hat[part])`` part by part: W_hat decoded once (fp16, exact),
+    the product in cuBLAS with an fp32 result, the 128-block Hadamard + svh in ``had_cols``."""
+    from freetoken.kernel.triton.exl3 import had_cols, reconstruct
+
+    k, bits = parts.k, parts.bits
+    off = col = 0
+    for j, n in enumerate(parts.sizes):
+        count = (k // 16) * (n // 16) * 16 * bits
+        w = reconstruct(trellis[off : off + count].view(k // 16, n // 16, 16 * bits), parts.codebook)
+        for c0 in range(0, n, RECONSTRUCT_SLAB):
+            c1 = min(c0 + RECONSTRUCT_SLAB, n)
+            acc = torch.mm(xh[j], w[:, c0:c1], out_dtype=torch.float32)
+            had_cols(acc, svh[col + c0 : col + c1], out[:, col + c0 : col + c1])
+        off += count
+        col += n
+    return out
 
 
 class TritonExl3LinearKernel(LinearKernel):

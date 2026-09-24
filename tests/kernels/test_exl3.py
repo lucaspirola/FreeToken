@@ -263,3 +263,25 @@ def test_split_k_decode_is_deterministic():
     xm, w, ids = (t.cuda() for t in _routing(1, 12, seed=6))
     first = fused_experts_exl3(xm, banks, w, ids, bits=5, codebook="mul1", is_prefill=False)
     assert all(torch.equal(first, fused_experts_exl3(xm, banks, w, ids, bits=5, codebook="mul1", is_prefill=False)) for _ in range(20))
+
+
+@cuda
+@pytest.mark.parametrize("codebook", tuple(CODEBOOKS))
+def test_reconstruct_path_matches_gemm_path(monkeypatch, codebook):
+    """Long prefills decode W_hat once per part and use cuBLAS; slabs split a part's columns. The
+    result must agree with the tl.dot GEMM (same fp16 operands, fp32 accumulation, same epilogue)."""
+    from freetoken.kernel.triton.exl3 import Exl3Parts
+    from freetoken.layers.quantization.linear import exl3 as lin
+
+    k, sizes, bits, rows = 512, (256, 128, 384), 4, 333
+    trs, suh, svh = _dense_case(k, sizes, bits, codebook, seed=7)
+    parts = Exl3Parts.build(k, sizes, bits, codebook, "cuda")
+    flat = torch.cat([t.reshape(-1) for t in trs]).cuda()
+    x = torch.randn(rows, k, generator=torch.Generator().manual_seed(8)).to(torch.bfloat16).cuda()
+    args = (x, flat, suh.cuda(), svh.cuda(), parts, torch.float32)
+    monkeypatch.setattr(lin, "RECONSTRUCT_MIN_ROWS", 1 << 30)
+    gemm = lin.exl3_forward(*args)
+    monkeypatch.setattr(lin, "RECONSTRUCT_MIN_ROWS", 16)
+    monkeypatch.setattr(lin, "RECONSTRUCT_SLAB", 128)  # every part split into 128-column slabs
+    recon = lin.exl3_forward(*args)
+    assert rel_err(recon, gemm) < 1e-5, rel_err(recon, gemm)

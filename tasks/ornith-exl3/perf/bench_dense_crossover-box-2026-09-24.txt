@@ -1,0 +1,42 @@
+# ft-dev RTX 5080 box, 2026-09-24; exl3_forward times (ms), gemm = tl.dot GEMM, recon = reconstruct + cuBLAS + had_cols
+292 passed, 1 warning in 332.13s (0:05:32)
+K=2048 parts=(12288,)
+  M=16: gemm 0.767 / recon 0.347 ms
+  M=32: gemm 1.172 / recon 0.382 ms
+  M=64: gemm 1.179 / recon 0.382 ms
+  M=128: gemm 1.927 / recon 0.349 ms
+  M=192: gemm 1.758 / recon 0.385 ms
+  M=256: gemm 2.200 / recon 0.349 ms
+  M=384: gemm 3.073 / recon 0.414 ms
+  M=512: gemm 4.339 / recon 0.507 ms
+  M=1024: gemm 8.178 / recon 0.821 ms
+K=2048 parts=(8192, 512, 512)
+  M=16: gemm 0.430 / recon 0.469 ms
+  M=32: gemm 0.766 / recon 0.529 ms
+  M=64: gemm 0.777 / recon 0.508 ms
+  M=128: gemm 1.520 / recon 0.511 ms
+  M=192: gemm 1.334 / recon 0.536 ms
+  M=256: gemm 1.770 / recon 0.469 ms
+  M=384: gemm 2.641 / recon 0.491 ms
+  M=512: gemm 3.085 / recon 0.456 ms
+  M=1024: gemm 6.103 / recon 0.650 ms
+K=4096 parts=(2048,)
+  M=16: gemm 0.844 / recon 0.068 ms
+  M=32: gemm 0.842 / recon 0.068 ms
+  M=64: gemm 0.847 / recon 0.070 ms
+  M=128: gemm 0.848 / recon 0.085 ms
+  M=192: gemm 0.888 / recon 0.096 ms
+  M=256: gemm 0.887 / recon 0.108 ms
+  M=384: gemm 1.751 / recon 0.134 ms
+  M=512: gemm 1.755 / recon 0.158 ms
+  M=1024: gemm 3.435 / recon 0.252 ms
+K=2048 parts=(512, 512)
+  M=16: gemm 0.430 / recon 0.101 ms
+  M=32: gemm 0.428 / recon 0.097 ms
+  M=64: gemm 0.432 / recon 0.101 ms
+  M=128: gemm 0.434 / recon 0.104 ms
+  M=192: gemm 0.456 / recon 0.122 ms
+  M=256: gemm 0.456 / recon 0.118 ms
+  M=384: gemm 0.459 / recon 0.112 ms
+  M=512: gemm 0.462 / recon 0.105 ms
+  M=1024: gemm 0.910 / recon 0.117 ms

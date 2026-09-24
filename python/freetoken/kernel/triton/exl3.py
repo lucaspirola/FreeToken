@@ -144,6 +144,7 @@ class Exl3Parts:
     nstart: torch.Tensor
     num_parts: int
     suh_part_stride: int
+    sizes: tuple[int, ...] = ()  # host copy of each part's N (the reconstruct path slices by it)
 
     @staticmethod
     def build(k: int, sizes: tuple[int, ...], bits: int, codebook: str, device, *, suh_part_stride: int | None = None) -> "Exl3Parts":
@@ -169,7 +170,7 @@ class Exl3Parts:
 
         return Exl3Parts(
             k, col, bits, codebook, t(part_of_nb), t(word_off), t(ntiles), t(nstart), len(sizes),
-            k if suh_part_stride is None else suh_part_stride,
+            k if suh_part_stride is None else suh_part_stride, tuple(sizes),
         )
 
     @property
@@ -466,6 +467,37 @@ def exl3_gemv(
 
 
 @triton.jit
+def _had_cols_kernel(acc_ptr, stride_am, out_ptr, stride_om, svh_ptr, had_ptr, rows, BM: tl.constexpr):
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    r = pid_m * BM + tl.arange(0, BM)
+    rmask = r < rows
+    r64 = r.to(tl.int64)
+    idx = tl.arange(0, 128)
+    cols = pid_n * 128 + idx
+    acc = tl.load(acc_ptr + r64[:, None] * stride_am + cols[None, :], mask=rmask[:, None], other=0.0)
+    h = tl.load(had_ptr + idx[:, None] * 128 + idx[None, :])
+    hi = acc.to(tl.float16)
+    lo = (acc - hi.to(tl.float32)).to(tl.float16)
+    y = tl.dot(hi, h) + tl.dot(lo, h)
+    sv = tl.load(svh_ptr + cols).to(tl.float32)
+    y = y * (sv * 0.08838834764831843)[None, :]
+    tl.store(out_ptr + r64[:, None] * stride_om + cols[None, :], y.to(out_ptr.dtype.element_ty), mask=rmask[:, None])
+
+
+def had_cols(acc: torch.Tensor, svh: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+    """``out = svh * H_128blocks(acc)`` (the GEMM epilogue on its own): ``acc`` fp32 ``[rows, N]``,
+    ``out`` ``[rows, N]`` of any float dtype, both with unit column stride; ``svh`` ``[N]``."""
+    rows, n = acc.shape
+    assert n % HAD == 0 and acc.stride(1) == 1 and out.stride(1) == 1 and out.shape == acc.shape
+    if rows:
+        _had_cols_kernel[(triton.cdiv(rows, 64), n // HAD)](
+            acc, acc.stride(0), out, out.stride(0), svh, hadamard_pm1(acc.device), rows, BM=64, num_warps=4,
+        )
+    return out
+
+
+@triton.jit
 def _reconstruct_kernel(tr_ptr, out_ptr, n_tiles, N, BITS: tl.constexpr, CB: tl.constexpr):
     pid_k = tl.program_id(0)
     pid_n = tl.program_id(1)
@@ -489,6 +521,6 @@ def reconstruct(trellis: torch.Tensor, codebook: str) -> torch.Tensor:
 
 __all__ = [
     "CODEBOOKS", "Exl3Parts", "HAD", "HAD_SCALE", "MCG_MULT", "MUL1_MULT",
-    "exl3_gemm", "exl3_gemv", "had_rows", "hadamard_pm1", "hadamard_reference",
+    "exl3_gemm", "exl3_gemv", "had_cols", "had_rows", "hadamard_pm1", "hadamard_reference",
     "linear_reference", "reconstruct", "reconstruct_reference", "tile_stream_index",
 ]
