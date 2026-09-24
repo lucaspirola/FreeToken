@@ -50,3 +50,9 @@ outside the ring, as for EXL3.
 Files: `ringrule-*` (rule arm), `../ring17-box`, `../ring85-box`, `../ring85trace-box`.
 The traces are `ring85trace-nemotron.trace` and `ringrule-nemotron.trace`. The EXL3 runs and traces are
 in scratch/exl3-dma `tasks/ornith-exl3/results/step5-ring-rule-2026-09-24/`.
+
+## Answers (`../ringrulend-box`, rule = 16, arm mirror-nd, 4206a76)
+
+The needles (21K/120K) and the recall (21K/120K/240K) match the whole model's (wb0-whole) field by
+field: 0 differences (`ringrulend-needles-vs-wb0-whole.txt`). Decode on the same arm: p1
+146.5/133.9, p2 153.2/142.9 tok/s at 8K/80K, the same as the mirror-np rule arm above. R3 PASS.
