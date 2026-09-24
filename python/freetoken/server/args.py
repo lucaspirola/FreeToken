@@ -505,8 +505,12 @@ def parse_args(
         type=float,
         default=ServerArgs.memory_ratio,
         help=(
-            "Fraction of total GPU free memory the engine may use for weights + MoE "
-            "cache + KV cache combined; the remainder is reserved runtime headroom."
+            "Fraction of the free GPU memory the engine may plan for (weights + MoE "
+            "cache + KV cache). Default 1.00; an override, not a tuning knob: the "
+            "runtime headroom (one prefill chunk, CUDA-graph pools, a margin) is "
+            "predicted from the config and reserved (fixed-size KV) or measured at "
+            "startup and left free by the growable arena. Lower it only to leave VRAM "
+            "to another process."
         ),
     )
 

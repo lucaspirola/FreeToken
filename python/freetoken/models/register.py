@@ -32,6 +32,12 @@ class ModelSpec:
     # "module:Class" turning the checkpoint's media into items; None: the family takes no multimodal input
     mm_processor: str | None = None
     encoders: tuple[EncoderSpec, ...] = ()
+    # "module:function(model_config, chunk_tokens, act_bytes) -> {layer_kind: bytes}":
+    # one prefill chunk's live intermediates per layer kind, for mixers the generic
+    # startup prediction (engine/memory_prediction.py) does not model from the config's
+    # attention groups (full/SWA attention, GatedDeltaNet, Mamba-2) and MoE/MLP fields.
+    # None: the generic terms stand; an unmodelled group kind makes the prediction coarse.
+    prefill_transient: str | None = None
 
 
 # Multimodal wrappers store the text tower under model.language_model.

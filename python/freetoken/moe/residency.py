@@ -1114,6 +1114,7 @@ class MirrorResidency:
             engine._baseline_free,
             engine._weights_bytes,
             fixed_cache_size,
+            getattr(config, "runtime_reserve_bytes", 0),
         ) - growable_headroom_bytes(getattr(engine, "prefill_transient_bytes", 0))
         # The mirror is built before the KV pool exists, so take the ceiling
         # from config (--num-tokens / --num-pages, the growable KV target)

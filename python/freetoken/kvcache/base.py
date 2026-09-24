@@ -136,6 +136,7 @@ class BaseKVCachePool(ABC):
         budget = net_cache_budget_bytes(
             config.memory_ratio, baseline_free, weights_bytes,
             fixed_cache_size + extra_fixed_bytes,
+            getattr(config, "runtime_reserve_bytes", 0),
         )
         need = (
             target_moe_bytes

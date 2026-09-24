@@ -179,6 +179,9 @@ class GraphRunner:
         # graphs-disabled early return so that config gets the phase too.
         emit_progress("Capturing CUDA graphs / warming up", 0, 0)
         self.graph_map: Dict[int, torch.cuda.CUDAGraph] = {}
+        # Free VRAM the capture consumed (the shared graph pool plus its buffers); the
+        # engine compares it with the startup prediction.
+        self.captured_bytes = 0
         if self.max_graph_bs == 0:
             return logger.info_rank0("CUDA graph is disabled.")
 
@@ -205,6 +208,7 @@ class GraphRunner:
         logger.info_rank0(f"Start capturing CUDA graphs with sizes: {self.graph_bs_list}")
         free_memory = get_free_memory(self.device)
         logger.info_rank0(f"Free GPU memory before capturing CUDA graphs: {mem_GB(free_memory)}")
+        free_before_capture = free_memory
 
         self.buffer = GraphCaptureBuffer.init(
             self.max_graph_bs, vocab_size, self.device, mrope=self.mrope
@@ -252,6 +256,7 @@ class GraphRunner:
         self._reset_moe_offload_cache()
         free_memory = get_free_memory(self.device)
         logger.info_rank0(f"Free GPU memory after capturing CUDA graphs: {mem_GB(free_memory)}")
+        self.captured_bytes = max(0, int(free_before_capture) - int(free_memory))
 
     def can_use_cuda_graph(self, batch: Batch) -> bool:
         return batch.is_decode and batch.size <= self.max_graph_bs

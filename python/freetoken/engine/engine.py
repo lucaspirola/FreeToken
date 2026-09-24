@@ -56,6 +56,12 @@ from .growable_kv import (
     GrowableKvController,
     growable_headroom_bytes,
 )
+from .memory_prediction import (
+    PREDICTION_WARN_FRACTION,
+    compare as _compare_prediction,
+    predict_startup,
+    runtime_reserve_bytes,
+)
 from .sample import BatchSamplingArgs, FirstStepLogprobs, Sampler
 from freetoken.kvcache import create_kv_pool, resolve_pool_class
 from freetoken.kvcache.base import CacheRebuildRejected
@@ -193,12 +199,44 @@ def _sgl_flash_attn_available() -> bool:
 
 
 def _startup_kv_budget(
-    memory_ratio: float, init_free_memory: int, new_free_memory: int
+    memory_ratio: float, init_free_memory: int, new_free_memory: int, reserve_bytes: int = 0
 ) -> int:
     """Bytes available to the KV pool at startup: ratio-scaled pre-load free memory minus
-    what the resident model consumed. Kept as a pure function so the composition with the
-    pool families' ``solve_num_pages`` stays CPU-testable."""
-    return int(memory_ratio * init_free_memory) - (init_free_memory - new_free_memory)
+    what the resident model consumed and the runtime reserve (0 for growable KV; see
+    memory_prediction.runtime_reserve_bytes). Kept as a pure function so the composition
+    with the pool families' ``solve_num_pages`` stays CPU-testable."""
+    return (
+        int(memory_ratio * init_free_memory)
+        - (init_free_memory - new_free_memory)
+        - int(reserve_bytes)
+    )
+
+
+# A prediction/measurement disagreement below this many bytes is noise (graph pools of
+# a few MiB, allocator rounding), whatever its relative size.
+_PREDICTION_WARN_MIN_BYTES = 64 * 1024 * 1024
+
+
+def _log_prediction_vs_measurement(what: str, predicted: int, measured: int) -> bool:
+    """One "Memory prediction check" line; WARN (and return True) when the startup
+    prediction and the measurement differ by more than PREDICTION_WARN_FRACTION of the
+    measurement and by more than _PREDICTION_WARN_MIN_BYTES."""
+    rel, outside = _compare_prediction(int(predicted), int(measured))
+    flagged = outside and abs(int(predicted) - int(measured)) > _PREDICTION_WARN_MIN_BYTES
+    msg = (
+        f"Memory prediction check: {what} predicted {mem_GB(predicted)}, "
+        f"measured {mem_GB(measured)} ({rel:+.0%})"
+    )
+    if flagged:
+        logger.warning_rank0(
+            msg
+            + f" -- outside the +/-{PREDICTION_WARN_FRACTION:.0%} band: this model or GPU "
+            "does not match the modelled kernels (engine/memory_prediction.py); the "
+            "measurement is what the engine uses"
+        )
+    else:
+        logger.info_rank0(msg)
+    return flagged
 
 
 # Planning estimate of one prefill chunk's transient VRAM, per chunk token, used only
@@ -625,6 +663,35 @@ class Engine:
         # unlike a query-time mem_get_info it doesn't drift with allocator caching, CUDA
         # graphs, or other processes. Cross-rank MIN, deterministic across ranks.
         self._post_weights_free = post_weights_free
+        # Startup prediction from the config and flags (engine/memory_prediction.py),
+        # logged before anything else allocates and compared with each measurement as
+        # it lands (weights here, graph pools after capture, the prefill transient in
+        # _settle_prefill_headroom). A fixed-size start takes its runtime reserve out of
+        # the ratio budget; growable KV reserves nothing here (its arena is parked and
+        # filled back around the measured transient).
+        self.startup_prediction = predict_startup(config)
+        object.__setattr__(
+            config,
+            "runtime_reserve_bytes",
+            runtime_reserve_bytes(
+                self.startup_prediction,
+                growable=bool(config.kv_grow_step_tokens),
+                baseline_free=self._baseline_free,
+            ),
+        )
+        logger.info_rank0(
+            "Startup memory prediction: %s; runtime reserve %s (%s)",
+            self.startup_prediction.summary(),
+            mem_GB(config.runtime_reserve_bytes),
+            "growable KV: none, the arena is filled back around the measured transient"
+            if config.kv_grow_step_tokens
+            else "one predicted prefill chunk + graph pools + margin, out of the cache budget",
+        )
+        predicted_weights = self.startup_prediction.non_expert_weight_bytes
+        if predicted_weights:
+            _log_prediction_vs_measurement(
+                "non-expert weights", predicted_weights, self._weights_bytes
+            )
         self.moe_offload_cache = None
         self.cpu_moe_executor = None
         # The growable-KV transaction (engine/growable_kv.py). Always present: its poison
@@ -709,7 +776,8 @@ class Engine:
         # The engine measures the budget and settles the sibling GDN state pool's bytes
         # off it; the KV pool family owns every geometry-specific formula behind the rest.
         available_memory = _startup_kv_budget(
-            config.memory_ratio, init_free_memory, new_free
+            config.memory_ratio, init_free_memory, new_free,
+            getattr(config, "runtime_reserve_bytes", 0),
         )
         available_memory -= state_pool_bytes(config)
         self.num_pages = self._pool_cls.solve_num_pages(config, available_memory)
@@ -816,6 +884,12 @@ class Engine:
             gguf_mma_enabled=config.model_config.gguf_expert_types is not None,
             mrope=config.model_config.model_is_mrope,
         )
+        if self.graph_runner.max_graph_bs:
+            _log_prediction_vs_measurement(
+                f"CUDA graph pool (max bs {self.graph_runner.max_graph_bs})",
+                self.startup_prediction.graph_pool_bytes,
+                self.graph_runner.captured_bytes,
+            )
         if config.attention_backend.split(",")[0] == "triton":
             # Prefill runs on the first comma part; warm its autotune cache.
             self._warmup_prefill()
@@ -977,6 +1051,7 @@ class Engine:
             quant_format=getattr(banks, "quant_format", ""),
             expert_slot_signatures=expert_slot_signatures(banks.sources),
             max_slots=method.slot_limit() if method is not None else None,
+            reserve_bytes=getattr(config, "runtime_reserve_bytes", 0),
         )
 
     def _init_offload_moe_cache(self, config: EngineConfig) -> OffloadMoeCache:
@@ -1904,6 +1979,52 @@ class Engine:
             mem_GB(VMM_COMMIT_CUSHION_BYTES),
             mem_GB(PREFILL_HEADROOM_MARGIN_BYTES),
             arena_note,
+        )
+        self._log_startup_geometry(measured)
+
+    def _log_startup_geometry(self, measured: "dict[str, int] | None") -> None:
+        """The startup prediction against what the start measured and built: the
+        prefill transient (WARN outside the band), the linear-state pool, and the final
+        arena / KV / free geometry in one line."""
+        prediction = getattr(self, "startup_prediction", None)
+        if prediction is None:
+            return
+        if measured is not None:
+            _log_prediction_vs_measurement(
+                f"prefill transient ({measured['length']}-token chunk, peak layer "
+                f"{prediction.transient.peak_layer})",
+                prediction.transient.bytes,
+                self.prefill_transient_bytes,
+            )
+        pool = getattr(self, "linear_state_pool", None)
+        if pool is not None:
+            built = sum(
+                int(t.numel() * t.element_size())
+                for t in (
+                    getattr(pool, "recurrent_states", None),
+                    getattr(pool, "conv_states", None),
+                )
+                if isinstance(t, torch.Tensor)
+            )
+            if built:
+                _log_prediction_vs_measurement(
+                    "linear-state pool", prediction.linear_state_bytes, built
+                )
+        cache = self.moe_offload_cache
+        committed = getattr(self.kv_cache, "committed_pages", None)
+        kv_tokens = int(committed if committed is not None else self.num_pages) * self.config.page_size
+        logger.info_rank0(
+            "Startup geometry: memory ratio %.2f, runtime reserve %s; expert arena %s; "
+            "KV %d tokens mapped of %d (%s); %s free",
+            self.config.memory_ratio,
+            mem_GB(self.config.runtime_reserve_bytes),
+            f"{cache.cache_size} slots" if cache is not None else "none",
+            kv_tokens,
+            self.num_pages * self.config.page_size,
+            mem_GB(self.kv_cache.mapped_bytes_for_pages(int(committed)))
+            if committed is not None and hasattr(self.kv_cache, "mapped_bytes_for_pages")
+            else "fixed",
+            mem_GB(self._sync_get_memory()[0]),
         )
 
     def _validate_growable_ceiling(self) -> None:

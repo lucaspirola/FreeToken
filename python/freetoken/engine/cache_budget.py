@@ -327,13 +327,25 @@ def joint_usable_for_target_free_bytes(
 
 
 def net_cache_budget_bytes(
-    memory_ratio: float, baseline_free: int, weights_bytes: int, fixed_cache_size: int
+    memory_ratio: float,
+    baseline_free: int,
+    weights_bytes: int,
+    fixed_cache_size: int,
+    reserve_bytes: int = 0,
 ) -> int:
     """Net GPU bytes available for the MoE + KV pools: ``memory_ratio`` of the pre-model
-    baseline minus weights and fixed (non-paged) cache. The ``(1-memory_ratio)`` remainder
-    is the CUDA-graph/activation headroom. Single source of truth for startup auto-sizing
-    and the runtime-rebuild fit check."""
-    return int(memory_ratio * baseline_free) - weights_bytes - fixed_cache_size
+    baseline minus weights, fixed (non-paged) cache and the runtime reserve.
+
+    ``memory_ratio`` defaults to 1.00 and is an override, not a tuning knob. The runtime
+    headroom (one prefill chunk's transient, CUDA-graph pools, a margin) is
+    ``reserve_bytes``: the engine's startup prediction for a fixed-size start
+    (``memory_prediction.runtime_reserve_bytes``, carried as
+    ``EngineConfig.runtime_reserve_bytes``), and 0 for growable KV, whose arena is
+    parked and filled back around the measured transient instead. Single source of
+    truth for startup auto-sizing and the runtime-rebuild fit check."""
+    return (
+        int(memory_ratio * baseline_free) - weights_bytes - fixed_cache_size - int(reserve_bytes)
+    )
 
 
 def required_bytes(
@@ -435,16 +447,19 @@ def resolve_moe_cache_auto(
     quant_format: str = "",
     expert_slot_signatures: tuple[tuple[int, ...], ...] | None = None,
     max_slots: int | None = None,
+    reserve_bytes: int = 0,
 ) -> tuple[int, int, bool]:
     """Resolve --moe-cache-auto into (moe_cache_size, num_pages, prefill_overlap).
 
     ``max_slots`` is the expert kernel's addressable slot limit; the plan never exceeds it.
 
     Applies memory_ratio to the persisted pre-model baseline exactly once, then defers
-    the MoE-vs-KV split to plan_cache_budget. The (1-memory_ratio) remainder is the
-    CUDA-graph/activation headroom (not subtracted here).
+    the MoE-vs-KV split to plan_cache_budget. The runtime headroom is ``reserve_bytes``
+    (see net_cache_budget_bytes) plus whatever ``(1-memory_ratio)`` an override leaves.
     """
-    budget_bytes = net_cache_budget_bytes(memory_ratio, baseline_free, weights_bytes, fixed_cache_size)
+    budget_bytes = net_cache_budget_bytes(
+        memory_ratio, baseline_free, weights_bytes, fixed_cache_size, reserve_bytes
+    )
     if max_slots is None and quant_format == "nvfp4_marlin":
         # marlin's fused MoE entry addresses at most 992 expert slots; upstream states
         # the same limit through ``method.slot_limit()``, which the fork's

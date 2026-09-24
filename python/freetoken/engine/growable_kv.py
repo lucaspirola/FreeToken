@@ -303,6 +303,7 @@ class GrowableKvController:
             self.engine._baseline_free,
             self.engine._weights_bytes,
             fixed_cache_size,
+            getattr(self.engine.config, "runtime_reserve_bytes", 0),
         )
         # A VMM growth step must make the new physical allocation resident before it
         # can expose the mapping.  In particular, WSL/DXG needs more live headroom
