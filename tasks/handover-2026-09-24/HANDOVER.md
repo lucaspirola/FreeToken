@@ -57,6 +57,13 @@ of the tree a live ft-measure unit serves; commit after each green step with evi
 16/17 requirements pass (S0–S13, both GPU checkpoints). Open: **R-S12a** (Ornith NVFP4 80K prefill
 ≥ 5,000 tok/s on the owner's machine).
 
+> **Update 2026-09-24 evening: 17/17.** R-S12a passes on the merged code: Ornith NVFP4 80K prefill
+> 5485–5816 tok/s, all arms ≥ 5,000 (results/ornith-dynamic-local/README.md). exp/dt-dma (583afc8:
+> measured-transient headroom, dynamic headroom, arena compaction, mirror DMA write-backs) is merged
+> into exp/reorg (6fc9476, results 34ad5f1). Its ck4 gate passed on the owner's machine:
+> 8K/80K alternated x3 medians ≥ 95%, 1M 98.9/96.5%, needles 0 differences, 0 faults and 0 starved write-backs,
+> one capture, 1M ram_gib 12.54 (results/dtdma-gate-local/README.md). The rest of this section is history.
+
 - **Cause found:** after a KV grow, the engine kept only ~0.375 GiB free, but one 8192-token
   prefill chunk needs 0.98 GiB (Ornith) / 0.65 GiB (Nemotron). Native Linux OOMs there; WSL pages
   and gives a half-speed chunk (the "bimodal" runs).
