@@ -1,0 +1,27 @@
+== ck4f-mirror-1m (ba7d1a6) vs same-box whole
+  decode_1000k          84.7  (no same-box reference)
+  decode_1000k_p1       80.1  (no same-box reference)
+  decode_8k            179.3 vs   186.3 (whole   )  96.2%  ok
+  decode_8k_p1         177.1 vs   188.5 (whole   )  94.0%  ok
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            13.54  free_evict_rate 0.691
+  ram 12.26 +/- 0.6  OUT
+== ck4f-mirror (ba7d1a6) vs same-box whole
+  decode_713k          102.8  (no same-box reference)
+  decode_713k_p1        90.1  (no same-box reference)
+  decode_80k           166.7 vs   175.1 (whole   )  95.2%  ok
+  decode_80k_p1        166.0 vs   173.2 (whole   )  95.8%  ok
+  decode_8k            161.1 vs   186.3 (whole   )  86.5%  BELOW
+  decode_8k_p1         166.2 vs   188.5 (whole   )  88.2%  BELOW
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            10.81  free_evict_rate 0.758
+== whole-close vs whole (box drift)
+  decode_32k           182.1 vs   175.9  103.5%
+  decode_32k_p1        181.7 vs   182.5   99.6%
+  decode_80k           175.0 vs   175.1   99.9%
+  decode_80k_p1        173.9 vs   173.2  100.4%
+  decode_8k            187.0 vs   186.3  100.4%
+  decode_8k_p1         188.3 vs   188.5   99.9%
+3 point(s) outside the band

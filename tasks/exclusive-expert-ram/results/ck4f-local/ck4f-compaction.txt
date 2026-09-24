@@ -1,0 +1,28 @@
+== ck4f-whole: def, dc
+  def hit 0.9419  swaps/tok -  releases 8  slots 1904..2088
+      compactions 10: moved 652 (65.2/call), 349.6 MiB and 8.27 ms per call, 0 left for write-back
+      decode windows 7: misses per window [1339, 269, 659, 685, 754, 668, 675] (mean 721)
+  dc  hit 0.9386  swaps/tok -  releases 8  slots 1904..2088
+      decode windows 7: misses per window [1339, 377, 768, 706, 827, 686, 698] (mean 772)
+  decode tok/s                   def              dc
+      8K p1         195.0           191.2 ( 98.0%)
+      8K p2         179.0           185.8 (103.8%)
+     32K p1         188.6           187.2 ( 99.3%)
+     32K p2         174.5           181.8 (104.2%)
+     80K p1         164.9           173.3 (105.1%)
+     80K p2         179.7           179.0 ( 99.6%)
+== ck4f-mirror: def, dc
+  def hit 0.9396  swaps/tok 7.2  releases 8  slots 1560..2088
+      compactions 29: moved 901 (31.1/call), 166.6 MiB and 4.07 ms per call, 255 left for write-back
+      mirror refills 18: 255 rows (0 re-read from the checkpoint)
+      decode windows 7: misses per window [889, 298, 658, 816, 1474, 951, 737] (mean 832)
+  dc  hit 0.9339  swaps/tok 7.9  releases 8  slots 1560..2088
+      mirror refills 19: 657 rows (0 re-read from the checkpoint)
+      decode windows 7: misses per window [889, 410, 817, 992, 1581, 970, 766] (mean 918)
+  decode tok/s                   def              dc
+      8K p1         170.0           176.7 (103.9%)
+      8K p2         170.7           163.8 ( 96.0%)
+     80K p1         150.9           152.9 (101.3%)
+     80K p2         158.5           160.1 (101.0%)
+    713K p1          99.1            92.1 ( 93.0%)
+    713K p2         110.2           108.9 ( 98.8%)
