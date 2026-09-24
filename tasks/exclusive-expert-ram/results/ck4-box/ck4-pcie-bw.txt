@@ -1,0 +1,7 @@
+# pcie_bw.py on ft-ck after all ck4 arms ended (GPU idle, 2 MiB used), 2026-09-24 ~04:40Z
+# link: PCIe gen 4 (max 4) x16. Owner RTX 5080 box: gen 5 x16 (nvidia-smi, same day).
+NVIDIA GeForce RTX 5080 13.0
+H2D    8 MiB    24.2 GB/s
+D2H    8 MiB    28.2 GB/s
+H2D  256 MiB    28.3 GB/s
+D2H  256 MiB    28.2 GB/s
