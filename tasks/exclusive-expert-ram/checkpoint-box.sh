@@ -78,6 +78,7 @@ echo "checkpoint label: $CK (box)"
   uname -r; nproc; free -g; ulimit -l; "$FT_VENV/bin/python" -c 'import torch; print("torch", torch.__version__, torch.version.cuda)'
   "$CUDA_HOME/bin/nvcc" --version | tail -1; git -C "$REPO" log --oneline -1; } > "$BOX/$CK-box-env.txt" 2>&1
 
+T0="FREETOKEN_PREFILL_TRANSIENT_MEASURE=0 FREETOKEN_PREFILL_TRANSIENT_MB=0"
 for a in ${ARMS:-whole mirror-1m mirror whole-close}; do
   case "$a" in
     whole)       arm $CK-whole       FT_ROWS=0 FT_POST="${NEEDLES//\$ARM_NAME/$CK-whole}" ;;
@@ -85,6 +86,17 @@ for a in ${ARMS:-whole mirror-1m mirror whole-close}; do
     mirror-1m)   arm $CK-mirror-1m   FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 1000000" FT_POST="${NEEDLES//\$ARM_NAME/$CK-mirror-1m}" ;;
     mirror)      arm $CK-mirror      FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 80000 713000" ;;
     whole-close) arm $CK-whole-close FT_ROWS=0 ;;
+    # Prefill-transient A/B (-def = default, -t0 = pre-fix cushion-only headroom: no startup
+    # measurement, transient 0, so the arena is neither parked nor held 0.65 GiB below the
+    # ratio plan through decode). --moe-collect-stats on both sides for the decode hit rate.
+    whole-def|whole-t0|mirror-def|mirror-t0|whole-8k-def|whole-8k-t0|mirror-8k-def|mirror-8k-t0)
+      envs=""; case "$a" in *-t0) envs="$T0" ;; esac
+      case "$a" in
+        whole-8k-*)  arm $CK-$a FT_ROWS=0 FT_SIZES="8000" FT_EXTRA="--moe-collect-stats" FT_ENVS="$envs" ;;
+        mirror-8k-*) arm $CK-$a FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000" FT_EXTRA="--moe-collect-stats" FT_ENVS="$envs" ;;
+        whole-*)     arm $CK-$a FT_ROWS=0 FT_EXTRA="--moe-collect-stats" FT_ENVS="$envs" ;;
+        mirror-*)    arm $CK-$a FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 80000 713000" FT_EXTRA="--moe-collect-stats" FT_ENVS="$envs" ;;
+      esac ;;
     *) die "unknown arm $a" ;;
   esac
 done
@@ -102,7 +114,8 @@ r6_arm() {
     [ "$lim" = unlimited ] &&
     echo "R6(arm) ok: no pageable fallback, no mlock failure, memlock unlimited"
 }
-for a in $CK-whole $CK-whole-1m $CK-mirror-1m $CK-mirror $CK-whole-close; do
+for x in ${ARMS:-whole mirror-1m mirror whole-close}; do
+  a=$CK-$x
   [ -f "$BOX/$a-journal.txt" ] || { echo "$a: no journal"; continue; }
   printf '%s R3: ' "$a"
   FREETOKEN_LOG="$BOX/$a-journal.txt" bash "$REPO/benchmarks/switchyard_soak/checks/acceptance.sh" R3 \
@@ -116,6 +129,7 @@ python3 "$HERE/compare_needles.py" "$BOX" $CK-whole $CK-mirror-1m > "$BOX/$CK-ne
 cp "$OUT"/nemotron-reserve-2e-record.json "$OUT"/nemotron-reserve-2e-1m-record.json "$BOX/" 2>/dev/null || true
 python3 "$HERE/compare_records.py" "$BOX" $CK > "$BOX/$CK-records-compare.txt" 2>&1 || true
 rm -f "$BOX"/nemotron-reserve-2e-record.json "$BOX"/nemotron-reserve-2e-1m-record.json
+python3 "$HERE/compare_transient_ab.py" "$BOX" $CK > "$BOX/$CK-transient-ab.txt" 2>&1 || true
 python3 "$HERE/compare_box.py" "$BOX" $CK > "$BOX/$CK-box-compare.txt" 2>&1 || true
-cat "$BOX/$CK-needles-compare.txt" "$BOX/$CK-records-compare.txt" "$BOX/$CK-box-compare.txt"
+cat "$BOX/$CK-transient-ab.txt" "$BOX/$CK-needles-compare.txt" "$BOX/$CK-records-compare.txt" "$BOX/$CK-box-compare.txt"
 echo "checkpoint $CK (box) arms done $(date -u +%FT%TZ)"
