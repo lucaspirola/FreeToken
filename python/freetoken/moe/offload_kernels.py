@@ -47,6 +47,16 @@ FREETOKEN_MIRROR_TIEBREAK = os.getenv("FREETOKEN_MIRROR_TIEBREAK", "1").strip() 
 # of the coldest one. 0 restores the one-bucket tie-break above.
 FREETOKEN_MIRROR_DUP_BAND = os.getenv("FREETOKEN_MIRROR_DUP_BAND", "1").strip() == "1"
 
+# LFU aging: a layer's expert counts are halved every this many calls of that layer
+# (decode steps). 256 is the historical constant. The trace-driven simulation
+# (tasks/exclusive-expert-ram/evict-sim, exp/evict-sim) puts the hit-rate optimum
+# near 64 on Nemotron; this switch is for the live A/B. Must be a power of two.
+FREETOKEN_LFU_HALVE_STEPS = int(os.getenv("FREETOKEN_LFU_HALVE_STEPS", "256"))
+if FREETOKEN_LFU_HALVE_STEPS < 1 or FREETOKEN_LFU_HALVE_STEPS & (FREETOKEN_LFU_HALVE_STEPS - 1):
+    raise ValueError(
+        f"FREETOKEN_LFU_HALVE_STEPS={FREETOKEN_LFU_HALVE_STEPS} must be a power of two"
+    )
+
 
 def _lfu_recency_config(cache) -> tuple[int, int]:
     tokens = (
@@ -153,6 +163,7 @@ def _ensure_experts_sized_gpu(cache, layer_id, expert_ids, begin, end) -> None:
             MIRROR_BOOK=mirror is not None,
             LFU_RECENCY_CALLS=recency_tokens * cache.num_layers,
             LFU_RECENCY_BONUS=recency_bonus,
+            LFU_HALVE_MASK=FREETOKEN_LFU_HALVE_STEPS - 1,
             num_warps=8 if block_c >= 2048 else 4,
         )
         return
@@ -182,6 +193,7 @@ def _ensure_experts_sized_gpu(cache, layer_id, expert_ids, begin, end) -> None:
         POLICY_LFU=cache.cache_policy_id == 1,
         LFU_RECENCY_CALLS=recency_tokens * cache.num_layers,
         LFU_RECENCY_BONUS=recency_bonus,
+        LFU_HALVE_MASK=FREETOKEN_LFU_HALVE_STEPS - 1,
         num_warps=8 if block_c >= 2048 else 4,
     )
 
@@ -199,7 +211,7 @@ def _ensure_experts_sized_cpu(cache, layer_id, expert_ids, begin, end) -> None:
     policy_step = int(cache.policy_steps[layer_id].item()) + 1
     cache.policy_steps[layer_id] = policy_step
     if cache.cache_policy_id == 1:
-        if policy_step % 256 == 0:
+        if policy_step % FREETOKEN_LFU_HALVE_STEPS == 0:
             cache.expert_frequency[layer_id].bitwise_right_shift_(1)
         for expert in expert_ids.view(-1).tolist():
             cache.expert_frequency[layer_id, expert] += 1
@@ -543,6 +555,7 @@ def _ensure_experts_sized_kernel(
     POLICY_LFU: tl.constexpr,
     LFU_RECENCY_CALLS: tl.constexpr,
     LFU_RECENCY_BONUS: tl.constexpr,
+    LFU_HALVE_MASK: tl.constexpr = 255,
 ):
     """Timestamp LRU constrained to one compact GGUF row-size class.
 
@@ -566,7 +579,7 @@ def _ensure_experts_sized_kernel(
         policy_step = tl.load(policy_steps_ptr + layer_id) + 1
         tl.store(policy_steps_ptr + layer_id, policy_step)
         frequency = tl.load(frequency_ptr + base + off_e, mask=e_mask, other=0)
-        frequency = tl.where((policy_step & 255) == 0, frequency >> 1, frequency)
+        frequency = tl.where((policy_step & LFU_HALVE_MASK) == 0, frequency >> 1, frequency)
         frequency += active_count
         tl.store(frequency_ptr + base + off_e, frequency, mask=e_mask)
     slot = tl.load(slot_for_id_ptr + base + off_e, mask=e_mask, other=-1)
@@ -677,6 +690,7 @@ def _ensure_experts_sized_kernel_v2(
     HAS_MIRROR: tl.constexpr,
     MIRROR_BOOK: tl.constexpr,
     DUP_BAND: tl.constexpr = False,
+    LFU_HALVE_MASK: tl.constexpr = 255,
 ):
     """Gated (``FREETOKEN_EXPERT_ARENA=1``) twin of ``_ensure_experts_sized_kernel``.
 
@@ -738,7 +752,7 @@ def _ensure_experts_sized_kernel_v2(
         policy_step = tl.load(policy_steps_ptr + layer_id) + 1
         tl.store(policy_steps_ptr + layer_id, policy_step)
         frequency = tl.load(frequency_ptr + base + off_e, mask=e_mask, other=0)
-        frequency = tl.where((policy_step & 255) == 0, frequency >> 1, frequency)
+        frequency = tl.where((policy_step & LFU_HALVE_MASK) == 0, frequency >> 1, frequency)
         frequency += active_count
         tl.store(frequency_ptr + base + off_e, frequency, mask=e_mask)
     slot = tl.load(slot_for_id_ptr + base + off_e, mask=e_mask, other=-1)
