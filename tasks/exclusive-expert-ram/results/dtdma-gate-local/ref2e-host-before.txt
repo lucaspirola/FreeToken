@@ -1,0 +1,40 @@
+date 2026-09-24T22:20:27+04:00
+MemTotal:       34881708 kB
+MemFree:        22984796 kB
+MemAvailable:   30279068 kB
+Cached:          5882584 kB
+Shmem:              3324 kB
+--- processes by RSS (top 25)
+    PID   RSS     ELAPSED COMMAND
+3078922 710232      13:05 omp
+    899 541284   13:43:51 codex
+  20826 464340   13:40:36 claude
+   1983 427428   13:43:38 claude
+2828859 365088      15:39 claude
+  14452 324068   13:41:06 claude
+3227690 319220      00:00 julia
+   8565 269860   13:41:49 claude
+3227677 242264      00:00 julia
+3081534 152172      13:03 piro-board-mcp
+2835144 151804      15:35 piro-board-mcp
+1828706 151688      44:09 piro-board-mcp
+   2134 144064   13:43:36 piro-board-mcp
+1666885 137820   01:15:23 piro-board-mcp
+   1905 59856    13:43:40 MainThread
+1828708 57588       44:09 MainThread
+2835108 53828       15:35 python
+2835111 51736       15:35 python
+    529 47892    13:44:04 dockerd
+1666888 44788    01:15:23 MainThread
+     41 38536    13:44:15 systemd-journal
+    438 27656    13:44:04 containerd
+    566 21216    13:44:04 MainThread
+    564 21152    13:44:04 MainThread
+1828707 21120       44:09 python3
+--- user units active
+  anthropic-proxy@account1.service loaded active running Anthropic OAuth->OpenAI proxy (account1)
+  anthropic-proxy@account2.service loaded active running Anthropic OAuth->OpenAI proxy (account2)
+  dbus.service                     loaded active running D-Bus User Message Bus
+  ft-cgsample.service              loaded active running /home/lucas/ai/FreeToken-wt/dynamic-transie
+  ft-ref2e-local.service           loaded active running /bin/bash -c "/tmp/claude-1000/-home-lucas-
+  switchyard-dev.service           loaded active running Switchyard dev router (hidden-state-routing
