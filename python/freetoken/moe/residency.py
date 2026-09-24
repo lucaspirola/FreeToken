@@ -387,7 +387,10 @@ class MirrorResidency:
         pending = wb["pending"]
         while pending and pending[0][0].query():
             _event, snap = pending.pop(0)
-            self._wb_issue(snap.tolist())
+            state = snap.tolist()
+            if wb["trace"] is not None:     # ring head at each step boundary
+                wb["trace"].write(f"{int(state[0])}\n")
+            self._wb_issue(state)
 
     def _wb_issue(self, state: list) -> None:
         """DMA ring entries [issued, state[0]) to their pool rows, in ring order."""
@@ -422,7 +425,11 @@ class MirrorResidency:
         if wb is None:
             return
         torch.cuda.synchronize(self.cache.device)
-        self._wb_issue(self._mirror["wb_state"].tolist())
+        state = self._mirror["wb_state"].tolist()
+        if wb["trace"] is not None:         # a drain: prefill / refill boundary
+            wb["trace"].write(f"D {int(state[0])}\n")
+            wb["trace"].flush()
+        self._wb_issue(state)
         wb["pending"].clear()
         wb["stream"].synchronize()
 
@@ -679,6 +686,12 @@ class MirrorResidency:
             "issued": 0,
             "dma_rows": 0,
             "peak_pending": 0,
+            # Measurement only: FREETOKEN_MIRROR_WB_TRACE=<file> appends the
+            # ring head at every step boundary ("D <head>" at drains), from
+            # which the rows staged per step, and so the ring any size would
+            # have needed, can be replayed offline (tasks/.../ring_replay.py).
+            "trace": (open(os.environ["FREETOKEN_MIRROR_WB_TRACE"], "a", buffering=1 << 16)
+                      if os.environ.get("FREETOKEN_MIRROR_WB_TRACE") else None),
         }
         logger.info_rank0(
             "mirror DMA writebacks: %d-row VRAM staging ring (%.1f MiB); "
