@@ -84,6 +84,7 @@ for a in ${ARMS:-whole mirror-1m mirror whole-close}; do
     whole-1m)    arm $CK-whole-1m    FT_ROWS=0 FT_SIZES="8000 1000000" ;;  # same-box 1M reference
     mirror-1m)   arm $CK-mirror-1m   FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 1000000" FT_POST="${NEEDLES//\$ARM_NAME/$CK-mirror-1m}" ;;
     mirror)      arm $CK-mirror      FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 80000 713000" ;;
+    mirror-nd)   arm $CK-mirror-nd   FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 80000" FT_POST="${NEEDLES//\$ARM_NAME/$CK-mirror-nd}" ;;  # pool arm with needles/recall, no 713K
     whole-close) arm $CK-whole-close FT_ROWS=0 ;;
     *) die "unknown arm $a" ;;
   esac
@@ -102,7 +103,7 @@ r6_arm() {
     [ "$lim" = unlimited ] &&
     echo "R6(arm) ok: no pageable fallback, no mlock failure, memlock unlimited"
 }
-for a in $CK-whole $CK-whole-1m $CK-mirror-1m $CK-mirror $CK-whole-close; do
+for a in $CK-whole $CK-whole-1m $CK-mirror-1m $CK-mirror $CK-mirror-nd $CK-whole-close; do
   [ -f "$BOX/$a-journal.txt" ] || { echo "$a: no journal"; continue; }
   printf '%s R3: ' "$a"
   FREETOKEN_LOG="$BOX/$a-journal.txt" bash "$REPO/benchmarks/switchyard_soak/checks/acceptance.sh" R3 \
@@ -112,7 +113,7 @@ for a in $CK-whole $CK-whole-1m $CK-mirror-1m $CK-mirror $CK-whole-close; do
 done
 # Needles/recall of the 1M pool arm against the whole-model reference of THIS run, and the
 # pool arms' decode against the owner-machine record (compare_records.py reads results/).
-python3 "$HERE/compare_needles.py" "$BOX" $CK-whole $CK-mirror-1m > "$BOX/$CK-needles-compare.txt" 2>&1 || true
+python3 "$HERE/compare_needles.py" "$BOX" $CK-whole ${NEEDLES_ARM:-$CK-mirror-1m} > "$BOX/$CK-needles-compare.txt" 2>&1 || true
 cp "$OUT"/nemotron-reserve-2e-record.json "$OUT"/nemotron-reserve-2e-1m-record.json "$BOX/" 2>/dev/null || true
 python3 "$HERE/compare_records.py" "$BOX" $CK > "$BOX/$CK-records-compare.txt" 2>&1 || true
 rm -f "$BOX"/nemotron-reserve-2e-record.json "$BOX"/nemotron-reserve-2e-1m-record.json
