@@ -3,13 +3,44 @@
 from __future__ import annotations
 
 import functools
+import hashlib
+import logging
 import pathlib
-
 import time
 
 import torch
 
 _CSRC = pathlib.Path(__file__).parent / "csrc" / "vmm_tensor.cpp"
+
+logger = logging.getLogger(__name__)
+
+# A build of this extension takes well under a minute; a lock older than this belongs to
+# a build that was killed (torch's FileBaton only checks that the file exists, so every
+# later start would otherwise wait on it forever -- 2026-09-24, every local start hung).
+_STALE_LOCK_SECONDS = 15 * 60
+
+
+def _extension_name() -> str:
+    """One build per source file and content.
+
+    Worktrees share ~/.cache/torch_extensions; under a single name each worktree rewrote
+    the other's build.ninja (absolute source path) and forced a rebuild on every switch.
+    """
+    digest = hashlib.sha1(str(_CSRC.resolve()).encode() + _CSRC.read_bytes()).hexdigest()
+    return f"freetoken_vmm_tensor_{digest[:12]}"
+
+
+def _clear_stale_lock(name: str) -> None:
+    from torch.utils.cpp_extension import _get_build_directory
+
+    lock = pathlib.Path(_get_build_directory(name, verbose=False)) / "lock"
+    try:
+        age = time.time() - lock.stat().st_mtime
+    except FileNotFoundError:
+        return
+    if age > _STALE_LOCK_SECONDS:
+        logger.warning("Removing stale torch extension lock %s (%.0f min old)", lock, age / 60)
+        lock.unlink(missing_ok=True)
 
 
 @functools.cache
@@ -22,8 +53,10 @@ def _module():
     target_lib = cuda_root / "targets" / "x86_64-linux" / "lib"
     runtime_lib = target_lib if target_lib.is_dir() else cuda_root / "lib64"
 
+    name = _extension_name()
+    _clear_stale_lock(name)
     return load(
-        name="freetoken_vmm_tensor",
+        name=name,
         sources=[str(_CSRC)],
         extra_include_paths=[str(cuda_root / "include")],
         extra_cflags=["-O3", "-std=c++17"],
