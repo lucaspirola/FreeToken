@@ -1,0 +1,4 @@
+scan_noreserve dyn2-whole:
+dyn2-whole-journal.txt: 192 prefill batches, 0 started at the decode level
+scan_noreserve dyn2-mirror-nd:
+dyn2-mirror-nd-journal.txt: 192 prefill batches, 0 started at the decode level

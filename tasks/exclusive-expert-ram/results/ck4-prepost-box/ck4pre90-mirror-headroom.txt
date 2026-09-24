@@ -1,0 +1,29 @@
+captures=1 kv_grows=6 tracebacks=1 ooms=1
+[2026-09-24|05:14:31|core|rank=0] INFO     --moe-cache-auto resolved moe_cache_size=2017 num_pages=77413 (prefill_overlap=True)
+[2026-09-24|05:14:38|core|rank=0] INFO     Growable-KV ceiling validated: 1048576 tokens, 3.23 GiB physical, planned final MoE cache 1392 slots
+[2026-09-24|05:14:38|core|rank=0] INFO     Free memory after initialization: 1.48 GiB
+[2026-09-24|05:14:39|core|rank=0] INFO     Start capturing CUDA graphs with sizes: [1]
+[2026-09-24|05:14:39|core|rank=0] INFO     Free GPU memory before capturing CUDA graphs: 1.48 GiB
+Preparing for capturing CUDA graphs...:   0%|          | 0/1 [00:00<?, ?batch/s]Capturing graphs: bs = 1   | avail_mem = 1.48 GiB:   0%|          | 0/1 [00:00<?, ?batch/s]INFO:     127.0.0.1:47190 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-24|05:15:01|core|rank=0] INFO     Free GPU memory after capturing CUDA graphs: 1.45 GiB
+[2026-09-24|05:15:08|core|rank=0] INFO     Prefill warmup complete for lengths [80, 128] in 7.792 s
+[2026-09-24|05:15:48|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.43 GiB free (driver 1.43 GiB), 0.21 GiB commit, 0.46 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|05:15:48|core|rank=0] INFO     Committed growable KV through 131072 tokens (0.45 GiB physical); MoE slots 2017 -> 2017
+[2026-09-24|05:15:48|core|rank=0] INFO     KV grew 65536 -> 131072 tokens; MoE cache now 2017 slots
+[2026-09-24|05:16:05|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.42 GiB free (driver 1.42 GiB), 0.21 GiB commit, 0.46 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|05:16:05|core|rank=0] INFO     Committed growable KV through 131072 tokens (0.45 GiB physical); MoE slots 2017 -> 2017
+[2026-09-24|05:16:05|core|rank=0] INFO     KV grew 65536 -> 131072 tokens; MoE cache now 2017 slots
+[2026-09-24|05:16:20|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.21 GiB free (driver 1.21 GiB), 0.19 GiB commit, 0.44 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|05:16:20|core|rank=0] INFO     Committed growable KV through 196608 tokens (0.63 GiB physical); MoE slots 2017 -> 2017
+[2026-09-24|05:16:20|core|rank=0] INFO     KV grew 131072 -> 196608 tokens; MoE cache now 2017 slots
+[2026-09-24|05:16:41|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.02 GiB free (driver 1.02 GiB), 0.21 GiB commit, 0.46 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|05:16:41|core|rank=0] INFO     Committed growable KV through 262144 tokens (0.84 GiB physical); MoE slots 2017 -> 2017
+[2026-09-24|05:16:41|core|rank=0] INFO     KV grew 196608 -> 262144 tokens; MoE cache now 2017 slots
+[2026-09-24|05:17:09|core|rank=0] INFO     Growable-KV pre-commit (arena): 0.81 GiB free (driver 0.81 GiB), 0.19 GiB commit, 0.44 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|05:17:09|core|rank=0] INFO     Committed growable KV through 327680 tokens (1.03 GiB physical); MoE slots 2017 -> 2017
+[2026-09-24|05:17:09|core|rank=0] INFO     KV grew 262144 -> 327680 tokens; MoE cache now 2017 slots
+[2026-09-24|05:17:42|core|rank=0] INFO     Growable-KV pre-commit (arena): 0.63 GiB free (driver 0.63 GiB), 0.21 GiB commit, 0.46 GiB required (allocator 2.82 GiB allocated / 2.87 GiB reserved)
+[2026-09-24|05:17:42|core|rank=0] INFO     Committed growable KV through 393216 tokens (1.24 GiB physical); MoE slots 2017 -> 2017
+[2026-09-24|05:17:42|core|rank=0] INFO     KV grew 327680 -> 393216 tokens; MoE cache now 2017 slots
+Traceback (most recent call last):
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 MiB. GPU 0 has a total capacity of 15.51 GiB of which 5.38 MiB is free. Including non-PyTorch memory, this process has 15.47 GiB memory in use. Of the allocated memory 3.24 GiB is allocated by PyTorch, with 22.00 MiB allocated in private pools (e.g., CUDA Graphs), and 39.46 MiB is reserved by PyTorch but unallocated. If reserved b

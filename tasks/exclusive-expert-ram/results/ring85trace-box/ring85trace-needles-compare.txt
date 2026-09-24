@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/root/FT-wb1/tasks/exclusive-expert-ram/compare_needles.py", line 24, in <module>
+    a, b = needles(REF), needles(ARM)
+           ^^^^^^^^^^^^
+  File "/root/FT-wb1/tasks/exclusive-expert-ram/compare_needles.py", line 13, in needles
+    d = json.load(open(os.path.join(D, f"{arm}-needles.json")))
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/root/FT-wb1/tasks/exclusive-expert-ram/results/ring85trace-box/ring85trace-whole-needles.json'

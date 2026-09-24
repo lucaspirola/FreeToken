@@ -1,0 +1,5 @@
+captures=0 kv_grows=0 tracebacks=1 ooms=2
+[2026-09-24|09:27:53|core|rank=0] INFO     --moe-cache-auto resolved moe_cache_size=2298 num_pages=78305 (prefill_overlap=True)
+Traceback (most recent call last):
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 598.00 MiB. GPU 0 has a total capacity of 15.46 GiB of which 570.31 MiB is free. Including non-PyTorch memory, this process has 14.87 GiB memory in use. Of the allocated memory 2.20 GiB is allocated by PyTorch, and 34.61 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLO
+[2026-09-24|09:27:59|FrontendAPI] ERROR    Backend supervisor: OutOfMemoryError: CUDA out of memory. Tried to allocate 598.00 MiB. GPU 0 has a total capacity of 15.46 GiB of which 570.31 MiB is free. Including non-PyTorch memory, this process has 14.87 GiB memory in use. Of the allocated memory 2.20 GiB is allocated by PyTorch, and 34.61 MiB is reserved by PyTorch but unallocated. If reserved but 

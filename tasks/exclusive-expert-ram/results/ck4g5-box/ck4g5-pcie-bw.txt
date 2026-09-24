@@ -1,0 +1,9 @@
+# pcie_bw.py on ft-g5 before any arm (GPU idle), 2026-09-24T04:53:37Z
+pcie.link.gen.current, pcie.link.gen.max, pcie.link.width.current, pcie.link.width.max
+1, 5, 16, 16
+NVIDIA GeForce RTX 5080 13.0
+H2D    8 MiB    56.2 GB/s
+D2H    8 MiB    39.9 GB/s
+H2D  256 MiB    56.3 GB/s
+D2H  256 MiB    40.0 GB/s
+model name	: Intel(R) Core(TM) Ultra 9 285K

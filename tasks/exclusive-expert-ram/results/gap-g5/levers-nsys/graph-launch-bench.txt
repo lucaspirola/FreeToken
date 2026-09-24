@@ -1,0 +1,5 @@
+none      replay() host     3.2 us (p90 3.3)
+torch     replay() host     3.2 us (p90 3.3)
+triton4   replay() host     3.1 us (p90 3.2)
+triton30  replay() host     3.2 us (p90 3.3)
+none      replay() host     3.1 us (p90 3.2)

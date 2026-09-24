@@ -1,0 +1,12 @@
+== ck4f-mirror: default (-def) vs -t0
+  def transient ('1.00', 'measured') arena 1944 of 2173 (free 1.15 GiB), slots over run min 1560 max 2088 (releases 8), decode hit rate 0.9396, mirror swaps/token 7.2  decode stats {'layer_calls': 17549, 'active': 106130, 'missing': 6414, 'fetched': 0, 'prefill_hit_rows': 306187, 'prefill_rows': 597632, 'pageable_stage_calls': 0, 'pageable_rows': 0}
+  t0: no probe
+== ck4f-whole: default (-def) vs -t0
+  def transient ('1.00', 'measured') arena 1944 of 2173 (free 1.15 GiB), slots over run min 1904 max 2088 (releases 8), decode hit rate 0.9419, mirror swaps/token -  decode stats {'layer_calls': 17549, 'active': 106130, 'missing': 6161, 'fetched': 0, 'prefill_hit_rows': 0, 'prefill_rows': 0, 'pageable_stage_calls': 0, 'pageable_rows': 0}
+  t0: no probe
+== ck4f-mirror: default (-def) vs -st
+  def transient ('1.00', 'measured') arena 1944 of 2173 (free 1.15 GiB), slots over run min 1560 max 2088 (releases 8), decode hit rate 0.9396, mirror swaps/token 7.2  decode stats {'layer_calls': 17549, 'active': 106130, 'missing': 6414, 'fetched': 0, 'prefill_hit_rows': 306187, 'prefill_rows': 597632, 'pageable_stage_calls': 0, 'pageable_rows': 0}
+  st: no probe
+== ck4f-whole: default (-def) vs -st
+  def transient ('1.00', 'measured') arena 1944 of 2173 (free 1.15 GiB), slots over run min 1904 max 2088 (releases 8), decode hit rate 0.9419, mirror swaps/token -  decode stats {'layer_calls': 17549, 'active': 106130, 'missing': 6161, 'fetched': 0, 'prefill_hit_rows': 0, 'prefill_rows': 0, 'pageable_stage_calls': 0, 'pageable_rows': 0}
+  st: no probe

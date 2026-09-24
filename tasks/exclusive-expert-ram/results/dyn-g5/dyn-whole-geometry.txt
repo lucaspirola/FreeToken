@@ -1,0 +1,2 @@
+[2026-09-24|12:02:57|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+[2026-09-24|12:03:07|core|rank=0] INFO     Prefill headroom: transient 0.65 GiB measured on a 8192-token chunk (empty prefix 0.65 GiB, after a 8192-token prefix 0.65 GiB, allocator peak 0.59 GiB); headroom 0.65 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 256 -> 2136 of 2298 slots, 0.77 GiB free (target 0.77 GiB), 162 slots below the ratio plan

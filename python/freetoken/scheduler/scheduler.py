@@ -766,6 +766,11 @@ class Scheduler(SchedulerIOMixin):
         # in-flight forward. copy_done only covers batch N; order against N+1 explicitly.
         self.stream.wait_stream(self.engine.stream)
         self._process_last_data(last_data)
+        # The previous step is complete now: DMA its mirror writebacks while
+        # the step just launched computes (no-op for the whole model).
+        residency = getattr(getattr(self.engine, "moe_offload_cache", None), "residency", None)
+        if residency is not None:
+            residency.issue_writebacks()
         self._flush_abort_acks()
         self._publish_scheduler_counters()
         return ongoing_data
@@ -2711,6 +2716,28 @@ class Scheduler(SchedulerIOMixin):
         except Exception as e:  # noqa: BLE001
             logger.warning(f"could not log cache geometry: {e!r}")
 
+    def _move_prefill_headroom(self, batch: Batch) -> None:
+        """Dynamic prefill headroom: before a prefill batch the expert arena gives up
+        one prefill chunk's transient; before a decode batch with no prefill waiting it
+        takes it back (engine/growable_kv.py ``prefill_headroom_transition``). Either
+        move resizes the arena, so drain the in-flight forward first (the same
+        no-forward-in-flight boundary ``grow_runtime_kv`` gets). Duck-typed: stub
+        engines in the loop tests have no such method."""
+        ask = getattr(getattr(self, "engine", None), "prefill_headroom_transition", None)
+        if ask is None:
+            return
+        pm = getattr(self, "prefill_manager", None)
+        kind = ask(
+            prefill=bool(getattr(batch, "is_prefill", False)),
+            prefill_pending=bool(getattr(pm, "runnable", False)),
+        )
+        if kind is None:
+            return
+        last_data = getattr(self, "_last_data", None)
+        if last_data is not None:
+            self._last_data = self._drain_inflight(last_data)
+        self.engine.apply_prefill_headroom(kind)
+
     def _batch_needs_kv_growth(self, batch: Batch) -> bool:
         """True when ``_prepare_batch`` would call ``engine.grow_runtime_kv`` for this
         batch, without performing the resize. Mirrors the condition inside
@@ -2853,6 +2880,7 @@ class Scheduler(SchedulerIOMixin):
         self._admission_stalled = batch is None
         if batch is None:
             return None
+        self._move_prefill_headroom(batch)
         # ``_prepare_batch`` below calls ``engine.grow_runtime_kv`` unconditionally when
         # growable KV is on; if this batch actually needs more pages, drain the still
         # in-flight previous forward (overlap_loop only -- ``_last_data`` is always None
@@ -3020,8 +3048,6 @@ class Scheduler(SchedulerIOMixin):
         # here beats a quietly wrong completion. Whole-model residency's
         # fault_check is a no-op; a model without an offload cache has none.
         residency = getattr(self.engine.moe_offload_cache, "residency", None)
-        if residency is not None:
-            residency.fault_check()
         profile = self.config.moe_collect_stats
         if profile:
             batch._profile_host_started = time.perf_counter()
@@ -3033,6 +3059,20 @@ class Scheduler(SchedulerIOMixin):
             self.cache_manager.snapshot_toolcall_anchor(batch.reqs)
         forward_output = self.engine.forward_batch(batch, sample_args)
         self.token_pool[output_mapping] = forward_output.next_tokens_gpu
+        if residency is not None:
+            # After the launch, not before it. Measured in decode (ft-g5 nsys,
+            # 2026-09-24): the host waits for each step to finish before it
+            # launches the next, so host work between the two is on the
+            # critical path; here it overlaps the step just launched.
+            # The check reads counters snapshotted after an earlier step (a
+            # fault surfaces one step later than it would before the launch;
+            # the snapshot always lagged).
+            residency.fault_check()
+            # Bounded mirror: DMA the writebacks of finished steps (the
+            # previous step's snapshot has landed by now) from the VRAM
+            # staging ring into the host pool, and snapshot the ring behind
+            # the step just launched. Non-blocking; no-op for the whole model.
+            residency.service_writebacks()
         if profile:
             batch._profile_enqueue_ms = (
                 time.perf_counter() - enqueue_started

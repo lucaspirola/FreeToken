@@ -1,0 +1,7 @@
+10 MiB, 1
+expert bytes 1.98 MB over 6 banks
+n=0: bpb8: H2D    4.3us ( 0.0 GB/s) D2H    4.3us ( 0.0) | bpb16: H2D    4.3us ( 0.0 GB/s) D2H    4.3us ( 0.0) | bpb32: H2D    4.7us ( 0.0 GB/s) D2H    4.7us ( 0.0) | bpb64: H2D    6.3us ( 0.0 GB/s) D2H    6.3us ( 0.0) | bpb128: H2D    7.1us ( 0.0 GB/s) D2H    7.2us ( 0.0)
+n=1: bpb8: H2D   43.7us (45.3 GB/s) D2H   53.7us (36.9) | bpb16: H2D   43.7us (45.3 GB/s) D2H   55.5us (35.7) | bpb32: H2D   43.6us (45.4 GB/s) D2H   56.2us (35.3) | bpb64: H2D   43.5us (45.5 GB/s) D2H   57.1us (34.7) | bpb128: H2D   43.6us (45.4 GB/s) D2H   57.3us (34.6)
+n=2: bpb8: H2D   82.3us (48.2 GB/s) D2H  103.0us (38.5) | bpb16: H2D   82.4us (48.1 GB/s) D2H  106.7us (37.1) | bpb32: H2D   82.4us (48.1 GB/s) D2H  108.9us (36.4) | bpb64: H2D   82.3us (48.1 GB/s) D2H  110.0us (36.0) | bpb128: H2D   82.3us (48.2 GB/s) D2H  110.0us (36.0)
+n=4: bpb8: H2D  160.1us (49.5 GB/s) D2H  201.0us (39.4) | bpb16: H2D  160.1us (49.5 GB/s) D2H  208.4us (38.0) | bpb32: H2D  160.1us (49.5 GB/s) D2H  213.8us (37.1) | bpb64: H2D  159.9us (49.6 GB/s) D2H  215.8us (36.7) | bpb128: H2D  160.1us (49.5 GB/s) D2H  215.8us (36.7)
+n=8: bpb8: H2D  314.0us (50.5 GB/s) D2H  397.4us (39.9) | bpb16: H2D  314.8us (50.3 GB/s) D2H  412.2us (38.5) | bpb32: H2D  314.3us (50.4 GB/s) D2H  423.2us (37.5) | bpb64: H2D  314.5us (50.4 GB/s) D2H  427.3us (37.1) | bpb128: H2D  314.8us (50.3 GB/s) D2H  427.1us (37.1)

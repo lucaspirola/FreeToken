@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/root/FreeToken-headroom/tasks/exclusive-expert-ram/compare_records.py", line 23, in <module>
+    a, r = load(arm), load(ref)
+           ^^^^^^^^^
+  File "/root/FreeToken-headroom/tasks/exclusive-expert-ram/compare_records.py", line 20, in <lambda>
+    load = lambda n: json.load(open(os.path.join(d, f"{n}-record.json")))
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/root/FreeToken-headroom/tasks/exclusive-expert-ram/results/ck4post90-box/ck4post90-mirror-1m-record.json'

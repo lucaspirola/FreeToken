@@ -1,0 +1,32 @@
+===== whole-node.sqlite: 254 graph launches, in-graph kernel time 5003.7 us/step
+   _decode_nvfp4_marlin_kernel                                    46.0/step   1255.7 us/step
+   _gemv_splitk_kernel                                            46.0/step   1097.2 us/step
+   fast_index_copy_multi                                          23.0/step    557.3 us/step
+   _nvfp4_gemv_splitk_kernel                                      46.0/step    411.8 us/step
+   kernel                                                         35.0/step    401.2 us/step
+   _nvfp4_gemv_kernel                                              1.0/step    230.4 us/step
+   vectorized_elementwise_kernel                                 167.0/step    149.1 us/step
+   unrolled_elementwise_kernel                                    70.0/step    133.3 us/step
+   _selective_state_update_kernel                                 23.0/step    125.8 us/step
+   gatherTopK                                                     23.0/step     98.6 us/step
+   kernel_cutlass_kernel_flashinfernormkernelsrmsnormRMSNormKer   53.0/step     85.9 us/step
+   _ensure_experts_sized_kernel_v2                                23.0/step     71.8 us/step
+   _decode_stage2_kernel                                           6.0/step     66.3 us/step
+   _decode_grouped_stage1_kernel                                   6.0/step     63.7 us/step
+===== mirror-node.sqlite: 254 graph launches, in-graph kernel time 5178.6 us/step
+   _decode_nvfp4_marlin_kernel                                    46.0/step   1262.7 us/step
+   _gemv_splitk_kernel                                            46.0/step   1099.4 us/step
+   fast_index_copy_kinds                                          46.0/step    615.5 us/step
+   _nvfp4_gemv_splitk_kernel                                      46.0/step    413.1 us/step
+   kernel                                                         35.0/step    402.3 us/step
+   _nvfp4_gemv_kernel                                              1.0/step    230.4 us/step
+   vectorized_elementwise_kernel                                 213.0/step    180.8 us/step
+   unrolled_elementwise_kernel                                    70.0/step    132.8 us/step
+   _selective_state_update_kernel                                 23.0/step    126.0 us/step
+   gatherTopK                                                     23.0/step     98.4 us/step
+   kernel_cutlass_kernel_flashinfernormkernelsrmsnormRMSNormKer   53.0/step     85.7 us/step
+   _ensure_experts_sized_kernel_v2                                23.0/step     68.6 us/step
+   _decode_stage2_kernel                                           6.0/step     66.3 us/step
+   _decode_grouped_stage1_kernel                                   6.0/step     64.0 us/step
+   memcpy kind 2: 23.0/step 7.8 us/step 0.00 MB/step
+   memcpy kind 8: 23.0/step 22.0 us/step 0.27 MB/step

@@ -1,0 +1,27 @@
+== ck4g5-mirror-1m (9dac3b5) vs same-box whole
+  decode_1000k          81.2 vs    91.7 (whole-1m)  88.5%  BELOW
+  decode_1000k_p1       74.7 vs    88.3 (whole-1m)  84.6%  BELOW
+  decode_8k            162.4 vs   184.9 (whole   )  87.8%  BELOW
+  decode_8k_p1         162.1 vs   184.7 (whole   )  87.8%  BELOW
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            12.07  free_evict_rate 0.646
+  ram 12.26 +/- 0.6  ok
+== ck4g5-mirror (9dac3b5) vs same-box whole
+  decode_713k           99.6  (no same-box reference)
+  decode_713k_p1        87.7  (no same-box reference)
+  decode_80k           159.2 vs   171.2 (whole   )  93.0%  ok
+  decode_80k_p1        149.1 vs   168.6 (whole   )  88.4%  BELOW
+  decode_8k            162.6 vs   184.9 (whole   )  87.9%  BELOW
+  decode_8k_p1         162.1 vs   184.7 (whole   )  87.8%  BELOW
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            12.07  free_evict_rate 0.648
+== whole-close vs whole (box drift)
+  decode_32k           179.5 vs   179.5  100.0%
+  decode_32k_p1        180.2 vs   180.2  100.0%
+  decode_80k           172.2 vs   171.2  100.6%
+  decode_80k_p1        169.5 vs   168.6  100.5%
+  decode_8k            184.8 vs   184.9   99.9%
+  decode_8k_p1         184.6 vs   184.7   99.9%
+7 point(s) outside the band

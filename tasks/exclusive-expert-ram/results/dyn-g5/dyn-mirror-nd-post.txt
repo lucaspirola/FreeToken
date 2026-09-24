@@ -1,0 +1,42 @@
+Traceback (most recent call last):
+  File "/root/FreeToken-dyn/tasks/exclusive-expert-ram/needles.py", line 395, in <module>
+    raise SystemExit(main(sys.argv[1:] or ["21000", "240000", "713000"]))
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-dyn/tasks/exclusive-expert-ram/needles.py", line 364, in main
+    res = run_size(int(raw), rng)
+          ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-dyn/tasks/exclusive-expert-ram/needles.py", line 313, in run_size
+    warm = _post([{"role": "user", "content": haystack + "\n\nReply with the "
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/FreeToken-dyn/tasks/exclusive-expert-ram/needles.py", line 292, in _post
+    with urllib.request.urlopen(req, timeout=7200) as r:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 515, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 532, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 1373, in http_open
+    return self.do_open(http.client.HTTPConnection, req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 1348, in do_open
+    r = h.getresponse()
+        ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/http/client.py", line 1457, in getresponse
+    response.begin()
+  File "/usr/lib/python3.12/http/client.py", line 336, in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/http/client.py", line 305, in _read_status
+    raise RemoteDisconnected("Remote end closed connection without"
+http.client.RemoteDisconnected: Remote end closed connection without response
+{"target": 21000, "error": "URLError: <urlopen error [Errno 111] Connection refused>"}
+{"target": 120000, "error": "URLError: <urlopen error [Errno 111] Connection refused>"}
+{"target": 240000, "error": "URLError: <urlopen error [Errno 111] Connection refused>"}

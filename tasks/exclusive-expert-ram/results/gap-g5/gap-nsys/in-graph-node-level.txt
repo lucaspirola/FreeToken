@@ -1,0 +1,15 @@
+===== mirror-node.sqlite: 254 graph launches, in-graph kernel time 5199.8 us/step
+   _decode_nvfp4_marlin_kernel                                    46.0/step   1264.0 us/step
+   _gemv_splitk_kernel                                            46.0/step   1102.3 us/step
+   fast_index_copy_kinds                                          46.0/step    631.3 us/step
+   _nvfp4_gemv_splitk_kernel                                      46.0/step    412.2 us/step
+   kernel                                                         35.0/step    403.2 us/step
+   _nvfp4_gemv_kernel                                              1.0/step    230.6 us/step
+   vectorized_elementwise_kernel                                 167.0/step    149.1 us/step
+   unrolled_elementwise_kernel                                    70.0/step    133.6 us/step
+   _selective_state_update_kernel                                 23.0/step    126.3 us/step
+   gatherTopK                                                     23.0/step     98.8 us/step
+   kernel_cutlass_kernel_flashinfernormkernelsrmsnormRMSNormKer   53.0/step     85.7 us/step
+   _ensure_experts_sized_kernel_v2                                23.0/step     68.7 us/step
+   _decode_stage2_kernel                                           6.0/step     66.3 us/step
+   _decode_grouped_stage1_kernel                                   6.0/step     63.8 us/step

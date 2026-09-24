@@ -1492,7 +1492,135 @@ class OffloadMoeCache:
             return self._arena_shrink(n, current)
         return self._arena_grow(current, n)
 
+    def _compaction_rank(self, slots_ids: list[int], usage: list[int]) -> list[tuple]:
+        """Per-slot value to the admission policy, larger = hotter.
+
+        The same key ``_ensure_experts_sized_kernel_v2`` evicts by: under LFU the
+        aged per-expert frequency plus the recency bonus, ties broken by last use;
+        under LRU the last use alone.
+        """
+        if self.cache_policy_id != 1:
+            return [(u,) for u in usage]
+        from freetoken.moe.offload_kernels import _lfu_recency_config
+
+        recency_tokens, recency_bonus = _lfu_recency_config(self)
+        recency_calls = recency_tokens * self.num_layers
+        step = int(self.step.item())
+        freq = self.expert_frequency.view(-1).tolist()
+        rank = []
+        for flat, u in zip(slots_ids, usage):
+            if flat < 0:
+                rank.append((-1, -1))
+                continue
+            f = freq[flat]
+            if recency_calls > 0 and step - u <= recency_calls:
+                f += recency_bonus
+            rank.append((f, u))
+        return rank
+
+    def _copy_slot_rows(self, src: list[int], dst: list[int]) -> int:
+        """Copy every bank's rows ``src[i] -> dst[i]`` on the device; returns bytes.
+
+        One fused launch when the banks are 16-byte aligned (the same kernel the
+        mirror uses for its slot -> slot relocations), a per-row copy otherwise.
+        ``src`` and ``dst`` must be disjoint.
+        """
+        banks = list(self.bank_caches.values())
+        row_bytes = [math.prod(b.shape[1:]) * b.element_size() for b in banks]
+        total = sum(row_bytes) * len(src)
+        fused = (
+            self.device.type == "cuda"
+            and all(rb % 16 == 0 and b.data_ptr() % 16 == 0 for rb, b in zip(row_bytes, banks))
+        )
+        if fused:
+            from freetoken.kernel.fast_index_copy import fast_index_copy_multi_jit
+
+            ptrs = torch.tensor([b.data_ptr() for b in banks], dtype=torch.int64, device=self.device)
+            feat = torch.tensor(row_bytes, dtype=torch.int64, device=self.device)
+            dst_t = torch.tensor(dst, dtype=torch.int32, device=self.device)
+            src_t = torch.tensor(src, dtype=torch.int32, device=self.device)
+            count = torch.tensor([len(src)], dtype=torch.int64, device=self.device)
+            fast_index_copy_multi_jit(ptrs, ptrs, feat, dst_t, src_t, count)
+        else:
+            for b in banks:
+                for s, d in zip(src, dst):
+                    b[d].copy_(b[s])
+        return total
+
+    def compact_before_shrink(self, n: int, current: int) -> dict:
+        """Move the doomed residents of ``[n, current)`` worth keeping below ``n``.
+
+        See ``moe/arena_compaction.py`` for the plan. Runs at the same no-forward-
+        in-flight boundary as the shrink. Only the maps and ``usage`` change for a
+        moved expert (``expert_frequency`` is per expert, so it follows by itself).
+        Returns this call's counters, also accumulated in ``compaction_totals``.
+        """
+        from freetoken.moe.arena_compaction import plan_compaction
+
+        if self._size_class_enabled or self._class_arena_banks or not self.bank_caches:
+            return {}
+        if os.getenv("FREETOKEN_ARENA_COMPACTION", "1").strip().lower() in {"0", "off", "false"}:
+            return {}
+        import time
+
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        t0 = time.perf_counter()
+        ids = self.id_of_slot[:current].tolist()
+        usage = self.usage[:current].tolist()
+        rank = self._compaction_rank(ids, usage)
+        mask = self.residency.host_copy_mask()
+        host_copy = (lambda _flat: True) if mask is None else (lambda flat: bool(mask[flat]))
+        lo = 2 * self.num_experts if self.prefill_overlap else 0
+        plan = plan_compaction(ids, rank, host_copy, lo=min(lo, n), n=n, current=current)
+        moved_bytes = 0
+        if plan.moves:
+            src = [s for s, _ in plan.moves]
+            dst = [d for _, d in plan.moves]
+            moved_bytes = self._copy_slot_rows(src, dst)
+            moved_ids = [ids[s] for s in src]
+            dev = self.id_of_slot.device
+            src_t = torch.tensor(src, dtype=torch.long, device=dev)
+            dst_t = torch.tensor(dst, dtype=torch.long, device=dev)
+            ids_t = torch.tensor(moved_ids, dtype=torch.long, device=dev)
+            flat_map = self.slot_for_id.view(-1)
+            if plan.displaced:
+                flat_map[torch.tensor(plan.displaced, dtype=torch.long, device=dev)] = -1
+            flat_map[ids_t] = dst_t.to(flat_map.dtype)
+            self.id_of_slot[dst_t] = ids_t.to(self.id_of_slot.dtype)
+            self.usage[dst_t] = self.usage[src_t]
+            # The sources are now empty: the shrink's invalidation must not clear
+            # the moved experts' new slot_for_id entries.
+            self.id_of_slot[src_t] = -1
+            self.usage[src_t] = 0
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+        ms = (time.perf_counter() - t0) * 1e3
+        out = {
+            "calls": 1,
+            "doomed": plan.doomed,
+            "moved": len(plan.moves),
+            "displaced": len(plan.displaced),
+            "dropped_with_copy": plan.dropped_with_copy,
+            "left_uncovered": plan.left_uncovered,
+            "bytes": moved_bytes,
+            "ms": ms,
+        }
+        totals = getattr(self, "compaction_totals", None)
+        if totals is None:
+            totals = self.compaction_totals = {k: 0 for k in out}
+        for k, v in out.items():
+            totals[k] += v
+        logger.info_rank0(
+            "Arena compaction %d -> %d: %d doomed, %d moved (%.1f MiB D2D, %.2f ms), "
+            "%d dropped with a host copy, %d left for write-back",
+            current, n, plan.doomed, len(plan.moves), moved_bytes / 2**20, ms,
+            plan.dropped_with_copy, plan.left_uncovered,
+        )
+        return out
+
     def _arena_shrink(self, n: int, current: int) -> int:
+        self.compact_before_shrink(n, current)
         self.residency.before_shrink(n, current)
         # (a) Invalidate every expert id whose slot falls in [n, current): the same
         # pattern _invalidate_prefill_buffer uses for the (fixed) double-buffer slots.
@@ -2088,8 +2216,16 @@ class OffloadMoeCache:
         return self.residency.stats()
 
     def mirror_fault_check(self) -> None:
-        """Raise if the bounded mirror lost coverage (no-op for the whole model)."""
-        self.residency.fault_check()
+        """Raise if the bounded mirror lost coverage (no-op for the whole model).
+
+        Reads the device counters now (a sync): this is the entry point for
+        callers that drive the kernels directly. The scheduler calls
+        ``residency.fault_check()``, which reads the per-step snapshot."""
+        check = getattr(self.residency, "mirror_fault_check", None)
+        if check is not None:
+            check(fresh=True)
+        else:
+            self.residency.fault_check()
     def _init_prefill_overlap_buffers(self) -> None:
         assert self.banks or self._size_class_enabled, (
             "set_bank_sources must register the banks first"

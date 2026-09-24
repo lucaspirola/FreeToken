@@ -8,6 +8,7 @@
 #   FT_ROWS    mirror rows: unset/0 = baseline (whole model in RAM), -1 = auto, N = N rows
 #   FT_PORT    spare port                     (default 1920 -- NEVER 1919, the owner's unit)
 #   FT_SIZES   probe prompt sizes             (default "8000 32000 80000")
+#   FT_GEN     decode tokens per probe        (default 128)
 #   FT_EXTRA   extra ft serve flags, verbatim (last flag wins; e.g. a lower seq-len cap)
 #   FT_NAME    served model name for the probe (default nemotron-3.5-lightning)
 #   FT_POST    command run while the server is STILL UP (recall.py, needles.py):
@@ -269,7 +270,7 @@ FREETOKEN_URL="http://127.0.0.1:$PORT" FREETOKEN_MODEL_NAME="$NAME" \
 
 echo "[$ARM] measuring"
 if ! FREETOKEN_URL="http://127.0.0.1:$PORT" FREETOKEN_MODEL_NAME="$NAME" \
-     PROBE_GEN_TOKENS=128 PROBE_PASSES=2 \
+     PROBE_GEN_TOKENS="${FT_GEN:-128}" PROBE_PASSES=2 \
      "$REPO/scripts/probe_decode.py" $SIZES > "$OUT/$ARM-probe.jsonl"; then
   echo "[$ARM] probe failed; recording the arm anyway" >&2
 fi

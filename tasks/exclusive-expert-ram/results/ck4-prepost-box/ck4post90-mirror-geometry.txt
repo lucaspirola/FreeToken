@@ -1,0 +1,6 @@
+[2026-09-24|05:18:49|core|rank=0] INFO     Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode graphs enabled, prefill overlap on (layers assembled from resident slots + pool rows, no disk)
+[2026-09-24|05:18:49|core|rank=0] INFO     Mirror pool: reserve resolved to 256 rows (FREETOKEN_MIRROR_RESERVE_ROWS='256')
+[2026-09-24|05:19:05|core|rank=0] INFO     Mirror pool: 1986 rows pinned (10.40 GiB), 927 cover the complement of 2017 GPU residents, 256 reserved, up to 803 duplicates (a duplicate makes its expert's next eviction free of any host traffic)
+[2026-09-24|05:19:05|core|rank=0] INFO     Mirror pool: the coverage floor is 1216 of 2017 arena slots, leaving 801 slots (4.19 GiB) the growable KV may still take
+[2026-09-24|05:19:05|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+[2026-09-24|05:19:38|core|rank=0] INFO     Prefill headroom: transient 0.65 GiB measured on a 8192-token chunk (empty prefix 0.65 GiB, after a 8192-token prefix 0.65 GiB, allocator peak 0.59 GiB); headroom 0.65 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 1216 -> 2017 of 2017 slots, 1.45 GiB free (target 0.77 GiB)

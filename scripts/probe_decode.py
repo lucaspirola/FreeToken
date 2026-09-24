@@ -43,6 +43,7 @@ def run(target_tokens: int, tag: str = "") -> dict:
     # time.monotonic() cannot jump (WSL2's wall clock steps ~1.7-2 s every ~34 s, which
     # an 80K TTFT straddles). The *_mono_s fields are the ones to trust.
     t0 = time.time(); m0 = time.monotonic(); first = None; mfirst = None; n = 0; usage = None
+    arrivals = []  # monotonic arrival of every content chunk: shows a stall inside decode
     with urllib.request.urlopen(req, timeout=3600) as r:
         for line in r:
             if not line.startswith(b"data:"):
@@ -57,22 +58,37 @@ def run(target_tokens: int, tag: str = "") -> dict:
                 delta = ch.get("delta", {})
                 if delta.get("content") or delta.get("reasoning_content"):
                     n += 1
+                    arrivals.append(time.monotonic())
                     if first is None:
                         first = time.time(); mfirst = time.monotonic()
     t1 = time.time(); m1 = time.monotonic()
     ttft = (first or t1) - t0
     ttft_m = (mfirst or m1) - m0
     dec = (t1 - first) if first and n > 1 else 0.0
+    dec_m = (m1 - mfirst) if mfirst and n > 1 else 0.0
     pt = (usage or {}).get("prompt_tokens", 0)
     ct = (usage or {}).get("completion_tokens", n)
     return {"prompt_tokens": pt, "ttft_s": round(ttft, 2),
             "prefill_tok_s": round(pt / ttft, 0) if ttft else None,
-            "gen_tokens": ct, "decode_tok_s": round((ct - 1) / dec, 1) if dec else None,
+            # decode from the monotonic clock: a WSL2 wall-clock step inside a 2 s decode
+            # window turned 82.7 tok/s into 56.7 (ck4 mirror-1m, 1M pass 2)
+            "gen_tokens": ct, "decode_tok_s": round((ct - 1) / dec_m, 1) if dec_m else None,
+            "decode_tok_s_wall": round((ct - 1) / dec, 1) if dec else None,
             "total_s": round(t1 - t0, 1),
             "ttft_mono_s": round(ttft_m, 3),
             "prefill_tok_s_mono": round(pt / ttft_m, 0) if ttft_m else None,
             "total_mono_s": round(m1 - m0, 2),
-            "t_start_wall": round(t0, 3)}
+            "t_start_wall": round(t0, 3),
+            # Gap between the first and second streamed chunk (a server-side stall right
+            # after the first token, e.g. the dynamic-headroom release, lands here), the
+            # largest gap anywhere in decode, and decode excluding that first gap.
+            "gap1_ms": round((arrivals[1] - arrivals[0]) * 1e3, 1) if len(arrivals) > 1 else None,
+            "max_gap_ms": round(max(b - a for a, b in zip(arrivals, arrivals[1:])) * 1e3, 1)
+                          if len(arrivals) > 1 else None,
+            "median_gap_ms": round(sorted(b - a for a, b in zip(arrivals, arrivals[1:]))[
+                (len(arrivals) - 1) // 2] * 1e3, 1) if len(arrivals) > 1 else None,
+            "decode_tok_s_after_gap1": round((ct - 2) / (m1 - arrivals[1]), 1)
+                                       if len(arrivals) > 2 and m1 > arrivals[1] else None}
 
 
 for p in range(1, PASSES + 1):

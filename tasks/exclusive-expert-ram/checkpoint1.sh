@@ -25,7 +25,7 @@ export FT_VENV=/home/lucas/ai/FreeToken/.venv
 export FT_RATIO=1.00
 POST_TIMEOUT=10800
 CK="${1:-ck1}"
-case "$CK" in ck[0-9]) shift || true ;; *) CK=ck1 ;; esac
+case "$CK" in ck[0-9]*) shift || true ;; *) CK=ck1 ;; esac
 
 die() { echo "checkpoint1: $*" >&2; exit 1; }
 
@@ -76,10 +76,33 @@ preflight
 [ "${1:-}" = "preflight" ] && exit 0
 echo "checkpoint label: $CK"
 
-arm $CK-whole       FT_ROWS=0                                     FT_POST="${NEEDLES//\$ARM_NAME/$CK-whole}"
-arm $CK-mirror-1m   FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 1000000" FT_POST="${NEEDLES//\$ARM_NAME/$CK-mirror-1m}"
-arm $CK-mirror      FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 80000 713000"
-arm $CK-whole-close FT_ROWS=0
+# ARMS picks and orders arms (default: the original four). whole-1m is the whole model at
+# 8K + 1M: the same-commit 1M reference compare_box.py judges mirror-1m against.
+T0="FREETOKEN_PREFILL_TRANSIENT_MEASURE=0 FREETOKEN_PREFILL_TRANSIENT_MB=0"
+for a in ${ARMS:-whole mirror-1m mirror whole-close}; do
+  case "$a" in
+    whole)       arm $CK-whole       FT_ROWS=0 FT_POST="${NEEDLES//\$ARM_NAME/$CK-whole}" ;;
+    whole-1m)    arm $CK-whole-1m    FT_ROWS=0 FT_SIZES="8000 1000000" ;;
+    mirror-1m)   arm $CK-mirror-1m   FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 1000000" FT_POST="${NEEDLES//\$ARM_NAME/$CK-mirror-1m}" ;;
+    mirror)      arm $CK-mirror      FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 80000 713000" ;;
+    whole-close) arm $CK-whole-close FT_ROWS=0 ;;
+    # Prefill-transient A/B (-def = default, -t0 = pre-fix cushion-only headroom: no startup
+    # measurement, transient 0, so the arena is neither parked nor held 0.65 GiB below the
+    # ratio plan through decode). --moe-collect-stats on both sides for the decode hit rate.
+    mirror-nd)   arm $CK-mirror-nd   FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 80000" FT_POST="${NEEDLES//\$ARM_NAME/$CK-mirror-nd}" ;;  # pool arm with needles/recall, no 713K
+    whole-def|whole-t0|mirror-def|mirror-t0|whole-8k-def|whole-8k-t0|mirror-8k-def|mirror-8k-t0|whole-st|mirror-st|whole-8k-st|mirror-8k-st|whole-dc|mirror-dc|whole-8k-dc|mirror-8k-dc)
+      # -st: the static reservation (dynamic prefill headroom off) on a tree that has it;
+      # -dc: dynamic, arena compaction off (FREETOKEN_ARENA_COMPACTION=0)
+      envs=""; case "$a" in *-t0) envs="$T0" ;; *-st) envs="FREETOKEN_DYNAMIC_PREFILL_HEADROOM=0" ;; *-dc) envs="FREETOKEN_ARENA_COMPACTION=0" ;; esac
+      case "$a" in
+        whole-8k-*)  arm $CK-$a FT_ROWS=0 FT_SIZES="8000" FT_EXTRA="--moe-collect-stats" FT_ENVS="$envs" ;;
+        mirror-8k-*) arm $CK-$a FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000" FT_EXTRA="--moe-collect-stats" FT_ENVS="$envs" ;;
+        whole-*)     arm $CK-$a FT_ROWS=0 FT_EXTRA="--moe-collect-stats" FT_ENVS="$envs" ;;
+        mirror-*)    arm $CK-$a FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 80000 713000" FT_EXTRA="--moe-collect-stats" FT_ENVS="$envs" ;;
+      esac ;;
+    *) die "unknown arm $a" ;;
+  esac
+done
 
 # R3 from acceptance.sh. Its R6 checks the production system unit freetoken-serve (down by
 # design during measurements) and read /proc/0/limits on checkpoint 1; for an arm only its
@@ -92,11 +115,22 @@ r6_arm() {
     [ "$(systemctl --user show -p DefaultLimitMEMLOCK --value)" = infinity ] &&
     echo "R6(arm) ok: no pageable fallback, no mlock failure, user DefaultLimitMEMLOCK=infinity"
 }
-for a in $CK-whole $CK-mirror-1m $CK-mirror $CK-whole-close; do
+for x in ${ARMS:-whole mirror-1m mirror whole-close}; do
+  a=$CK-$x
+  [ -f "$OUT/$a-journal.txt" ] || continue
   printf '%s R3: ' "$a"
   FREETOKEN_LOG="$OUT/$a-journal.txt" bash "$REPO/benchmarks/switchyard_soak/checks/acceptance.sh" R3 \
     > "$OUT/$a-acceptance-R3.txt" 2>&1 && echo PASS || echo "FAIL (see $a-acceptance-R3.txt)"
   printf '%s R6(arm): ' "$a"
   r6_arm "$OUT/$a-journal.txt" > "$OUT/$a-acceptance-R6.txt" 2>&1 && echo PASS || echo "FAIL (see $a-acceptance-R6.txt)"
 done
+# The gate twice: needles/recall vs the same-commit whole arm, decode pass by pass vs the
+# same-commit whole arms (compare_box.py, the owner's gate) and vs the record
+# (compare_records.py).
+python3 "$HERE/compare_needles.py" "$OUT" $CK-whole ${NEEDLES_ARM:-$CK-mirror-1m} > "$OUT/$CK-needles-compare.txt" 2>&1 || true
+{ python3 "$HERE/compare_transient_ab.py" "$OUT" $CK; python3 "$HERE/compare_transient_ab.py" "$OUT" $CK st; } > "$OUT/$CK-transient-ab.txt" 2>&1 || true
+python3 "$HERE/compare_compaction.py" "$OUT" $CK > "$OUT/$CK-compaction.txt" 2>&1 || true
+python3 "$HERE/compare_box.py" "$OUT" $CK > "$OUT/$CK-box-compare.txt" 2>&1 || true
+python3 "$HERE/compare_records.py" "$OUT" $CK > "$OUT/$CK-records-compare.txt" 2>&1 || true
+cat "$OUT/$CK-compaction.txt" "$OUT/$CK-transient-ab.txt" "$OUT/$CK-needles-compare.txt" "$OUT/$CK-box-compare.txt" "$OUT/$CK-records-compare.txt"
 echo "checkpoint $CK arms done. The embedder stays stopped."
