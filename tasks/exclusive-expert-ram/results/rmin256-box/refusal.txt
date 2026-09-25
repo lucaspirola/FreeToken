@@ -1,0 +1,6 @@
+[2026-09-25|04:34:01|FrontendAPI] ERROR    Backend supervisor: ValueError: FREETOKEN_MIRROR_RESERVE_ROWS='256' is below the minimum of 512 rows (2 x 256 experts per layer) for this model: the first prefill writes the 512 decode residents of the prefill double buffer back to the pool, and at the arena's coverage floor the reserve is all the free rows there are, so a smaller reserve loses coverage in the warmup prefill. Use at least 512 (the default is 768).
+
+18 passed in 4.71s
+[rmin256] starting: model=Ornith-1.5-35B-A3B-NVFP4 rows=-1 ratio=1.00 port=1920 code=/root/FT-rmin@f16672a4b venv=/root/venv launcher=nohup
+[rmin256] server pgid=649280 log=/root/FT-rmin/tasks/exclusive-expert-ram/results/rmin256-server.log
+[rmin256] FAILED to start; last log:
