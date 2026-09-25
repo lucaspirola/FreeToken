@@ -1,0 +1,1333 @@
+wait-for-quiet start 2026-09-25T15:01:53+04:00
+--- 2026-09-25T15:01:53+04:00 poll 0
+ 15:01:53 up 1 day,  5:31,  0 user,  load average: 10.54, 7.45, 6.18
+MemTotal:       34881708 kB
+MemFree:         6351404 kB
+MemAvailable:   30240064 kB
+Cached:         20310480 kB
+Dirty:            254024 kB
+Shmem:              2968 kB
+0 MiB, 277 MHz, 0 %, 41
+top CPU:
+ 762  492380 piro_agentd-524
+ 4.7   20826 claude
+ 3.9     899 codex
+ 2.6  471935 claude
+ 1.8 1882597 claude
+ 1.6  482050 cargo
+ 1.1 2828859 claude
+top RSS (KiB):
+961268    899 codex
+496052  20826 claude
+337240 1882597 claude
+312960 471935 claude
+305204 3935761 claude
+300340 3935592 claude
+269452   8565 claude
+254892 2828859 claude
+--- 2026-09-25T15:04:59+04:00 poll 1
+ 15:04:59 up 1 day,  5:34,  0 user,  load average: 4.32, 6.92, 6.27
+MemTotal:       34881708 kB
+MemFree:         7351264 kB
+MemAvailable:   30188348 kB
+Cached:         19239552 kB
+Dirty:              2612 kB
+Shmem:              2972 kB
+0 MiB, 277 MHz, 0 %, 41
+top CPU:
+ 4.7   20826 claude
+ 3.9     899 codex
+ 2.0  515438 ssh
+ 2.0  509935 piro-board-mcp
+ 1.8 1882597 claude
+ 1.5  471935 claude
+ 1.1 2828859 claude
+top RSS (KiB):
+982132    899 codex
+500168  20826 claude
+336580 1882597 claude
+308524 3935761 claude
+300040 3935592 claude
+292896 471935 claude
+269744   8565 claude
+255544 2828859 claude
+--- 2026-09-25T15:08:07+04:00 poll 2
+ 15:08:07 up 1 day,  5:37,  0 user,  load average: 8.38, 7.54, 6.62
+MemTotal:       34881708 kB
+MemFree:         5825308 kB
+MemAvailable:   29983528 kB
+Cached:         20560880 kB
+Dirty:              3608 kB
+Shmem:              2976 kB
+0 MiB, 277 MHz, 0 %, 41
+top CPU:
+1317  539734 piro_relayd-f71
+ 4.7   20826 claude
+ 3.9     899 codex
+ 1.8 1882597 claude
+ 1.2  471935 claude
+ 1.1 2828859 claude
+ 0.9    8565 claude
+top RSS (KiB):
+994124    899 codex
+488160  20826 claude
+340224 1882597 claude
+315504 3935761 claude
+306120 3935592 claude
+294956 471935 claude
+273080   8565 claude
+251444 2828859 claude
+--- 2026-09-25T15:11:14+04:00 poll 3
+ 15:11:14 up 1 day,  5:40,  0 user,  load average: 1.76, 5.08, 5.85
+MemTotal:       34881708 kB
+MemFree:         2965584 kB
+MemAvailable:   30153924 kB
+Cached:         23567884 kB
+Dirty:              5916 kB
+Shmem:              3096 kB
+0 MiB, 277 MHz, 0 %, 41
+top CPU:
+ 100  554970 piro-relayd-age
+ 4.7   20826 claude
+ 3.9     899 codex
+ 3.4  554635 systemd
+ 2.0  554730 systemd-journal
+ 1.8 1882597 claude
+ 1.1 2828859 claude
+top RSS (KiB):
+1006648   899 codex
+483460  20826 claude
+337676 1882597 claude
+305528 3935761 claude
+297324 3935592 claude
+295024 471935 claude
+269824   8565 claude
+253276 2828859 claude
+QUIET at poll 3
+--- 2026-09-25T15:11:15+04:00 before start
+ 15:11:15 up 1 day,  5:40,  0 user,  load average: 1.76, 5.08, 5.85
+MemTotal:       34881708 kB
+MemFree:         2959428 kB
+MemAvailable:   30148316 kB
+Cached:         23568124 kB
+Dirty:              5916 kB
+Shmem:              3096 kB
+0 MiB, 277 MHz, 0 %, 41
+top CPU:
+ 100  554970 piro-relayd-age
+ 4.7   20826 claude
+ 3.9     899 codex
+ 3.3  554635 systemd
+ 1.9  554730 systemd-journal
+ 1.8 1882597 claude
+ 1.1 2828859 claude
+top RSS (KiB):
+1006648   899 codex
+483460  20826 claude
+337676 1882597 claude
+305528 3935761 claude
+297324 3935592 claude
+295024 471935 claude
+269824   8565 claude
+253276 2828859 claude
+/home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/ck4g-local/pcache-before.tsv: 14.43 GiB cached
+--- 2026-09-25T15:12:18+04:00 tick
+ 15:12:18 up 1 day,  5:41,  0 user,  load average: 1.42, 4.33, 5.54
+MemTotal:       34881708 kB
+MemFree:         2405500 kB
+MemAvailable:   16282152 kB
+Cached:         12649312 kB
+Dirty:              1360 kB
+Shmem:           1462588 kB
+10832 MiB, 277 MHz, 0 %, 42
+top CPU:
+ 100  559168 git
+36.7  556608 python3
+33.3  559165 python3
+ 8.3  556450 ft
+ 7.8  556609 python3
+ 4.7   20826 claude
+ 3.9     899 codex
+top RSS (KiB):
+13186900 556608 python3
+1004396   899 codex
+858232 556609 python3
+661408 556450 ft
+471880  20826 claude
+323452 1882597 claude
+286708 3935761 claude
+274044 3935592 claude
+--- 2026-09-25T15:12:50+04:00 ready
+ 15:12:50 up 1 day,  5:41,  0 user,  load average: 1.22, 4.01, 5.40
+MemTotal:       34881708 kB
+MemFree:         2622824 kB
+MemAvailable:   16891928 kB
+Cached:         11670924 kB
+Dirty:              3744 kB
+Shmem:             92476 kB
+14476 MiB, 277 MHz, 0 %, 44
+top CPU:
+39.8  556608 python3
+ 5.0  556450 ft
+ 4.7   20826 claude
+ 4.5  556609 python3
+ 3.9     899 codex
+ 1.8 1882597 claude
+ 1.1 2828859 claude
+top RSS (KiB):
+12570904 556608 python3
+1024292   899 codex
+858232 556609 python3
+661408 556450 ft
+471940  20826 claude
+324960 1882597 claude
+285680 3935761 claude
+278880 3935592 claude
+/home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/ck4g-local/pcache-ready.tsv: 15.78 GiB cached
+--- 2026-09-25T15:13:35+04:00 tick
+ 15:13:35 up 1 day,  5:42,  0 user,  load average: 1.13, 3.64, 5.21
+MemTotal:       34881708 kB
+MemFree:         1797144 kB
+MemAvailable:   16111700 kB
+Cached:         11701580 kB
+Dirty:              2108 kB
+Shmem:             92472 kB
+15086 MiB, 2887 MHz, 100 %, 73
+top CPU:
+40.0  556608 python3
+ 5.7  556450 ft
+ 4.7   20826 claude
+ 4.6  556609 python3
+ 3.9     899 codex
+ 1.8 1882597 claude
+ 1.1 2828859 claude
+top RSS (KiB):
+12578200 556608 python3
+1186460 556609 python3
+1080648 556450 ft
+1018184   899 codex
+472176  20826 claude
+325632 1882597 claude
+285492 3935761 claude
+281712 471935 claude
+--- 2026-09-25T15:14:37+04:00 tick
+ 15:14:37 up 1 day,  5:43,  0 user,  load average: 1.16, 3.17, 4.94
+MemTotal:       34881708 kB
+MemFree:         1809268 kB
+MemAvailable:   16129164 kB
+Cached:         11706076 kB
+Dirty:              1448 kB
+Shmem:             92472 kB
+15048 MiB, 2880 MHz, 100 %, 73
+top CPU:
+62.1  556608 python3
+ 4.7   20826 claude
+ 3.9     899 codex
+ 3.8  556450 ft
+ 3.0  556609 python3
+ 1.8 1882597 claude
+ 1.1 2828859 claude
+top RSS (KiB):
+12578200 556608 python3
+1186460 556609 python3
+1080648 556450 ft
+1019404   899 codex
+474544  20826 claude
+325944 1882597 claude
+278556 471935 claude
+278300 3935592 claude
+--- 2026-09-25T15:15:39+04:00 tick
+ 15:15:39 up 1 day,  5:44,  0 user,  load average: 1.13, 2.80, 4.70
+MemTotal:       34881708 kB
+MemFree:         1679828 kB
+MemAvailable:   16170000 kB
+Cached:         11874208 kB
+Dirty:               280 kB
+Shmem:             92472 kB
+15068 MiB, 2887 MHz, 100 %, 74
+top CPU:
+72.8  556608 python3
+ 4.7   20826 claude
+ 3.9     899 codex
+ 2.9  556450 ft
+ 2.2  556609 python3
+ 1.8 1882597 claude
+ 1.1 2828859 claude
+top RSS (KiB):
+12578200 556608 python3
+1186460 556609 python3
+1080648 556450 ft
+1011548   899 codex
+469504  20826 claude
+326560 1882597 claude
+278212 3935761 claude
+278060 3935592 claude
+--- 2026-09-25T15:16:41+04:00 tick
+ 15:16:41 up 1 day,  5:45,  0 user,  load average: 1.21, 2.51, 4.48
+MemTotal:       34881708 kB
+MemFree:         1639124 kB
+MemAvailable:   16171572 kB
+Cached:         11914360 kB
+Dirty:              1232 kB
+Shmem:             92472 kB
+15048 MiB, 2880 MHz, 100 %, 73
+top CPU:
+79.2  556608 python3
+ 4.7   20826 claude
+ 3.9     899 codex
+ 2.3  556450 ft
+ 2.3  574156 ssh
+ 1.8 1882597 claude
+ 1.7  556609 python3
+top RSS (KiB):
+12578200 556608 python3
+1186460 556609 python3
+1080648 556450 ft
+1006492   899 codex
+472096  20826 claude
+327132 1882597 claude
+278484 3935761 claude
+277460 3935592 claude
+--- 2026-09-25T15:17:44+04:00 tick
+ 15:17:44 up 1 day,  5:46,  0 user,  load average: 1.18, 2.27, 4.27
+MemTotal:       34881708 kB
+MemFree:         1598016 kB
+MemAvailable:   16162968 kB
+Cached:         11919516 kB
+Dirty:              2996 kB
+Shmem:             92472 kB
+15066 MiB, 2880 MHz, 100 %, 73
+top CPU:
+ 100  577926 python
+83.4  556608 python3
+ 4.7   20826 claude
+ 3.9     899 codex
+ 2.5  577850 ssh
+ 2.0  556450 ft
+ 1.8 1882597 claude
+top RSS (KiB):
+12578200 556608 python3
+1186460 556609 python3
+1080648 556450 ft
+1007976   899 codex
+472472  20826 claude
+327932 1882597 claude
+279204 3935761 claude
+278632 3935592 claude
+--- 2026-09-25T15:18:47+04:00 tick
+ 15:18:47 up 1 day,  5:47,  0 user,  load average: 1.69, 2.22, 4.13
+MemTotal:       34881708 kB
+MemFree:         3382136 kB
+MemAvailable:   16220068 kB
+Cached:         10440544 kB
+Dirty:              3076 kB
+Shmem:             92436 kB
+15070 MiB, 2880 MHz, 100 %, 73
+top CPU:
+86.4  556608 python3
+ 4.7   20826 claude
+ 3.9     899 codex
+ 1.8 1882597 claude
+ 1.7  556450 ft
+ 1.2  556609 python3
+ 1.1 2828859 claude
+top RSS (KiB):
+12548248 556608 python3
+1158172 556609 python3
+1051208 556450 ft
+1004268   899 codex
+473072  20826 claude
+326692 1882597 claude
+281860 3935761 claude
+275052 471935 claude
+--- 2026-09-25T15:19:49+04:00 tick
+ 15:19:49 up 1 day,  5:48,  0 user,  load average: 1.91, 2.19, 4.00
+MemTotal:       34881708 kB
+MemFree:         3382800 kB
+MemAvailable:   16226784 kB
+Cached:         10445536 kB
+Dirty:              1772 kB
+Shmem:             92436 kB
+15066 MiB, 2880 MHz, 100 %, 73
+top CPU:
+88.6  556608 python3
+ 4.7   20826 claude
+ 3.9     899 codex
+ 1.7 1882597 claude
+ 1.5  556450 ft
+ 1.1 2828859 claude
+ 1.1  556609 python3
+top RSS (KiB):
+12548248 556608 python3
+1158172 556609 python3
+1051208 556450 ft
+998936    899 codex
+472072  20826 claude
+323356 1882597 claude
+282168 3935761 claude
+275476 3935592 claude
+--- 2026-09-25T15:20:52+04:00 tick
+ 15:20:52 up 1 day,  5:49,  0 user,  load average: 1.39, 1.99, 3.81
+MemTotal:       34881708 kB
+MemFree:         3363436 kB
+MemAvailable:   16240444 kB
+Cached:         10477840 kB
+Dirty:              1564 kB
+Shmem:             92436 kB
+15050 MiB, 2880 MHz, 100 %, 73
+top CPU:
+90.3  556608 python3
+ 4.7   20826 claude
+ 3.9     899 codex
+ 1.7 1882597 claude
+ 1.3  556450 ft
+ 1.1 2828859 claude
+ 0.9  556609 python3
+top RSS (KiB):
+12548248 556608 python3
+1158172 556609 python3
+1051208 556450 ft
+995084    899 codex
+471516  20826 claude
+329408 1882597 claude
+282464 3935761 claude
+274620 3935592 claude
+--- 2026-09-25T15:21:55+04:00 tick
+ 15:21:55 up 1 day,  5:50,  0 user,  load average: 1.41, 1.88, 3.66
+MemTotal:       34881708 kB
+MemFree:         3226488 kB
+MemAvailable:   16162288 kB
+Cached:         10530980 kB
+Dirty:              2972 kB
+Shmem:             92440 kB
+15050 MiB, 2880 MHz, 100 %, 73
+top CPU:
+ 143  593751 piro_agent_gran
+91.7  556608 python3
+ 7.6  593012 cargo
+ 4.7   20826 claude
+ 3.9     899 codex
+ 1.7 1882597 claude
+ 1.3  593003 bash
+top RSS (KiB):
+12548248 556608 python3
+1158172 556609 python3
+1051208 556450 ft
+976612    899 codex
+467680  20826 claude
+323536 1882597 claude
+282308 3935761 claude
+275556 3935592 claude
+--- 2026-09-25T15:22:15+04:00 after 1M p1
+ 15:22:15 up 1 day,  5:50,  0 user,  load average: 4.37, 2.51, 3.83
+MemTotal:       34881708 kB
+MemFree:         2954232 kB
+MemAvailable:   16101588 kB
+Cached:         10705564 kB
+Dirty:              3680 kB
+Shmem:             92460 kB
+15084 MiB, 2895 MHz, 100 %, 71
+top CPU:
+ 777  594175 piro_agentd-524
+91.5  556608 python3
+ 4.7   20826 claude
+ 3.9     899 codex
+ 1.7 1882597 claude
+ 1.6  556450 ft
+ 1.1 2828859 claude
+top RSS (KiB):
+12550836 556608 python3
+1147976 556450 ft
+1128264 556609 python3
+971128    899 codex
+470404  20826 claude
+324456 1882597 claude
+280768 3935761 claude
+275364 3935592 claude
+/home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/ck4g-local/pcache-p1.tsv: 15.47 GiB cached
+--- 2026-09-25T15:23:17+04:00 tick
+ 15:23:17 up 1 day,  5:51,  0 user,  load average: 6.77, 3.68, 4.16
+MemTotal:       34881708 kB
+MemFree:         2621204 kB
+MemAvailable:   16054760 kB
+Cached:         10919912 kB
+Dirty:               192 kB
+Shmem:             92440 kB
+15050 MiB, 2880 MHz, 100 %, 73
+top CPU:
+ 422  650336 piro_operator_j
+92.6  556608 python3
+ 4.7   20826 claude
+ 3.9     899 codex
+ 1.8  659811 ssh
+ 1.7 1882597 claude
+ 1.6  661500 verify-packagin
+top RSS (KiB):
+12550836 556608 python3
+1147976 556450 ft
+1128264 556609 python3
+984384    899 codex
+471144  20826 claude
+326392 1882597 claude
+280968 3935761 claude
+279092 3935592 claude
+--- 2026-09-25T15:24:20+04:00 tick
+ 15:24:20 up 1 day,  5:52,  0 user,  load average: 11.31, 5.38, 4.70
+MemTotal:       34881708 kB
+MemFree:         2396220 kB
+MemAvailable:   15955768 kB
+Cached:         11015320 kB
+Dirty:                80 kB
+Shmem:             92440 kB
+15068 MiB, 2880 MHz, 100 %, 74
+top CPU:
+1317  708947 piro_relayd-f71
+93.5  556608 python3
+ 4.7   20826 claude
+ 3.9     899 codex
+ 2.5  742834 verify-packagin
+ 2.4  743275 ssh
+ 1.7 1882597 claude
+top RSS (KiB):
+12550836 556608 python3
+1147976 556450 ft
+1128264 556609 python3
+987788    899 codex
+471340  20826 claude
+325268 1882597 claude
+279720 3935761 claude
+274164 3935592 claude
+--- 2026-09-25T15:25:22+04:00 tick
+ 15:25:22 up 1 day,  5:53,  0 user,  load average: 8.50, 5.50, 4.78
+MemTotal:       34881708 kB
+MemFree:         1711064 kB
+MemAvailable:   16062124 kB
+Cached:         11774924 kB
+Dirty:               728 kB
+Shmem:             92448 kB
+15048 MiB, 2880 MHz, 100 %, 73
+top CPU:
+ 740  821355 piro_agentd-524
+94.3  556608 python3
+50.0  841247 awk
+ 4.7   20826 claude
+ 3.9     899 codex
+ 2.7  838848 verify-packagin
+ 1.7 1882597 claude
+top RSS (KiB):
+12550836 556608 python3
+1147976 556450 ft
+1128264 556609 python3
+982476    899 codex
+472512  20826 claude
+324200 1882597 claude
+279200 3935761 claude
+277184 3935592 claude
+--- 2026-09-25T15:26:25+04:00 tick
+ 15:26:25 up 1 day,  5:54,  0 user,  load average: 9.98, 6.59, 5.20
+MemTotal:       34881708 kB
+MemFree:         1431980 kB
+MemAvailable:   16059376 kB
+Cached:         12000652 kB
+Dirty:              1212 kB
+Shmem:             92440 kB
+15066 MiB, 2880 MHz, 100 %, 73
+top CPU:
+ 463  924178 piro_operator_j
+94.9  556608 python3
+50.0  935153 python3
+ 4.7   20826 claude
+ 4.0     899 codex
+ 1.7 1882597 claude
+ 1.2  556450 ft
+top RSS (KiB):
+12550836 556608 python3
+1147976 556450 ft
+1128264 556609 python3
+986848    899 codex
+473556  20826 claude
+322336 1882597 claude
+279408 3935761 claude
+277052 3935592 claude
+--- 2026-09-25T15:27:28+04:00 tick
+ 15:27:28 up 1 day,  5:55,  0 user,  load average: 14.72, 8.42, 5.91
+MemTotal:       34881708 kB
+MemFree:         1209944 kB
+MemAvailable:   15947692 kB
+Cached:         12091620 kB
+Dirty:               148 kB
+Shmem:             92440 kB
+15070 MiB, 2880 MHz, 100 %, 72
+top CPU:
+1334  982667 piro_relayd-f71
+95.6  556608 python3
+ 4.7   20826 claude
+ 4.6 1016712 verify-packagin
+ 4.0     899 codex
+ 1.7 1882597 claude
+ 1.1 2828859 claude
+top RSS (KiB):
+12550836 556608 python3
+1147976 556450 ft
+1128264 556609 python3
+984764    899 codex
+475016  20826 claude
+322932 1882597 claude
+279544 3935761 claude
+277456 3935592 claude
+--- 2026-09-25T15:28:30+04:00 tick
+ 15:28:30 up 1 day,  5:56,  0 user,  load average: 7.49, 7.49, 5.75
+MemTotal:       34881708 kB
+MemFree:         1258576 kB
+MemAvailable:   16161300 kB
+Cached:         12251660 kB
+Dirty:               124 kB
+Shmem:             92436 kB
+15066 MiB, 2887 MHz, 100 %, 73
+top CPU:
+96.1  556608 python3
+ 4.6   20826 claude
+ 4.0     899 codex
+ 2.3 1115950 verify-packagin
+ 1.7 1882597 claude
+ 1.1 2828859 claude
+ 1.1  556450 ft
+top RSS (KiB):
+12550836 556608 python3
+1147976 556450 ft
+1128264 556609 python3
+995524    899 codex
+469180  20826 claude
+323548 1882597 claude
+282972 3935761 claude
+277592 3935592 claude
+--- 2026-09-25T15:29:33+04:00 tick
+ 15:29:33 up 1 day,  5:57,  0 user,  load average: 5.02, 6.75, 5.60
+MemTotal:       34881708 kB
+MemFree:         2412248 kB
+MemAvailable:   16200132 kB
+Cached:         11426116 kB
+Dirty:                 0 kB
+Shmem:             92436 kB
+15066 MiB, 2880 MHz, 100 %, 73
+top CPU:
+96.6  556608 python3
+50.0 1218878 python3
+ 4.6   20826 claude
+ 4.2 1216209 verify-packagin
+ 4.0     899 codex
+ 1.7 1882597 claude
+ 1.1 2828859 claude
+top RSS (KiB):
+12550708 556608 python3
+1147720 556450 ft
+1128136 556609 python3
+996044    899 codex
+471036  20826 claude
+323624 1882597 claude
+282608 3935761 claude
+276852 3935592 claude
+--- 2026-09-25T15:30:36+04:00 tick
+ 15:30:36 up 1 day,  5:58,  0 user,  load average: 5.29, 6.54, 5.60
+MemTotal:       34881708 kB
+MemFree:         1915676 kB
+MemAvailable:   16185752 kB
+Cached:         11902504 kB
+Dirty:               536 kB
+Shmem:             92440 kB
+15050 MiB, 2880 MHz, 100 %, 73
+top CPU:
+97.0  556608 python3
+ 4.6   20826 claude
+ 4.0     899 codex
+ 3.2 1318494 verify-packagin
+ 1.7 1882597 claude
+ 1.3 1314635 ssh
+ 1.1 2828859 claude
+top RSS (KiB):
+12550708 556608 python3
+1147720 556450 ft
+1128136 556609 python3
+1006440   899 codex
+470024  20826 claude
+325100 1882597 claude
+282476 3935761 claude
+278448 3935592 claude
+--- 2026-09-25T15:31:38+04:00 tick
+ 15:31:38 up 1 day,  5:59,  0 user,  load average: 2.97, 5.64, 5.35
+MemTotal:       34881708 kB
+MemFree:         2026972 kB
+MemAvailable:   16163188 kB
+Cached:         11769028 kB
+Dirty:             24352 kB
+Shmem:             92444 kB
+14824 MiB, 2895 MHz, 92 %, 60
+top CPU:
+ 218 1330092 piro_agentd_jou
+97.4  556608 python3
+ 4.6   20826 claude
+ 4.0     899 codex
+ 2.0 1329789 cargo
+ 1.7 1882597 claude
+ 1.1 2828859 claude
+top RSS (KiB):
+12550728 556608 python3
+1147720 556450 ft
+1128136 556609 python3
+1012796   899 codex
+470428  20826 claude
+326636 1882597 claude
+278844 3935761 claude
+275452 3935592 claude
+--- 2026-09-25T15:32:41+04:00 tick
+ 15:32:41 up 1 day,  6:00,  0 user,  load average: 6.90, 6.41, 5.64
+MemTotal:       34881708 kB
+MemFree:         6420292 kB
+MemAvailable:   16223084 kB
+Cached:          8136084 kB
+Dirty:            253540 kB
+Shmem:             92436 kB
+14824 MiB, 2880 MHz, 93 %, 61
+top CPU:
+97.8  556608 python3
+52.8 1340188 piro_agent_gran
+ 4.6   20826 claude
+ 4.0     899 codex
+ 3.0 1340377 ssh
+ 1.9 1330491 cargo
+ 1.7 1882597 claude
+top RSS (KiB):
+12429000 556608 python3
+1054536 556450 ft
+1033288 556609 python3
+948700    899 codex
+459616  20826 claude
+304980 1882597 claude
+263848   8565 claude
+251900 3935761 claude
+--- 2026-09-25T15:33:44+04:00 tick
+ 15:33:44 up 1 day,  6:01,  0 user,  load average: 7.74, 6.92, 5.87
+MemTotal:       34881708 kB
+MemFree:         6243376 kB
+MemAvailable:   16316596 kB
+Cached:          8311328 kB
+Dirty:              2796 kB
+Shmem:             92432 kB
+14824 MiB, 2880 MHz, 94 %, 62
+top CPU:
+98.1  556608 python3
+ 4.6   20826 claude
+ 4.0     899 codex
+ 1.7 1882597 claude
+ 1.3  556450 ft
+ 1.1 2828859 claude
+ 1.0  556609 python3
+top RSS (KiB):
+12429000 556608 python3
+1054536 556450 ft
+1033288 556609 python3
+947932    899 codex
+456356  20826 claude
+312512 1882597 claude
+266444   8565 claude
+253692 3935761 claude
+--- 2026-09-25T15:34:45+04:00 tick
+ 15:34:45 up 1 day,  6:02,  0 user,  load average: 5.25, 6.32, 5.73
+MemTotal:       34881708 kB
+MemFree:         3042796 kB
+MemAvailable:   13549232 kB
+Cached:          9097784 kB
+Dirty:             30296 kB
+Shmem:            459708 kB
+14824 MiB, 2880 MHz, 91 %, 63
+top CPU:
+ 197 1354275 omp
+98.2  556608 python3
+96.6 1352229 rustc
+ 4.6   20826 claude
+ 4.0     899 codex
+ 2.8 1354113 python3
+ 1.7 1882597 claude
+top RSS (KiB):
+12429000 556608 python3
+2288720 1352229 rustc
+1054536 556450 ft
+1033288 556609 python3
+961036    899 codex
+458960  20826 claude
+400520 1354275 omp
+314476 1882597 claude
+--- 2026-09-25T15:35:46+04:00 tick
+ 15:35:46 up 1 day,  6:03,  0 user,  load average: 7.78, 6.77, 5.91
+MemTotal:       34881708 kB
+MemFree:         5562056 kB
+MemAvailable:   16161152 kB
+Cached:          8744880 kB
+Dirty:              4080 kB
+Shmem:             92440 kB
+14824 MiB, 2880 MHz, 94 %, 64
+top CPU:
+98.4  556608 python3
+25.4 1363969 piro_cli-ed1574
+ 4.6   20826 claude
+ 4.0     899 codex
+ 1.7 1882597 claude
+ 1.5  556450 ft
+ 1.2  556609 python3
+top RSS (KiB):
+12429000 556608 python3
+1054536 556450 ft
+1033288 556609 python3
+963092    899 codex
+466656  20826 claude
+312060 1882597 claude
+282068   8565 claude
+253824 3935761 claude
+--- 2026-09-25T15:36:47+04:00 tick
+ 15:36:47 up 1 day,  6:04,  0 user,  load average: 8.98, 7.21, 6.12
+MemTotal:       34881708 kB
+MemFree:         5360840 kB
+MemAvailable:   16190452 kB
+Cached:          8952320 kB
+Dirty:              1380 kB
+Shmem:             92440 kB
+14824 MiB, 2880 MHz, 94 %, 62
+top CPU:
+98.6  556608 python3
+ 4.6   20826 claude
+ 4.0     899 codex
+ 1.7 1882597 claude
+ 1.5  556450 ft
+ 1.2  556609 python3
+ 1.1 2828859 claude
+top RSS (KiB):
+12428296 556608 python3
+1054536 556450 ft
+1033288 556609 python3
+961500    899 codex
+468548  20826 claude
+311032 1882597 claude
+279736   8565 claude
+254040 3935761 claude
+--- 2026-09-25T15:37:49+04:00 tick
+ 15:37:49 up 1 day,  6:05,  0 user,  load average: 8.23, 7.58, 6.33
+MemTotal:       34881708 kB
+MemFree:         5152148 kB
+MemAvailable:   16264952 kB
+Cached:          9217180 kB
+Dirty:              1620 kB
+Shmem:             92436 kB
+14826 MiB, 2880 MHz, 93 %, 62
+top CPU:
+98.6  556608 python3
+ 4.6   20826 claude
+ 4.0     899 codex
+ 1.7 1882597 claude
+ 1.6  556450 ft
+ 1.3  556609 python3
+ 1.1 2828859 claude
+top RSS (KiB):
+12429144 556608 python3
+1054536 556450 ft
+1033288 556609 python3
+978392    899 codex
+465064  20826 claude
+312128 1882597 claude
+281116   8565 claude
+262700 3935761 claude
+--- 2026-09-25T15:38:50+04:00 tick
+ 15:38:50 up 1 day,  6:06,  0 user,  load average: 10.02, 8.02, 6.54
+MemTotal:       34881708 kB
+MemFree:         4141916 kB
+MemAvailable:   16137064 kB
+Cached:         10060928 kB
+Dirty:            166020 kB
+Shmem:             92644 kB
+14826 MiB, 2880 MHz, 91 %, 61
+top CPU:
+ 761 1379828 piro_agentd-524
+98.8  556608 python3
+ 4.6   20826 claude
+ 4.0     899 codex
+ 1.7 1882597 claude
+ 1.7  556450 ft
+ 1.4  556609 python3
+top RSS (KiB):
+12429144 556608 python3
+1054536 556450 ft
+1033288 556609 python3
+970384    899 codex
+468492  20826 claude
+317116 1882597 claude
+281564   8565 claude
+267944 3935761 claude
+--- 2026-09-25T15:39:52+04:00 tick
+ 15:39:52 up 1 day,  6:07,  0 user,  load average: 8.72, 8.16, 6.69
+MemTotal:       34881708 kB
+MemFree:         3909488 kB
+MemAvailable:   16154876 kB
+Cached:         10216716 kB
+Dirty:              1160 kB
+Shmem:             92440 kB
+14806 MiB, 2880 MHz, 94 %, 62
+top CPU:
+ 254 1391560 piro_operator_j
+99.0  556608 python3
+ 4.6   20826 claude
+ 4.0     899 codex
+ 1.7  556450 ft
+ 1.7 1882597 claude
+ 1.4  556609 python3
+top RSS (KiB):
+12429144 556608 python3
+1054536 556450 ft
+1033288 556609 python3
+971900    899 codex
+470184  20826 claude
+312644 1882597 claude
+282252   8565 claude
+265344 3935761 claude
+--- 2026-09-25T15:40:55+04:00 tick
+ 15:40:55 up 1 day,  6:08,  0 user,  load average: 10.87, 8.87, 7.03
+MemTotal:       34881708 kB
+MemFree:         3766144 kB
+MemAvailable:   16210568 kB
+Cached:         10397828 kB
+Dirty:              1940 kB
+Shmem:             92440 kB
+14806 MiB, 2880 MHz, 94 %, 63
+top CPU:
+99.1  556608 python3
+ 4.6   20826 claude
+ 4.0     899 codex
+ 1.8  556450 ft
+ 1.7 1882597 claude
+ 1.5  556609 python3
+ 1.1 2828859 claude
+top RSS (KiB):
+12429144 556608 python3
+1054536 556450 ft
+1033288 556609 python3
+968068    899 codex
+471912  20826 claude
+308444 1882597 claude
+279476   8565 claude
+258244 3935592 claude
+--- 2026-09-25T15:41:57+04:00 tick
+ 15:41:57 up 1 day,  6:09,  0 user,  load average: 5.72, 7.70, 6.74
+MemTotal:       34881708 kB
+MemFree:          986764 kB
+MemAvailable:   14069668 kB
+Cached:         11023828 kB
+Dirty:            188668 kB
+Shmem:             92440 kB
+14806 MiB, 2880 MHz, 93 %, 64
+top CPU:
+ 101 1401720 rustc
+99.2  556608 python3
+ 4.6   20826 claude
+ 4.0     899 codex
+ 1.8  556450 ft
+ 1.7 1882597 claude
+ 1.5  556609 python3
+top RSS (KiB):
+12429528 556608 python3
+2425204 1401720 rustc
+1054536 556450 ft
+1033288 556609 python3
+961200    899 codex
+467604  20826 claude
+312756 1882597 claude
+280544   8565 claude
+--- 2026-09-25T15:42:58+04:00 tick
+ 15:42:58 up 1 day,  6:10,  0 user,  load average: 4.56, 6.95, 6.54
+MemTotal:       34881708 kB
+MemFree:         3869768 kB
+MemAvailable:   16286236 kB
+Cached:         10420504 kB
+Dirty:            160828 kB
+Shmem:             92436 kB
+14806 MiB, 2880 MHz, 94 %, 64
+top CPU:
+99.4  556608 python3
+ 4.6   20826 claude
+ 4.0     899 codex
+ 1.8  556450 ft
+ 1.7 1882597 claude
+ 1.6  556609 python3
+ 1.1 2828859 claude
+top RSS (KiB):
+12429912 556608 python3
+1054408 556450 ft
+1033160 556609 python3
+940692    899 codex
+467344  20826 claude
+313868 1882597 claude
+280316   8565 claude
+252468 3935761 claude
+--- 2026-09-25T15:44:00+04:00 tick
+ 15:44:00 up 1 day,  6:11,  0 user,  load average: 2.41, 5.90, 6.20
+MemTotal:       34881708 kB
+MemFree:         3861996 kB
+MemAvailable:   16283308 kB
+Cached:         10424912 kB
+Dirty:              1064 kB
+Shmem:             92436 kB
+14826 MiB, 2880 MHz, 94 %, 63
+top CPU:
+99.5  556608 python3
+ 4.6   20826 claude
+ 4.0     899 codex
+ 1.9  556450 ft
+ 1.7 1882597 claude
+ 1.6  556609 python3
+ 1.1 2828859 claude
+top RSS (KiB):
+12431852 556608 python3
+1054408 556450 ft
+1033160 556609 python3
+938784    899 codex
+468164  20826 claude
+311684 1882597 claude
+276920   8565 claude
+253560 3935592 claude
+--- 2026-09-25T15:45:02+04:00 tick
+ 15:45:02 up 1 day,  6:12,  0 user,  load average: 1.71, 5.05, 5.88
+MemTotal:       34881708 kB
+MemFree:         3860952 kB
+MemAvailable:   16292724 kB
+Cached:         10433760 kB
+Dirty:               352 kB
+Shmem:             92436 kB
+14826 MiB, 2880 MHz, 94 %, 61
+top CPU:
+99.6  556608 python3
+ 4.6   20826 claude
+ 4.0     899 codex
+ 2.5 1413249 ssh
+ 1.9  556450 ft
+ 1.7 1882597 claude
+ 1.6  556609 python3
+top RSS (KiB):
+12431852 556608 python3
+1054408 556450 ft
+1033160 556609 python3
+933944    899 codex
+468392  20826 claude
+314004 1882597 claude
+278840   8565 claude
+255260 3935592 claude
+--- 2026-09-25T15:46:04+04:00 tick
+ 15:46:04 up 1 day,  6:13,  0 user,  load average: 1.85, 4.47, 5.63
+MemTotal:       34881708 kB
+MemFree:         3846588 kB
+MemAvailable:   16289536 kB
+Cached:         10443944 kB
+Dirty:               520 kB
+Shmem:             92432 kB
+14806 MiB, 2880 MHz, 94 %, 62
+top CPU:
+99.8  556608 python3
+ 4.6   20826 claude
+ 4.0     899 codex
+ 1.9  556450 ft
+ 1.7 1882597 claude
+ 1.6  556609 python3
+ 1.6 1416488 ssh
+top RSS (KiB):
+12432492 556608 python3
+1054408 556450 ft
+1033160 556609 python3
+937076    899 codex
+463808  20826 claude
+313844 1882597 claude
+279708   8565 claude
+254160 3935592 claude
+--- 2026-09-25T15:47:07+04:00 tick
+ 15:47:07 up 1 day,  6:14,  0 user,  load average: 1.72, 3.98, 5.39
+MemTotal:       34881708 kB
+MemFree:         3848400 kB
+MemAvailable:   16293152 kB
+Cached:         10445332 kB
+Dirty:              1336 kB
+Shmem:             92432 kB
+14806 MiB, 2880 MHz, 94 %, 63
+top CPU:
+99.9  556608 python3
+ 4.6   20826 claude
+ 4.0     899 codex
+ 1.9  556450 ft
+ 1.7 1882597 claude
+ 1.7  556609 python3
+ 1.1 2828859 claude
+top RSS (KiB):
+12433132 556608 python3
+1054408 556450 ft
+1033160 556609 python3
+935844    899 codex
+465656  20826 claude
+310924 1882597 claude
+280392   8565 claude
+254008 3935592 claude
+--- 2026-09-25T15:48:08+04:00 tick
+ 15:48:08 up 1 day,  6:16,  0 user,  load average: 2.12, 3.63, 5.17
+MemTotal:       34881708 kB
+MemFree:          618140 kB
+MemAvailable:   13234116 kB
+Cached:         10624308 kB
+Dirty:            168956 kB
+Shmem:             92436 kB
+14806 MiB, 2880 MHz, 92 %, 64
+top CPU:
+ 156 1421772 rustc
+ 100  556608 python3
+ 4.6   20826 claude
+ 4.0     899 codex
+ 1.9  556450 ft
+ 1.7 1882597 claude
+ 1.7  556609 python3
+top RSS (KiB):
+12433900 556608 python3
+3172508 1421772 rustc
+1054408 556450 ft
+1033160 556609 python3
+934980    899 codex
+465816  20826 claude
+312320 1882597 claude
+280796   8565 claude
+--- 2026-09-25T15:49:11+04:00 tick
+ 15:49:11 up 1 day,  6:17,  0 user,  load average: 4.52, 3.90, 5.16
+MemTotal:       34881708 kB
+MemFree:         3597684 kB
+MemAvailable:   16191192 kB
+Cached:         10621732 kB
+Dirty:            161768 kB
+Shmem:             92448 kB
+14806 MiB, 2887 MHz, 93 %, 64
+top CPU:
+ 778 1427775 piro_agentd-524
+ 100  556608 python3
+ 4.6   20826 claude
+ 4.0     899 codex
+ 2.0  556450 ft
+ 1.7  556609 python3
+ 1.7 1882597 claude
+top RSS (KiB):
+12433772 556608 python3
+1054152 556450 ft
+1032904 556609 python3
+922872    899 codex
+466744  20826 claude
+307684 1882597 claude
+277364   8565 claude
+266836 3935761 claude
+--- 2026-09-25T15:50:13+04:00 tick
+ 15:50:13 up 1 day,  6:18,  0 user,  load average: 6.72, 4.76, 5.39
+MemTotal:       34881708 kB
+MemFree:         3421696 kB
+MemAvailable:   16183284 kB
+Cached:         10753384 kB
+Dirty:              6528 kB
+Shmem:             92436 kB
+14826 MiB, 2880 MHz, 93 %, 63
+top CPU:
+ 388 1439156 piro_operator_j
+ 100  556608 python3
+ 4.6   20826 claude
+ 4.0     899 codex
+ 2.0  556450 ft
+ 1.8 1439917 ssh
+ 1.8  556609 python3
+top RSS (KiB):
+12435488 556608 python3
+1054152 556450 ft
+1032904 556609 python3
+921792    899 codex
+467452  20826 claude
+309816 1882597 claude
+279064   8565 claude
+260092 3935761 claude
+--- 2026-09-25T15:51:15+04:00 tick
+ 15:51:15 up 1 day,  6:19,  0 user,  load average: 10.90, 6.17, 5.82
+MemTotal:       34881708 kB
+MemFree:         3280216 kB
+MemAvailable:   16112984 kB
+Cached:         10811924 kB
+Dirty:              1928 kB
+Shmem:             92436 kB
+14826 MiB, 2887 MHz, 93 %, 61
+top CPU:
+1317 1442165 piro_relayd-f71
+ 100  556608 python3
+ 100 1444258 python3
+ 4.6   20826 claude
+ 4.0     899 codex
+ 2.0  556450 ft
+ 1.8  556609 python3
+top RSS (KiB):
+12435488 556608 python3
+1054152 556450 ft
+1032904 556609 python3
+923508    899 codex
+469144  20826 claude
+309824 1882597 claude
+279236   8565 claude
+254432 2828859 claude
+--- 2026-09-25T15:52:17+04:00 tick
+ 15:52:17 up 1 day,  6:20,  0 user,  load average: 6.03, 5.71, 5.69
+MemTotal:       34881708 kB
+MemFree:         1991616 kB
+MemAvailable:   15053972 kB
+Cached:         11038652 kB
+Dirty:             34404 kB
+Shmem:             92436 kB
+14806 MiB, 2880 MHz, 92 %, 62
+top CPU:
+ 120 1449172 rustc
+ 100  556608 python3
+ 4.6   20826 claude
+ 4.0     899 codex
+ 2.0  556450 ft
+ 1.8  556609 python3
+ 1.7 1882597 claude
+top RSS (KiB):
+12435744 556608 python3
+1459756 1449172 rustc
+1054152 556450 ft
+1032904 556609 python3
+930928    899 codex
+462124  20826 claude
+311320 1882597 claude
+279884   8565 claude
+--- 2026-09-25T15:53:19+04:00 tick
+ 15:53:19 up 1 day,  6:21,  0 user,  load average: 3.71, 5.09, 5.48
+MemTotal:       34881708 kB
+MemFree:         2530712 kB
+MemAvailable:   16313068 kB
+Cached:         11821144 kB
+Dirty:              3576 kB
+Shmem:             92548 kB
+14806 MiB, 2880 MHz, 94 %, 63
+top CPU:
+ 100  556608 python3
+ 4.6   20826 claude
+ 4.0     899 codex
+ 2.1  556450 ft
+ 1.8  556609 python3
+ 1.7 1882597 claude
+ 1.1 2828859 claude
+top RSS (KiB):
+12395424 556608 python3
+1040072 556450 ft
+1018568 556609 python3
+909172    899 codex
+464800  20826 claude
+310776 1882597 claude
+276500   8565 claude
+258480 3935761 claude
+--- 2026-09-25T15:54:21+04:00 tick
+ 15:54:21 up 1 day,  6:22,  0 user,  load average: 3.00, 4.62, 5.29
+MemTotal:       34881708 kB
+MemFree:         2577256 kB
+MemAvailable:   15756104 kB
+Cached:         11215452 kB
+Dirty:              1024 kB
+Shmem:             92428 kB
+14806 MiB, 2887 MHz, 93 %, 64
+top CPU:
+ 100  556608 python3
+88.5 1457510 rustc
+ 4.6   20826 claude
+ 4.0     899 codex
+ 2.1  556450 ft
+ 2.1 1457184 cargo
+ 1.9  556609 python3
+top RSS (KiB):
+12396320 556608 python3
+1040072 556450 ft
+1018568 556609 python3
+910052    899 codex
+679016 1457510 rustc
+466120  20826 claude
+304760 1882597 claude
+278144   8565 claude
+--- 2026-09-25T15:55:22+04:00 tick
+ 15:55:22 up 1 day,  6:23,  0 user,  load average: 3.00, 4.31, 5.14
+MemTotal:       34881708 kB
+MemFree:          743816 kB
+MemAvailable:   14154484 kB
+Cached:         11652320 kB
+Dirty:             41556 kB
+Shmem:             92428 kB
+14806 MiB, 2880 MHz, 93 %, 64
+top CPU:
+ 100  556608 python3
+99.8 1461065 rustc
+98.7 1461044 rustc
+66.6 1461648 python3
+ 4.6   20826 claude
+ 4.0     899 codex
+ 2.1  556450 ft
+top RSS (KiB):
+12347680 556608 python3
+1288956 1461044 rustc
+1213856 1461065 rustc
+998344 556450 ft
+976840 556609 python3
+908504    899 codex
+462980  20826 claude
+309492 1882597 claude
+--- 2026-09-25T15:56:24+04:00 tick
+ 15:56:24 up 1 day,  6:24,  0 user,  load average: 8.52, 5.56, 5.51
+MemTotal:       34881708 kB
+MemFree:         3499288 kB
+MemAvailable:   16319908 kB
+Cached:         11000884 kB
+Dirty:              3652 kB
+Shmem:             92428 kB
+15086 MiB, 2880 MHz, 88 %, 75
+top CPU:
+ 100  556608 python3
+16.0 1470860 command_cli-9f0
+ 4.6   20826 claude
+ 4.0     899 codex
+ 3.8 1471272 piro-agentd
+ 2.1  556450 ft
+ 1.9  556609 python3
+top RSS (KiB):
+12314040 556608 python3
+966216 556450 ft
+944968 556609 python3
+899720    899 codex
+463232  20826 claude
+303692 1882597 claude
+276756   8565 claude
+250264 2828859 claude
+--- 2026-09-25T15:57:26+04:00 end
+ 15:57:26 up 1 day,  6:25,  0 user,  load average: 5.58, 5.32, 5.43
+MemTotal:       34881708 kB
+MemFree:        17192852 kB
+MemAvailable:   30367728 kB
+Cached:         11240576 kB
+Dirty:              2544 kB
+Shmem:              2936 kB
+0 MiB, 270 MHz, 0 %, 47
+top CPU:
+ 579 1478272 recovery_public
+ 4.6   20826 claude
+ 4.0     899 codex
+ 1.7 1882597 claude
+ 1.1 2828859 claude
+ 0.9    8565 claude
+ 0.7  471935 claude
+top RSS (KiB):
+907556    899 codex
+458412  20826 claude
+306396 1882597 claude
+277000   8565 claude
+248064 2828859 claude
+246044 471935 claude
+244856 3935761 claude
+241108 3935592 claude
+/home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/ck4g-local/pcache-end.tsv: 14.57 GiB cached
+RUNDONE 2026-09-25T15:57:41+04:00

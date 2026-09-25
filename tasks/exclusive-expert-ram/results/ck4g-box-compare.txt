@@ -1,0 +1,10 @@
+== ck4g-mirror-1m (31b8efb) vs same-box whole
+  decode_1000k          99.6  (no same-box reference)
+  decode_1000k_p1       88.9  (no same-box reference)
+  decode_8k            172.6  (no same-box reference)
+  decode_8k_p1         179.9  (no same-box reference)
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            12.86  free_evict_rate 0.828
+  ram 12.26 +/- 0.6  ok
+0 point(s) outside the band

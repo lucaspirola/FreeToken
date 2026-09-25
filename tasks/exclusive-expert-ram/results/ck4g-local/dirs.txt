@@ -1,0 +1,1 @@
+/home/lucas/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 /home/lucas/ai/FreeToken/.venv /home/lucas/.cache/flashinfer /home/lucas/.cache/tvm-ffi /home/lucas/.cache/torch /home/lucas/.cache/torch_extensions /home/lucas/.triton /home/lucas/.nv /home/lucas/.cache/freetoken /home/lucas/ai/FreeToken-wt/reorg/python /usr/lib/wsl /usr/local/cuda /dev/shm /tmp/freetoken

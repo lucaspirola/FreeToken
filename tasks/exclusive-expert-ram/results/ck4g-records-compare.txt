@@ -1,0 +1,11 @@
+== ck4g-mirror-1m (31b8efb) vs nemotron-reserve-2e-1m (None)
+  decode_1000k          99.6 vs    72.9  136.6%  ok   total 530.1 s, ttft 528.83 s
+  decode_1000k_p1       88.9 vs    76.9  115.6%  ok   total 530.0 s, ttft 528.57 s
+  decode_8k            172.6 vs   170.7  101.1%  ok   total 1.7 s, ttft 0.98 s
+  decode_8k_p1         179.9 vs   177.0  101.6%  ok   total 0.9 s, ttft 0.23 s
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            12.86 (record 12.26)  free_evict_rate 0.828 (record 0.565)
+  ram 12.26 +/- 0.6  ok
+== ck4g-mirror: not run in this checkpoint (ARMS), no comparison
+0 point(s) outside the band

@@ -183,7 +183,12 @@ cgroup sampler (`cg.tsv` and `../ck4n-local/cgroup-samples.tsv`), same mirror-1m
   reclaimable page cache that MemAvailable counts as available, and it had dropped to 0.96 by
   the end-of-arm record (ck4w 0.90). Which files it caches was not attributed.
 * So ram_gib misses the band, but the gate is explained with evidence: the server itself
-  holds the same RAM as ck4w/ck4n. No re-run was made; the evidence above is from the runs of record.
+  holds the same RAM as ck4w/ck4n.
+* **Re-run on exp/reorg 31b8efb, quiet host (`../ck4g-local/README.md`): ram_gib 12.86, inside
+  12.26 ± 0.6 (at the edge), scheduler RssAnon 11.47 GiB as here; needles 0 differences, 0
+  faults, 0 starved, one capture.** The +1.2 GiB of cgroup file cache is shared libraries
+  (0.72 GiB, libtriton.so alone 0.36) and the CUDA driver's JIT cache ~/.nv/ComputeCache
+  (0.58 GiB). It is reclaimable and does not belong in the metric.
 
 ## Script fixes
 * `compare_records.py`: an arm that did not run in this checkpoint (ARMS) is skipped, not a

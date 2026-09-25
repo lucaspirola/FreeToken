@@ -1,0 +1,106 @@
+code: 31b8efb Merge exp/reorg-round2 into exp/reorg: round 2 (wb-schedule, prefix reuse, flashinfer extend) with the complete GGUF MMQ pad fix
+preflight ok: GPU 0 MiB, MemAvailable 28 GiB, no server, no pytest
+checkpoint label: ck4g
+code: 31b8efb Merge exp/reorg-round2 into exp/reorg: round 2 (wb-schedule, prefix reuse, flashinfer extend) with the complete GGUF MMQ pad fix
+preflight ok: GPU 0 MiB, MemAvailable 28 GiB, no server, no pytest
+=== arm ck4g-mirror-1m ===
+[ck4g-mirror-1m] starting: model=NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 rows=-1 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/reorg@31b8efb venv=/home/lucas/ai/FreeToken/.venv launcher=systemd
+Running as unit: ft-measure-ck4g-mirror-1m.service; invocation ID: c8d2af443dcf410b82f48e6f5d8f6b3e
+[ck4g-mirror-1m] ready after 79s
+Sep 25 15:11:42 TESSERACT serve-default.sh[556608]: [2026-09-25|15:11:42|core|rank=0] INFO     Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode graphs enabled, prefill overlap on (layers assembled from resident slots + pool rows, no disk)
+Sep 25 15:11:42 TESSERACT serve-default.sh[556608]: [2026-09-25|15:11:42|core|rank=0] INFO     Mirror pool: reserve resolved to 256 rows (FREETOKEN_MIRROR_RESERVE_ROWS='256')
+Sep 25 15:12:08 TESSERACT serve-default.sh[556608]: [2026-09-25|15:12:08|core|rank=0] INFO     Mirror pool: 1850 rows pinned (9.69 GiB), 755 cover the complement of 2189 GPU residents, 256 reserved, up to 839 duplicates (a duplicate makes its expert's next eviction free of any host traffic)
+Sep 25 15:12:08 TESSERACT serve-default.sh[556608]: [2026-09-25|15:12:08|core|rank=0] INFO     Mirror pool: the coverage floor is 1352 of 2189 arena slots, leaving 837 slots (4.38 GiB) the growable KV may still take
+Sep 25 15:12:08 TESSERACT serve-default.sh[556608]: [2026-09-25|15:12:08|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+Sep 25 15:12:46 TESSERACT serve-default.sh[556608]: [2026-09-25|15:12:46|core|rank=0] INFO     Prefill headroom: transient 0.59 GiB measured on a 8192-token chunk (empty prefix 0.59 GiB, after a 8192-token prefix 0.59 GiB, allocator peak 0.59 GiB); headroom 0.59 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 1352 -> 2024 of 2189 slots, 0.74 GiB free (target 0.71 GiB), 165 slots below the ratio plan
+Sep 25 15:12:46 TESSERACT serve-default.sh[556608]: [2026-09-25|15:12:46|core|rank=0] INFO     Startup geometry: memory ratio 1.00, runtime reserve 0.00 GiB; expert arena 2024 slots; KV 65536 tokens mapped of 1048576 (0.23 GiB); 0.74 GiB free
+[ck4g-mirror-1m] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8014, "ttft_s": 0.23, "prefill_tok_s": 34688.0, "gen_tokens": 127, "decode_tok_s": 179.9, "decode_tok_s_wall": 179.9, "total_s": 0.9, "ttft_mono_s": 0.231, "prefill_tok_s_mono": 34688.0, "total_mono_s": 0.93, "t_start_wall": 1790334796.04, "gap1_ms": 18.7, "max_gap_ms": 18.7, "median_gap_ms": 5.3, "decode_tok_s_after_gap1": 183.4}
+{"target": 1000000, "pass": 1, "prompt_tokens": 1000030, "ttft_s": 528.57, "prefill_tok_s": 1892.0, "gen_tokens": 127, "decode_tok_s": 88.9, "decode_tok_s_wall": 88.9, "total_s": 530.0, "ttft_mono_s": 508.323, "prefill_tok_s_mono": 1967.0, "total_mono_s": 509.74, "t_start_wall": 1790334796.983, "gap1_ms": 38.2, "max_gap_ms": 38.2, "median_gap_ms": 10.8, "decode_tok_s_after_gap1": 90.7}
+{"target": 8000, "pass": 2, "prompt_tokens": 8016, "ttft_s": 0.98, "prefill_tok_s": 8153.0, "gen_tokens": 127, "decode_tok_s": 172.6, "decode_tok_s_wall": 172.6, "total_s": 1.7, "ttft_mono_s": 0.983, "prefill_tok_s_mono": 8153.0, "total_mono_s": 1.71, "t_start_wall": 1790335326.972, "gap1_ms": 27.2, "max_gap_ms": 27.2, "median_gap_ms": 5.4, "decode_tok_s_after_gap1": 177.8}
+{"target": 1000000, "pass": 2, "prompt_tokens": 1000032, "ttft_s": 528.83, "prefill_tok_s": 1891.0, "gen_tokens": 127, "decode_tok_s": 99.6, "decode_tok_s_wall": 99.6, "total_s": 530.1, "ttft_mono_s": 507.449, "prefill_tok_s_mono": 1971.0, "total_mono_s": 508.71, "t_start_wall": 1790335328.697, "gap1_ms": 35.8, "max_gap_ms": 35.8, "median_gap_ms": 9.5, "decode_tok_s_after_gap1": 101.7}
+[ck4g-mirror-1m] post: NEEDLES_THINK_MAX_TOKENS=65536 NEEDLES_OUT="/home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/ck4g-mirror-1m-needles.json" python3 /home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/needles.py 21000 120000; python3 /home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/recall.py 21000 120000 240000
+[21000 -> 19927 tok] 5/7  codes=ok multihop=TRUNC counting=FAIL ordering=ok contradiction=ok arithmetic=ok negative=ok
+[120000 -> 112298 tok] 3/7  codes=ok multihop=TRUNC counting=FAIL ordering=TRUNC contradiction=ok arithmetic=TRUNC negative=ok
+wrote /home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/ck4g-mirror-1m-needles.json
+{"target": 21000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 19757, "completion_tokens": 27, "seconds": 2.2, "planted": ["ZULU-2188", "ROMEO-6864", "KILO-3647"], "recalled": ["ZULU-2188", "ROMEO-6864", "KILO-3647"], "all_three": true, "answer": "ZULU-2188, ROMEO-6864, KILO-3647"}
+{"target": 120000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 112048, "completion_tokens": 27, "seconds": 15.1, "planted": ["ROMEO-1813", "TANGO-6789", "ZULU-5364"], "recalled": ["ROMEO-1813", "TANGO-6789", "ZULU-5364"], "all_three": true, "answer": "ROMEO-1813, TANGO-6789, ZULU-5364"}
+{"target": 240000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 224417, "completion_tokens": 27, "seconds": 41.3, "planted": ["SIERRA-6523", "SIERRA-1067", "ROMEO-9011"], "recalled": ["SIERRA-6523", "SIERRA-1067", "ROMEO-9011"], "all_three": true, "answer": "SIERRA-6523, SIERRA-1067, ROMEO-9011"}
+{
+  "arm": "ck4g-mirror-1m",
+  "model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+  "rows": "-1",
+  "commit": "31b8efb",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 12.86,
+  "rss_ready_gib": 13.7,
+  "devzero_gib": 0.09,
+  "ram_after_80k_gib": 13.24,
+  "rss_gib": 13.63,
+  "locked_gib": 0.0,
+  "anon_gib": 13.29,
+  "file_gib": 0.44,
+  "unevict_gib": 0.0,
+  "shmem_gib": 0.09,
+  "current_gib": 13.77,
+  "peak_current_gib": 15.07,
+  "gpu_mib": "14486",
+  "decode_8k_p1": 179.9,
+  "ttft_8k_p1": 0.23,
+  "total_8k_p1": 0.9,
+  "ttft_mono_8k_p1": 0.23,
+  "decode_1000k_p1": 88.9,
+  "ttft_1000k_p1": 528.57,
+  "total_1000k_p1": 530.0,
+  "ttft_mono_1000k_p1": 508.32,
+  "decode_8k": 172.6,
+  "ttft_8k": 0.98,
+  "total_8k": 1.7,
+  "ttft_mono_8k": 0.98,
+  "decode_1000k": 99.6,
+  "ttft_1000k": 528.83,
+  "total_1000k": 530.1,
+  "ttft_mono_1000k": 507.45,
+  "coverage_faults": 0,
+  "starved": 0,
+  "swaps": 64897,
+  "retained_rows": 53160,
+  "free_evict_rate": 0.828,
+  "buffer_free_evictions": 5311
+}
+71 arms -> /home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/sweep.tsv
+[ck4g-mirror-1m] stopping
+ck4g-mirror-1m R3: PASS
+ck4g-mirror-1m R6(arm): PASS
+Traceback (most recent call last):
+  File "/home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/compare_needles.py", line 24, in <module>
+    a, b = needles(REF), needles(ARM)
+           ^^^^^^^^^^^^
+  File "/home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/compare_needles.py", line 13, in needles
+    d = json.load(open(os.path.join(D, f"{arm}-needles.json")))
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/home/lucas/ai/FreeToken-wt/reorg/tasks/exclusive-expert-ram/results/ck4g-whole-needles.json'
+== ck4g-mirror-1m (31b8efb) vs same-box whole
+  decode_1000k          99.6  (no same-box reference)
+  decode_1000k_p1       88.9  (no same-box reference)
+  decode_8k            172.6  (no same-box reference)
+  decode_8k_p1         179.9  (no same-box reference)
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            12.86  free_evict_rate 0.828
+  ram 12.26 +/- 0.6  ok
+0 point(s) outside the band
+== ck4g-mirror-1m (31b8efb) vs nemotron-reserve-2e-1m (None)
+  decode_1000k          99.6 vs    72.9  136.6%  ok   total 530.1 s, ttft 528.83 s
+  decode_1000k_p1       88.9 vs    76.9  115.6%  ok   total 530.0 s, ttft 528.57 s
+  decode_8k            172.6 vs   170.7  101.1%  ok   total 1.7 s, ttft 0.98 s
+  decode_8k_p1         179.9 vs   177.0  101.6%  ok   total 0.9 s, ttft 0.23 s
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            12.86 (record 12.26)  free_evict_rate 0.828 (record 0.565)
+  ram 12.26 +/- 0.6  ok
+== ck4g-mirror: not run in this checkpoint (ARMS), no comparison
+0 point(s) outside the band
+checkpoint ck4g arms done. The embedder stays stopped.
