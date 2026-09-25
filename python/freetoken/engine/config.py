@@ -142,7 +142,16 @@ class EngineConfig:
     cuda_graph_bs: List[int] | None = None
     cuda_graph_max_bs: int | None = None
     page_size: int = 1
-    memory_ratio: float = 0.9
+    # Fraction of the pre-load free VRAM the engine may plan for. 1.00 is the default and
+    # is meant to be left alone: the runtime headroom is not "whatever the ratio leaves"
+    # but runtime_reserve_bytes below (fixed-size KV) or the measured prefill transient
+    # the growable arena is filled back around. A lower value is an explicit override,
+    # e.g. to leave VRAM to another process that starts later.
+    memory_ratio: float = 1.0
+    # Set by the engine at startup from memory_prediction (not a flag): the bytes a
+    # fixed-size start keeps out of the cache budget for one prefill chunk's transient,
+    # the CUDA-graph pools and a margin. 0 with growable KV.
+    runtime_reserve_bytes: int = 0
     # Hybrid GDN models default to the HybridRadixCache (cross-request GDN-state prefix reuse);
     # `--cache-type naive` opts out. linear_state_cache_ratio sizes the GDN snapshot cache as
     # ceil(ratio * max_running_req) extra slots.

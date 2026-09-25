@@ -413,7 +413,10 @@ class DSV4PagedKVCache(BaseKVCachePool):
             kv_sizes = self.sizes
         # The rebuilds are free-before-alloc, so the whole budget is available (no fixed
         # cache term); an unfit request must still reject BEFORE the teardown.
-        budget = net_cache_budget_bytes(config.memory_ratio, baseline_free, weights_bytes, 0)
+        budget = net_cache_budget_bytes(
+            config.memory_ratio, baseline_free, weights_bytes, 0,
+            getattr(config, "runtime_reserve_bytes", 0),
+        )
         moe_bytes = (
             target_moe_bytes
             if target_moe_bytes is not None

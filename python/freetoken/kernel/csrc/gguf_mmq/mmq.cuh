@@ -357,16 +357,6 @@ static constexpr __device__ int ggml_cuda_mmq_get_sram_stride(ggml_type type, in
     return ggml_cuda_mmq_get_sram_stride(ggml_cuda_mmq_get_sram_layout(type, J, fallback));
 }
 
-static __host__ int ggml_cuda_mmq_get_J_max(const ggml_type type, const bool fallback, const int cc, const int64_t ne11) {
-    int ret = std::min(ne11, int64_t(512));
-    ret -= ret % 8;
-    for (;ret > 0; ret -= 8) {
-        if (ggml_cuda_mmq_get_config(type, ret, fallback, cc).type != GGML_TYPE_COUNT) {
-            return ret;
-        }
-    }
-    return ret;
-}
 
 static constexpr __device__ int ggml_cuda_mmq_get_rows_per_warp(ggml_type type, int J, bool fallback) {
     return ggml_cuda_mmq_get_config(type, J, fallback).rows_per_warp();
@@ -1466,12 +1456,16 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
          ntx_fd);
 }
 
-template <ggml_type type, bool fallback>
-void mul_mat_q_switch_J(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
-    const int    id    = ggml_cuda_get_device();
-    const int    cc    = ggml_cuda_info().devices[id].cc;
-    const size_t smpbo = ggml_cuda_info().devices[id].smpbo;
-
+// The column tile J that mul_mat_q_switch_J launches for ``ncols_max`` columns (fewest tiles, the
+// smallest J among equals). The y-tile loads read J whole columns of every K group from each
+// tile's first column without a bound, rounded up to a multiple of the block's thread count, so
+// the last tile reads past the quantized activations: the caller pads y by that extent
+// (mmq_y_pad_blocks in mmq_ext.cu). (The padding used
+// to come from a J_max rounded DOWN from ne11 -- 0 for ne11 < 8, and the MoE entry passed ne11 = 1
+// -- so a 7-token call read 144 B past its buffer: the illegal address of the round-2 suite at
+// tests/kernels/test_gguf_mma.py::test_mma_matches_reference[7-12].)
+static __host__ int ggml_cuda_mmq_select_J(const ggml_type type, const bool fallback, const int cc,
+                                           const size_t smpbo, const int64_t ncols_max) {
     int J_best        = 0;
     int ntiles_J_best = INT_MAX;
 
@@ -1485,13 +1479,23 @@ void mul_mat_q_switch_J(ggml_backend_cuda_context & ctx, const mmq_args & args, 
             continue;
         }
 
-        const int ntiles_x = (args.ncols_max + config.J - 1) / config.J;
+        const int ntiles_x = (ncols_max + config.J - 1) / config.J;
 
         if (ntiles_x < ntiles_J_best) {
             J_best = J;
             ntiles_J_best = ntiles_x;
         }
     }
+    return J_best;
+}
+
+template <ggml_type type, bool fallback>
+void mul_mat_q_switch_J(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
+    const int    id    = ggml_cuda_get_device();
+    const int    cc    = ggml_cuda_info().devices[id].cc;
+    const size_t smpbo = ggml_cuda_info().devices[id].smpbo;
+
+    const int J_best = ggml_cuda_mmq_select_J(type, fallback, cc, smpbo, args.ncols_max);
 
     switch (J_best) {
         case   8:

@@ -1,0 +1,30 @@
+===== /tmp/claude-1000/-home-lucas-ai-FreeToken/606da56c-cd31-49f4-adb4-b4ab53d18508/scratchpad/nsys-dec/whole-base.sqlite: 166 graph launches, in-graph kernel time 9357.0 us/step
+   _decode_grouped_stage1_kernel                                   6.0/step   3769.1 us/step
+   fast_index_copy_multi                                          22.9/step   1607.4 us/step
+   _decode_nvfp4_marlin_kernel                                    45.9/step   1151.6 us/step
+   _gemv_splitk_kernel                                            45.9/step   1027.9 us/step
+   _nvfp4_gemv_splitk_kernel                                      45.9/step    379.6 us/step
+   kernel                                                         34.9/step    377.5 us/step
+   _nvfp4_gemv_kernel                                              1.0/step    216.6 us/step
+   _selective_state_update_kernel                                 22.9/step    116.8 us/step
+   unrolled_elementwise_kernel                                    69.8/step    113.7 us/step
+   vectorized_elementwise_kernel                                 166.5/step    110.9 us/step
+   gatherTopK                                                     22.9/step     86.7 us/step
+   _ensure_experts_sized_kernel_v2                                22.9/step     84.0 us/step
+   kernel_cutlass_kernel_flashinfernormkernelsrmsnormRMSNormKer   52.8/step     69.7 us/step
+   causal_conv1d_update_kernel                                    22.9/step     45.6 us/step
+===== /tmp/claude-1000/-home-lucas-ai-FreeToken/606da56c-cd31-49f4-adb4-b4ab53d18508/scratchpad/nsys-dec/whole-r2.sqlite: 169 graph launches, in-graph kernel time 9644.3 us/step
+   _decode_grouped_stage1_kernel                                   6.0/step   3847.2 us/step
+   fast_index_copy_multi                                          22.9/step   1737.4 us/step
+   _decode_nvfp4_marlin_kernel                                    45.8/step   1172.3 us/step
+   _gemv_splitk_kernel                                            45.8/step   1048.2 us/step
+   _nvfp4_gemv_splitk_kernel                                      45.8/step    386.6 us/step
+   kernel                                                         34.8/step    385.4 us/step
+   _nvfp4_gemv_kernel                                              1.0/step    221.7 us/step
+   _selective_state_update_kernel                                 22.9/step    119.0 us/step
+   unrolled_elementwise_kernel                                    69.6/step    116.0 us/step
+   vectorized_elementwise_kernel                                 166.1/step    113.2 us/step
+   gatherTopK                                                     22.9/step     88.5 us/step
+   _ensure_experts_sized_kernel_v2                                22.9/step     87.1 us/step
+   kernel_cutlass_kernel_flashinfernormkernelsrmsnormRMSNormKer   52.7/step     70.9 us/step
+   causal_conv1d_update_kernel                                    22.9/step     46.6 us/step

@@ -90,6 +90,9 @@ class UserMsg(BaseBackendMsg):
     no_prefix_cache: bool = False
     # Resolved client session id for the prefix auto-pin only (see Req.pin_key).
     pin_key: str | None = None
+    # Token length of the prompt's leading system+tools segment when it is a strict token
+    # prefix of the prompt (TokenizeManager.segment_boundary); None otherwise.
+    prefix_boundary: int | None = None
 
 
 @dataclass

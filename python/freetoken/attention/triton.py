@@ -75,6 +75,9 @@ class TritonMetadata(BaseAttnMetadata):
     attn_lse: torch.Tensor | None = None
     num_kv_splits: torch.Tensor | None = None
     swa_indices: torch.Tensor | None = None
+    # Per-sequence (query, prefix, KV) lengths as host ints, for extend kernels
+    # that plan on the host (flashinfer); None for decode and graph replay.
+    host_lens: tuple[list[int], list[int], list[int]] | None = None
 
     def get_last_indices(self, bs: int) -> torch.Tensor:
         return self.cu_seqlens_q_gpu[1 : 1 + bs] - 1
@@ -283,6 +286,7 @@ class TritonAttentionBackend(BaseAttnBackend):
                 k_scale=k_scale,
                 v_scale=v_scale,
                 block_ends=block_ends,
+                host_lens=metadata.host_lens,
             )
         if block_ends is not None:
             raise NotImplementedError("bidirectional multimodal blocks need the extend kernel path")
@@ -352,6 +356,7 @@ class TritonAttentionBackend(BaseAttnBackend):
             prefix_lens=prefix_lens,
             max_q_len=max(seqlens_q),
             swa_indices=swa_indices,
+            host_lens=None if is_decode else (seqlens_q, cached_lens, seqlens_k),
         )
 
     def init_capture_graph(self, max_seq_len: int, bs_list: List[int]) -> None:

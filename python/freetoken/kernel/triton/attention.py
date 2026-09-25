@@ -13,12 +13,18 @@ _MIN_BLOCK_KV = 32
 
 # Grid-filling decode fallback. Stage 1 launches ``batch * head_blocks * kv_splits``
 # CTAs and ``head_blocks`` is fixed by the head geometry, so ``kv_splits`` is the only
-# term that scales the decode grid with the GPU. One CTA per SM at batch one is what the
-# 2026-09-04 RTX 5080 sweep measured (benchmarks/bench_decode_launch.py): for 32Q/2KV/D128
-# at 131K-1M, 64 splits (128 CTAs on 84 SMs) beat both 32 and 128 at every length.
+# term that scales the decode grid with the GPU. The 2026-09-04 RTX 5080 sweep compared
+# powers of two only (64 splits = 128 CTAs on 84 SMs beat 32 and 128). The 2026-09-24
+# box sweep (tasks/splitkv-decode) added SM multiples: exactly two CTAs per SM -- 84
+# splits for 32Q/2KV/D128 on 84 SMs, 168 CTAs -- is 9-12% faster than 64 at 80K-1M
+# (1M: 0.797 -> 0.703 ms per layer, 716 -> 812 GB/s) and ties at 8K; 168 and 256
+# splits lose. A power-of-two count leaves 1.5 CTAs per SM, so half the SMs finish a
+# second CTA while the other half idle.
 # ``_MAX_AUTO_KV_SPLITS`` caps the stage-2 reduction and the fp32 scratch.
-_DECODE_CTAS_PER_SM = 1
+_DECODE_CTAS_PER_SM = 2
 _MAX_AUTO_KV_SPLITS = 128
+# Stage 2 merges this many split partials per vector step (was one split per step).
+_STAGE2_SPLIT_CHUNK = 32
 
 # The cache-native Q8 score path is independently switchable so its numerical and
 # performance gates can be compared against the dequantize-to-BF16 implementation.
@@ -69,8 +75,7 @@ def _grid_filling_splits(*, num_q_heads: int, num_kv_heads: int, sm_count: int) 
     and only the stage-2 reduction (``splits`` fp32 rows per head) grows.
     """
     head_blocks = _decode_head_blocks(num_q_heads, num_kv_heads)
-    target = -(-(sm_count * _DECODE_CTAS_PER_SM) // head_blocks)
-    splits = 1 << max(0, (target - 1).bit_length())
+    splits = -(-(sm_count * _DECODE_CTAS_PER_SM) // head_blocks)
     return max(_MAX_KV_SPLITS, min(splits, _MAX_AUTO_KV_SPLITS))
 
 
@@ -1036,6 +1041,7 @@ def _decode_stage2_kernel(
     SLIDING_WINDOW: tl.constexpr,
     HAS_SINKS: tl.constexpr,
     KV_SPLITS: tl.constexpr,
+    SPLIT_CHUNK: tl.constexpr,
 ):
     batch_id = tl.program_id(0)
     q_head = tl.program_id(1)
@@ -1065,23 +1071,31 @@ def _decode_stage2_kernel(
     mid_base = batch_id * stride_mid_ob + q_head * stride_mid_oh + offs_d
     lse_base = batch_id * stride_lse_b + q_head * stride_lse_h
 
-    for split_id in tl.range(0, MAX_KV_SPLITS, num_stages=2):
-        split_start = kv_len_per_split * split_id
-        split_end = tl.minimum(split_start + kv_len_per_split, effective_len)
-
-        if split_end > split_start:
-            partial = tl.load(
-                mid_o_ptr + mid_base + split_id * stride_mid_os,
-                mask=mask_d,
-                other=0.0,
-            )
-            partial_lse = tl.load(mid_lse_ptr + lse_base + split_id * stride_lse_s)
-            m_new = tl.maximum(partial_lse, m_i)
-            alpha = tl.exp(m_i - m_new)
-            beta = tl.exp(partial_lse - m_new)
-            acc = acc * alpha + partial * beta
-            l_i = l_i * alpha + beta
-            m_i = m_new
+    # SPLIT_CHUNK partials per step, not one: the one-split loop was a chain of
+    # MAX_KV_SPLITS dependent loads (~11 us per layer at 64 splits on an RTX 5080,
+    # twice stage 1 at 8K). Within a chunk the partials are combined against the
+    # chunk's max; a split exists iff its first token is inside the context.
+    for chunk in tl.static_range(0, MAX_KV_SPLITS, SPLIT_CHUNK):
+        split_ids = chunk + tl.arange(0, SPLIT_CHUNK)
+        valid = (split_ids < MAX_KV_SPLITS) & (kv_len_per_split * split_ids < effective_len)
+        partial_lse = tl.load(
+            mid_lse_ptr + lse_base + split_ids * stride_lse_s,
+            mask=valid,
+            other=-float("inf"),
+        )
+        partial = tl.load(
+            mid_o_ptr + mid_base[None, :] + split_ids[:, None] * stride_mid_os,
+            mask=valid[:, None] & mask_d[None, :],
+            other=0.0,
+        )
+        m_new = tl.maximum(tl.max(partial_lse, axis=0), m_i)
+        # A chunk past the last split leaves m_new = m_i; before any split (only an
+        # empty context) m_new is -inf, and exp(-inf - -inf) would poison acc.
+        alpha = tl.where(m_new == -float("inf"), 1.0, tl.exp(m_i - m_new))
+        beta = tl.where(valid, tl.exp(partial_lse - m_new), 0.0)
+        acc = acc * alpha + tl.sum(partial * beta[:, None], axis=0)
+        l_i = l_i * alpha + tl.sum(beta, axis=0)
+        m_i = m_new
 
     out = tl.where(l_i == 0.0, 0.0, acc / l_i)
     tl.store(
@@ -1313,6 +1327,7 @@ def decode_paged_attention(
         SLIDING_WINDOW=sliding_window or 0,
         HAS_SINKS=sinks is not None,
         KV_SPLITS=launch_splits,
+        SPLIT_CHUNK=min(_STAGE2_SPLIT_CHUNK, triton.next_power_of_2(launch_splits)),
         num_warps=4,
         num_stages=2,
     )
@@ -1689,6 +1704,223 @@ def _extend_attention_split_kernel(
     )
 
 
+@triton.jit
+def _extend_attention_split_gqa_kernel(
+    q_ptr,
+    k_extend_ptr,
+    v_extend_ptr,
+    k_cache_ptr,
+    v_cache_ptr,
+    ks_ptr,
+    vs_ptr,
+    o_ptr,
+    qo_indptr_ptr,
+    kv_indptr_ptr,
+    kv_indices_ptr,
+    prefix_lens_ptr,
+    block_ends_ptr,
+    sm_scale,
+    sinks_ptr,
+    stride_qt,
+    stride_qh,
+    stride_ket,
+    stride_keh,
+    stride_vet,
+    stride_veh,
+    stride_kcs,
+    stride_kch,
+    stride_vcs,
+    stride_vch,
+    stride_kss,
+    stride_ksh,
+    stride_vss,
+    stride_vsh,
+    stride_ot,
+    stride_oh,
+    GROUP: tl.constexpr,
+    D: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_DV: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    SLIDING_WINDOW: tl.constexpr,
+    HAS_SINKS: tl.constexpr,
+    K_FORMAT: tl.constexpr,
+    V_FORMAT: tl.constexpr,
+    QBLOCK: tl.constexpr,
+    SLOT_I64: tl.constexpr,
+    HAS_BLOCKS: tl.constexpr,
+):
+    # GQA-packed: one program per (sequence, KV head, block of BLOCK_M // GROUP
+    # tokens); row r is token r // GROUP of the block, query head
+    # kv_head * GROUP + r % GROUP. Every K/V tile is loaded and dequantized once
+    # for all GROUP query heads that read it, instead of once per head.
+    seq_id = tl.program_id(0)
+    kv_head = tl.program_id(1)
+    block_m_id = tl.program_id(2)
+    BLOCK_T: tl.constexpr = BLOCK_M // GROUP
+
+    q_start = tl.load(qo_indptr_ptr + seq_id)
+    q_len = tl.load(qo_indptr_ptr + seq_id + 1) - q_start
+    kv_start = tl.load(kv_indptr_ptr + seq_id)
+    prefix_len = tl.load(prefix_lens_ptr + seq_id)
+
+    rows = tl.arange(0, BLOCK_M)
+    offs_m = block_m_id * BLOCK_T + rows // GROUP      # token index within the chunk
+    q_head = kv_head * GROUP + rows % GROUP            # per-row query head
+    offs_n = tl.arange(0, BLOCK_N)
+    offs_d = tl.arange(0, BLOCK_D)
+    offs_dv = tl.arange(0, BLOCK_DV)
+    mask_m = offs_m < q_len
+    mask_d = offs_d < D
+    mask_dv = offs_dv < D
+    offs_nb = tl.arange(0, BLOCK_D // QBLOCK)
+    offs_nbv = tl.arange(0, BLOCK_DV // QBLOCK)
+    mask_nb = offs_nb < D // QBLOCK
+    mask_nbv = offs_nbv < D // QBLOCK
+    q_abs_pos = prefix_len + offs_m
+
+    q = tl.load(
+        q_ptr
+        + (q_start + offs_m[:, None]) * stride_qt
+        + q_head[:, None] * stride_qh
+        + offs_d[None, :],
+        mask=mask_m[:, None] & mask_d[None, :],
+        other=0.0,
+    )
+
+    if HAS_SINKS:
+        m_i = tl.load(sinks_ptr + q_head).to(tl.float32)
+        l_i = tl.full((BLOCK_M,), 1.0, dtype=tl.float32)
+    else:
+        m_i = tl.zeros((BLOCK_M,), dtype=tl.float32) - float("inf")
+        l_i = tl.zeros((BLOCK_M,), dtype=tl.float32)
+    acc = tl.zeros((BLOCK_M, BLOCK_DV), dtype=tl.float32)
+
+    for start_n in tl.range(0, prefix_len, BLOCK_N):
+        kv_offsets = start_n + offs_n
+        mask_n = kv_offsets < prefix_len
+        key_pos = kv_offsets
+        final_mask = mask_m[:, None] & mask_n[None, :]
+        if SLIDING_WINDOW > 0:
+            window_mask = (key_pos[None, :] + SLIDING_WINDOW) > q_abs_pos[:, None]
+            final_mask = final_mask & window_mask
+
+        skip_tile = False
+        if SLIDING_WINDOW > 0:
+            skip_tile = tl.max(tl.max(final_mask.to(tl.int32), axis=1), axis=0) == 0
+
+        if not skip_tile:
+            slots = tl.load(kv_indices_ptr + kv_start + kv_offsets, mask=mask_n, other=0)
+            if SLOT_I64:
+                # Pools above 2**31 elements overflow a 32-bit slot*stride offset.
+                slots = slots.to(tl.int64)
+            k = _load_kv(
+                k_cache_ptr,
+                ks_ptr,
+                slots[None, :] * stride_kcs + kv_head * stride_kch,
+                offs_d[:, None],
+                slots[None, :] * stride_kss + kv_head * stride_ksh + offs_nb[:, None],
+                mask_n[None, :] & mask_d[:, None],
+                mask_n[None, :] & mask_nb[:, None],
+                q.dtype,
+                K_FORMAT,
+                QBLOCK,
+                True,
+                False,
+            )
+            scores = tl.dot(q.to(k.dtype), k) * sm_scale
+            scores = tl.where(final_mask, scores, -float("inf"))
+
+            row_max = tl.max(scores, axis=1)
+            row_max_fixed = tl.where(row_max == -float("inf"), -1e20, row_max)
+            m_new = tl.maximum(row_max_fixed, m_i)
+            alpha = tl.exp(m_i - m_new)
+            p = tl.exp(scores - m_new[:, None])
+
+            v = _load_kv(
+                v_cache_ptr,
+                vs_ptr,
+                slots[:, None] * stride_vcs + kv_head * stride_vch,
+                offs_dv[None, :],
+                slots[:, None] * stride_vss + kv_head * stride_vsh + offs_nbv[None, :],
+                mask_n[:, None] & mask_dv[None, :],
+                mask_n[:, None] & mask_nbv[None, :],
+                q.dtype,
+                V_FORMAT,
+                QBLOCK,
+                False,
+                False,
+            )
+            acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v)
+            l_i = l_i * alpha + tl.sum(p, axis=1)
+            m_i = m_new
+
+    current_end = tl.minimum(q_len, (block_m_id + 1) * BLOCK_T)
+    if HAS_BLOCKS:
+        # rows inside a multimodal span also attend forward to the span's later keys: the tile loop must reach them
+        block_end = tl.load(block_ends_ptr + q_start + offs_m, mask=mask_m, other=0) - prefix_len
+        current_end = tl.minimum(q_len, tl.maximum(current_end, tl.max(block_end, axis=0)))
+    else:
+        block_end = tl.zeros((BLOCK_M,), dtype=tl.int32)
+    for start_n in tl.range(0, current_end, BLOCK_N):
+        local_kv_offsets = start_n + offs_n
+        mask_n = local_kv_offsets < current_end
+        local_q_pos = offs_m
+        causal_mask = local_kv_offsets[None, :] <= local_q_pos[:, None]
+        if HAS_BLOCKS:
+            causal_mask = causal_mask | (local_kv_offsets[None, :] < block_end[:, None])
+        if SLIDING_WINDOW > 0:
+            causal_mask = causal_mask & (
+                (local_kv_offsets[None, :] + SLIDING_WINDOW) > local_q_pos[:, None]
+            )
+        final_mask = mask_m[:, None] & mask_n[None, :] & causal_mask
+
+        skip_tile = False
+        if SLIDING_WINDOW > 0:
+            skip_tile = tl.max(tl.max(final_mask.to(tl.int32), axis=1), axis=0) == 0
+
+        if not skip_tile:
+            k = tl.load(
+                k_extend_ptr
+                + (q_start + local_kv_offsets[None, :]) * stride_ket
+                + kv_head * stride_keh
+                + offs_d[:, None],
+                mask=mask_n[None, :] & mask_d[:, None],
+                other=0.0,
+            )
+            scores = tl.dot(q.to(k.dtype), k) * sm_scale
+            scores = tl.where(final_mask, scores, -float("inf"))
+
+            row_max = tl.max(scores, axis=1)
+            row_max_fixed = tl.where(row_max == -float("inf"), -1e20, row_max)
+            m_new = tl.maximum(row_max_fixed, m_i)
+            alpha = tl.exp(m_i - m_new)
+            p = tl.exp(scores - m_new[:, None])
+
+            v = tl.load(
+                v_extend_ptr
+                + (q_start + local_kv_offsets[:, None]) * stride_vet
+                + kv_head * stride_veh
+                + offs_dv[None, :],
+                mask=mask_n[:, None] & mask_dv[None, :],
+                other=0.0,
+            )
+            acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v)
+            l_i = l_i * alpha + tl.sum(p, axis=1)
+            m_i = m_new
+
+    out = tl.where(l_i[:, None] == 0.0, 0.0, acc / l_i[:, None])
+    tl.store(
+        o_ptr
+        + (q_start + offs_m[:, None]) * stride_ot
+        + q_head[:, None] * stride_oh
+        + offs_dv[None, :],
+        out.to(o_ptr.dtype.element_ty),
+        mask=mask_m[:, None] & mask_dv[None, :],
+    )
+
+
 def extend_paged_attention(
     q: torch.Tensor,
     k_cache: torch.Tensor,
@@ -1707,8 +1939,14 @@ def extend_paged_attention(
     k_scale: torch.Tensor | None = None,
     v_scale: torch.Tensor | None = None,
     block_ends: torch.Tensor | None = None,
+    host_lens: tuple[list[int], list[int], list[int]] | None = None,
 ) -> torch.Tensor:
-    """Block-tiled causal prefill/extend attention over paged KV cache; block_ends holds per query token the end of the multimodal span it sits in (0 for none), whose later keys the row also attends."""
+    """Block-tiled causal prefill/extend attention over paged KV cache; block_ends holds per query token the end of the multimodal span it sits in (0 for none), whose later keys the row also attends.
+
+    ``host_lens`` (per-sequence query, prefix and KV lengths as host ints) lets
+    an eligible call run on flashinfer's prefill kernel instead
+    (freetoken/kernel/extend_flashinfer.py, ``FREETOKEN_EXTEND_BACKEND=triton``
+    forces this kernel)."""
 
     assert q.is_cuda and k_cache.is_cuda and v_cache.is_cuda
     assert q.dim() == 3 and k_cache.dim() == 3 and v_cache.dim() == 3
@@ -1730,6 +1968,16 @@ def extend_paged_attention(
 
     if block_ends is not None:
         assert block_ends.is_cuda and block_ends.dtype == torch.int32 and block_ends.numel() == num_q_tokens
+    from freetoken.kernel import extend_flashinfer as _fi_extend
+
+    if _fi_extend.eligible(q, k_format, v_format, sliding_window, sinks, block_ends,
+                           k_extend, host_lens):
+        return _fi_extend.extend_attention(
+            q=q, k_cache=k_cache, v_cache=v_cache, k_scale=k_scale, v_scale=v_scale,
+            k_format=k_format, v_format=v_format, kv_indices=kv_indices,
+            k_extend=k_extend, v_extend=v_extend, sm_scale=sm_scale, out=out,
+            host_lens=host_lens,
+        )
     o = out if out is not None else torch.empty_like(q)
     sinks_arg = sinks if sinks is not None else q
     block_ends_arg = block_ends if block_ends is not None else qo_indptr
@@ -1747,6 +1995,23 @@ def extend_paged_attention(
         v_format=v_format,
     )
     grid = (qo_indptr.numel() - 1, num_q_heads, triton.cdiv(max_q_len, block_m))
+    group = num_q_heads // num_kv_heads
+    split_kernel = _extend_attention_split_kernel
+    if os.getenv("FREETOKEN_EXTEND_GQA", "").strip() == "1" and group > 1 and k_extend is not None:
+        # Rows are (token, query head) pairs of one KV head: BLOCK_M must hold a
+        # whole number of tokens' worth of heads.
+        gm = os.getenv("FREETOKEN_EXTEND_GQA_BLOCK_M", "").strip()
+        block_m = int(gm) if gm else block_m
+        block_m = max(block_m, group, 16)
+        assert block_m % group == 0, (block_m, group)
+        gw = os.getenv("FREETOKEN_EXTEND_GQA_NUM_WARPS", "").strip()
+        num_warps = int(gw) if gw else num_warps
+        gn = os.getenv("FREETOKEN_EXTEND_GQA_BLOCK_N", "").strip()
+        block_n = int(gn) if gn else block_n
+        gs = os.getenv("FREETOKEN_EXTEND_GQA_NUM_STAGES", "").strip()
+        num_stages = int(gs) if gs else num_stages
+        split_kernel = _extend_attention_split_gqa_kernel
+        grid = (qo_indptr.numel() - 1, num_kv_heads, triton.cdiv(max_q_len, block_m // group))
     if k_extend is not None or v_extend is not None:
         assert k_extend is not None and v_extend is not None
         assert k_extend.is_cuda and v_extend.is_cuda
@@ -1754,7 +2019,7 @@ def extend_paged_attention(
         assert k_extend.shape[0] == num_q_tokens and v_extend.shape[0] == num_q_tokens
         assert k_extend.shape[1] == num_kv_heads and v_extend.shape[1] == num_kv_heads
         assert k_extend.shape[-1] == head_dim and v_extend.shape[-1] == head_dim
-        _extend_attention_split_kernel[grid](
+        split_kernel[grid](
             q,
             k_extend,
             v_extend,

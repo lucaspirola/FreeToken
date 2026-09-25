@@ -1,0 +1,30 @@
+===== /home/lucas/ai/FreeToken-wt/reorg-next/tasks/exclusive-expert-ram/results/nsys1m-local/whole.sqlite: 165 graph launches, in-graph kernel time 8904.6 us/step
+   _decode_grouped_stage1_kernel                                   6.0/step   3581.0 us/step
+   fast_index_copy_multi                                          23.0/step   1537.8 us/step
+   _decode_nvfp4_marlin_kernel                                    46.0/step   1095.3 us/step
+   _gemv_splitk_kernel                                            46.0/step    978.0 us/step
+   _nvfp4_gemv_splitk_kernel                                      46.0/step    361.0 us/step
+   kernel                                                         35.0/step    358.8 us/step
+   _nvfp4_gemv_kernel                                              1.0/step    206.7 us/step
+   _selective_state_update_kernel                                 23.0/step    110.8 us/step
+   unrolled_elementwise_kernel                                    70.0/step    108.0 us/step
+   vectorized_elementwise_kernel                                 167.0/step    105.5 us/step
+   gatherTopK                                                     23.0/step     82.4 us/step
+   _ensure_experts_sized_kernel_v2                                23.0/step     79.9 us/step
+   kernel_cutlass_kernel_flashinfernormkernelsrmsnormRMSNormKer   53.0/step     66.2 us/step
+   causal_conv1d_update_kernel                                    23.0/step     43.4 us/step
+===== /home/lucas/ai/FreeToken-wt/reorg-next/tasks/exclusive-expert-ram/results/nsys1m-local/mirror.sqlite: 183 graph launches, in-graph kernel time 9500.3 us/step
+   _decode_grouped_stage1_kernel                                   6.0/step   3581.4 us/step
+   fast_index_copy_kinds                                          46.0/step   2033.7 us/step
+   _decode_nvfp4_marlin_kernel                                    46.0/step   1093.4 us/step
+   _gemv_splitk_kernel                                            46.0/step    979.2 us/step
+   _nvfp4_gemv_splitk_kernel                                      46.0/step    360.5 us/step
+   kernel                                                         35.0/step    358.9 us/step
+   _nvfp4_gemv_kernel                                              1.0/step    204.9 us/step
+   _selective_state_update_kernel                                 23.0/step    109.1 us/step
+   unrolled_elementwise_kernel                                    69.9/step    108.1 us/step
+   vectorized_elementwise_kernel                                 166.8/step    107.0 us/step
+   _ensure_experts_sized_kernel_v2                                23.0/step    103.0 us/step
+   gatherTopK                                                     23.0/step     81.8 us/step
+   kernel_cutlass_kernel_flashinfernormkernelsrmsnormRMSNormKer   53.0/step     65.6 us/step
+   _resolve_swaps_kernel                                          23.0/step     58.3 us/step

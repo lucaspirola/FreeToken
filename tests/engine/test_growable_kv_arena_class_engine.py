@@ -27,6 +27,9 @@ from freetoken.engine.engine import Engine
 from freetoken.engine.growable_kv import GrowableKvController
 from freetoken.moe.residency import WholeModelResidency
 
+# These drive the arena transaction through torch.cuda (memory queries, device tensors).
+needs_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+
 MiB = 1024 * 1024
 GRANULE = 2 * MiB
 # One VMM granule per slot per bank, per class -- so joint_arena_bytes_for_usable
@@ -151,6 +154,7 @@ def test_class_arena_startup_gate_accepts_class_arena_layouts():
     assert getattr(moe, "class_arena_layouts", None) is not None
 
 
+@needs_cuda
 def test_grow_funds_kv_via_set_usable_slots_on_class_arena_never_rebuild():
     class_layouts = _two_class_layout()
     total = sum(c for c, _ in class_layouts)
@@ -179,6 +183,7 @@ def test_grow_funds_kv_via_set_usable_slots_on_class_arena_never_rebuild():
     assert engine.config.moe_cache_size == target
 
 
+@needs_cuda
 def test_grow_rollback_regrows_experts_on_failed_commit_class_arena():
     class_layouts = _two_class_layout()
     total = sum(c for c, _ in class_layouts)
@@ -200,6 +205,7 @@ def test_grow_rollback_regrows_experts_on_failed_commit_class_arena():
     assert getattr(engine, "_growable_transition_failed", False) is False
 
 
+@needs_cuda
 def test_shrink_regrows_experts_via_set_usable_slots_on_class_arena_never_rebuild():
     class_layouts = _two_class_layout()
     total = sum(c for c, _ in class_layouts)
@@ -225,6 +231,7 @@ def test_shrink_regrows_experts_via_set_usable_slots_on_class_arena_never_rebuil
         assert engine.config.moe_cache_size == start
 
 
+@needs_cuda
 def test_shrink_no_regrow_when_released_bytes_are_too_small_class_arena():
     class_layouts = _two_class_layout()
     total = sum(c for c, _ in class_layouts)

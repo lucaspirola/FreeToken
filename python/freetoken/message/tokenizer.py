@@ -9,6 +9,11 @@ from freetoken.hidden_states import HiddenStateSpec
 from .utils import deserialize_type, serialize_type
 
 
+#: Key an adapter sets on a system-role chat message that arrived after the conversation
+#: started; the tokenizer resolves it (TokenizeManager.place_system_messages).
+IN_PLACE_SYSTEM_KEY = "freetoken_in_place"
+
+
 @dataclass
 class BaseTokenizerMsg:
     @staticmethod

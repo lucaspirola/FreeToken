@@ -113,7 +113,7 @@ system unit (`sudo scripts/systemd/install.sh`).** This is the configuration eve
 P1/P2 below are kept for history. Single lane: `--max-running-requests 1
 --linear-state-slots 13`, growable KV `--kv-grow-step-tokens 65536` up to
 `--num-tokens 1048576 --max-seq-len-override 1048576`, `--kv-cache-dtype q8_0`,
-`--memory-ratio 0.91 --max-prefill-length 8192`, session spill 1 GiB RAM / 50 GiB disk,
+`--memory-ratio 1.00 --max-prefill-length 8192`, session spill 1 GiB RAM / 50 GiB disk,
 `FREETOKEN_EXPERT_ARENA=1 FREETOKEN_GROWABLE_OVERLAP=1 FREETOKEN_PIN_BUDGET_GB=17`.
 Why: one session resident on the GPU keeps ~1900 expert slots resident (vs ~1000 with 16
 lanes) and decodes at 150–170 tok/s at any prompt size 8K–256K (vs 16–41 tok/s per lane
@@ -123,12 +123,16 @@ expert cache is a fixed-capacity VMM arena, so KV growth/shrink never rebuilds i
 CUDA graphs are captured once per process; overlap scheduling stays on with growable KV
 (`_drain_inflight` boundaries). `FREETOKEN_PIN_BUDGET_GB` ≥ the 15.41 GiB expert banks puts
 the whole model in RAM (mlock'd; needs `LimitMEMLOCK=infinity`, hence the system unit).
-`--memory-ratio` is per host and tuned at install time by `scripts/tune-memory-ratio.sh`:
-free VRAM is expert slots not used, so it tries 1.00 first and bisects downward (0.005 steps)
-only when a trial fails to start, capture graphs or serve 8K/80K/256K prompts; the result
-goes to `~/.config/freetoken/serve.env` (`FREETOKEN_MEMORY_RATIO`), which the launcher
-sources — its literal 0.91 is only the untuned fallback. On the 5080 (16 GB) 1.00 itself
-passed: 0.00 GiB free after graph capture, 2056 expert slots (vs ~1.3 GiB free / 1985 slots
+`--memory-ratio` is 1.00 by default in the engine and the launcher (since 2026-09-24, owner
+decision) and is an override, not a per-host tuning knob. Free VRAM is expert slots not used,
+and the runtime headroom is not "whatever the ratio leaves". The engine predicts it from the
+config (`engine/memory_prediction.py`: one prefill chunk per layer kind, graph pool,
+linear-state pool, KV floor, non-expert weights), measures the prefill transient at startup,
+and fills the growable arena back so that exactly that is left free. Every start logs the
+prediction beside each measurement and WARNs outside ±25%. `scripts/verify-memory-ratio.sh`
+checks a host once: 1.00 starts and serves 8K/80K/256K (the old bisecting
+`tune-memory-ratio.sh` is retired). On the 5080 (16 GB) 1.00
+passed from the start: 0.00 GiB free after graph capture, 2056 expert slots (vs ~1.3 GiB free / 1985 slots
 at 0.91), KV growth to 256K still funded from the arena, decode unchanged on the synthetic
 probe (167 tok/s at 80K, 148 tok/s at 256K); the extra slots only pay off as a higher expert
 hit rate on varied real traffic, which is not what the probe measures.

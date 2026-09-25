@@ -120,12 +120,19 @@ def test_host_device_ptr_is_identity_under_uva():
     torch.cuda.init()
     if not _host_ptr_identity():
         pytest.skip("non-UVA platform: host_device_ptr rejects unregistered memory instead")
-    # Under UVA cudaHostGetDevicePointer degenerates to identity for any host pointer
-    # (no registration validation); rejection of pageable memory only exists on
-    # non-identity platforms (Windows/WDDM), where the translation is real.
+    # Unregistered pageable memory under UVA: some drivers hand the pointer back
+    # unchanged, others validate it and return cudaErrorInvalidValue (595.58 on
+    # ft-dev). Either answer is fine; a rejection must be a clean exception that
+    # leaves no CUDA error behind for the next, unrelated launch to trip over.
     pageable = torch.empty(64, dtype=torch.uint8)
     ext = _load_pinned_extension()
-    assert ext.host_device_ptr(pageable.data_ptr()) == pageable.data_ptr()
+    try:
+        assert ext.host_device_ptr(pageable.data_ptr()) == pageable.data_ptr()
+    except RuntimeError as exc:
+        assert "cudaHostGetDevicePointer failed" in str(exc)
+    x = torch.arange(8, device="cuda") * 2
+    torch.cuda.synchronize()
+    assert x.sum().item() == 56
 
 
 def test_host_bank_pin_registers_and_translates():

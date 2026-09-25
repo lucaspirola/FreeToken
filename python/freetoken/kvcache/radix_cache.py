@@ -33,6 +33,11 @@ class RadixTreeNode:
         # whose end boundary is unchanged. Forward-compat seam for SWA.
         self.mamba_value: int | None = None
         self.mamba_ref_count: int = 0
+        # What the snapshot marks (HybridRadixCache.insert ``kind``): "chunk" a mid-prompt
+        # prefill-chunk boundary, "segment" the end of a prompt's leading system+tools
+        # segment, "end" a request's final state. ``evict_mamba`` takes chunk boundaries
+        # first. Stays on the suffix half with ``mamba_value`` on a split.
+        self.snapshot_kind: str = "chunk"
         # Pooled hidden-state sums riding on the snapshot (HybridRadixCache): a host
         # float32 ``[num_layers, hidden]`` sum of the residual stream over every position
         # in [0, this node's end boundary), for all layers, and that position count.

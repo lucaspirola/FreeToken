@@ -1,0 +1,8 @@
+4543acc52 Merge exp/pinned-err: pinned_tensor clears the sticky CUDA error after a rejected cudaHostGetDevicePointer (a658c8c)
+build rc=0 20:31:33
+-rwxr-xr-x 1 root root 11979984 Sep 24 20:30 python/freetoken/kernel/_cpu_moe.cpython-312-x86_64-linux-gnu.so
+-rwxr-xr-x 1 root root 10909488 Sep 24 20:31 python/freetoken/kernel/_pageable_stage.cpython-312-x86_64-linux-gnu.so
+-rwxr-xr-x 1 root root 10358848 Sep 24 20:29 python/freetoken/kernel/_pinned_tensor.cpython-312-x86_64-linux-gnu.so
+-rwxr-xr-x 1 root root 11679648 Sep 24 20:31 python/freetoken/kernel/_ple_store.cpython-312-x86_64-linux-gnu.so
+tests rc=0 1599 passed, 14 skipped, 2 warnings, 2 subtests passed in 653.06s (0:10:53) 20:51:40
+ALLDONE

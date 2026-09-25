@@ -1,0 +1,33 @@
+===== /home/lucas/ai/FreeToken-wt/reorg-next/tasks/exclusive-expert-ram/results/nsys1m-local/mirror-s0.sqlite: 206 decode steps traced from step 1
+       steps  step ms wb MB/step copies/step copy us/step fetch mean us
+      1-16      12.29      28.11        19.5         3825           235
+     17-32      10.83      70.62        21.8         2499           186
+     33-48      10.51      70.27        22.4         2201           165
+     49-64      10.01      55.87        19.8         1673           134
+     65-80      11.07      66.41        23.6         2641           170
+     81-96      10.12      56.22        18.1         1752           153
+     97-112     11.47      74.84        27.3         3088           175
+    113-128     10.45      66.76        20.1         2036           165
+    129-206     10.12      33.59        16.5         1733           144
+===== /home/lucas/ai/FreeToken-wt/reorg-next/tasks/exclusive-expert-ram/results/nsys1m-local/mirror-wb0-s0.sqlite: 205 decode steps traced from step 1
+       steps  step ms wb MB/step copies/step copy us/step fetch mean us
+      1-16      12.75       0.00        20.2         4348           215
+     17-32      11.98       0.00        22.2         3570           160
+     33-48      11.66       0.00        22.2         3295           149
+     49-64      11.10       0.00        21.8         2812           129
+     65-80      11.77       0.00        21.6         3409           158
+     81-96      11.19       0.00        18.9         2815           149
+     97-112     12.23       0.00        24.1         3833           159
+    113-128     11.64       0.00        21.0         3231           154
+    129-205     10.55       0.00        15.7         2230           142
+===== /home/lucas/ai/FreeToken-wt/reorg-next/tasks/exclusive-expert-ram/results/nsys1m-local/whole-s0.sqlite: 206 decode steps traced from step 1
+       steps  step ms wb MB/step copies/step copy us/step fetch mean us
+      1-16      10.39       0.00         9.9         2094           212
+     17-32       9.39       0.00         9.2         1132           122
+     33-48       9.78       0.00        11.2         1497           134
+     49-64       9.57       0.00        11.2         1297           115
+     65-80       9.95       0.00        12.3         1672           136
+     81-96       9.65       0.00        10.4         1359           130
+     97-112     10.25       0.00        13.7         1934           141
+    113-128      9.70       0.00        10.8         1432           132
+    129-206      9.69       0.00        10.8         1391           129

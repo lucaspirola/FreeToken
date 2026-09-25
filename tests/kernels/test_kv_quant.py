@@ -505,6 +505,49 @@ def test_ornith_q4_tuned_decode_matches_dequantized_oracle():
 
 
 @cuda_only
+@pytest.mark.parametrize("splits", [84, 5, 128])
+def test_nemotron_decode_splits_match_dequantized_oracle(splits):
+    """Nemotron's grid-filling split count (84 = 2 CTAs per SM on 84 SMs, not a power of
+    two) and the chunked stage-2 merge, over a batch whose contexts leave most splits
+    empty (1 token), some partly filled, and all filled."""
+    from freetoken.kernel.triton.attention import decode_paged_attention
+
+    q_heads, kv_heads, head_dim = 32, 2, 128
+    lens = [1, 33, 700, 5000, 20011]
+    batch, slots = len(lens), sum(lens)
+    q = _kv(batch, q_heads, head_dim, seed=93)
+    k = _kv(slots, kv_heads, head_dim, seed=94)
+    v = _kv(slots, kv_heads, head_dim, seed=95)
+    kq, ks, vq, vs, k_deq, v_deq = _quantized_pool(Q8_0, k, v)
+    indptr = torch.tensor([0] + lens, device="cuda", dtype=torch.int32).cumsum(0).to(torch.int32)
+    indices = torch.randperm(slots, device="cuda", generator=torch.Generator("cuda").manual_seed(4)).to(torch.int32)
+    q_pos = torch.tensor([n - 1 for n in lens], device="cuda", dtype=torch.int32)
+
+    def run(k_cache, v_cache, n, k_scale=None, v_scale=None):
+        logits = torch.empty(batch, q_heads, n, head_dim, device="cuda", dtype=torch.float32)
+        lse = torch.empty(batch, q_heads, n, device="cuda", dtype=torch.float32)
+        nsplits = torch.full((batch,), n, device="cuda", dtype=torch.int32)
+        return decode_paged_attention(
+            q, k_cache, v_cache, indptr, indices, q_pos, logits, lse, nsplits,
+            n, head_dim**-0.5, k_scale=k_scale, v_scale=v_scale,
+        )
+
+    got = run(kq, vq, splits, ks, vs)
+    want = run(k_deq, v_deq, 8)
+    assert torch.isfinite(got).all()
+    torch.testing.assert_close(got, want, rtol=2e-2, atol=2e-2)
+    # fp32 reference straight from the dequantized pool
+    ref = []
+    for b, n in enumerate(lens):
+        sl = indices[indptr[b]:indptr[b + 1]].long()
+        kk = k_deq[sl].float().repeat_interleave(q_heads // kv_heads, dim=1)  # [n, H, D]
+        vv = v_deq[sl].float().repeat_interleave(q_heads // kv_heads, dim=1)
+        s_ = torch.einsum("hd,nhd->hn", q[b].float(), kk) * head_dim**-0.5
+        ref.append(torch.einsum("hn,nhd->hd", s_.softmax(-1), vv))
+    torch.testing.assert_close(got.float(), torch.stack(ref), rtol=2e-2, atol=2e-2)
+
+
+@cuda_only
 def test_ornith_q8_native_score_matches_dequantized_oracle(monkeypatch):
     """Pin the sm_89 Q8 integer-score path at Ornith's production geometry."""
     import freetoken.kernel.triton.attention as attention
@@ -549,9 +592,12 @@ def test_ornith_q8_native_score_matches_dequantized_oracle(monkeypatch):
 @cuda_only
 @pytest.mark.parametrize("spec", SPECS, ids=IDS)
 @pytest.mark.parametrize("split", [False, True], ids=["fused", "split"])
-def test_extend_attention_over_quantized_pool(spec, split):
+@pytest.mark.parametrize("gqa", [False, True], ids=["perhead", "gqa"])
+def test_extend_attention_over_quantized_pool(monkeypatch, spec, split, gqa):
     """Both extend paths. The split kernel reads the freshly-computed K/V in bf16 and
-    only the prefix from the quantized pool, so it exercises the mixed case."""
+    only the prefix from the quantized pool, so it exercises the mixed case. ``gqa``
+    runs the split path through the GQA head-packed kernel (FREETOKEN_EXTEND_GQA=1)."""
+    monkeypatch.setenv("FREETOKEN_EXTEND_GQA", "1" if gqa else "0")
     from freetoken.kernel.triton.attention import extend_paged_attention
 
     head_dim, slots, q_heads, kv_heads = 256, 64, 8, 2

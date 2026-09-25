@@ -1,0 +1,37 @@
+== /home/lucas/ai/FreeToken-wt/transient-slack/tasks/exclusive-expert-ram/transient-slack/ts-box/nemo-mirror/transient-prefix0.pickle
+   measured: reserved rise 602 MiB, allocated rise 603 MiB (length 8192, prefix 0)
+   stats num_alloc_retries = 0
+   stats num_device_alloc = 112
+   stats num_device_free = 3
+   stats segment.large_pool.peak = 0
+   stats segment.small_pool.peak = 0
+   stats oversize_allocations.peak = 0
+   stats oversize_segments.peak = 0
+   trace replay: peak reserved (in-window segments) 602 MiB, peak allocated 603 MiB, allocated at the reserved peak 93 MiB
+   10 segments created in the window, 602 MiB:
+     >=10 MiB request             x   7       560 MiB
+     20MiB (1-10 MiB request)     x   2        40 MiB
+     2MiB small                   x   1         2 MiB
+   largest segments (size, the request that created it, cached-free bytes at that moment, site):
+        160.0 MiB for   161.00 MiB  free-cached   155.9 MiB  freetoken/kernel/triton/fp8_pertensor_linear.py:218:_gemm < freetoken/kernel/triton/fp8_pertensor_linear.py:349:fp8_pertensor_linear < freetoken/kernel/triton/fp8_pertensor_linear.py:395:forward
+        120.0 MiB for   128.00 MiB  free-cached   116.9 MiB  freetoken/kernel/triton/mamba2/ssd_chunk_state.py:396:_chunk_state_fwd < freetoken/kernel/triton/mamba2/ssd_combined.py:107:_mamba_chunk_scan_combined_fwd < freetoken/kernel/triton/mamba2/ssd_combined.py:205:mamba_chunk_scan_combined_varlen
+        100.0 MiB for    96.00 MiB  free-cached    94.9 MiB  freetoken/models/nemotron_h/model.py:138:_conv < freetoken/models/nemotron_h/model.py:235:forward < freetoken/models/nemotron_h/model.py:417:forward
+         60.0 MiB for    64.00 MiB  free-cached    56.9 MiB  freetoken/kernel/triton/mamba2/__init__.py:150:mamba2_prefill < freetoken/models/nemotron_h/model.py:188:_prefill_scan < freetoken/models/nemotron_h/model.py:268:forward
+         40.0 MiB for    42.00 MiB  free-cached    39.9 MiB  freetoken/kernel/index.py:49:indexing < freetoken/layers/embedding.py:44:forward < freetoken/utils/torch_utils.py:33:wrapper
+         40.0 MiB for    42.00 MiB  free-cached    37.9 MiB  /root/venv/lib/python3.12/site-packages/flashinfer/norm/__init__.py:173:rmsnorm < /root/venv/lib/python3.12/site-packages/flashinfer/api_logging.py:2333:_auto_dump_wrapper < freetoken/layers/norm.py:23:forward
+         40.0 MiB for    32.00 MiB  free-cached    28.9 MiB  freetoken/kernel/triton/mamba2/ssd_bmm.py:186:_bmm_chunk_fwd < freetoken/kernel/triton/mamba2/ssd_combined.py:131:_mamba_chunk_scan_combined_fwd < freetoken/kernel/triton/mamba2/ssd_combined.py:205:mamba_chunk_scan_combined_varlen
+         20.0 MiB for    16.00 MiB  free-cached    16.9 MiB  freetoken/kernel/triton/mamba2/ssd_combined.py:70:_mamba_chunk_scan_combined_fwd < freetoken/kernel/triton/mamba2/ssd_combined.py:205:mamba_chunk_scan_combined_varlen < freetoken/kernel/triton/mamba2/__init__.py:157:mamba2_prefill
+         20.0 MiB for    16.00 MiB  free-cached    12.9 MiB  freetoken/kernel/triton/mamba2/ssd_combined.py:68:_mamba_chunk_scan_combined_fwd < freetoken/kernel/triton/mamba2/ssd_combined.py:205:mamba_chunk_scan_combined_varlen < freetoken/kernel/triton/mamba2/__init__.py:157:mamba2_prefill
+          2.0 MiB for     0.00 MiB  free-cached   509.1 MiB  freetoken/moe/residency.py:1172:_mirror_writeback_buffer < freetoken/moe/residency.py:238:before_buffer_fill < freetoken/moe/offload_cache.py:2281:_invalidate_prefill_buffer
+   rounding slack by site (segment - request), top:
+          8.0 MiB  freetoken/kernel/triton/mamba2/ssd_bmm.py:186:_bmm_chunk_fwd < freetoken/kernel/triton/mamba2/ssd_combined.py:131:_mamba_chunk_scan_combined_fwd < freetoken/kernel/triton/mamba2/ssd_combined.py:205:mamba_chunk_scan_combined_varlen
+          4.0 MiB  freetoken/models/nemotron_h/model.py:138:_conv < freetoken/models/nemotron_h/model.py:235:forward < freetoken/models/nemotron_h/model.py:417:forward
+          4.0 MiB  freetoken/kernel/triton/mamba2/ssd_combined.py:68:_mamba_chunk_scan_combined_fwd < freetoken/kernel/triton/mamba2/ssd_combined.py:205:mamba_chunk_scan_combined_varlen < freetoken/kernel/triton/mamba2/__init__.py:157:mamba2_prefill
+          4.0 MiB  freetoken/kernel/triton/mamba2/ssd_combined.py:70:_mamba_chunk_scan_combined_fwd < freetoken/kernel/triton/mamba2/ssd_combined.py:205:mamba_chunk_scan_combined_varlen < freetoken/kernel/triton/mamba2/__init__.py:157:mamba2_prefill
+          2.0 MiB  freetoken/moe/residency.py:1172:_mirror_writeback_buffer < freetoken/moe/residency.py:238:before_buffer_fill < freetoken/moe/offload_cache.py:2281:_invalidate_prefill_buffer
+         -1.0 MiB  freetoken/kernel/triton/fp8_pertensor_linear.py:218:_gemm < freetoken/kernel/triton/fp8_pertensor_linear.py:349:fp8_pertensor_linear < freetoken/kernel/triton/fp8_pertensor_linear.py:395:forward
+         -2.0 MiB  freetoken/kernel/index.py:49:indexing < freetoken/layers/embedding.py:44:forward < freetoken/utils/torch_utils.py:33:wrapper
+         -2.0 MiB  /root/venv/lib/python3.12/site-packages/flashinfer/norm/__init__.py:173:rmsnorm < /root/venv/lib/python3.12/site-packages/flashinfer/api_logging.py:2333:_auto_dump_wrapper < freetoken/layers/norm.py:23:forward
+         -4.0 MiB  freetoken/kernel/triton/mamba2/__init__.py:150:mamba2_prefill < freetoken/models/nemotron_h/model.py:188:_prefill_scan < freetoken/models/nemotron_h/model.py:268:forward
+         -8.0 MiB  freetoken/kernel/triton/mamba2/ssd_chunk_state.py:396:_chunk_state_fwd < freetoken/kernel/triton/mamba2/ssd_combined.py:107:_mamba_chunk_scan_combined_fwd < freetoken/kernel/triton/mamba2/ssd_combined.py:205:mamba_chunk_scan_combined_varlen
+   end-of-run segments: 5 total 3614 MiB, active 2959 MiB

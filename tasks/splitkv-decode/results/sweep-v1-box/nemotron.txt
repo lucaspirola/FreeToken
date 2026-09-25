@@ -1,0 +1,328 @@
+gpu NVIDIA GeForce RTX 5080  sms 84  geometry q=32 kv=2 d=128 quant=q8_0
+stage-1 head blocks per request: 2 (CTAs = batch * 2 * splits)
+ctx=    8192 bs= 1 splits= 64 bn= 32 w=4 st=2 bd=0 sm=0 ctas=  128    0.020 ms   217.6 GB/s  d8=2.44e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits= 64 bn= 32 w=8 st=2 bd=0 sm=0 ctas=  128    0.023 ms   197.8 GB/s  d8=2.44e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits= 84 bn= 32 w=4 st=2 bd=0 sm=0 ctas=  168    0.020 ms   217.6 GB/s  d8=2.44e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits= 84 bn= 32 w=8 st=2 bd=0 sm=0 ctas=  168    0.023 ms   197.8 GB/s  d8=2.44e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits=128 bn= 32 w=4 st=2 bd=0 sm=0 ctas=  256    0.031 ms   145.1 GB/s  d8=4.88e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits=128 bn= 32 w=8 st=2 bd=0 sm=0 ctas=  256    0.033 ms   136.0 GB/s  d8=4.88e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits=168 bn= 32 w=4 st=2 bd=0 sm=0 ctas=  336    0.031 ms   145.1 GB/s  d8=4.88e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits=168 bn= 32 w=8 st=2 bd=0 sm=0 ctas=  336    0.033 ms   136.0 GB/s  d8=4.88e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits=256 bn= 32 w=4 st=2 bd=0 sm=0 ctas=  512    0.051 ms    87.0 GB/s  d8=4.88e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits=256 bn= 32 w=8 st=2 bd=0 sm=0 ctas=  512    0.053 ms    83.7 GB/s  d8=4.88e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits= 64 bn= 32 w=4 st=3 bd=0 sm=0 ctas=  128    0.020 ms   217.6 GB/s  d8=2.44e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits= 64 bn= 32 w=8 st=3 bd=0 sm=0 ctas=  128    0.023 ms   197.8 GB/s  d8=2.44e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits= 84 bn= 32 w=4 st=3 bd=0 sm=0 ctas=  168    0.023 ms   197.8 GB/s  d8=2.44e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits= 84 bn= 32 w=8 st=3 bd=0 sm=0 ctas=  168    0.023 ms   197.8 GB/s  d8=2.44e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits=128 bn= 32 w=4 st=3 bd=0 sm=0 ctas=  256    0.033 ms   136.0 GB/s  d8=4.88e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits=128 bn= 32 w=8 st=3 bd=0 sm=0 ctas=  256    0.033 ms   136.0 GB/s  d8=4.88e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits=168 bn= 32 w=4 st=3 bd=0 sm=0 ctas=  336    0.033 ms   136.0 GB/s  d8=4.88e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits=168 bn= 32 w=8 st=3 bd=0 sm=0 ctas=  336    0.035 ms   128.0 GB/s  d8=4.88e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits=256 bn= 32 w=4 st=3 bd=0 sm=0 ctas=  512    0.051 ms    87.0 GB/s  d8=4.88e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits=256 bn= 32 w=8 st=3 bd=0 sm=0 ctas=  512    0.053 ms    83.7 GB/s  d8=4.88e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits= 64 bn= 64 w=4 st=2 bd=0 sm=0 ctas=  128    0.020 ms   217.6 GB/s  d8=2.44e-04  dq=3.05e-05
+ctx=    8192 bs= 1 splits= 64 bn= 64 w=8 st=2 bd=0 sm=0 ctas=  128    0.020 ms   217.6 GB/s  d8=2.44e-04  dq=3.05e-05
+ctx=    8192 bs= 1 splits= 84 bn= 64 w=4 st=2 bd=0 sm=0 ctas=  168    0.020 ms   217.6 GB/s  d8=2.44e-04  dq=3.05e-05
+ctx=    8192 bs= 1 splits= 84 bn= 64 w=8 st=2 bd=0 sm=0 ctas=  168    0.020 ms   217.6 GB/s  d8=2.44e-04  dq=3.05e-05
+ctx=    8192 bs= 1 splits=128 bn= 64 w=4 st=2 bd=0 sm=0 ctas=  256    0.031 ms   145.1 GB/s  d8=4.88e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits=128 bn= 64 w=8 st=2 bd=0 sm=0 ctas=  256    0.031 ms   145.1 GB/s  d8=4.88e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits=168 bn= 64 w=4 st=2 bd=0 sm=0 ctas=  336    0.031 ms   145.1 GB/s  d8=4.88e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits=168 bn= 64 w=8 st=2 bd=0 sm=0 ctas=  336    0.031 ms   145.1 GB/s  d8=4.88e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits=256 bn= 64 w=4 st=2 bd=0 sm=0 ctas=  512    0.055 ms    80.6 GB/s  d8=4.88e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits=256 bn= 64 w=8 st=2 bd=0 sm=0 ctas=  512    0.053 ms    83.7 GB/s  d8=4.88e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits= 64 bn= 64 w=4 st=3 bd=0 sm=0 ctas=  128    0.020 ms   217.6 GB/s  d8=2.44e-04  dq=3.05e-05
+ctx=    8192 bs= 1 splits= 64 bn= 64 w=8 st=3 bd=0 sm=0 ctas=  128    0.020 ms   217.6 GB/s  d8=2.44e-04  dq=3.05e-05
+ctx=    8192 bs= 1 splits= 84 bn= 64 w=4 st=3 bd=0 sm=0 ctas=  168    0.020 ms   217.6 GB/s  d8=2.44e-04  dq=3.05e-05
+ctx=    8192 bs= 1 splits= 84 bn= 64 w=8 st=3 bd=0 sm=0 ctas=  168    0.020 ms   217.6 GB/s  d8=2.44e-04  dq=3.05e-05
+ctx=    8192 bs= 1 splits=128 bn= 64 w=4 st=3 bd=0 sm=0 ctas=  256    0.031 ms   145.1 GB/s  d8=4.88e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits=128 bn= 64 w=8 st=3 bd=0 sm=0 ctas=  256    0.031 ms   145.1 GB/s  d8=4.88e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits=168 bn= 64 w=4 st=3 bd=0 sm=0 ctas=  336    0.033 ms   136.0 GB/s  d8=4.88e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits=168 bn= 64 w=8 st=3 bd=0 sm=0 ctas=  336    0.033 ms   136.0 GB/s  d8=4.88e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits=256 bn= 64 w=4 st=3 bd=0 sm=0 ctas=  512    0.055 ms    80.6 GB/s  d8=4.88e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits=256 bn= 64 w=8 st=3 bd=0 sm=0 ctas=  512    0.055 ms    80.6 GB/s  d8=4.88e-04  dq=1.22e-04
+ctx=    8192 bs= 1 splits= 64 bn= 32 w=4 st=2 bd=1 sm=0 ctas=  128    0.025 ms   181.3 GB/s  d8=2.44e-04  dq=2.44e-04
+ctx=    8192 bs= 1 splits= 64 bn= 32 w=8 st=2 bd=1 sm=0 ctas=  128    0.027 ms   167.4 GB/s  d8=2.44e-04  dq=2.44e-04
+ctx=    8192 bs= 1 splits= 84 bn= 32 w=4 st=2 bd=1 sm=0 ctas=  168    0.025 ms   181.3 GB/s  d8=2.44e-04  dq=2.44e-04
+ctx=    8192 bs= 1 splits= 84 bn= 32 w=8 st=2 bd=1 sm=0 ctas=  168    0.027 ms   167.4 GB/s  d8=2.44e-04  dq=2.44e-04
+ctx=    8192 bs= 1 splits=128 bn= 32 w=4 st=2 bd=1 sm=0 ctas=  256    0.035 ms   128.0 GB/s  d8=4.88e-04  dq=4.88e-04
+ctx=    8192 bs= 1 splits=128 bn= 32 w=8 st=2 bd=1 sm=0 ctas=  256    0.037 ms   120.9 GB/s  d8=4.88e-04  dq=4.88e-04
+ctx=    8192 bs= 1 splits=168 bn= 32 w=4 st=2 bd=1 sm=0 ctas=  336    0.035 ms   128.0 GB/s  d8=4.88e-04  dq=4.88e-04
+ctx=    8192 bs= 1 splits=168 bn= 32 w=8 st=2 bd=1 sm=0 ctas=  336    0.039 ms   114.5 GB/s  d8=4.88e-04  dq=4.88e-04
+ctx=    8192 bs= 1 splits=256 bn= 32 w=4 st=2 bd=1 sm=0 ctas=  512    0.053 ms    83.7 GB/s  d8=2.44e-04  dq=4.88e-04
+ctx=    8192 bs= 1 splits=256 bn= 32 w=8 st=2 bd=1 sm=0 ctas=  512    0.057 ms    77.7 GB/s  d8=2.44e-04  dq=4.88e-04
+ctx=    8192 bs= 1 splits= 64 bn= 32 w=4 st=3 bd=1 sm=0 ctas=  128    0.025 ms   181.3 GB/s  d8=2.44e-04  dq=2.44e-04
+ctx=    8192 bs= 1 splits= 64 bn= 32 w=8 st=3 bd=1 sm=0 ctas=  128    0.033 ms   136.0 GB/s  d8=2.44e-04  dq=2.44e-04
+ctx=    8192 bs= 1 splits= 84 bn= 32 w=4 st=3 bd=1 sm=0 ctas=  168    0.025 ms   181.3 GB/s  d8=2.44e-04  dq=2.44e-04
+ctx=    8192 bs= 1 splits= 84 bn= 32 w=8 st=3 bd=1 sm=0 ctas=  168    0.033 ms   136.0 GB/s  d8=2.44e-04  dq=2.44e-04
+ctx=    8192 bs= 1 splits=128 bn= 32 w=4 st=3 bd=1 sm=0 ctas=  256    0.035 ms   128.0 GB/s  d8=4.88e-04  dq=4.88e-04
+ctx=    8192 bs= 1 splits=128 bn= 32 w=8 st=3 bd=1 sm=0 ctas=  256    0.043 ms   103.6 GB/s  d8=4.88e-04  dq=4.88e-04
+ctx=    8192 bs= 1 splits=168 bn= 32 w=4 st=3 bd=1 sm=0 ctas=  336    0.035 ms   128.0 GB/s  d8=4.88e-04  dq=4.88e-04
+ctx=    8192 bs= 1 splits=168 bn= 32 w=8 st=3 bd=1 sm=0 ctas=  336    0.045 ms    98.9 GB/s  d8=4.88e-04  dq=4.88e-04
+ctx=    8192 bs= 1 splits=256 bn= 32 w=4 st=3 bd=1 sm=0 ctas=  512    0.053 ms    83.7 GB/s  d8=2.44e-04  dq=4.88e-04
+ctx=    8192 bs= 1 splits=256 bn= 32 w=8 st=3 bd=1 sm=0 ctas=  512    0.066 ms    68.0 GB/s  d8=2.44e-04  dq=4.88e-04
+ctx=    8192 bs= 1 splits= 64 bn= 64 w=4 st=2 bd=1 sm=0 ctas=  128    0.025 ms   181.3 GB/s  d8=2.44e-04  dq=2.44e-04
+ctx=    8192 bs= 1 splits= 64 bn= 64 w=8 st=2 bd=1 sm=0 ctas=  128    0.031 ms   145.1 GB/s  d8=2.44e-04  dq=2.44e-04
+ctx=    8192 bs= 1 splits= 84 bn= 64 w=4 st=2 bd=1 sm=0 ctas=  168    0.025 ms   181.3 GB/s  d8=2.44e-04  dq=2.44e-04
+ctx=    8192 bs= 1 splits= 84 bn= 64 w=8 st=2 bd=1 sm=0 ctas=  168    0.031 ms   145.1 GB/s  d8=2.44e-04  dq=2.44e-04
+ctx=    8192 bs= 1 splits=128 bn= 64 w=4 st=2 bd=1 sm=0 ctas=  256    0.035 ms   128.0 GB/s  d8=2.44e-04  dq=4.88e-04
+ctx=    8192 bs= 1 splits=128 bn= 64 w=8 st=2 bd=1 sm=0 ctas=  256    0.041 ms   108.8 GB/s  d8=2.44e-04  dq=4.88e-04
+ctx=    8192 bs= 1 splits=168 bn= 64 w=4 st=2 bd=1 sm=0 ctas=  336    0.035 ms   128.0 GB/s  d8=2.44e-04  dq=4.88e-04
+ctx=    8192 bs= 1 splits=168 bn= 64 w=8 st=2 bd=1 sm=0 ctas=  336    0.043 ms   103.6 GB/s  d8=2.44e-04  dq=4.88e-04
+ctx=    8192 bs= 1 splits=256 bn= 64 w=4 st=2 bd=1 sm=0 ctas=  512    0.061 ms    72.5 GB/s  d8=2.44e-04  dq=4.88e-04
+ctx=    8192 bs= 1 splits=256 bn= 64 w=8 st=2 bd=1 sm=0 ctas=  512    0.074 ms    60.4 GB/s  d8=2.44e-04  dq=4.88e-04
+ctx=    8192 bs= 1 splits= 64 bn= 64 w=4 st=3 bd=1 sm=0 ctas=  128    0.025 ms   181.3 GB/s  d8=2.44e-04  dq=2.44e-04
+ctx=    8192 bs= 1 splits= 64 bn= 64 w=8 st=3 bd=1 sm=0 ctas=  128    0.033 ms   136.0 GB/s  d8=2.44e-04  dq=2.44e-04
+ctx=    8192 bs= 1 splits= 84 bn= 64 w=4 st=3 bd=1 sm=0 ctas=  168    0.025 ms   181.3 GB/s  d8=2.44e-04  dq=2.44e-04
+ctx=    8192 bs= 1 splits= 84 bn= 64 w=8 st=3 bd=1 sm=0 ctas=  168    0.033 ms   136.0 GB/s  d8=2.44e-04  dq=2.44e-04
+ctx=    8192 bs= 1 splits=128 bn= 64 w=4 st=3 bd=1 sm=0 ctas=  256    0.035 ms   128.0 GB/s  d8=2.44e-04  dq=4.88e-04
+ctx=    8192 bs= 1 splits=128 bn= 64 w=8 st=3 bd=1 sm=0 ctas=  256    0.043 ms   103.6 GB/s  d8=2.44e-04  dq=4.88e-04
+ctx=    8192 bs= 1 splits=168 bn= 64 w=4 st=3 bd=1 sm=0 ctas=  336    0.037 ms   120.9 GB/s  d8=2.44e-04  dq=4.88e-04
+ctx=    8192 bs= 1 splits=168 bn= 64 w=8 st=3 bd=1 sm=0 ctas=  336    0.045 ms    98.9 GB/s  d8=2.44e-04  dq=4.88e-04
+ctx=    8192 bs= 1 splits=256 bn= 64 w=4 st=3 bd=1 sm=0 ctas=  512    0.061 ms    72.5 GB/s  d8=2.44e-04  dq=4.88e-04
+ctx=    8192 bs= 1 splits=256 bn= 64 w=8 st=3 bd=1 sm=0 ctas=  512    0.078 ms    57.3 GB/s  d8=2.44e-04  dq=4.88e-04
+ctx=   81920 bs= 1 splits= 64 bn= 32 w=4 st=2 bd=0 sm=0 ctas=  128    0.063 ms   701.9 GB/s  d8=1.22e-04  dq=6.10e-05
+ctx=   81920 bs= 1 splits= 64 bn= 32 w=8 st=2 bd=0 sm=0 ctas=  128    0.086 ms   518.1 GB/s  d8=1.22e-04  dq=6.10e-05
+ctx=   81920 bs= 1 splits= 84 bn= 32 w=4 st=2 bd=0 sm=0 ctas=  168    0.057 ms   777.1 GB/s  d8=1.22e-04  dq=3.05e-05
+ctx=   81920 bs= 1 splits= 84 bn= 32 w=8 st=2 bd=0 sm=0 ctas=  168    0.074 ms   604.2 GB/s  d8=1.22e-04  dq=3.05e-05
+ctx=   81920 bs= 1 splits=128 bn= 32 w=4 st=2 bd=0 sm=0 ctas=  256    0.074 ms   604.4 GB/s  d8=1.22e-04  dq=6.10e-05
+ctx=   81920 bs= 1 splits=128 bn= 32 w=8 st=2 bd=0 sm=0 ctas=  256    0.094 ms   473.0 GB/s  d8=1.22e-04  dq=6.10e-05
+ctx=   81920 bs= 1 splits=168 bn= 32 w=4 st=2 bd=0 sm=0 ctas=  336    0.070 ms   640.0 GB/s  d8=1.22e-04  dq=3.05e-05
+ctx=   81920 bs= 1 splits=168 bn= 32 w=8 st=2 bd=0 sm=0 ctas=  336    0.088 ms   506.0 GB/s  d8=1.22e-04  dq=3.05e-05
+ctx=   81920 bs= 1 splits=256 bn= 32 w=4 st=2 bd=0 sm=0 ctas=  512    0.084 ms   530.7 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=256 bn= 32 w=8 st=2 bd=0 sm=0 ctas=  512    0.109 ms   410.6 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits= 64 bn= 32 w=4 st=3 bd=0 sm=0 ctas=  128    0.070 ms   640.0 GB/s  d8=1.22e-04  dq=6.10e-05
+ctx=   81920 bs= 1 splits= 64 bn= 32 w=8 st=3 bd=0 sm=0 ctas=  128    0.084 ms   530.7 GB/s  d8=1.22e-04  dq=6.10e-05
+ctx=   81920 bs= 1 splits= 84 bn= 32 w=4 st=3 bd=0 sm=0 ctas=  168    0.061 ms   725.3 GB/s  d8=1.22e-04  dq=3.05e-05
+ctx=   81920 bs= 1 splits= 84 bn= 32 w=8 st=3 bd=0 sm=0 ctas=  168    0.074 ms   604.2 GB/s  d8=1.22e-04  dq=3.05e-05
+ctx=   81920 bs= 1 splits=128 bn= 32 w=4 st=3 bd=0 sm=0 ctas=  256    0.080 ms   557.9 GB/s  d8=1.22e-04  dq=6.10e-05
+ctx=   81920 bs= 1 splits=128 bn= 32 w=8 st=3 bd=0 sm=0 ctas=  256    0.094 ms   473.0 GB/s  d8=1.22e-04  dq=6.10e-05
+ctx=   81920 bs= 1 splits=168 bn= 32 w=4 st=3 bd=0 sm=0 ctas=  336    0.078 ms   572.6 GB/s  d8=1.22e-04  dq=3.05e-05
+ctx=   81920 bs= 1 splits=168 bn= 32 w=8 st=3 bd=0 sm=0 ctas=  336    0.088 ms   506.0 GB/s  d8=1.22e-04  dq=3.05e-05
+ctx=   81920 bs= 1 splits=256 bn= 32 w=4 st=3 bd=0 sm=0 ctas=  512    0.088 ms   506.0 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=256 bn= 32 w=8 st=3 bd=0 sm=0 ctas=  512    0.109 ms   410.6 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits= 64 bn= 64 w=4 st=2 bd=0 sm=0 ctas=  128    0.061 ms   725.3 GB/s  d8=1.22e-04  dq=6.10e-05
+ctx=   81920 bs= 1 splits= 64 bn= 64 w=8 st=2 bd=0 sm=0 ctas=  128    0.059 ms   750.3 GB/s  d8=1.22e-04  dq=6.10e-05
+ctx=   81920 bs= 1 splits= 84 bn= 64 w=4 st=2 bd=0 sm=0 ctas=  168    0.055 ms   805.9 GB/s  d8=1.22e-04  dq=6.10e-05
+ctx=   81920 bs= 1 splits= 84 bn= 64 w=8 st=2 bd=0 sm=0 ctas=  168    0.053 ms   836.9 GB/s  d8=1.22e-04  dq=6.10e-05
+ctx=   81920 bs= 1 splits=128 bn= 64 w=4 st=2 bd=0 sm=0 ctas=  256    0.072 ms   621.7 GB/s  d8=1.22e-04  dq=6.10e-05
+ctx=   81920 bs= 1 splits=128 bn= 64 w=8 st=2 bd=0 sm=0 ctas=  256    0.068 ms   659.4 GB/s  d8=1.22e-04  dq=6.10e-05
+ctx=   81920 bs= 1 splits=168 bn= 64 w=4 st=2 bd=0 sm=0 ctas=  336    0.068 ms   659.4 GB/s  d8=1.22e-04  dq=3.05e-05
+ctx=   81920 bs= 1 splits=168 bn= 64 w=8 st=2 bd=0 sm=0 ctas=  336    0.066 ms   680.0 GB/s  d8=1.22e-04  dq=3.05e-05
+ctx=   81920 bs= 1 splits=256 bn= 64 w=4 st=2 bd=0 sm=0 ctas=  512    0.090 ms   494.5 GB/s  d8=1.22e-04  dq=6.10e-05
+ctx=   81920 bs= 1 splits=256 bn= 64 w=8 st=2 bd=0 sm=0 ctas=  512    0.084 ms   530.7 GB/s  d8=1.22e-04  dq=6.10e-05
+ctx=   81920 bs= 1 splits= 64 bn= 64 w=4 st=3 bd=0 sm=0 ctas=  128    0.057 ms   777.1 GB/s  d8=1.22e-04  dq=6.10e-05
+ctx=   81920 bs= 1 splits= 64 bn= 64 w=8 st=3 bd=0 sm=0 ctas=  128    0.061 ms   725.3 GB/s  d8=1.22e-04  dq=6.10e-05
+ctx=   81920 bs= 1 splits= 84 bn= 64 w=4 st=3 bd=0 sm=0 ctas=  168    0.053 ms   836.9 GB/s  d8=1.22e-04  dq=6.10e-05
+ctx=   81920 bs= 1 splits= 84 bn= 64 w=8 st=3 bd=0 sm=0 ctas=  168    0.057 ms   777.1 GB/s  d8=1.22e-04  dq=6.10e-05
+ctx=   81920 bs= 1 splits=128 bn= 64 w=4 st=3 bd=0 sm=0 ctas=  256    0.068 ms   659.4 GB/s  d8=1.22e-04  dq=6.10e-05
+ctx=   81920 bs= 1 splits=128 bn= 64 w=8 st=3 bd=0 sm=0 ctas=  256    0.072 ms   621.7 GB/s  d8=1.22e-04  dq=6.10e-05
+ctx=   81920 bs= 1 splits=168 bn= 64 w=4 st=3 bd=0 sm=0 ctas=  336    0.066 ms   680.0 GB/s  d8=1.22e-04  dq=3.05e-05
+ctx=   81920 bs= 1 splits=168 bn= 64 w=8 st=3 bd=0 sm=0 ctas=  336    0.070 ms   640.0 GB/s  d8=1.22e-04  dq=3.05e-05
+ctx=   81920 bs= 1 splits=256 bn= 64 w=4 st=3 bd=0 sm=0 ctas=  512    0.086 ms   518.1 GB/s  d8=1.22e-04  dq=6.10e-05
+ctx=   81920 bs= 1 splits=256 bn= 64 w=8 st=3 bd=0 sm=0 ctas=  512    0.088 ms   506.0 GB/s  d8=1.22e-04  dq=6.10e-05
+ctx=   81920 bs= 1 splits= 64 bn= 32 w=4 st=2 bd=1 sm=0 ctas=  128    0.100 ms   444.1 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits= 64 bn= 32 w=8 st=2 bd=1 sm=0 ctas=  128    0.129 ms   345.4 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits= 84 bn= 32 w=4 st=2 bd=1 sm=0 ctas=  168    0.086 ms   518.1 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits= 84 bn= 32 w=8 st=2 bd=1 sm=0 ctas=  168    0.109 ms   410.6 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=128 bn= 32 w=4 st=2 bd=1 sm=0 ctas=  256    0.104 ms   426.7 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=128 bn= 32 w=8 st=2 bd=1 sm=0 ctas=  256    0.137 ms   324.8 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=168 bn= 32 w=4 st=2 bd=1 sm=0 ctas=  336    0.096 ms   463.0 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=168 bn= 32 w=8 st=2 bd=1 sm=0 ctas=  336    0.123 ms   362.7 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=256 bn= 32 w=4 st=2 bd=1 sm=0 ctas=  512    0.113 ms   395.6 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=256 bn= 32 w=8 st=2 bd=1 sm=0 ctas=  512    0.145 ms   306.5 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits= 64 bn= 32 w=4 st=3 bd=1 sm=0 ctas=  128    0.100 ms   444.1 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits= 64 bn= 32 w=8 st=3 bd=1 sm=0 ctas=  128    0.168 ms   265.4 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits= 84 bn= 32 w=4 st=3 bd=1 sm=0 ctas=  168    0.086 ms   518.1 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits= 84 bn= 32 w=8 st=3 bd=1 sm=0 ctas=  168    0.137 ms   324.8 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=128 bn= 32 w=4 st=3 bd=1 sm=0 ctas=  256    0.109 ms   410.6 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=128 bn= 32 w=8 st=3 bd=1 sm=0 ctas=  256    0.178 ms   250.1 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=168 bn= 32 w=4 st=3 bd=1 sm=0 ctas=  336    0.098 ms   453.3 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=168 bn= 32 w=8 st=3 bd=1 sm=0 ctas=  336    0.156 ms   286.3 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=256 bn= 32 w=4 st=3 bd=1 sm=0 ctas=  512    0.115 ms   388.6 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=256 bn= 32 w=8 st=3 bd=1 sm=0 ctas=  512    0.182 ms   244.5 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits= 64 bn= 64 w=4 st=2 bd=1 sm=0 ctas=  128    0.092 ms   483.6 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits= 64 bn= 64 w=8 st=2 bd=1 sm=0 ctas=  128    0.164 ms   272.0 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits= 84 bn= 64 w=4 st=2 bd=1 sm=0 ctas=  168    0.080 ms   557.9 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits= 84 bn= 64 w=8 st=2 bd=1 sm=0 ctas=  168    0.137 ms   324.8 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=128 bn= 64 w=4 st=2 bd=1 sm=0 ctas=  256    0.100 ms   444.1 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=128 bn= 64 w=8 st=2 bd=1 sm=0 ctas=  256    0.172 ms   259.0 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=168 bn= 64 w=4 st=2 bd=1 sm=0 ctas=  336    0.092 ms   483.6 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=168 bn= 64 w=8 st=2 bd=1 sm=0 ctas=  336    0.152 ms   294.1 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=256 bn= 64 w=4 st=2 bd=1 sm=0 ctas=  512    0.115 ms   388.6 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=256 bn= 64 w=8 st=2 bd=1 sm=0 ctas=  512    0.176 ms   253.0 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits= 64 bn= 64 w=4 st=3 bd=1 sm=0 ctas=  128    0.094 ms   473.0 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits= 64 bn= 64 w=8 st=3 bd=1 sm=0 ctas=  128    0.162 ms   275.4 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits= 84 bn= 64 w=4 st=3 bd=1 sm=0 ctas=  168    0.082 ms   544.0 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits= 84 bn= 64 w=8 st=3 bd=1 sm=0 ctas=  168    0.137 ms   324.8 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=128 bn= 64 w=4 st=3 bd=1 sm=0 ctas=  256    0.104 ms   426.7 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=128 bn= 64 w=8 st=3 bd=1 sm=0 ctas=  256    0.174 ms   256.0 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=168 bn= 64 w=4 st=3 bd=1 sm=0 ctas=  336    0.094 ms   473.0 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=168 bn= 64 w=8 st=3 bd=1 sm=0 ctas=  336    0.152 ms   294.1 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=256 bn= 64 w=4 st=3 bd=1 sm=0 ctas=  512    0.117 ms   381.8 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=   81920 bs= 1 splits=256 bn= 64 w=8 st=3 bd=1 sm=0 ctas=  512    0.180 ms   247.3 GB/s  d8=1.22e-04  dq=1.22e-04
+ctx=  262144 bs= 1 splits= 64 bn= 32 w=4 st=2 bd=0 sm=0 ctas=  128    0.274 ms   519.6 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 64 bn= 32 w=8 st=2 bd=0 sm=0 ctas=  128    0.301 ms   473.7 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 84 bn= 32 w=4 st=2 bd=0 sm=0 ctas=  168    0.233 ms   610.8 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 84 bn= 32 w=8 st=2 bd=0 sm=0 ctas=  168    0.250 ms   570.8 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=128 bn= 32 w=4 st=2 bd=0 sm=0 ctas=  256    0.311 ms   458.1 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=128 bn= 32 w=8 st=2 bd=0 sm=0 ctas=  256    0.309 ms   461.1 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=168 bn= 32 w=4 st=2 bd=0 sm=0 ctas=  336    0.258 ms   552.6 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=168 bn= 32 w=8 st=2 bd=0 sm=0 ctas=  336    0.281 ms   508.3 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=256 bn= 32 w=4 st=2 bd=0 sm=0 ctas=  512    0.299 ms   476.9 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=256 bn= 32 w=8 st=2 bd=0 sm=0 ctas=  512    0.338 ms   422.0 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 64 bn= 32 w=4 st=3 bd=0 sm=0 ctas=  128    0.274 ms   519.6 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 64 bn= 32 w=8 st=3 bd=0 sm=0 ctas=  128    0.270 ms   527.5 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 84 bn= 32 w=4 st=3 bd=0 sm=0 ctas=  168    0.242 ms   590.1 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 84 bn= 32 w=8 st=3 bd=0 sm=0 ctas=  168    0.233 ms   610.8 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=128 bn= 32 w=4 st=3 bd=0 sm=0 ctas=  256    0.326 ms   437.9 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=128 bn= 32 w=8 st=3 bd=0 sm=0 ctas=  256    0.285 ms   500.9 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=168 bn= 32 w=4 st=3 bd=0 sm=0 ctas=  336    0.260 ms   548.3 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=168 bn= 32 w=8 st=3 bd=0 sm=0 ctas=  336    0.260 ms   548.3 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=256 bn= 32 w=4 st=3 bd=0 sm=0 ctas=  512    0.315 ms   452.2 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=256 bn= 32 w=8 st=3 bd=0 sm=0 ctas=  512    0.309 ms   461.1 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 64 bn= 64 w=4 st=2 bd=0 sm=0 ctas=  128    0.254 ms   561.5 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 64 bn= 64 w=8 st=2 bd=0 sm=0 ctas=  128    0.213 ms   669.5 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 84 bn= 64 w=4 st=2 bd=0 sm=0 ctas=  168    0.221 ms   644.7 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 84 bn= 64 w=8 st=2 bd=0 sm=0 ctas=  168    0.195 ms   733.0 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=128 bn= 64 w=4 st=2 bd=0 sm=0 ctas=  256    0.266 ms   535.6 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=128 bn= 64 w=8 st=2 bd=0 sm=0 ctas=  256    0.225 ms   633.0 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=168 bn= 64 w=4 st=2 bd=0 sm=0 ctas=  336    0.252 ms   566.1 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=168 bn= 64 w=8 st=2 bd=0 sm=0 ctas=  336    0.225 ms   633.0 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=256 bn= 64 w=4 st=2 bd=0 sm=0 ctas=  512    0.303 ms   470.5 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=256 bn= 64 w=8 st=2 bd=0 sm=0 ctas=  512    0.264 ms   539.8 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 64 bn= 64 w=4 st=3 bd=0 sm=0 ctas=  128    0.240 ms   595.1 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 64 bn= 64 w=8 st=3 bd=0 sm=0 ctas=  128    0.219 ms   650.8 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 84 bn= 64 w=4 st=3 bd=0 sm=0 ctas=  168    0.227 ms   627.3 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 84 bn= 64 w=8 st=3 bd=0 sm=0 ctas=  168    0.205 ms   696.3 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=128 bn= 64 w=4 st=3 bd=0 sm=0 ctas=  256    0.264 ms   539.8 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=128 bn= 64 w=8 st=3 bd=0 sm=0 ctas=  256    0.238 ms   600.3 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=168 bn= 64 w=4 st=3 bd=0 sm=0 ctas=  336    0.258 ms   552.6 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=168 bn= 64 w=8 st=3 bd=0 sm=0 ctas=  336    0.238 ms   600.3 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=256 bn= 64 w=4 st=3 bd=0 sm=0 ctas=  512    0.313 ms   455.1 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=256 bn= 64 w=8 st=3 bd=0 sm=0 ctas=  512    0.276 ms   515.9 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 64 bn= 32 w=4 st=2 bd=1 sm=0 ctas=  128    0.365 ms   391.2 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 64 bn= 32 w=8 st=2 bd=1 sm=0 ctas=  128    0.412 ms   346.4 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 84 bn= 32 w=4 st=2 bd=1 sm=0 ctas=  168    0.295 ms   483.6 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 84 bn= 32 w=8 st=2 bd=1 sm=0 ctas=  168    0.328 ms   435.2 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=128 bn= 32 w=4 st=2 bd=1 sm=0 ctas=  256    0.371 ms   384.7 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=128 bn= 32 w=8 st=2 bd=1 sm=0 ctas=  256    0.418 ms   341.3 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=168 bn= 32 w=4 st=2 bd=1 sm=0 ctas=  336    0.305 ms   467.3 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=168 bn= 32 w=8 st=2 bd=1 sm=0 ctas=  336    0.350 ms   407.2 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=256 bn= 32 w=4 st=2 bd=1 sm=0 ctas=  512    0.340 ms   419.5 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=256 bn= 32 w=8 st=2 bd=1 sm=0 ctas=  512    0.406 ms   351.7 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 64 bn= 32 w=4 st=3 bd=1 sm=0 ctas=  128    0.311 ms   458.1 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 64 bn= 32 w=8 st=3 bd=1 sm=0 ctas=  128    0.537 ms   265.8 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 84 bn= 32 w=4 st=3 bd=1 sm=0 ctas=  168    0.256 ms   557.1 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 84 bn= 32 w=8 st=3 bd=1 sm=0 ctas=  168    0.430 ms   331.6 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=128 bn= 32 w=4 st=3 bd=1 sm=0 ctas=  256    0.317 ms   449.2 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=128 bn= 32 w=8 st=3 bd=1 sm=0 ctas=  256    0.559 ms   255.1 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=168 bn= 32 w=4 st=3 bd=1 sm=0 ctas=  336    0.262 ms   544.0 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=168 bn= 32 w=8 st=3 bd=1 sm=0 ctas=  336    0.455 ms   313.7 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=256 bn= 32 w=4 st=3 bd=1 sm=0 ctas=  512    0.307 ms   464.2 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=256 bn= 32 w=8 st=3 bd=1 sm=0 ctas=  512    0.532 ms   267.8 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 64 bn= 64 w=4 st=2 bd=1 sm=0 ctas=  128    0.287 ms   497.4 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 64 bn= 64 w=8 st=2 bd=1 sm=0 ctas=  128    0.598 ms   238.5 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 84 bn= 64 w=4 st=2 bd=1 sm=0 ctas=  168    0.240 ms   595.1 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 84 bn= 64 w=8 st=2 bd=1 sm=0 ctas=  168    0.481 ms   296.3 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=128 bn= 64 w=4 st=2 bd=1 sm=0 ctas=  256    0.299 ms   476.9 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=128 bn= 64 w=8 st=2 bd=1 sm=0 ctas=  256    0.618 ms   230.6 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=168 bn= 64 w=4 st=2 bd=1 sm=0 ctas=  336    0.276 ms   515.8 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=168 bn= 64 w=8 st=2 bd=1 sm=0 ctas=  336    0.510 ms   279.6 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=256 bn= 64 w=4 st=2 bd=1 sm=0 ctas=  512    0.322 ms   443.5 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=256 bn= 64 w=8 st=2 bd=1 sm=0 ctas=  512    0.580 ms   246.0 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 64 bn= 64 w=4 st=3 bd=1 sm=0 ctas=  128    0.291 ms   490.4 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 64 bn= 64 w=8 st=3 bd=1 sm=0 ctas=  128    0.524 ms   272.0 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 84 bn= 64 w=4 st=3 bd=1 sm=0 ctas=  168    0.248 ms   575.5 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits= 84 bn= 64 w=8 st=3 bd=1 sm=0 ctas=  168    0.430 ms   331.6 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=128 bn= 64 w=4 st=3 bd=1 sm=0 ctas=  256    0.301 ms   473.7 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=128 bn= 64 w=8 st=3 bd=1 sm=0 ctas=  256    0.553 ms   257.9 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=168 bn= 64 w=4 st=3 bd=1 sm=0 ctas=  336    0.287 ms   497.4 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=168 bn= 64 w=8 st=3 bd=1 sm=0 ctas=  336    0.461 ms   309.5 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=256 bn= 64 w=4 st=3 bd=1 sm=0 ctas=  512    0.324 ms   440.7 GB/s  d8=6.10e-05
+ctx=  262144 bs= 1 splits=256 bn= 64 w=8 st=3 bd=1 sm=0 ctas=  512    0.532 ms   267.8 GB/s  d8=6.10e-05
+ctx= 1048576 bs= 1 splits= 64 bn= 32 w=4 st=2 bd=0 sm=0 ctas=  128    1.027 ms   555.4 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 64 bn= 32 w=8 st=2 bd=0 sm=0 ctas=  128    1.134 ms   503.2 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 84 bn= 32 w=4 st=2 bd=0 sm=0 ctas=  168    0.847 ms   673.6 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 84 bn= 32 w=8 st=2 bd=0 sm=0 ctas=  168    0.916 ms   622.4 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=128 bn= 32 w=4 st=2 bd=0 sm=0 ctas=  256    1.142 ms   499.6 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=128 bn= 32 w=8 st=2 bd=0 sm=0 ctas=  256    1.152 ms   495.2 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=168 bn= 32 w=4 st=2 bd=0 sm=0 ctas=  336    0.937 ms   608.8 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=168 bn= 32 w=8 st=2 bd=0 sm=0 ctas=  336    0.945 ms   603.5 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=256 bn= 32 w=4 st=2 bd=0 sm=0 ctas=  512    0.957 ms   595.8 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=256 bn= 32 w=8 st=2 bd=0 sm=0 ctas=  512    1.148 ms   496.9 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 64 bn= 32 w=4 st=3 bd=0 sm=0 ctas=  128    1.027 ms   555.4 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 64 bn= 32 w=8 st=3 bd=0 sm=0 ctas=  128    1.019 ms   559.9 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 84 bn= 32 w=4 st=3 bd=0 sm=0 ctas=  168    0.904 ms   630.9 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 84 bn= 32 w=8 st=3 bd=0 sm=0 ctas=  168    0.902 ms   632.3 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=128 bn= 32 w=4 st=3 bd=0 sm=0 ctas=  256    1.189 ms   479.8 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=128 bn= 32 w=8 st=3 bd=0 sm=0 ctas=  256    1.086 ms   525.0 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=168 bn= 32 w=4 st=3 bd=0 sm=0 ctas=  336    0.970 ms   588.2 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=168 bn= 32 w=8 st=3 bd=0 sm=0 ctas=  336    0.914 ms   623.8 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=256 bn= 32 w=4 st=3 bd=0 sm=0 ctas=  512    1.019 ms   559.9 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=256 bn= 32 w=8 st=3 bd=0 sm=0 ctas=  512    1.058 ms   539.3 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 64 bn= 64 w=4 st=2 bd=0 sm=0 ctas=  128    0.955 ms   597.1 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 64 bn= 64 w=8 st=2 bd=0 sm=0 ctas=  128    0.797 ms   716.0 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 84 bn= 64 w=4 st=2 bd=0 sm=0 ctas=  168    0.799 ms   714.2 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 84 bn= 64 w=8 st=2 bd=0 sm=0 ctas=  168    0.702 ms   812.0 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=128 bn= 64 w=4 st=2 bd=0 sm=0 ctas=  256    0.978 ms   583.3 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=128 bn= 64 w=8 st=2 bd=0 sm=0 ctas=  256    0.833 ms   685.2 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=168 bn= 64 w=4 st=2 bd=0 sm=0 ctas=  336    0.828 ms   688.6 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=168 bn= 64 w=8 st=2 bd=0 sm=0 ctas=  336    0.739 ms   771.5 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=256 bn= 64 w=4 st=2 bd=0 sm=0 ctas=  512    1.019 ms   559.9 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=256 bn= 64 w=8 st=2 bd=0 sm=0 ctas=  512    0.867 ms   657.7 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 64 bn= 64 w=4 st=3 bd=0 sm=0 ctas=  128    0.898 ms   635.2 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 64 bn= 64 w=8 st=3 bd=0 sm=0 ctas=  128    0.818 ms   697.2 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 84 bn= 64 w=4 st=3 bd=0 sm=0 ctas=  168    0.837 ms   681.8 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 84 bn= 64 w=8 st=3 bd=0 sm=0 ctas=  168    0.762 ms   748.7 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=128 bn= 64 w=4 st=3 bd=0 sm=0 ctas=  256    0.984 ms   579.7 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=128 bn= 64 w=8 st=3 bd=0 sm=0 ctas=  256    0.888 ms   642.5 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=168 bn= 64 w=4 st=3 bd=0 sm=0 ctas=  336    0.869 ms   656.1 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=168 bn= 64 w=8 st=3 bd=0 sm=0 ctas=  336    0.784 ms   727.2 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=256 bn= 64 w=4 st=3 bd=0 sm=0 ctas=  512    1.031 ms   553.2 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=256 bn= 64 w=8 st=3 bd=0 sm=0 ctas=  512    0.904 ms   630.9 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 64 bn= 32 w=4 st=2 bd=1 sm=0 ctas=  128    1.396 ms   408.7 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 64 bn= 32 w=8 st=2 bd=1 sm=0 ctas=  128    1.594 ms   357.8 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 84 bn= 32 w=4 st=2 bd=1 sm=0 ctas=  168    1.097 ms   520.1 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 84 bn= 32 w=8 st=2 bd=1 sm=0 ctas=  168    1.236 ms   461.5 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=128 bn= 32 w=4 st=2 bd=1 sm=0 ctas=  256    1.392 ms   409.9 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=128 bn= 32 w=8 st=2 bd=1 sm=0 ctas=  256    1.582 ms   360.6 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=168 bn= 32 w=4 st=2 bd=1 sm=0 ctas=  336    1.117 ms   510.6 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=168 bn= 32 w=8 st=2 bd=1 sm=0 ctas=  336    1.244 ms   458.5 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=256 bn= 32 w=4 st=2 bd=1 sm=0 ctas=  512    1.138 ms   501.4 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=256 bn= 32 w=8 st=2 bd=1 sm=0 ctas=  512    1.414 ms   403.4 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 64 bn= 32 w=4 st=3 bd=1 sm=0 ctas=  128    1.179 ms   484.0 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 64 bn= 32 w=8 st=3 bd=1 sm=0 ctas=  128    2.090 ms   272.9 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 84 bn= 32 w=4 st=3 bd=1 sm=0 ctas=  168    0.935 ms   610.1 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 84 bn= 32 w=8 st=3 bd=1 sm=0 ctas=  168    1.611 ms   354.1 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=128 bn= 32 w=4 st=3 bd=1 sm=0 ctas=  256    1.185 ms   481.5 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=128 bn= 32 w=8 st=3 bd=1 sm=0 ctas=  256    2.108 ms   270.5 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=168 bn= 32 w=4 st=3 bd=1 sm=0 ctas=  336    0.947 ms   602.2 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=168 bn= 32 w=8 st=3 bd=1 sm=0 ctas=  336    1.650 ms   345.8 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=256 bn= 32 w=4 st=3 bd=1 sm=0 ctas=  512    1.009 ms   565.5 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=256 bn= 32 w=8 st=3 bd=1 sm=0 ctas=  512    1.904 ms   299.7 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 64 bn= 64 w=4 st=2 bd=1 sm=0 ctas=  128    1.082 ms   527.0 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 64 bn= 64 w=8 st=2 bd=1 sm=0 ctas=  128    2.352 ms   242.5 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 84 bn= 64 w=4 st=2 bd=1 sm=0 ctas=  168    0.888 ms   642.5 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 84 bn= 64 w=8 st=2 bd=1 sm=0 ctas=  168    1.822 ms   313.1 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=128 bn= 64 w=4 st=2 bd=1 sm=0 ctas=  256    1.121 ms   508.7 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=128 bn= 64 w=8 st=2 bd=1 sm=0 ctas=  256    2.358 ms   241.9 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=168 bn= 64 w=4 st=2 bd=1 sm=0 ctas=  336    0.904 ms   630.9 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=168 bn= 64 w=8 st=2 bd=1 sm=0 ctas=  336    1.863 ms   306.2 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=256 bn= 64 w=4 st=2 bd=1 sm=0 ctas=  512    1.091 ms   523.1 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=256 bn= 64 w=8 st=2 bd=1 sm=0 ctas=  512    2.129 ms   267.9 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 64 bn= 64 w=4 st=3 bd=1 sm=0 ctas=  128    1.097 ms   520.1 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 64 bn= 64 w=8 st=3 bd=1 sm=0 ctas=  128    2.049 ms   278.4 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 84 bn= 64 w=4 st=3 bd=1 sm=0 ctas=  168    0.955 ms   597.1 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits= 84 bn= 64 w=8 st=3 bd=1 sm=0 ctas=  168    1.615 ms   353.2 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=128 bn= 64 w=4 st=3 bd=1 sm=0 ctas=  256    1.138 ms   501.4 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=128 bn= 64 w=8 st=3 bd=1 sm=0 ctas=  256    2.094 ms   272.4 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=168 bn= 64 w=4 st=3 bd=1 sm=0 ctas=  336    0.914 ms   623.8 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=168 bn= 64 w=8 st=3 bd=1 sm=0 ctas=  336    1.662 ms   343.2 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=256 bn= 64 w=4 st=3 bd=1 sm=0 ctas=  512    1.068 ms   534.1 GB/s  d8=3.05e-05
+ctx= 1048576 bs= 1 splits=256 bn= 64 w=8 st=3 bd=1 sm=0 ctas=  512    1.902 ms   300.0 GB/s  d8=3.05e-05
+
+best per (ctx, batch):
+  ctx=    8192 bs= 1 -> splits=64 bn=32 w=4  0.020 ms  
+  ctx=   81920 bs= 1 -> splits=84 bn=64 w=8  0.053 ms  
+  ctx=  262144 bs= 1 -> splits=84 bn=64 w=8  0.195 ms  
+  ctx= 1048576 bs= 1 -> splits=84 bn=64 w=8  0.702 ms  

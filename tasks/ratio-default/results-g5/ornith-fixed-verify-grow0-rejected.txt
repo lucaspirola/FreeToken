@@ -1,0 +1,4 @@
+=== verify memory-ratio 1.00 (nohup, port 1920) 07:07:52
+--- startup memory lines
+--- FAIL-start (ratio 1.00, ready 302s, captures 0, decode - tok/s, prediction WARNs 0)
+TSV: /root/FreeToken-ratio/tasks/ratio-default/results-g5/verify-memory-ratio.tsv

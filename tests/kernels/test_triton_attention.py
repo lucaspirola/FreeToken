@@ -393,7 +393,8 @@ def test_decode_launch_config_fills_the_gpu_for_untuned_head_shapes():
     Stage 1's grid is ``batch * cdiv(num_q_heads, min(16, group)) * kv_splits``, i.e. two
     head blocks for this geometry, so the old flat 8-split fallback put 16 CTAs on 84 SMs
     and decode time grew linearly with context. 64 splits (128 CTAs) measured 8.3x/9.1x/
-    9.6x/9.7x faster per layer at 131K/262K/524K/1M on the RTX 5080.
+    9.6x/9.7x faster per layer at 131K/262K/524K/1M on the RTX 5080; two CTAs per SM
+    (84 splits, 168 CTAs) is another 9-12% at 80K-1M (tasks/splitkv-decode, box sweep).
     """
     from freetoken.kernel.triton.attention import (
         _decode_head_blocks,
@@ -403,7 +404,7 @@ def test_decode_launch_config_fills_the_gpu_for_untuned_head_shapes():
 
     nemotron = {"quant_name": "q8_0", "head_dim": 128, "num_q_heads": 32, "num_kv_heads": 2}
     assert _decode_head_blocks(32, 2) == 2
-    assert decode_launch_config(compute_capability=(12, 0), sm_count=84, **nemotron) == (64, 64, 8)
+    assert decode_launch_config(compute_capability=(12, 0), sm_count=84, **nemotron) == (84, 64, 8)
     # No SM count (CPU device, direct kernel callers): the historical conservative answer.
     assert decode_launch_config(compute_capability=(12, 0), **nemotron) == (8, 32, 4)
 
@@ -411,12 +412,12 @@ def test_decode_launch_config_fills_the_gpu_for_untuned_head_shapes():
     # and measured slower on the 16Q/2KV/D256 bf16 pool.
     assert decode_launch_config(
         quant_name=None, head_dim=256, num_q_heads=16, num_kv_heads=2, sm_count=84
-    ) == (64, 32, 4)
+    ) == (84, 32, 4)
 
     # More head blocks need fewer splits to fill the same GPU, and MHA-shaped grids
     # (one head block per query head) never fall below the historical floor.
     assert _decode_head_blocks(64, 8) == 8
-    assert _grid_filling_splits(num_q_heads=64, num_kv_heads=8, sm_count=84) == 16
+    assert _grid_filling_splits(num_q_heads=64, num_kv_heads=8, sm_count=84) == 21
     assert _grid_filling_splits(num_q_heads=32, num_kv_heads=32, sm_count=84) == 8
     assert _grid_filling_splits(num_q_heads=32, num_kv_heads=2, sm_count=2048) == 128
 
@@ -674,7 +675,10 @@ def test_decode_triton_attention_with_sinks_matches_reference():
         (512, 2, None, [2, 4], [3, 2]),
     ],
 )
+@pytest.mark.parametrize("gqa", [False, True])
 def test_extend_triton_attention_matches_reference(
+    monkeypatch,
+    gqa: bool,
     use_split_inputs: bool,
     head_dim: int,
     num_kv_heads: int,
@@ -684,6 +688,8 @@ def test_extend_triton_attention_matches_reference(
 ):
     from freetoken.kernel.triton.attention import extend_paged_attention
 
+    # GQA-packed split kernel (FREETOKEN_EXTEND_GQA=1) must match the same reference.
+    monkeypatch.setenv("FREETOKEN_EXTEND_GQA", "1" if gqa else "0")
     torch.manual_seed(2)
     device = torch.device("cuda")
     num_q_heads = 16
@@ -757,8 +763,10 @@ def test_extend_triton_attention_matches_reference(
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton attention needs CUDA")
 @pytest.mark.parametrize("use_split_inputs", [False, True])
 @pytest.mark.parametrize("sliding_window", [None, 48])
-def test_extend_triton_attention_with_bidirectional_blocks_matches_reference(use_split_inputs: bool, sliding_window: int | None):
+@pytest.mark.parametrize("gqa", [False, True])
+def test_extend_triton_attention_with_bidirectional_blocks_matches_reference(monkeypatch, gqa: bool, use_split_inputs: bool, sliding_window: int | None):
     """Rows of an image span see the span's later keys across q tiles, text rows stay causal, the window still bounds the past."""
+    monkeypatch.setenv("FREETOKEN_EXTEND_GQA", "1" if gqa else "0")
     from freetoken.kernel.triton.attention import extend_paged_attention
 
     torch.manual_seed(3)
@@ -805,7 +813,9 @@ def test_extend_triton_attention_with_bidirectional_blocks_matches_reference(use
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton attention needs CUDA")
 @pytest.mark.parametrize("use_split_inputs", [False, True])
-def test_extend_triton_attention_with_sinks_matches_reference(use_split_inputs: bool):
+@pytest.mark.parametrize("gqa", [False, True])
+def test_extend_triton_attention_with_sinks_matches_reference(monkeypatch, gqa: bool, use_split_inputs: bool):
+    monkeypatch.setenv("FREETOKEN_EXTEND_GQA", "1" if gqa else "0")
     from freetoken.kernel.triton.attention import extend_paged_attention
 
     torch.manual_seed(12)

@@ -1,0 +1,46 @@
+== /root/K/results/nsys-v2/dec-256000.sqlite: 103 steps, period mean 7941.9 us (median 7681.4) = 125.9 tok/s under trace
+   attention stage1   1123.7 us/step (6.0 launches/step)
+   attention stage2     26.0 us/step
+   rest of graph      5256.2 us/step
+   non-graph kerns      18.9 us/step
+   memcpy           kind2: 0.3 us 0.00 MB, kind8: 11.6 us 2.07 MB, kind1: 2.7 us 0.00 MB
+   GPU busy 6438.3 us, idle 1503.6 us per step; attention share of period 14.5%
+     G _decode_nvfp4_marlin_kernel                                                    46.0/step   1228.4 us
+     G _decode_grouped_stage1_kernel                                                   6.0/step   1123.7 us
+     G _gemv_splitk_kernel                                                            46.0/step   1095.8 us
+     G fast_index_copy_multi                                                          23.0/step    974.0 us
+     G _nvfp4_gemv_splitk_kernel                                                      46.0/step    410.1 us
+     G kernel                                                                         35.0/step    398.3 us
+     G _nvfp4_gemv_kernel                                                              1.0/step    228.5 us
+     G vectorized_elementwise_kernel                                                 167.0/step    156.5 us
+     G unrolled_elementwise_kernel                                                    70.0/step    129.3 us
+     G _selective_state_update_kernel                                                 23.0/step    123.0 us
+     G gatherTopK                                                                     23.0/step     99.7 us
+     G kernel_cutlass_kernel_flashinfernormkernelsrmsnormRMSNormKernel_object_at__t   53.0/step     83.9 us
+     G _ensure_experts_sized_kernel_v2                                                23.0/step     70.5 us
+     G causal_conv1d_update_kernel                                                    23.0/step     50.9 us
+     G _splitk_reduce_kernel                                                          46.0/step     50.8 us
+     G reduce_kernel                                                                  23.0/step     34.1 us
+== /root/K/results/nsys-v2/dec-8000.sqlite: 77 steps, period mean 7218.4 us (median 7092.5) = 138.5 tok/s under trace
+   attention stage1     62.5 us/step (6.0 launches/step)
+   attention stage2     22.4 us/step
+   rest of graph      5551.5 us/step
+   non-graph kerns      19.0 us/step
+   memcpy           kind2: 0.3 us 0.00 MB, kind8: 9.8 us 0.26 MB, kind1: 2.6 us 0.00 MB
+   GPU busy 5668.1 us, idle 1550.4 us per step; attention share of period 1.2%
+     G fast_index_copy_multi                                                          23.0/step   1271.9 us
+     G _decode_nvfp4_marlin_kernel                                                    46.0/step   1224.6 us
+     G _gemv_splitk_kernel                                                            46.0/step   1097.1 us
+     G _nvfp4_gemv_splitk_kernel                                                      46.0/step    411.6 us
+     G kernel                                                                         35.0/step    399.3 us
+     G _nvfp4_gemv_kernel                                                              1.0/step    229.1 us
+     G vectorized_elementwise_kernel                                                 167.0/step    154.5 us
+     G unrolled_elementwise_kernel                                                    70.0/step    129.1 us
+     G _selective_state_update_kernel                                                 23.0/step    122.9 us
+     G gatherTopK                                                                     23.0/step     94.8 us
+     G kernel_cutlass_kernel_flashinfernormkernelsrmsnormRMSNormKernel_object_at__t   53.0/step     83.4 us
+     G _ensure_experts_sized_kernel_v2                                                23.0/step     73.7 us
+     G _decode_grouped_stage1_kernel                                                   6.0/step     62.5 us
+     G _splitk_reduce_kernel                                                          46.0/step     52.6 us
+     G causal_conv1d_update_kernel                                                    23.0/step     50.9 us
+     G reduce_kernel                                                                  23.0/step     34.1 us

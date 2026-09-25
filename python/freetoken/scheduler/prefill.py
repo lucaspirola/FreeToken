@@ -378,6 +378,11 @@ class PrefillAdder:
             # the request until it gets a bigger turn.
             aligned = align_down(cached_len + chunk_size, align) - cached_len
             chunk_size = aligned if aligned > 0 else chunk_size
+        b = self._segment_cut(pending_req)
+        if b is not None and cached_len < b < cached_len + chunk_size:
+            # End this chunk exactly at the leading system+tools segment so its state can be
+            # snapshotted there (CacheManager.commit_prefix_boundary, at the continuation).
+            chunk_size = b - cached_len
         if self.keep_images_whole and pending_req.mm_items and chunk_size < remain_len:
             # a cut image would attend within only the part already in the cache: end the chunk before it, decided last because the caps above only move the end earlier and would undo it
             unit = math.lcm(self.cache_manager.page_size if self.cache_manager.swa_paged else 1, align if align > 1 else 1)
@@ -424,6 +429,7 @@ class PrefillAdder:
             no_prefix_cache=pending_req.no_prefix_cache,
             pin_key=pending_req.pin_key,
         )
+        req.prefix_boundary = pending_req.prefix_boundary
         req.mm_items = pending_req.mm_items
         req.mrope_positions_full = pending_req.mrope_positions_full
         req.mrope_delta = pending_req.mrope_delta
@@ -497,12 +503,26 @@ class PrefillAdder:
             self.reserved_swa += self.cache_manager.page_size
         return True
 
+    def _segment_cut(self, pending_req: PendingReq) -> int | None:
+        """The page-aligned segment boundary a hybrid prefill chunk should end on, or None."""
+        cm = self.cache_manager
+        b = pending_req.prefix_boundary
+        if b is None or not (cm.is_hybrid and cm.chunk_snapshots):
+            return None
+        if pending_req.hidden_states is not None or pending_req.no_prefix_cache:
+            return None
+        b = align_down(b, cm.page_size)
+        return b if 0 < b < pending_req.input_len else None
+
     def try_add_one(self, pending_req: PendingReq, chunk_limit: int | None = None) -> Req | None:
         if self.token_budget <= 0:
             return None
 
         if chunked_req := pending_req.chunked_req:
-            return self._add_one_req(
+            # Hybrid: hand the previous chunk's boundary snapshot to the shared tree before
+            # this continuation copies the handle and ping-pong slots (commit_chunk_snapshot).
+            self.cache_manager.commit_chunk_snapshot(chunked_req)
+            req = self._add_one_req(
                 pending_req=pending_req,
                 cache_handle=chunked_req.cache_handle,
                 table_idx=chunked_req.table_idx,
@@ -514,6 +534,13 @@ class PrefillAdder:
                 swa_evicted_seqlen=chunked_req.swa_evicted_seqlen,  # extend-free watermark so far
                 chunk_limit=chunk_limit,
             )
+            b = self._segment_cut(pending_req)
+            if req is not None and b is not None and chunked_req.cached_len == b:
+                # The previous chunk ended at the segment boundary (the cut above): its live
+                # state is the segment's state. Only now that this continuation is in the
+                # batch, whose forward performs the copy first, may the tree name the slot.
+                self.cache_manager.commit_prefix_boundary(chunked_req, req, b)
+            return req
 
         if resource := self._try_allocate_one(pending_req):
             cache_handle, table_idx, linear_slot_idx, ping_pong, restore_src = resource
@@ -734,6 +761,7 @@ class PrefillManager:
                 hidden_states=req.hidden_states,
                 no_prefix_cache=req.no_prefix_cache,
                 pin_key=req.pin_key,
+                prefix_boundary=getattr(req, "prefix_boundary", None),
                 mm_items=req.mm_items,
                 mrope_positions_full=req.mrope_positions,
                 mrope_delta=req.mrope_delta,

@@ -36,7 +36,7 @@ def _packed_rows(qtype: int, rows: int, seed: int) -> np.ndarray:
 
 
 @pytest.mark.parametrize("qtype", [GGML_Q4_K, GGML_Q6_K])
-@pytest.mark.parametrize("tokens", [7, 16, 129])
+@pytest.mark.parametrize("tokens", [1, 3, 7, 16, 129])
 def test_mma_matches_reference(qtype, tokens):
     from freetoken.kernel.gguf import ggml_mul_mat_a8_mma
 
@@ -61,6 +61,37 @@ def test_mma_matches_reference(qtype, tokens):
     rel = ((got - ref).norm() / (ref.norm() + 1e-12)).item()
     assert got.shape == (tokens, out_features)
     assert rel < 0.02, rel
+
+
+@pytest.mark.parametrize("qtype", [GGML_Q4_K, GGML_Q6_K])
+@pytest.mark.parametrize("nrows", [320, 512])
+def test_activation_padding_covers_the_launched_tile(qtype, nrows):
+    """Each y-tile load of mul_mat_q copies J * MMQ_TILE_Y_K ints from its column tile's
+    first column in steps of nthreads with no bound on the index, so it reads
+    ceil(J * 36 / nthreads) * nthreads ints; the last tile starts at most one block
+    before the end of the quantized activations, so both entry points must pad them by
+    that extent. Two short pads faulted the round-2 suite:
+    * a J_max rounded DOWN from ne11 (0 blocks for fewer than 8 columns; the MoE entry
+      passed ne11 = 1): test_mma_matches_reference[7-12] read 144 B past its buffer;
+    * J blocks (fe95df1): J = 8 on a 256-thread config reads 512 ints = 14.2 blocks,
+      and memcheck without the caching allocator flagged the 1-token call reading
+      bytes 1792..1919 of its 1728 B buffer.
+    The MoE entry's ids_dst map has the same unbounded fill: each tile copies J entries
+    from its first column, so the last expert's last tile reads up to J - 1 entries past
+    the routed rows (memcheck: 1..49 B past the 144 B ids_dst of the 9-token top-4 call
+    of test_moe_mma_matches_reference); ids_dst must be padded by J - 1 entries or more.
+    Whether the reads fault depends on what the caching allocator placed after the
+    buffers, hence a check of the sizing rules rather than of a crash."""
+    from freetoken.kernel.gguf import _mma_module
+
+    hook = _mma_module().mmq_tile_and_pad
+    tile_y_k = 32 + 32 // 8  # MMQ_TILE_Y_K ints per column = one block_q8_1_mmq
+    for ncols in list(range(1, 300)) + [511, 512, 513, 4096, 8192]:
+        tile, nthreads, pad, ids_pad = hook(qtype, nrows, ncols)
+        assert 8 <= tile <= 128 and tile % 8 == 0, (ncols, tile)
+        read_ints = -(-tile * tile_y_k // nthreads) * nthreads
+        assert pad * tile_y_k >= read_ints, (ncols, tile, nthreads, pad)
+        assert ids_pad >= tile - 1, (ncols, tile, ids_pad)
 
 
 @pytest.mark.parametrize("qtype", [GGML_Q4_K, GGML_Q6_K])

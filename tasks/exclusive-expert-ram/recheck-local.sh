@@ -11,7 +11,7 @@
 #      the host is stopped.
 #   RC_LABEL  arm prefix (default rc); RC_OUT results dir (default results/recheck-local)
 #   RC_PARTS  "8k ram" (default both)
-#   RC_SIZE   prompt size of the alternated part (default 8000; 80000 for the 80K re-check)
+#   RC_SIZE   prompt size(s) of the alternated part (default 8000; "8000 80000" runs both per arm)
 # Waits for MemAvailable >= 23 GiB and 0 MiB on the GPU before each arm [agent practice].
 # Run as a systemd transient user unit (--setenv=PATH), never from an agent shell.
 set -uo pipefail
@@ -42,8 +42,8 @@ for part in ${RC_PARTS:-8k ram}; do
   case "$part" in
     8k)
       for i in 1 2 3; do
-        one "$L-whole-$i"  FT_ROWS=0 FT_SIZES=${RC_SIZE:-8000} FT_GEN=512
-        one "$L-mirror-$i" FT_ROWS=-1 FT_RESERVE=256 FT_SIZES=${RC_SIZE:-8000} FT_GEN=512
+        one "$L-whole-$i"  FT_ROWS=0 FT_SIZES="${RC_SIZE:-8000}" FT_GEN=512
+        one "$L-mirror-$i" FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="${RC_SIZE:-8000}" FT_GEN=512
       done ;;
     ram)
       {

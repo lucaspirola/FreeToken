@@ -1,0 +1,2 @@
+captures=1 tracebacks=0 kv_grows=8
+[2026-09-24|12:24:09|core|rank=0] INFO     Triton decode launch: kv_splits=84 block_n=64 warps=8 (q_heads=32 kv_heads=2 head_dim=128 quant=q8_0 sms=84)

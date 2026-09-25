@@ -98,6 +98,9 @@ def _scheduler(*, pending, cm=None, shrink_error=None):
     )
     obj._growable_handoff_demand_pages = Scheduler._growable_handoff_demand_pages.__get__(obj)
     obj._retained_session_handles = Scheduler._retained_session_handles.__get__(obj)
+    obj._release_leases_older_than_prefix = (
+        Scheduler._release_leases_older_than_prefix.__get__(obj))
+    obj._newest_evictable_prefix_ns = Scheduler._newest_evictable_prefix_ns.__get__(obj)
     obj.engine.stream = SimpleNamespace(synchronize=lambda: None)
     return obj, calls
 

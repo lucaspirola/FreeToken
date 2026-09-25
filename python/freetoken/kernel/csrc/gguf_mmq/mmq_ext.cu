@@ -143,6 +143,51 @@ static ggml_backend_cuda_context & mma_context(int id) {
     return *contexts[id];
 }
 
+// Blocks of block_q8_1_mmq to pad the quantized activations with. Each y-tile load of
+// mul_mat_q_process_tile copies J*MMQ_TILE_Y_K ints from the tile's first column in steps of
+// nthreads with no bound on the index, so it reads J*MMQ_TILE_Y_K rounded up to nthreads ints:
+// for J = 8 on a 256-thread config that is 512 ints (14.2 blocks), not J = 8 blocks. The last
+// tile starts at most one block before the end of the data, so this many blocks cover it.
+static int mmq_launch_J(ggml_type type_x, bool fallback, int id, int64_t ncols_max) {
+    const int cc = ggml_cuda_info().devices[id].cc;
+    const size_t smpbo = ggml_cuda_info().devices[id].smpbo;
+    const int J = ggml_cuda_mmq_select_J(type_x, fallback, cc, smpbo, ncols_max);
+    TORCH_CHECK(J > 0, "no MMQ tile fits this device");
+    return J;
+}
+
+static int64_t mmq_y_pad_blocks(ggml_type type_x, bool fallback, int id, int64_t ncols_max) {
+    const int cc = ggml_cuda_info().devices[id].cc;
+    const int J = mmq_launch_J(type_x, fallback, id, ncols_max);
+    const int nthreads = ggml_cuda_mmq_get_nthreads(type_x, J, fallback, cc);
+    const int64_t tile_ints = ((int64_t) J * MMQ_TILE_Y_K + nthreads - 1) / nthreads * nthreads;
+    constexpr int64_t sz = sizeof(block_q8_1_mmq) / sizeof(int);
+    return (tile_ints + sz - 1) / sz;
+}
+
+// Entries to pad the MoE ids_dst map with. mul_mat_q fills its shared ids_dst tile with J entries
+// from each column tile's first column without a bound on the expert's column count (the
+// write-back bounds j instead), so an expert's last tile reads up to J - 1 entries past the
+// routed rows: the last expert's reads leave the buffer (memcheck: mul_mat_q<Q4_K, 16, true>
+// read 1..49 B past the 144 B ids_dst of a 9-token top-4 call).
+static int64_t mmq_ids_dst_pad(ggml_type type_x, bool fallback, int id, int64_t ncols_max) {
+    return mmq_launch_J(type_x, fallback, id, ncols_max);
+}
+
+// Test hook: (J launched, nthreads of that config, y pad blocks, ids_dst pad entries) for a call
+// with ``ncols_max`` columns and ``nrows`` rows.
+static std::vector<int64_t> mmq_tile_and_pad(int64_t type, int64_t nrows, int64_t ncols_max) {
+    const ggml_type type_x = (ggml_type) type;
+    const bool fallback = nrows % 128 != 0;
+    const int id = ggml_cuda_get_device();
+    const int cc = ggml_cuda_info().devices[id].cc;
+    const size_t smpbo = ggml_cuda_info().devices[id].smpbo;
+    const int J = ggml_cuda_mmq_select_J(type_x, fallback, cc, smpbo, ncols_max);
+    return {J, ggml_cuda_mmq_get_nthreads(type_x, J, fallback, cc),
+            mmq_y_pad_blocks(type_x, fallback, id, ncols_max),
+            mmq_ids_dst_pad(type_x, fallback, id, ncols_max)};
+}
+
 static void warmup_mma_context(int64_t device_id) {
     const c10::cuda::CUDAGuard guard((c10::DeviceIndex) device_id);
     (void) mma_context((int) device_id);
@@ -179,8 +224,9 @@ static torch::Tensor ggml_mul_mat_a8_mma(torch::Tensor W, torch::Tensor X, int64
     const bool fallback = ne01 % 128 != 0;
 
     const int64_t ne10_padded = GGML_PAD(ne10, MATRIX_ROW_PADDING);
+    // + the launched tile's y-load extent: the last column tile reads past ne11 (mmq_y_pad_blocks).
     const size_t nbytes_src1_q8_1 = ne11 * ne10_padded * sizeof(block_q8_1_mmq) / QK8_1_MMQ +
-        ggml_cuda_mmq_get_J_max(type_x, fallback, cc, ne11) * sizeof(block_q8_1_mmq);
+        mmq_y_pad_blocks(type_x, fallback, id, /*ncols_max=*/ne11) * sizeof(block_q8_1_mmq);
 
     auto opts = torch::TensorOptions().device(W.device());
     torch::Tensor y_q = torch::empty({(int64_t) nbytes_src1_q8_1}, opts.dtype(torch::kUInt8));
@@ -271,7 +317,9 @@ static torch::Tensor ggml_moe_a8_mma(
     auto opts = torch::TensorOptions().device(W.device());
     const int64_t ne_get_rows = ne12 * n_expert_used;
     torch::Tensor ids_src1 = torch::empty({ne_get_rows}, opts.dtype(torch::kInt32));
-    torch::Tensor ids_dst = torch::empty({ne_get_rows}, opts.dtype(torch::kInt32));
+    // + the launched J: an expert's last column tile reads J entries (mmq_ids_dst_pad).
+    torch::Tensor ids_dst = torch::empty(
+        {ne_get_rows + mmq_ids_dst_pad(type_x, fallback, id, /*ncols_max=*/ne12)}, opts.dtype(torch::kInt32));
     torch::Tensor expert_bounds = torch::empty({ne02 + 1}, opts.dtype(torch::kInt32));
 
     // Broadcast activations (gate/up): each token row is shared by its top_k
@@ -290,8 +338,10 @@ static torch::Tensor ggml_moe_a8_mma(
     CUDA_CHECK(cudaGetLastError());
 
     const int64_t ne10_padded = GGML_PAD(ne10, MATRIX_ROW_PADDING);
+    // + the y-load extent of the tile launched for ncols_max (= tokens): an expert's last column
+    // tile reads past the last routed row (mmq_y_pad_blocks).
     const size_t nbytes_src1_q8_1 = ne_get_rows * ne10_padded * sizeof(block_q8_1_mmq) / QK8_1_MMQ +
-        ggml_cuda_mmq_get_J_max(type_x, fallback, cc, /*ne11=*/1) * sizeof(block_q8_1_mmq);
+        mmq_y_pad_blocks(type_x, fallback, id, /*ncols_max=*/ne12) * sizeof(block_q8_1_mmq);
     torch::Tensor y_q = torch::empty({(int64_t) nbytes_src1_q8_1}, opts.dtype(torch::kUInt8));
     torch::Tensor dst = torch::empty({ne_get_rows, ne01}, opts.dtype(torch::kFloat32));
 
@@ -347,4 +397,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "y = x @ dequant(W).T via upstream int8-MMA MMQ (Q4_K/Q6_K)");
     m.def("ggml_moe_a8_mma", &ggml_moe_a8_mma,
           "grouped MoE matmul over flat padded expert slots (Q4_K/Q6_K)");
+    m.def("mmq_tile_and_pad", &mmq_tile_and_pad,
+          "test hook: [column tile J launched, its nthreads, y padding in blocks, ids_dst padding] for (type, nrows, ncols_max)");
 }
