@@ -1,0 +1,114 @@
+waiting for /root/gpu.lock
+code: a2f08c0ad Decode-level headroom probe (FREETOKEN_DECODE_MEM_PROBE=1) and a measurement override for the target
+preflight ok: GPU 2 MiB, MemAvailable 241 GiB, no server, no pytest
+checkpoint label: dt128m (box)
+code: a2f08c0ad Decode-level headroom probe (FREETOKEN_DECODE_MEM_PROBE=1) and a measurement override for the target
+preflight ok: GPU 2 MiB, MemAvailable 241 GiB, no server, no pytest
+=== arm dt128m-mirror-1m 2026-09-25T09:36:04Z ===
+[dt128m-mirror-1m] starting: model=NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 rows=-1 ratio=1.00 port=1920 code=/root/FT-dh@a2f08c0ad venv=/root/venv launcher=nohup
+[dt128m-mirror-1m] server pgid=744851 log=/root/FT-dh/tasks/exclusive-expert-ram/results/dt128m-mirror-1m-server.log
+[dt128m-mirror-1m] ready after 87s
+[2026-09-25|09:36:24|core|rank=0] INFO     Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode graphs enabled, prefill overlap on (layers assembled from resident slots + pool rows, no disk)
+[2026-09-25|09:36:24|core|rank=0] INFO     Mirror pool: reserve resolved to 256 rows (FREETOKEN_MIRROR_RESERVE_ROWS='256')
+[2026-09-25|09:36:40|core|rank=0] INFO     Mirror pool: 1740 rows pinned (9.11 GiB), 648 cover the complement of 2296 GPU residents, 256 reserved, up to 836 duplicates (a duplicate makes its expert's next eviction free of any host traffic)
+[2026-09-25|09:36:40|core|rank=0] INFO     Mirror pool: the coverage floor is 1464 of 2296 arena slots, leaving 832 slots (4.36 GiB) the growable KV may still take
+[2026-09-25|09:36:40|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+[2026-09-25|09:37:30|core|rank=0] INFO     Prefill headroom: transient 0.59 GiB measured on a 8192-token chunk (empty prefix 0.59 GiB, after a 8192-token prefix 0.59 GiB, allocator peak 0.59 GiB); headroom 0.59 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 1464 -> 2128 of 2296 slots, 0.73 GiB free (target 0.71 GiB), 168 slots below the ratio plan
+[dt128m-mirror-1m] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8014, "ttft_s": 0.42, "prefill_tok_s": 19299.0, "gen_tokens": 511, "decode_tok_s": 164.4, "decode_tok_s_wall": 164.4, "total_s": 3.5, "ttft_mono_s": 0.415, "prefill_tok_s_mono": 19299.0, "total_mono_s": 3.52, "t_start_wall": 1790329081.218, "gap1_ms": 13.7, "max_gap_ms": 20.4, "median_gap_ms": 5.8, "decode_tok_s_after_gap1": 164.8}
+{"target": 1000000, "pass": 1, "prompt_tokens": 1000030, "ttft_s": 790.22, "prefill_tok_s": 1266.0, "gen_tokens": 511, "decode_tok_s": 71.0, "decode_tok_s_wall": 71.0, "total_s": 797.4, "ttft_mono_s": 790.215, "prefill_tok_s_mono": 1266.0, "total_mono_s": 797.4, "t_start_wall": 1790329084.781, "gap1_ms": 38.8, "max_gap_ms": 59.4, "median_gap_ms": 12.1, "decode_tok_s_after_gap1": 71.2}
+{"target": 8000, "pass": 2, "prompt_tokens": 8016, "ttft_s": 0.99, "prefill_tok_s": 8062.0, "gen_tokens": 511, "decode_tok_s": 165.6, "decode_tok_s_wall": 165.6, "total_s": 4.1, "ttft_mono_s": 0.994, "prefill_tok_s_mono": 8062.0, "total_mono_s": 4.07, "t_start_wall": 1790329882.183, "gap1_ms": 22.2, "max_gap_ms": 22.2, "median_gap_ms": 5.8, "decode_tok_s_after_gap1": 166.5}
+{"target": 1000000, "pass": 2, "prompt_tokens": 1000032, "ttft_s": 789.59, "prefill_tok_s": 1267.0, "gen_tokens": 511, "decode_tok_s": 72.7, "decode_tok_s_wall": 72.7, "total_s": 796.6, "ttft_mono_s": 789.592, "prefill_tok_s_mono": 1267.0, "total_mono_s": 796.61, "t_start_wall": 1790329886.297, "gap1_ms": 38.9, "max_gap_ms": 49.3, "median_gap_ms": 12.2, "decode_tok_s_after_gap1": 72.9}
+[dt128m-mirror-1m] post: NEEDLES_THINK_MAX_TOKENS=65536 NEEDLES_OUT="/root/FT-dh/tasks/exclusive-expert-ram/results/dt128m-mirror-1m-needles.json" python3 /root/FT-dh/tasks/exclusive-expert-ram/needles.py 21000 120000; python3 /root/FT-dh/tasks/exclusive-expert-ram/recall.py 21000 120000 240000
+[21000 -> 19927 tok] 5/7  codes=ok multihop=TRUNC counting=FAIL ordering=ok contradiction=ok arithmetic=ok negative=ok
+  WARNING: prefix cache MISSED at 120000 (cached 0 of 112298 prompt tokens). Every question re-prefilled the haystack; raise --pin-prefix-max-tokens above the haystack size.
+[120000 -> 112298 tok] 3/7  codes=ok multihop=TRUNC counting=FAIL ordering=TRUNC contradiction=ok arithmetic=FAIL negative=ok
+wrote /root/FT-dh/tasks/exclusive-expert-ram/results/dt128m-mirror-1m-needles.json
+{"target": 21000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 19757, "completion_tokens": 27, "seconds": 2.6, "planted": ["ZULU-2188", "ROMEO-6864", "KILO-3647"], "recalled": ["ZULU-2188", "ROMEO-6864", "KILO-3647"], "all_three": true, "answer": "ZULU-2188, ROMEO-6864, KILO-3647"}
+{"target": 120000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 112048, "completion_tokens": 27, "seconds": 19.3, "planted": ["ROMEO-1813", "TANGO-6789", "ZULU-5364"], "recalled": ["ROMEO-1813", "TANGO-6789", "ZULU-5364"], "all_three": true, "answer": "ROMEO-1813, TANGO-6789, ZULU-5364"}
+{"target": 240000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 224417, "completion_tokens": 27, "seconds": 56.5, "planted": ["SIERRA-6523", "SIERRA-1067", "ROMEO-9011"], "recalled": ["SIERRA-6523", "SIERRA-1067", "ROMEO-9011"], "all_three": true, "answer": "SIERRA-6523, SIERRA-1067, ROMEO-9011"}
+{
+  "arm": "dt128m-mirror-1m",
+  "model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+  "rows": "-1",
+  "commit": "a2f08c0ad",
+  "venv": "/root/venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 12.2,
+  "rss_ready_gib": 13.16,
+  "devzero_gib": 0.02,
+  "ram_after_80k_gib": 12.61,
+  "rss_gib": 13.54,
+  "locked_gib": 0.0,
+  "anon_gib": 0.0,
+  "file_gib": 0.0,
+  "unevict_gib": 0.0,
+  "shmem_gib": 0.0,
+  "current_gib": 0.0,
+  "peak_current_gib": 0.0,
+  "gpu_mib": "15124",
+  "decode_8k_p1": 164.4,
+  "ttft_8k_p1": 0.42,
+  "total_8k_p1": 3.5,
+  "ttft_mono_8k_p1": 0.41,
+  "decode_1000k_p1": 71.0,
+  "ttft_1000k_p1": 790.22,
+  "total_1000k_p1": 797.4,
+  "ttft_mono_1000k_p1": 790.22,
+  "decode_8k": 165.6,
+  "ttft_8k": 0.99,
+  "total_8k": 4.1,
+  "ttft_mono_8k": 0.99,
+  "decode_1000k": 72.7,
+  "ttft_1000k": 789.59,
+  "total_1000k": 796.6,
+  "ttft_mono_1000k": 789.59,
+  "coverage_faults": 0,
+  "starved": 0,
+  "swaps": 79555,
+  "retained_rows": 64714,
+  "free_evict_rate": 0.821,
+  "buffer_free_evictions": 5251
+}
+69 arms -> /root/FT-dh/tasks/exclusive-expert-ram/results/sweep.tsv
+[dt128m-mirror-1m] stopping
+=== arm dt128m-mirror-1m done 2026-09-25T10:27:27Z ===
+dt128m-mirror-1m R3: PASS
+dt128m-mirror-1m R6(arm): FAIL (see dt128m-mirror-1m-acceptance-R6.txt; expected on Vast)
+Traceback (most recent call last):
+  File "/root/FT-dh/tasks/exclusive-expert-ram/compare_needles.py", line 24, in <module>
+    a, b = needles(REF), needles(ARM)
+           ^^^^^^^^^^^^
+  File "/root/FT-dh/tasks/exclusive-expert-ram/compare_needles.py", line 13, in needles
+    d = json.load(open(os.path.join(D, f"{arm}-needles.json")))
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/root/FT-dh/tasks/exclusive-expert-ram/results/dt128m-box/dt128m-whole-needles.json'
+== dt128m-mirror-1m (a2f08c0ad) vs nemotron-reserve-2e-1m (None)
+  decode_1000k          72.7 vs    72.9   99.7%  ok   total 796.6 s, ttft 789.59 s
+  decode_1000k_p1       71.0 vs    76.9   92.3%  ok   total 797.4 s, ttft 790.22 s
+  decode_8k            165.6 vs   170.7   97.0%  ok   total 4.1 s, ttft 0.99 s
+  decode_8k_p1         164.4 vs   177.0   92.9%  ok   total 3.5 s, ttft 0.42 s
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            12.2 (record 12.26)  free_evict_rate 0.821 (record 0.565)
+  ram 12.26 +/- 0.6  ok
+Traceback (most recent call last):
+  File "/root/FT-dh/tasks/exclusive-expert-ram/compare_records.py", line 23, in <module>
+    a, r = load(arm), load(ref)
+           ^^^^^^^^^
+  File "/root/FT-dh/tasks/exclusive-expert-ram/compare_records.py", line 20, in <lambda>
+    load = lambda n: json.load(open(os.path.join(d, f"{n}-record.json")))
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/root/FT-dh/tasks/exclusive-expert-ram/results/dt128m-box/dt128m-mirror-record.json'
+== dt128m-mirror-1m (a2f08c0ad) vs same-box whole
+  decode_1000k          72.7  (no same-box reference)
+  decode_1000k_p1       71.0  (no same-box reference)
+  decode_8k            165.6  (no same-box reference)
+  decode_8k_p1         164.4  (no same-box reference)
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            12.2  free_evict_rate 0.821
+  ram 12.26 +/- 0.6  ok
+0 point(s) outside the band
+checkpoint dt128m (box) arms done 2026-09-25T10:27:47Z

@@ -1,0 +1,10 @@
+a2f08c0ad Decode-level headroom probe (FREETOKEN_DECODE_MEM_
+dtdef-1 rc=0 06:55:32
+dt128-1 rc=0 07:11:07
+dtdef-2 rc=0 07:32:20
+dt128-2 rc=0 07:45:40
+paused 07:58:29: lfunat after nB1 (next nA2), dh2 before dt128m
+dt128m start 09:15:24 gpu=2 MiB  09:15:24 up 37 days, 14:35,  0 user,  load average: 3.11, 2.30, 2.10
+09:30:03 killed 738558 (mirror-queue.sh) to break gpu.lock self-deadlock, tail relaunched as /root/mirror-queue-tail.sh (exl3 worker)
+dt128m finished 10:27:50 (rc unknown: parent queue killed to break the gpu.lock self-deadlock, see /root/dh2-1m.log and /root/mirror-queue-tail.sh)
+ALLDONE
