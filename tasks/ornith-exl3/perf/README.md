@@ -1,3 +1,68 @@
+# Ornith EXL3 5.0bpw decode/prefill stack: final ft-dev table (BOX NUMBERS, Vast RTX 5080, PCIe gen4), 2026-09-25
+
+This is the baseline for the owner's-machine final run. Branch exp/ornith-exl3 at the D3c commit (52020bc).
+
+Setup for every row: ratio 1.00, flashinfer extend, `FREETOKEN_EXL3_GEMV_PREROT=1`, `FREETOKEN_EXL3_F16ACC` off, q8_0 KV, nothing else on the GPU. The numbers are pass 2 of `fuse/job-e2e.sh`, 127 generated tokens. Each step's README holds its bracket, tests and output gate.
+
+## (a) Saver (`--expert-residency mirror --moe-mirror-host-rows -1`), decode tok/s
+
+| step | 8K | 32K | 80K | README |
+|---|---:|---:|---:|---|
+| P4/P2b (old GEMV) | 126.1 | 121.8 | 106.5 | `p2b-f16acc`, `d2-gemv` base |
+| D2 GEMV occupancy | 134.7 | 128.9 | 111.0 | `d2-gemv` |
+| D3a shared expert on a side stream | 146.3 | 139.0 | 117.8 | `d3-sidestream` |
+| **D3c shared gate on the side stream** | **152.0** | **144.4** | **122.0** | `d3c-glue` |
+
+Prefill (saver, D3c): 8K 7377, 32K 6715, 80K 5371 tok/s. With the P2b fp16-accumulate flag on (default off; see `p2b-f16acc` for why): 8K 8523, 32K 7963, 80K 6232.
+
+## (b) Whole model (`--expert-residency whole`), decode tok/s
+
+Ornith EXL3's 20.2 GB of routed experts exceed the 16 GB GPU, so this mode also crosses PCIe on misses.
+
+| step | 8K | 32K | 80K |
+|---|---:|---:|---:|
+| D2 | 145.5 | 136.5 | 124.0 |
+| D3a | 159.8 | 148.7 | 134.1 |
+| **D3c** | **165.2** | **154.1** | **138.3** |
+
+Prefill (whole, D3c): 7861 / 7069 / 5653 tok/s.
+
+## (c) Profiled 8K decode (saver, D3c; `profile_step.py` wall-clock split, `d3c-glue/results/exl3prof-d3c2`)
+
+The profiler inflates every kernel and gap, so its window (8.17 ms) is longer than E2E (6.58 ms). The shares are what matter.
+
+| ms/token | |
+|---|---:|
+| EXL3 GEMV | 3.60 |
+| expert miss loads (`fast_index_copy_kinds`, PCIe) | 1.55 |
+| saver writebacks (DtoH) | 0.40 |
+| rest (router, cuBLAS, norms, GDN/attention kernels, mirror bookkeeping) | 1.72 |
+| idle | 0.91 |
+
+**Derived no-miss decode at 8K: 199 tok/s** (E2E minus the miss loads). It is 216 without the writebacks, with a lower bound of 161 from the profiled window. The ft-dev kernel target of >= 150 is met.
+
+## Not in this branch: the scheduler's per-step sync (exp/overlap-sync, round 3)
+
+nsys (`d3c-glue/results/exl3nsys-d3c2`) shows the GPU idle ~0.56 ms between decode graph replays.
+
+- Cause: `attention/triton.py` `prepare_metadata` builds `prefix_lens`/`indptr` with a blocking pageable host->device copy. The overlap loop's stream is ordered behind the forward in flight, so the host waits for step N before it prepares N+1.
+- It is generic: Nemotron whole and saver show it too.
+- The fix is on exp/overlap-sync (from exp/reorg-round2), measured separately, and rides round 3.
+
+## What to run on the owner's machine
+
+Run the same three arms:
+- `fuse/job-e2e.sh`, with `RESIDENCY=whole` for (b);
+- `fuse/job-prof.sh` for (c).
+
+Keep the server down and nothing else on the GPU.
+
+What should change there:
+- The gen5 link roughly halves the miss/writeback copy time.
+- The saver target there is 140 tok/s at 8K.
+
+---
+
 # Where EXL3 prefill time goes — BOX NUMBERS (ft-dev Vast RTX 5080), 2026-09-24
 
 `profile_prefill.py` (torch.profiler, one 8000-token chunk after two warmups, ratio 1.00, saver on,
