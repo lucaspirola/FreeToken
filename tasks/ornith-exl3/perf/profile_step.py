@@ -11,6 +11,7 @@ a decode step is kernels, host->device expert copies (saver misses) and host-sid
 Writes <out-prefix>.txt.
 """
 import dataclasses
+import os
 import sys
 import time
 from collections import defaultdict
@@ -68,6 +69,45 @@ def top(evs, n=25):
     return [f"  {us / 1e3:10.1f} ms {c:7d}x [{cat(k)}] {k[:140]}" for k, (us, c) in sorted(rows.items(), key=lambda kv: -kv[1][0])[:n]]
 
 
+def wall_share(evs):
+    """Split the window's wall clock among the kernels running at each instant (1/n each when n
+    overlap: side streams, PDL kernels spinning in gdc_wait), plus the idle gaps. Unlike summed
+    kernel durations, the categories add up to the window. Returns ({category: us}, {name: us}, idle us)."""
+    import heapq
+
+    pts = sorted([(s, 0, i) for i, (s, _, _, _) in enumerate(evs)] + [(e, 1, i) for i, (_, e, _, _) in enumerate(evs)],
+                 key=lambda p: (p[0], -p[1]))
+    by_cat, by_name, idle = defaultdict(float), defaultdict(float), 0.0
+    active, last = set(), pts[0][0] if pts else 0
+    for t, kind, i in pts:
+        dt = t - last
+        if dt > 0:
+            if active:
+                share = dt / len(active)
+                for j in active:
+                    by_name[evs[j][2]] += share
+                    by_cat[cat(evs[j][2])] += share
+            else:
+                idle += dt
+        last = t
+        (active.discard if kind else active.add)(i)
+    return by_cat, by_name, idle
+
+
+def wall_table(evs, gen):
+    by_cat, by_name, idle = wall_share(evs)
+    span = evs[-1][1] - evs[0][0]
+    lines = [f"wall-clock split of the decode window ({span / 1e3:.1f} ms, {span / 1e3 / gen:.3f} ms/token; "
+             f"overlapping kernels share each instant):"]
+    for k, v in sorted(by_cat.items(), key=lambda kv: -kv[1]):
+        lines.append(f"  {k:28s} {v / 1e3 / gen:7.3f} ms/token  {100 * v / span:5.1f}%")
+    lines.append(f"  {'(idle: no kernel running)':28s} {idle / 1e3 / gen:7.3f} ms/token  {100 * idle / span:5.1f}%")
+    lines += ["", "top kernels by wall-clock share, ms/token:"]
+    for k, v in sorted(by_name.items(), key=lambda kv: -kv[1])[:30]:
+        lines.append(f"  {v / 1e3 / gen:7.3f} [{cat(k)}] {k[:120]}")
+    return lines
+
+
 def main(mode, prefix, args, flags):
     llm = build(flags)
     from freetoken.core import SamplingParams
@@ -104,6 +144,18 @@ def main(mode, prefix, args, flags):
                 torch.cuda.synchronize()
                 return cache.mirror_stats() if cache is not None else {}
             before = mstats()
+            if os.environ.get("NSYS") == "1":
+                # low-overhead timeline: no torch.profiler; nsys (--capture-range=cudaProfilerApi,
+                # --cuda-graph-trace=graph) records this window, see job-nsys.sh
+                torch.cuda.synchronize()
+                torch.cuda.profiler.start()
+                t = time.perf_counter()
+                res = llm.generate([ids(llm, "measured", n_ctx)], SamplingParams(temperature=0.0, max_tokens=n_gen, ignore_eos=True))
+                torch.cuda.synchronize()
+                wall = time.perf_counter() - t
+                torch.cuda.profiler.stop()
+                print(f"nsys window: ctx {n_ctx}, {len(res[0]['token_ids'])} tokens, request wall {wall:.3f} s", flush=True)
+                return
             with torch.profiler.profile(activities=acts) as prof:
                 t = time.perf_counter()
                 res = llm.generate([ids(llm, "measured", n_ctx)], SamplingParams(temperature=0.0, max_tokens=n_gen, ignore_eos=True))
@@ -124,6 +176,10 @@ def main(mode, prefix, args, flags):
                          + (f"; {delta.get('swaps', 0) / gen:.1f} swaps and {delta.get('writebacks', 0) / gen:.1f} writebacks per token" if gen else ""))
             lines += table(dec, "decode window")
             lines += ["", "top kernels, decode window:"] + top(dec, 30)
+            lines += [""] + wall_table(dec, gen)
+            import gzip
+            with gzip.open(prefix + ".events.tsv.gz", "wt") as f:  # (start us, end us, kernel) for later analysis
+                f.writelines(f"{e[0]}\t{e[1]}\t{e[2]}\n" for e in dec)
     finally:
         llm.shutdown()
     open(prefix + ".txt", "w").write("\n".join(lines) + "\n")

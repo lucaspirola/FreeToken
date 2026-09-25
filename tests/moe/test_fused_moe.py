@@ -327,6 +327,22 @@ def test_fused_topk_softmax_ties_pick_the_lowest_expert_id():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_fused_topk_softmax_signed_zeros_tie_and_negative_order():
+    """The packed-key argmax must treat -0.0 and +0.0 as equal (lowest id wins) and order
+    negative logits correctly."""
+    from freetoken.kernel.triton.moe_router import fused_topk_softmax
+
+    gating = torch.full((2, 8), -10.0, device="cuda")
+    gating[0, [5, 1, 3]] = torch.tensor([0.0, -0.0, -0.0], device="cuda")
+    gating[1] = torch.tensor([-3.0, -1.0, -2.5, -0.5, -7.0, -1.0, -0.25, -9.0], device="cuda")
+
+    _, ids = fused_topk_softmax(gating, 3, renormalize=True)
+
+    assert ids[0].tolist() == [1, 3, 5]
+    assert ids[1].tolist() == [6, 3, 1]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 @pytest.mark.parametrize("limit_dtype", [torch.int32, torch.int64])
 def test_fused_topk_softmax_masks_padded_rows(limit_dtype):
     from freetoken.kernel.triton.moe_router import fused_topk_softmax
