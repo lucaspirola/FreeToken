@@ -1,0 +1,57 @@
+[ck5-nat-mirror-2] starting: model=NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 rows=-1 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/round3@ceb482c venv=/home/lucas/ai/FreeToken/.venv launcher=systemd
+Running as unit: ft-measure-ck5-nat-mirror-2.service; invocation ID: f00f7278d8c546bbbbf362fc9a898a4d
+[ck5-nat-mirror-2] ready after 65s
+Sep 25 18:47:36 TESSERACT serve-default.sh[2353566]: [2026-09-25|18:47:36|core|rank=0] INFO     Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode graphs enabled, prefill overlap on (layers assembled from resident slots + pool rows, no disk)
+Sep 25 18:47:36 TESSERACT serve-default.sh[2353566]: [2026-09-25|18:47:36|core|rank=0] INFO     Mirror pool: reserve resolved to 256 rows (FREETOKEN_MIRROR_RESERVE_ROWS='256')
+Sep 25 18:47:50 TESSERACT serve-default.sh[2353566]: [2026-09-25|18:47:50|core|rank=0] INFO     Mirror pool: 1850 rows pinned (9.69 GiB), 755 cover the complement of 2189 GPU residents, 256 reserved, up to 839 duplicates (a duplicate makes its expert's next eviction free of any host traffic)
+Sep 25 18:47:50 TESSERACT serve-default.sh[2353566]: [2026-09-25|18:47:50|core|rank=0] INFO     Mirror pool: the coverage floor is 1352 of 2189 arena slots, leaving 837 slots (4.38 GiB) the growable KV may still take
+Sep 25 18:47:50 TESSERACT serve-default.sh[2353566]: [2026-09-25|18:47:50|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+Sep 25 18:48:26 TESSERACT serve-default.sh[2353566]: [2026-09-25|18:48:26|core|rank=0] INFO     Prefill headroom: transient 0.59 GiB measured on a 8192-token chunk (empty prefix 0.59 GiB, after a 8192-token prefix 0.59 GiB, allocator peak 0.59 GiB); headroom 0.59 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 1352 -> 2024 of 2189 slots, 0.74 GiB free (target 0.71 GiB), 165 slots below the ratio plan
+Sep 25 18:48:26 TESSERACT serve-default.sh[2353566]: [2026-09-25|18:48:26|core|rank=0] INFO     Startup geometry: memory ratio 1.00, runtime reserve 0.00 GiB; expert arena 2024 slots; KV 65536 tokens mapped of 1048576 (0.23 GiB); 0.74 GiB free
+[ck5-nat-mirror-2] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8014, "ttft_s": 0.23, "prefill_tok_s": 34364.0, "gen_tokens": 127, "decode_tok_s": 182.1, "decode_tok_s_wall": 182.1, "total_s": 0.9, "ttft_mono_s": 0.233, "prefill_tok_s_mono": 34364.0, "total_mono_s": 0.93, "t_start_wall": 1790347736.205, "gap1_ms": 16.5, "max_gap_ms": 16.5, "median_gap_ms": 5.3, "decode_tok_s_after_gap1": 185.1}
+{"target": 8000, "pass": 2, "prompt_tokens": 8016, "ttft_s": 0.72, "prefill_tok_s": 11161.0, "gen_tokens": 127, "decode_tok_s": 184.0, "decode_tok_s_wall": 184.0, "total_s": 1.4, "ttft_mono_s": 0.718, "prefill_tok_s_mono": 11161.0, "total_mono_s": 1.4, "t_start_wall": 1790347737.13, "gap1_ms": 22.5, "max_gap_ms": 22.5, "median_gap_ms": 5.3, "decode_tok_s_after_gap1": 188.7}
+[ck5-nat-mirror-2] post: python3 /home/lucas/ai/FreeToken-wt/harvest/tasks/harvest/belady/natural_gen.py --doc /home/lucas/ai/FreeToken-wt/round3/docs/nemotron.md --doc /home/lucas/ai/FreeToken-wt/round3/docs/cli.md --max-tokens 3500 --out /home/lucas/ai/FreeToken-wt/round3/tasks/exclusive-expert-ram/results/ck5-local/ck5-nat-mirror-2-natural.json --texts /home/lucas/ai/FreeToken-wt/round3/tasks/exclusive-expert-ram/results/ck5-local/ck5-nat-mirror-2
+{"task": "code", "prompt_tokens": 69, "completion_tokens": 3499, "finish": "length", "s": 20.28, "md5": "fb744116ba661f8ba96b156df54c6ff5"}
+{"task": "essay", "prompt_tokens": 65, "completion_tokens": 3499, "finish": "length", "s": 20.35, "md5": "c8eb1381dc846298efcedb7761d85c46"}
+{"task": "math", "prompt_tokens": 120, "completion_tokens": 3499, "finish": "length", "s": 22.19, "md5": "7ddca62945f7843a012d6fe4bcc773d4"}
+{"task": "translate", "prompt_tokens": 88, "completion_tokens": 3499, "finish": "length", "s": 20.12, "md5": "1fa5e02a8c125a134623e163b9cdd4d9"}
+{"task": "summary", "prompt_tokens": 20060, "completion_tokens": 3499, "finish": "length", "s": 23.46, "md5": "a6d3164a4293bf53f8d93d0572a0702d"}
+{
+  "arm": "ck5-nat-mirror-2",
+  "model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+  "rows": "-1",
+  "commit": "ceb482c",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 11.27,
+  "rss_ready_gib": 13.82,
+  "devzero_gib": 0.09,
+  "ram_after_80k_gib": 11.28,
+  "rss_gib": 13.85,
+  "locked_gib": 0.0,
+  "anon_gib": 12.73,
+  "file_gib": 0.51,
+  "unevict_gib": 0.0,
+  "shmem_gib": 0.09,
+  "current_gib": 13.29,
+  "peak_current_gib": 13.85,
+  "gpu_mib": "15080",
+  "decode_8k_p1": 182.1,
+  "ttft_8k_p1": 0.23,
+  "total_8k_p1": 0.9,
+  "ttft_mono_8k_p1": 0.23,
+  "decode_8k": 184.0,
+  "ttft_8k": 0.72,
+  "total_8k": 1.4,
+  "ttft_mono_8k": 0.72,
+  "coverage_faults": 0,
+  "starved": 0,
+  "swaps": 147787,
+  "retained_rows": 126991,
+  "free_evict_rate": 0.861,
+  "buffer_free_evictions": 2044
+}
+74 arms -> /home/lucas/ai/FreeToken-wt/round3/tasks/exclusive-expert-ram/results/sweep.tsv
+[ck5-nat-mirror-2] stopping

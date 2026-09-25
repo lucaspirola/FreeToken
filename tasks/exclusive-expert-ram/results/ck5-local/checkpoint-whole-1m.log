@@ -1,0 +1,79 @@
+code: ceb482c Decode free target 128 MiB by default, for every model (was VMM cushion + margin, 0.375 GiB)
+preflight ok: GPU 0 MiB, MemAvailable 29 GiB, no server, no pytest
+checkpoint label: ck5
+code: ceb482c Decode free target 128 MiB by default, for every model (was VMM cushion + margin, 0.375 GiB)
+preflight ok: GPU 0 MiB, MemAvailable 29 GiB, no server, no pytest
+=== arm ck5-whole-1m ===
+[ck5-whole-1m] starting: model=NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 rows=0 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/round3@ceb482c venv=/home/lucas/ai/FreeToken/.venv launcher=systemd
+Running as unit: ft-measure-ck5-whole-1m.service; invocation ID: e95d5fd69b974386b301897f3b8b4f69
+[ck5-whole-1m] ready after 23s
+Sep 25 16:53:29 TESSERACT serve-default.sh[1758662]: [2026-09-25|16:53:29|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+Sep 25 16:53:33 TESSERACT serve-default.sh[1758662]: [2026-09-25|16:53:33|core|rank=0] INFO     Prefill headroom: transient 0.61 GiB measured on a 8192-token chunk (empty prefix 0.61 GiB, after a 8192-token prefix 0.61 GiB, allocator peak 0.59 GiB); headroom 0.61 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 256 -> 2040 of 2189 slots, 0.75 GiB free (target 0.73 GiB), 149 slots below the ratio plan
+Sep 25 16:53:33 TESSERACT serve-default.sh[1758662]: [2026-09-25|16:53:33|core|rank=0] INFO     Startup geometry: memory ratio 1.00, runtime reserve 0.00 GiB; expert arena 2040 slots; KV 65536 tokens mapped of 1048576 (0.23 GiB); 0.75 GiB free
+[ck5-whole-1m] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8014, "ttft_s": 0.34, "prefill_tok_s": 23542.0, "gen_tokens": 127, "decode_tok_s": 193.6, "decode_tok_s_wall": 193.6, "total_s": 1.0, "ttft_mono_s": 0.34, "prefill_tok_s_mono": 23542.0, "total_mono_s": 0.99, "t_start_wall": 1790340839.597, "gap1_ms": 36.3, "max_gap_ms": 36.3, "median_gap_ms": 4.7, "decode_tok_s_after_gap1": 203.4}
+{"target": 1000000, "pass": 1, "prompt_tokens": 1000030, "ttft_s": 522.44, "prefill_tok_s": 1914.0, "gen_tokens": 127, "decode_tok_s": 96.9, "decode_tok_s_wall": 96.9, "total_s": 523.7, "ttft_mono_s": 500.495, "prefill_tok_s_mono": 1998.0, "total_mono_s": 501.79, "t_start_wall": 1790340840.6, "gap1_ms": 39.7, "max_gap_ms": 39.7, "median_gap_ms": 9.8, "decode_tok_s_after_gap1": 99.2}
+{"target": 8000, "pass": 2, "prompt_tokens": 8016, "ttft_s": 0.94, "prefill_tok_s": 8535.0, "gen_tokens": 127, "decode_tok_s": 176.9, "decode_tok_s_wall": 176.9, "total_s": 1.7, "ttft_mono_s": 0.939, "prefill_tok_s_mono": 8535.0, "total_mono_s": 1.65, "t_start_wall": 1790341364.337, "gap1_ms": 40.2, "max_gap_ms": 40.2, "median_gap_ms": 5.2, "decode_tok_s_after_gap1": 185.9}
+{"target": 1000000, "pass": 2, "prompt_tokens": 1000032, "ttft_s": 523.84, "prefill_tok_s": 1909.0, "gen_tokens": 127, "decode_tok_s": 104.1, "decode_tok_s_wall": 104.1, "total_s": 525.1, "ttft_mono_s": 499.946, "prefill_tok_s_mono": 2000.0, "total_mono_s": 501.16, "t_start_wall": 1790341366.0, "gap1_ms": 39.1, "max_gap_ms": 39.1, "median_gap_ms": 9.0, "decode_tok_s_after_gap1": 106.7}
+[ck5-whole-1m] post: NEEDLES_THINK_MAX_TOKENS=65536 NEEDLES_OUT="/home/lucas/ai/FreeToken-wt/round3/tasks/exclusive-expert-ram/results/ck5-whole-1m-needles.json" python3 /home/lucas/ai/FreeToken-wt/round3/tasks/exclusive-expert-ram/needles.py 21000 120000; python3 /home/lucas/ai/FreeToken-wt/round3/tasks/exclusive-expert-ram/recall.py 21000 120000 240000
+[21000 -> 19927 tok] 5/7  codes=ok multihop=TRUNC counting=FAIL ordering=ok contradiction=ok arithmetic=ok negative=ok
+[120000 -> 112298 tok] 3/7  codes=ok multihop=TRUNC counting=FAIL ordering=TRUNC contradiction=ok arithmetic=TRUNC negative=ok
+wrote /home/lucas/ai/FreeToken-wt/round3/tasks/exclusive-expert-ram/results/ck5-whole-1m-needles.json
+{"target": 21000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 19757, "completion_tokens": 27, "seconds": 2.0, "planted": ["ZULU-2188", "ROMEO-6864", "KILO-3647"], "recalled": ["ZULU-2188", "ROMEO-6864", "KILO-3647"], "all_three": true, "answer": "ZULU-2188, ROMEO-6864, KILO-3647"}
+{"target": 120000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 112048, "completion_tokens": 27, "seconds": 14.2, "planted": ["ROMEO-1813", "TANGO-6789", "ZULU-5364"], "recalled": ["ROMEO-1813", "TANGO-6789", "ZULU-5364"], "all_three": true, "answer": "ROMEO-1813, TANGO-6789, ZULU-5364"}
+{"target": 240000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 224417, "completion_tokens": 27, "seconds": 39.4, "planted": ["SIERRA-6523", "SIERRA-1067", "ROMEO-9011"], "recalled": ["SIERRA-6523", "SIERRA-1067", "ROMEO-9011"], "all_three": true, "answer": "SIERRA-6523, SIERRA-1067, ROMEO-9011"}
+{
+  "arm": "ck5-whole-1m",
+  "model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+  "rows": "0",
+  "commit": "ceb482c",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 18.55,
+  "rss_ready_gib": 19.53,
+  "devzero_gib": 15.49,
+  "ram_after_80k_gib": 18.95,
+  "rss_gib": 19.58,
+  "locked_gib": 0.0,
+  "anon_gib": 3.38,
+  "file_gib": 15.55,
+  "unevict_gib": 0.0,
+  "shmem_gib": 15.49,
+  "current_gib": 19.02,
+  "peak_current_gib": 21.95,
+  "gpu_mib": "14474",
+  "decode_8k_p1": 193.6,
+  "ttft_8k_p1": 0.34,
+  "total_8k_p1": 1.0,
+  "ttft_mono_8k_p1": 0.34,
+  "decode_1000k_p1": 96.9,
+  "ttft_1000k_p1": 522.44,
+  "total_1000k_p1": 523.7,
+  "ttft_mono_1000k_p1": 500.5,
+  "decode_8k": 176.9,
+  "ttft_8k": 0.94,
+  "total_8k": 1.7,
+  "ttft_mono_8k": 0.94,
+  "decode_1000k": 104.1,
+  "ttft_1000k": 523.84,
+  "total_1000k": 525.1,
+  "ttft_mono_1000k": 499.95
+}
+72 arms -> /home/lucas/ai/FreeToken-wt/round3/tasks/exclusive-expert-ram/results/sweep.tsv
+[ck5-whole-1m] stopping
+ck5-whole-1m R3: PASS
+ck5-whole-1m R6(arm): PASS
+Traceback (most recent call last):
+  File "/home/lucas/ai/FreeToken-wt/round3/tasks/exclusive-expert-ram/compare_needles.py", line 24, in <module>
+    a, b = needles(REF), needles(ARM)
+                         ^^^^^^^^^^^^
+  File "/home/lucas/ai/FreeToken-wt/round3/tasks/exclusive-expert-ram/compare_needles.py", line 13, in needles
+    d = json.load(open(os.path.join(D, f"{arm}-needles.json")))
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/home/lucas/ai/FreeToken-wt/round3/tasks/exclusive-expert-ram/results/ck5-mirror-1m-needles.json'
+0 point(s) outside the band
+== ck5-mirror-1m: not run in this checkpoint (ARMS), no comparison
+== ck5-mirror: not run in this checkpoint (ARMS), no comparison
+0 point(s) outside the band
+checkpoint ck5 arms done. The embedder stays stopped.

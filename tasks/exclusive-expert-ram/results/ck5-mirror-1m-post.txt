@@ -1,0 +1,6 @@
+[21000 -> 19927 tok] 5/7  codes=ok multihop=TRUNC counting=FAIL ordering=ok contradiction=ok arithmetic=ok negative=ok
+[120000 -> 112298 tok] 3/7  codes=ok multihop=TRUNC counting=FAIL ordering=TRUNC contradiction=ok arithmetic=TRUNC negative=ok
+wrote /home/lucas/ai/FreeToken-wt/round3/tasks/exclusive-expert-ram/results/ck5-mirror-1m-needles.json
+{"target": 21000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 19757, "completion_tokens": 27, "seconds": 2.1, "planted": ["ZULU-2188", "ROMEO-6864", "KILO-3647"], "recalled": ["ZULU-2188", "ROMEO-6864", "KILO-3647"], "all_three": true, "answer": "ZULU-2188, ROMEO-6864, KILO-3647"}
+{"target": 120000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 112048, "completion_tokens": 27, "seconds": 14.8, "planted": ["ROMEO-1813", "TANGO-6789", "ZULU-5364"], "recalled": ["ROMEO-1813", "TANGO-6789", "ZULU-5364"], "all_three": true, "answer": "ROMEO-1813, TANGO-6789, ZULU-5364"}
+{"target": 240000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 224417, "completion_tokens": 27, "seconds": 40.0, "planted": ["SIERRA-6523", "SIERRA-1067", "ROMEO-9011"], "recalled": ["SIERRA-6523", "SIERRA-1067", "ROMEO-9011"], "all_three": true, "answer": "SIERRA-6523, SIERRA-1067, ROMEO-9011"}

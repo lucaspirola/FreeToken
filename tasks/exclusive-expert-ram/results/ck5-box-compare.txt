@@ -1,0 +1,10 @@
+== ck5-mirror-1m (ceb482c) vs same-box whole
+  decode_1000k          94.3 vs   104.1 (whole-1m)  90.6%  BELOW
+  decode_1000k_p1       92.7 vs    96.9 (whole-1m)  95.7%  ok
+  decode_8k            175.8 vs   176.9 (whole-1m)  99.4%  ok
+  decode_8k_p1         181.1 vs   193.6 (whole-1m)  93.5%  ok
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            12.77  free_evict_rate 0.862
+  ram 12.26 +/- 0.6  ok
+1 point(s) outside the band

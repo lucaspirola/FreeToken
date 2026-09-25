@@ -1,0 +1,41 @@
+[ck5c-warmup] starting: model=NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 rows=0 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/round3@ceb482c venv=/home/lucas/ai/FreeToken/.venv launcher=systemd
+Running as unit: ft-measure-ck5c-warmup.service; invocation ID: 9c6dd660b46948afaf7fd1e75f1bf966
+[ck5c-warmup] ready after 31s
+Sep 25 20:49:45 TESSERACT serve-default.sh[2883]: [2026-09-25|20:49:45|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+Sep 25 20:49:53 TESSERACT serve-default.sh[2883]: [2026-09-25|20:49:53|core|rank=0] INFO     Prefill headroom: transient 0.61 GiB measured on a 8192-token chunk (empty prefix 0.61 GiB, after a 8192-token prefix 0.61 GiB, allocator peak 0.59 GiB); headroom 0.61 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 256 -> 2040 of 2189 slots, 0.75 GiB free (target 0.73 GiB), 149 slots below the ratio plan
+Sep 25 20:49:53 TESSERACT serve-default.sh[2883]: [2026-09-25|20:49:53|core|rank=0] INFO     Startup geometry: memory ratio 1.00, runtime reserve 0.00 GiB; expert arena 2040 slots; KV 65536 tokens mapped of 1048576 (0.23 GiB); 0.75 GiB free
+[ck5c-warmup] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8014, "ttft_s": 0.35, "prefill_tok_s": 22702.0, "gen_tokens": 127, "decode_tok_s": 188.4, "decode_tok_s_wall": 188.4, "total_s": 1.0, "ttft_mono_s": 0.353, "prefill_tok_s_mono": 22702.0, "total_mono_s": 1.02, "t_start_wall": 1790355021.598, "gap1_ms": 35.3, "max_gap_ms": 35.3, "median_gap_ms": 4.9, "decode_tok_s_after_gap1": 197.4}
+{"target": 8000, "pass": 2, "prompt_tokens": 8016, "ttft_s": 0.71, "prefill_tok_s": 11219.0, "gen_tokens": 127, "decode_tok_s": 186.7, "decode_tok_s_wall": 186.7, "total_s": 1.4, "ttft_mono_s": 0.714, "prefill_tok_s_mono": 11219.0, "total_mono_s": 1.39, "t_start_wall": 1790355022.619, "gap1_ms": 39.0, "max_gap_ms": 39.0, "median_gap_ms": 4.9, "decode_tok_s_after_gap1": 196.6}
+{
+  "arm": "ck5c-warmup",
+  "model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+  "rows": "0",
+  "commit": "ceb482c",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 18.62,
+  "rss_ready_gib": 19.56,
+  "devzero_gib": 15.49,
+  "ram_after_80k_gib": 18.65,
+  "rss_gib": 19.59,
+  "locked_gib": 0.0,
+  "anon_gib": 3.04,
+  "file_gib": 17.0,
+  "unevict_gib": 0.0,
+  "shmem_gib": 15.49,
+  "current_gib": 20.15,
+  "peak_current_gib": 22.41,
+  "gpu_mib": "15080",
+  "decode_8k_p1": 188.4,
+  "ttft_8k_p1": 0.35,
+  "total_8k_p1": 1.0,
+  "ttft_mono_8k_p1": 0.35,
+  "decode_8k": 186.7,
+  "ttft_8k": 0.71,
+  "total_8k": 1.4,
+  "ttft_mono_8k": 0.71
+}
+74 arms -> /home/lucas/ai/FreeToken-wt/round3/tasks/exclusive-expert-ram/results/sweep.tsv
+[ck5c-warmup] stopping

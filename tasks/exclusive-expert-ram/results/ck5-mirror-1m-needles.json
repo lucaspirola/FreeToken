@@ -1,0 +1,256 @@
+{
+ "url": "http://127.0.0.1:1920",
+ "model": "nemotron-3.5-lightning",
+ "max_tokens": 1024,
+ "think_max_tokens": 65536,
+ "sizes": [
+  {
+   "target": 21000,
+   "questions": {
+    "codes": {
+     "thinking": false,
+     "correct": true,
+     "seconds": 0.51,
+     "cached_tokens": 19840,
+     "completion_tokens": 27,
+     "reasoning_chars": 0,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "ROMEO-5324, TANGO-3579, ZULU-1956"
+    },
+    "multihop": {
+     "thinking": true,
+     "correct": false,
+     "seconds": 318.37,
+     "cached_tokens": 19840,
+     "completion_tokens": 65535,
+     "reasoning_chars": 241030,
+     "finish_reason": "length",
+     "truncated": true,
+     "answer": "Let me carefully search through the text to find information about Delia Marsh's manager and their office location.\n\nLooking through the text, I find this relevant passage:\n\n\"Delia Marsh's manager is Ov Petran. ledger clause remittance invoice batch invoice revision batch audit reconcile batch invoice reconcile remittance revision reconcile clause appendix variance reconcile variance schedule vari"
+    },
+    "counting": {
+     "thinking": true,
+     "correct": false,
+     "seconds": 1.88,
+     "cached_tokens": 19840,
+     "completion_tokens": 276,
+     "reasoning_chars": 1095,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "5"
+    },
+    "ordering": {
+     "thinking": true,
+     "correct": true,
+     "seconds": 5.55,
+     "cached_tokens": 19840,
+     "completion_tokens": 910,
+     "reasoning_chars": 2522,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "innsmouth filing\nostrey merger\nhalberd audit\npellow recall\nverrick settlement"
+    },
+    "contradiction": {
+     "thinking": true,
+     "correct": true,
+     "seconds": 1.69,
+     "cached_tokens": 19840,
+     "completion_tokens": 222,
+     "reasoning_chars": 809,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "51,750, yes"
+    },
+    "arithmetic": {
+     "thinking": true,
+     "correct": true,
+     "seconds": 1.19,
+     "cached_tokens": 19840,
+     "completion_tokens": 132,
+     "reasoning_chars": 417,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "3878"
+    },
+    "negative": {
+     "thinking": false,
+     "correct": true,
+     "seconds": 0.43,
+     "cached_tokens": 19840,
+     "completion_tokens": 18,
+     "reasoning_chars": 0,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "The authorization code OSCAR-6621 is not present in the text."
+    }
+   },
+   "prompt_tokens": 19927,
+   "prefill_seconds": 2.06,
+   "prefill_cached_tokens": 0,
+   "truth": {
+    "codes": [
+     "ROMEO-5324",
+     "TANGO-3579",
+     "ZULU-1956"
+    ],
+    "multihop": {
+     "person": "Delia Marsh",
+     "manager": "Ov Petran",
+     "city": "Braunfels"
+    },
+    "counting": {
+     "phrase": "crimson ledger",
+     "n": 7
+    },
+    "ordering": [
+     "the Innsmouth filing",
+     "the Ostrey merger",
+     "the Halberd audit",
+     "the Pellow recall",
+     "the Verrick settlement"
+    ],
+    "contradiction": {
+     "first": "48,200",
+     "revised": "51,750"
+    },
+    "arithmetic": {
+     "parts": [
+      1420,
+      385,
+      2073
+     ],
+     "sum": 3878
+    },
+    "negative": {
+     "code": "OSCAR-6621"
+    }
+   },
+   "score": 5
+  },
+  {
+   "target": 120000,
+   "questions": {
+    "codes": {
+     "thinking": false,
+     "correct": true,
+     "seconds": 7.93,
+     "cached_tokens": 65408,
+     "completion_tokens": 27,
+     "reasoning_chars": 0,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "KILO-8972, KILO-6305, KILO-7431"
+    },
+    "multihop": {
+     "thinking": true,
+     "correct": false,
+     "seconds": 351.25,
+     "cached_tokens": 65408,
+     "completion_tokens": 65535,
+     "reasoning_chars": 240735,
+     "finish_reason": "length",
+     "truncated": true,
+     "answer": "Let me carefully read through the text to find information about Delia Marsh's manager and their office location.\n\nLooking through the text, I find this relevant passage:\n\n\"Delia Marsh's manager is Ov Petran. revision clause schedule audit quarter reconcile remittance appendix appendix ledger reconcile revision remittance variance batch reconcile clause remittance column audit remittance audit led"
+    },
+    "counting": {
+     "thinking": true,
+     "correct": false,
+     "seconds": 9.2,
+     "cached_tokens": 65408,
+     "completion_tokens": 156,
+     "reasoning_chars": 587,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "4"
+    },
+    "ordering": {
+     "thinking": true,
+     "correct": false,
+     "seconds": 353.56,
+     "cached_tokens": 65408,
+     "completion_tokens": 65535,
+     "reasoning_chars": 451920,
+     "finish_reason": "length",
+     "truncated": true,
+     "answer": "Let me carefully read through the text to find the five events with dates mentioned in the text.\n\nLooking through the text, I need to find specific dates associated with events. Let me search for date patterns.\n\nI found these dates:\n1. \"The authorization code for this section is KILO-8972.\" - No date\n2. \"The crimson ledger, finally, was returned to the vault.\" - No date\n3. \"The innsmouth filing wa"
+    },
+    "contradiction": {
+     "thinking": true,
+     "correct": true,
+     "seconds": 8.89,
+     "cached_tokens": 65408,
+     "completion_tokens": 219,
+     "reasoning_chars": 761,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "51,750 units, yes"
+    },
+    "arithmetic": {
+     "thinking": true,
+     "correct": false,
+     "seconds": 350.74,
+     "cached_tokens": 65408,
+     "completion_tokens": 65535,
+     "reasoning_chars": 456182,
+     "finish_reason": "length",
+     "truncated": true,
+     "answer": "Let me carefully read through the text to find the three depot numbers mentioned.\n\nFrom the text, I can see these depot numbers:\n\n1. \"The Calloway account total is 48,200 units.\" - This is mentioned in the text, but it's not a depot number, it's an account total.\n\n2. \"The innsmouth filing was concluded on 1979-01-30.\" - This is a date, not a number of units.\n\n3. \"The halberd audit was concluded on"
+    },
+    "negative": {
+     "thinking": false,
+     "correct": true,
+     "seconds": 7.83,
+     "cached_tokens": 65408,
+     "completion_tokens": 18,
+     "reasoning_chars": 0,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "The authorization code OSCAR-6621 is not present in the text."
+    }
+   },
+   "prompt_tokens": 112298,
+   "prefill_seconds": 14.59,
+   "prefill_cached_tokens": 0,
+   "truth": {
+    "codes": [
+     "KILO-8972",
+     "KILO-6305",
+     "KILO-7431"
+    ],
+    "multihop": {
+     "person": "Delia Marsh",
+     "manager": "Ov Petran",
+     "city": "Braunfels"
+    },
+    "counting": {
+     "phrase": "crimson ledger",
+     "n": 7
+    },
+    "ordering": [
+     "the Innsmouth filing",
+     "the Ostrey merger",
+     "the Halberd audit",
+     "the Pellow recall",
+     "the Verrick settlement"
+    ],
+    "contradiction": {
+     "first": "48,200",
+     "revised": "51,750"
+    },
+    "arithmetic": {
+     "parts": [
+      1420,
+      385,
+      2073
+     ],
+     "sum": 3878
+    },
+    "negative": {
+     "code": "OSCAR-6621"
+    }
+   },
+   "score": 3
+  }
+ ]
+}

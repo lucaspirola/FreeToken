@@ -1,0 +1,60 @@
+quiet at 2026-09-25T18:51:22+04:00: MemAvailable:   31064928 kB
+[ck5-replay] starting: model=NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 rows=0 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/round3@ceb482c venv=/home/lucas/ai/FreeToken/.venv launcher=systemd
+Running as unit: ft-measure-ck5-replay.service; invocation ID: 98de2197b0174d9493a01a8f76127d10
+[ck5-replay] ready after 27s
+Sep 25 18:51:47 TESSERACT serve-default.sh[2369627]: [2026-09-25|18:51:47|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+Sep 25 18:51:50 TESSERACT serve-default.sh[2369627]: [2026-09-25|18:51:50|core|rank=0] INFO     Prefill headroom: transient 0.61 GiB measured on a 8192-token chunk (empty prefix 0.61 GiB, after a 8192-token prefix 0.61 GiB, allocator peak 0.59 GiB); headroom 0.61 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 256 -> 2040 of 2189 slots, 0.75 GiB free (target 0.73 GiB), 149 slots below the ratio plan
+Sep 25 18:51:50 TESSERACT serve-default.sh[2369627]: [2026-09-25|18:51:50|core|rank=0] INFO     Startup geometry: memory ratio 1.00, runtime reserve 0.00 GiB; expert arena 2040 slots; KV 65536 tokens mapped of 1048576 (0.23 GiB); 0.75 GiB free
+[ck5-replay] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8014, "ttft_s": 0.34, "prefill_tok_s": 23847.0, "gen_tokens": 127, "decode_tok_s": 196.3, "decode_tok_s_wall": 196.3, "total_s": 1.0, "ttft_mono_s": 0.336, "prefill_tok_s_mono": 23847.0, "total_mono_s": 0.98, "t_start_wall": 1790347939.85, "gap1_ms": 27.9, "max_gap_ms": 27.9, "median_gap_ms": 4.7, "decode_tok_s_after_gap1": 203.6}
+{"target": 8000, "pass": 2, "prompt_tokens": 8016, "ttft_s": 0.69, "prefill_tok_s": 11693.0, "gen_tokens": 127, "decode_tok_s": 194.0, "decode_tok_s_wall": 194.0, "total_s": 1.3, "ttft_mono_s": 0.686, "prefill_tok_s_mono": 11693.0, "total_mono_s": 1.34, "t_start_wall": 1790347940.829, "gap1_ms": 31.2, "max_gap_ms": 31.2, "median_gap_ms": 4.8, "decode_tok_s_after_gap1": 202.1}
+[ck5-replay] post: REPLAY_OUT=/home/lucas/ai/FreeToken-wt/round3/tasks/exclusive-expert-ram/results/ck5-local/ck5-replay.json python3 /tmp/claude-1000/-home-lucas-ai-FreeToken/606da56c-cd31-49f4-adb4-b4ab53d18508/scratchpad/clear-probe/replay.py
+claude-code cold {"ttft_s": 2.644, "total_s": 2.87, "usage": {"input_tokens": 19063, "output_tokens": 31, "cache_read_input_tokens": 0}, "tokens": {"prompt": 19063, "cached": 0}}
+claude-code A {"ttft_s": 4.754, "total_s": 4.959, "usage": {"input_tokens": 45489, "output_tokens": 31, "cache_read_input_tokens": 0}, "tokens": {"prompt": 45489, "cached": 0}}
+claude-code clear {"ttft_s": 0.376, "total_s": 0.572, "usage": {"input_tokens": 2390, "output_tokens": 31, "cache_read_input_tokens": 16609}, "tokens": {"prompt": 18999, "cached": 16609}}
+claude-code repeat {"ttft_s": 0.476, "total_s": 0.668, "usage": {"input_tokens": 86, "output_tokens": 31, "cache_read_input_tokens": 18913}, "tokens": {"prompt": 18999, "cached": 18913}}
+claude-code next {"ttft_s": 0.349, "total_s": 0.542, "usage": {"input_tokens": 129, "output_tokens": 31, "cache_read_input_tokens": 18913}, "tokens": {"prompt": 19042, "cached": 18913}}
+omp cold {"ttft_s": 1.799, "total_s": 2.005, "usage": {"prompt_tokens": 8775, "completion_tokens": 31, "total_tokens": 8806, "prompt_tokens_details": {"cached_tokens": 0}, "completion_tokens_details": {"reasoning_tokens": 31}}, "tokens": {"prompt": 8775, "cached": 0}}
+omp A {"ttft_s": 3.716, "total_s": 3.911, "usage": {"prompt_tokens": 35303, "completion_tokens": 31, "total_tokens": 35334, "prompt_tokens_details": {"cached_tokens": 0}, "completion_tokens_details": {"reasoning_tokens": 31}}, "tokens": {"prompt": 35303, "cached": 0}}
+omp clear {"ttft_s": 0.488, "total_s": 0.668, "usage": {"prompt_tokens": 8740, "completion_tokens": 31, "total_tokens": 8771, "prompt_tokens_details": {"cached_tokens": 8619}, "completion_tokens_details": {"reasoning_tokens": 31}}, "tokens": {"prompt": 8740, "cached": 8619}}
+omp repeat {"ttft_s": 0.338, "total_s": 0.519, "usage": {"prompt_tokens": 8740, "completion_tokens": 31, "total_tokens": 8771, "prompt_tokens_details": {"cached_tokens": 8619}, "completion_tokens_details": {"reasoning_tokens": 31}}, "tokens": {"prompt": 8740, "cached": 8619}}
+omp next {"ttft_s": 0.344, "total_s": 0.49, "usage": {"prompt_tokens": 8760, "completion_tokens": 24, "total_tokens": 8784, "prompt_tokens_details": {"cached_tokens": 8619}, "completion_tokens_details": {"reasoning_tokens": 22}}, "tokens": {"prompt": 8760, "cached": 8619}}
+codex cold {"ttft_s": 1.318, "total_s": 1.503, "usage": null, "tokens": null}
+codex A {"ttft_s": 3.667, "total_s": 3.822, "usage": {"input_tokens": 35949, "input_tokens_details": {"cache_write_tokens": 0, "cached_tokens": 0}, "output_tokens": 24, "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 35973}, "tokens": {"prompt": 35949, "cached": 0}}
+codex clear {"ttft_s": 0.329, "total_s": 0.511, "usage": null, "tokens": null}
+codex repeat {"ttft_s": 0.338, "total_s": 0.518, "usage": null, "tokens": null}
+codex next {"ttft_s": 0.339, "total_s": 0.524, "usage": null, "tokens": null}
+replay done
+{
+  "arm": "ck5-replay",
+  "model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+  "rows": "0",
+  "commit": "ceb482c",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 18.48,
+  "rss_ready_gib": 19.53,
+  "devzero_gib": 15.49,
+  "ram_after_80k_gib": 18.85,
+  "rss_gib": 19.94,
+  "locked_gib": 0.0,
+  "anon_gib": 3.36,
+  "file_gib": 15.81,
+  "unevict_gib": 0.0,
+  "shmem_gib": 15.49,
+  "current_gib": 19.25,
+  "peak_current_gib": 21.96,
+  "gpu_mib": "15064",
+  "decode_8k_p1": 196.3,
+  "ttft_8k_p1": 0.34,
+  "total_8k_p1": 1.0,
+  "ttft_mono_8k_p1": 0.34,
+  "decode_8k": 194.0,
+  "ttft_8k": 0.69,
+  "total_8k": 1.3,
+  "ttft_mono_8k": 0.69
+}
+74 arms -> /home/lucas/ai/FreeToken-wt/round3/tasks/exclusive-expert-ram/results/sweep.tsv
+[ck5-replay] stopping
+done at 2026-09-25T18:52:55+04:00

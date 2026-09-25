@@ -1,0 +1,657 @@
+Here's a thinking process:
+
+1.  **Analyze the Requirements:**
+   - **Thread-safe LRU cache**: Must handle concurrent access safely (likely using `threading.Lock` or `RLock`, or `asyncio` locks, but the prompt says "thread-safe", so `threading` is appropriate).
+   - **Per-entry time-to-live (TTL)**: Each cached entry expires after a certain time.
+   - **Size-based eviction**: When the cache reaches a maximum size, entries are evicted based on size (LRU order, but considering size).
+   - **Hit/miss statistics**: Track number of hits and misses.
+   - **Decorator for memoizing functions**: A `@lru_cache`-style decorator that uses this cache.
+   - **Type hints**: Proper typing throughout.
+   - **Complete, well-documented Python module**: Docstrings, comments, etc.
+   - **unittest test cases**: A set of tests.
+
+2.  **Module Structure:**
+   - `LRUCache` class with:
+     - `__init__(max_size: int, ttl: Optional[float] = None, default_ttl: Optional[float] = None)`
+     - `get(key) -> Optional[Any]`
+     - `set(key, value, ttl: Optional[float] = None) -> None`
+     - `evict()` or automatic eviction on `set` when full
+     - `hits` and `misses` counters
+     - Thread safety via `threading.Lock`
+     - Expiration checking on `get`
+     - Size-aware: each entry has a `size`, max total size or max items? "size-based eviction" likely means each entry has a size, and when total size exceeds a limit, evict LRU entries.
+   - Decorator function `@lru_cache_with_ttl` or similar.
+   - Helper functions/utils.
+   - `unittest.TestCase` subclass with tests.
+
+3.  **Design Details:**
+
+   **LRU Cache Implementation:**
+   - Use `collections.OrderedDict` for O(1) LRU operations (move_to_end, popitem).
+   - Thread safety: `with self._lock:` around all public methods.
+   - Per-entry TTL: store `(value, expiration_time)` or `(value, size, expiration_time)`.
+   - Size-based: each entry has a `size` (int). Cache has `max_size` (total size limit). On `set`, if `total_size + entry_size > max_size`, evict LRU entries until under limit.
+   - Hits/misses: increment on `get` success/failure (after checking expiration).
+
+   **Decorator:**
+   - `functools.wraps` preserving metadata.
+   - Key generation from args/kwargs (use `args + tuple(sorted(kwargs.items()))` or `pickle` for complex types, but keep it simple with `str(args) + str(kwargs)` or `make_key`).
+   - Support `max_size`, `ttl`, `key` parameters.
+
+   **TTL Handling:**
+   - On `get`, check if `time.time() > entry.expiry`. If so, delete and treat as miss.
+   - On `set`, set expiry = `time.time() + ttl`.
+
+   **Size-Based Eviction:**
+   - `max_size` = max total bytes (or arbitrary size units).
+   - Each entry carries a `size` parameter, default 1.
+   - On insertion, while `total_size > max_size`, pop LRU item.
+
+4.  **Drafting the Code (mental or scratchpad):**
+
+   ```python
+   import threading
+   import time
+   from collections import OrderedDict
+   from typing import Any, Optional, Callable, TypeVar, ParamSpec, overload
+   import unittest
+
+   K = TypeVar('K')
+   V = TypeVar('V')
+   P = ParamSpec('P')
+   R = TypeVar('R')
+
+   class LRUCache(Generic[K, V]):
+       def __init__(self, max_size: int = 128, default_ttl: Optional[float] = None):
+           self.max_size: int = max_size  # total size limit
+           self.default_ttl: Optional[float] = default_ttl
+           self._cache: OrderedDict[K, tuple[V, int, float]] = OrderedDict()  # key -> (value, size, expiry)
+           self._total_size: int = 0
+           self._lock = threading.Lock()
+           self.hits: int = 0
+           self.misses: int = 0
+
+       def get(self, key: K) -> Optional[V]:
+           with self._lock:
+               if key not in self._cache:
+                   self.misses += 1
+                   return None
+               value, size, expiry = self._cache[key]
+               if self.default_ttl is not None and time.time() > expiry:
+                   self._cache.pop(key)
+                   self._total_size -= size
+                   self.misses += 1
+                   return None
+               self.hits += 1
+               self._cache.move_to_end(key)
+               return value
+
+       def set(self, key: K, value: V, size: int = 1, ttl: Optional[float] = None) -> None:
+           with self._lock:
+               expiry = time.time() + (ttl or self.default_ttl or float('inf'))
+               self._cache[key] = (value, size, expiry)
+               self._total_size += size
+               while self._total_size > self.max_size and self._cache:
+                   _, evicted_size, _ = self._cache.popitem(last=False)
+                   self._total_size -= evicted_size
+               # if key already existed, we already added its size, need to avoid double counting
+               # Actually, if key exists, OrderedDict __setitem__ doesn't remove old size. Need to handle.
+   ```
+
+   Wait, need to handle key existence in `set`. If key already present, we should subtract old size before adding new one. Let's refine.
+
+   Also, `max_size` interpretation: "size-based eviction" could mean max number of items, or max total size. I'll support both: `max_size` as max total size, and optionally `max_items`. But the prompt says "size-based eviction", so I'll stick with total size limit, each entry has a size.
+
+   Let's make it clean.
+
+   **Decorator:**
+   ```python
+   def lru_cache_with_ttl(max_size: int = 128, default_ttl: Optional[float] = None, typed: bool = False):
+       def decorator(func: Callable[P, R]) -> Callable[P, R]:
+           cache = LRUCache(max_size=max_size, default_ttl=default_ttl)
+           @functools.wraps(func)
+           def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+               # key generation
+               if typed:
+                   key = args + tuple(sorted(kwargs.items()))
+               else:
+                   key = args
+               # or use a proper hashable key
+               result = cache.get(key)
+               if result is not None:
+                   return result
+               result = func(*args, **kwargs)
+               cache.set(key, result)
+               return result
+           return wrapper
+       return decorator
+   ```
+
+   Key generation should be robust. I'll use `functools._make_key` or just `hash(args + tuple(sorted(kwargs.items())))` but need to handle unhashable types. Standard `functools.lru_cache` does this. I'll keep it simple but note limitations, or use `b64` of pickle, but that's heavy. I'll stick to a simple key maker that works with hashable args, and mention that unhashable args are user responsibility, or convert to string. Actually, `functools._make_key` is private. I'll just use `key = (args, frozenset(kwargs.items()))` if kwargs else args, and require hashable. Or I can use `pickle.dumps` but that's slow. I'll keep it simple: key = `args + tuple(sorted(kwargs.items()))` and document that args/kwargs must be hashable.
+
+   Let's structure the module properly.
+
+   **Tests:**
+   - Test basic get/set
+   - Test LRU eviction when full
+   - Test TTL expiration
+   - Test thread safety (concurrent get/set)
+   - Test hit/miss stats
+   - Test decorator usage
+   - Test size-based eviction
+
+5.  **Refining the Implementation:**
+
+   I'll write the full module now.
+
+   Key points:
+   - `LRUCache` uses `OrderedDict`.
+   - Each entry: `(value, size, expiry_time)`.
+   - `max_size` is total size capacity.
+   - On `set`, if key exists, adjust size.
+   - Eviction pops from front (LRU).
+   - Thread safety with `threading.Lock`.
+   - Hits/misses counted.
+   - Decorator with `functools.wraps`.
+   - Type hints throughout.
+   - `unittest` suite.
+
+   Let's code it carefully.
+
+   ```python
+   """\
+   Thread-safe LRU cache with per-entry TTL, size-based eviction,
+   hit/miss statistics, and a memoizing decorator.
+
+   Module: lru_ttl_cache.py
+   """
+
+   import threading
+   import time
+   from collections import OrderedDict
+   from typing import Any, Optional, Callable, TypeVar, Generic, ParamSpec, overload
+   import functools
+   import unittest
+
+   K = TypeVar("K")
+   V = TypeVar("V")
+   P = ParamSpec("P")
+   R = TypeVar("R")
+
+   class LRUCache(Generic[K, V]):
+       """A thread-safe LRU cache with per-entry TTL and size-based eviction.
+
+       Parameters
+       ----------
+       max_size : int
+           Maximum total size of the cache. Entries exceeding this limit
+           trigger eviction of the least recently used items.
+       default_ttl : float, optional
+           Default time-to-live in seconds for all entries. If None, entries
+           never expire. Default is None.
+       """
+
+       def __init__(self, max_size: int = 128, default_ttl: Optional[float] = None) -> None:
+           if max_size <= 0:
+               raise ValueError("max_size must be a positive integer")
+           self.max_size: int = max_size
+           self.default_ttl: Optional[float] = default_ttl
+           self._cache: OrderedDict[K, tuple[V, int, float]] = OrderedDict()
+           self._total_size: int = 0
+           self._lock = threading.Lock()
+           self.hits: int = 0
+           self.misses: int = 0
+
+       def get(self, key: K) -> Optional[V]:
+           """Retrieve a value from the cache by key.
+
+           If the entry has expired, it is removed and treated as a miss.
+           Otherwise, the entry is moved to the end (most recently used).
+
+           Returns
+           -------
+           Optional[V]
+               The cached value, or None if not found or expired.
+           """
+           with self._lock:
+               if key not in self._cache:
+                   self.misses += 1
+                   return None
+
+               value, size, expiry = self._cache[key]
+               now = time.time()
+               if self.default_ttl is not None and now > expiry:
+                   # Expired: remove entry
+                   self._cache.pop(key)
+                   self._total_size -= size
+                   self.misses += 1
+                   return None
+
+               # Cache hit: promote to MRU position
+               self.hits += 1
+               self._cache.move_to_end(key)
+               return value
+
+       def set(
+           self,
+           key: K,
+           value: V,
+           size: int = 1,
+           ttl: Optional[float] = None,
+       ) -> None:
+           """Insert or update a value in the cache.
+
+           Parameters
+           ----------
+           key : K
+               The cache key (must be hashable).
+           value : V
+               The value to store.
+           size : int, default 1
+               The size of this entry for eviction purposes.
+           ttl : float, optional
+               Override TTL for this specific entry in seconds.
+               If None, the cache's default_ttl is used.
+           """
+           if size <= 0:
+               raise ValueError("size must be a positive integer")
+
+           with self._lock:
+               # If key already exists, remove old entry to adjust size
+               if key in self._cache:
+                   old_value, old_size, _ = self._cache[key]
+                   self._total_size -= old_size
+                   self._cache.pop(key)
+
+               expiry = time.time() + (ttl if ttl is not None else self.default_ttl or 0)
+               # If default_ttl is None, we treat expiry as never (use a large number or check in get)
+               # Let's use float('inf') for never-expiring, but we need to handle in get.
+               # Better: store expiry as None if no TTL, and check accordingly.
+               # Refactor: store (value, size, expiry) where expiry is float or None.
+               # Let's just use 0 or handle None in get. I'll store expiry as float('inf') if None,
+               # but then `now > float('inf')` is False, which is correct.
+               # Actually, `time.time() > float('inf')` is always False. Good.
+               # But if default_ttl is None and ttl is None, expiry = -1 or inf? Let's use float('inf').
+
+               expiry = time.time() + (ttl if ttl is not None else (self.default_ttl if self.default_ttl is not None else float('inf')))
+               # Wait, if default_ttl is None, we want no expiry. float('inf') works.
+               # But if user passes ttl=0, expiry = time.time(), which expires immediately. That's fine.
+
+               self._cache[key] = (value, size, expiry)
+               self._total_size += size
+
+               # Size-based eviction: remove LRU entries until under limit
+               while self._total_size > self.max_size and self._cache:
+                   _, evicted_size, _ = self._cache.popitem(last=False)
+                   self._total_size -= evicted_size
+
+       def peek_most_recent(self) -> Optional[K]:
+           """Return the most recently used key without removing it."""
+           with self._lock:
+               if not self._cache:
+                   return None
+               return next(reversed(self._cache))
+
+       def peek_least_recent(self) -> Optional[K]:
+           """Return the least recently used key without removing it."""
+           with self._lock:
+               if not self._cache:
+                   return None
+               return next(iter(self._cache))
+
+       def stats(self) -> dict[str, Any]:
+           """Return hit/miss statistics and current cache size."""
+           with self._lock:
+               return {
+                   "hits": self.hits,
+                   "misses": self.misses,
+                   "hit_rate": self.hits / (self.hits + self.misses) if (self.hits + self.misses) else 0.0,
+                   "total_size": self._total_size,
+                   "max_size": self.max_size,
+                   "item_count": len(self._cache),
+               }
+
+   # -----------------------------------------------------------------------
+   # Decorator
+   # -----------------------------------------------------------------------
+
+   def lru_cache_with_ttl(
+       max_size: int = 128,
+       default_ttl: Optional[float] = None,
+       typed: bool = False,
+   ) -> Callable[[Callable[P, R]], Callable[P, R]]:
+       """A decorator that memoizes a function using a thread-safe LRU cache
+       with per-entry TTL and size-based eviction.
+
+       Parameters
+       ----------
+       max_size : int, default 12
+<<content>>
+Here's a thinking process:
+
+1.  **Analyze the Requirements:**
+   - **Thread-safe LRU cache**: Must handle concurrent access safely (likely using `threading.Lock` or `RLock`, or `asyncio` locks, but the prompt says "thread-safe", so `threading` is appropriate).
+   - **Per-entry time-to-live (TTL)**: Each cached entry expires after a certain time.
+   - **Size-based eviction**: When the cache reaches a maximum size, entries are evicted based on size (LRU order, but considering size).
+   - **Hit/miss statistics**: Track number of hits and misses.
+   - **Decorator for memoizing functions**: A `@lru_cache`-style decorator that uses this cache.
+   - **Type hints**: Proper typing throughout.
+   - **Complete, well-documented Python module**: Docstrings, comments, etc.
+   - **unittest test cases**: A set of tests.
+
+2.  **Module Structure:**
+   - `LRUCache` class with:
+     - `__init__(max_size: int, ttl: Optional[float] = None, default_ttl: Optional[float] = None)`
+     - `get(key) -> Optional[Any]`
+     - `set(key, value, ttl: Optional[float] = None) -> None`
+     - `evict()` or automatic eviction on `set` when full
+     - `hits` and `misses` counters
+     - Thread safety via `threading.Lock`
+     - Expiration checking on `get`
+     - Size-aware: each entry has a `size`, max total size or max items? "size-based eviction" likely means each entry has a size, and when total size exceeds a limit, evict LRU entries.
+   - Decorator function `@lru_cache_with_ttl` or similar.
+   - Helper functions/utils.
+   - `unittest.TestCase` subclass with tests.
+
+3.  **Design Details:**
+
+   **LRU Cache Implementation:**
+   - Use `collections.OrderedDict` for O(1) LRU operations (move_to_end, popitem).
+   - Thread safety: `with self._lock:` around all public methods.
+   - Per-entry TTL: store `(value, expiration_time)` or `(value, size, expiration_time)`.
+   - Size-based: each entry has a `size` (int). Cache has `max_size` (total size limit). On `set`, if `total_size + entry_size > max_size`, evict LRU entries until under limit.
+   - Hits/misses: increment on `get` success/failure (after checking expiration).
+
+   **Decorator:**
+   - `functools.wraps` preserving metadata.
+   - Key generation from args/kwargs (use `args + tuple(sorted(kwargs.items()))` or `pickle` for complex types, but keep it simple with `str(args) + str(kwargs)` or `make_key`).
+   - Support `max_size`, `ttl`, `key` parameters.
+
+   **TTL Handling:**
+   - On `get`, check if `time.time() > entry.expiry`. If so, delete and treat as miss.
+   - On `set`, set expiry = `time.time() + ttl`.
+
+   **Size-Based Eviction:**
+   - `max_size` = max total bytes (or arbitrary size units).
+   - Each entry carries a `size` parameter, default 1.
+   - On insertion, while `total_size > max_size`, pop LRU item.
+
+4.  **Drafting the Code (mental or scratchpad):**
+
+   ```python
+   import threading
+   import time
+   from collections import OrderedDict
+   from typing import Any, Optional, Callable, TypeVar, ParamSpec, overload
+   import unittest
+
+   K = TypeVar('K')
+   V = TypeVar('V')
+   P = ParamSpec('P')
+   R = TypeVar('R')
+
+   class LRUCache(Generic[K, V]):
+       def __init__(self, max_size: int = 128, default_ttl: Optional[float] = None):
+           self.max_size: int = max_size  # total size limit
+           self.default_ttl: Optional[float] = default_ttl
+           self._cache: OrderedDict[K, tuple[V, int, float]] = OrderedDict()  # key -> (value, size, expiry)
+           self._total_size: int = 0
+           self._lock = threading.Lock()
+           self.hits: int = 0
+           self.misses: int = 0
+
+       def get(self, key: K) -> Optional[V]:
+           with self._lock:
+               if key not in self._cache:
+                   self.misses += 1
+                   return None
+               value, size, expiry = self._cache[key]
+               if self.default_ttl is not None and time.time() > expiry:
+                   self._cache.pop(key)
+                   self._total_size -= size
+                   self.misses += 1
+                   return None
+               self.hits += 1
+               self._cache.move_to_end(key)
+               return value
+
+       def set(self, key: K, value: V, size: int = 1, ttl: Optional[float] = None) -> None:
+           with self._lock:
+               expiry = time.time() + (ttl or self.default_ttl or float('inf'))
+               self._cache[key] = (value, size, expiry)
+               self._total_size += size
+               while self._total_size > self.max_size and self._cache:
+                   _, evicted_size, _ = self._cache.popitem(last=False)
+                   self._total_size -= evicted_size
+               # if key already existed, we already added its size, need to avoid double counting
+               # Actually, if key exists, OrderedDict __setitem__ doesn't remove old size. Need to handle.
+   ```
+
+   Wait, need to handle key existence in `set`. If key already present, we should subtract old size before adding new one. Let's refine.
+
+   Also, `max_size` interpretation: "size-based eviction" could mean max number of items, or max total size. I'll support both: `max_size` as max total size, and optionally `max_items`. But the prompt says "size-based eviction", so I'll stick with total size limit, each entry has a size.
+
+   Let's make it clean.
+
+   **Decorator:**
+   ```python
+   def lru_cache_with_ttl(max_size: int = 128, default_ttl: Optional[float] = None, typed: bool = False):
+       def decorator(func: Callable[P, R]) -> Callable[P, R]:
+           cache = LRUCache(max_size=max_size, default_ttl=default_ttl)
+           @functools.wraps(func)
+           def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+               # key generation
+               if typed:
+                   key = args + tuple(sorted(kwargs.items()))
+               else:
+                   key = args
+               # or use a proper hashable key
+               result = cache.get(key)
+               if result is not None:
+                   return result
+               result = func(*args, **kwargs)
+               cache.set(key, result)
+               return result
+           return wrapper
+       return decorator
+   ```
+
+   Key generation should be robust. I'll use `functools._make_key` or just `hash(args + tuple(sorted(kwargs.items())))` but need to handle unhashable types. Standard `functools.lru_cache` does this. I'll keep it simple but note limitations, or use `b64` of pickle, but that's heavy. I'll stick to a simple key maker that works with hashable args, and mention that unhashable args are user responsibility, or convert to string. Actually, `functools._make_key` is private. I'll just use `key = (args, frozenset(kwargs.items()))` if kwargs else args, and require hashable. Or I can use `pickle.dumps` but that's slow. I'll keep it simple: key = `args + tuple(sorted(kwargs.items()))` and document that args/kwargs must be hashable.
+
+   Let's structure the module properly.
+
+   **Tests:**
+   - Test basic get/set
+   - Test LRU eviction when full
+   - Test TTL expiration
+   - Test thread safety (concurrent get/set)
+   - Test hit/miss stats
+   - Test decorator usage
+   - Test size-based eviction
+
+5.  **Refining the Implementation:**
+
+   I'll write the full module now.
+
+   Key points:
+   - `LRUCache` uses `OrderedDict`.
+   - Each entry: `(value, size, expiry_time)`.
+   - `max_size` is total size capacity.
+   - On `set`, if key exists, adjust size.
+   - Eviction pops from front (LRU).
+   - Thread safety with `threading.Lock`.
+   - Hits/misses counted.
+   - Decorator with `functools.wraps`.
+   - Type hints throughout.
+   - `unittest` suite.
+
+   Let's code it carefully.
+
+   ```python
+   """\
+   Thread-safe LRU cache with per-entry TTL, size-based eviction,
+   hit/miss statistics, and a memoizing decorator.
+
+   Module: lru_ttl_cache.py
+   """
+
+   import threading
+   import time
+   from collections import OrderedDict
+   from typing import Any, Optional, Callable, TypeVar, Generic, ParamSpec, overload
+   import functools
+   import unittest
+
+   K = TypeVar("K")
+   V = TypeVar("V")
+   P = ParamSpec("P")
+   R = TypeVar("R")
+
+   class LRUCache(Generic[K, V]):
+       """A thread-safe LRU cache with per-entry TTL and size-based eviction.
+
+       Parameters
+       ----------
+       max_size : int
+           Maximum total size of the cache. Entries exceeding this limit
+           trigger eviction of the least recently used items.
+       default_ttl : float, optional
+           Default time-to-live in seconds for all entries. If None, entries
+           never expire. Default is None.
+       """
+
+       def __init__(self, max_size: int = 128, default_ttl: Optional[float] = None) -> None:
+           if max_size <= 0:
+               raise ValueError("max_size must be a positive integer")
+           self.max_size: int = max_size
+           self.default_ttl: Optional[float] = default_ttl
+           self._cache: OrderedDict[K, tuple[V, int, float]] = OrderedDict()
+           self._total_size: int = 0
+           self._lock = threading.Lock()
+           self.hits: int = 0
+           self.misses: int = 0
+
+       def get(self, key: K) -> Optional[V]:
+           """Retrieve a value from the cache by key.
+
+           If the entry has expired, it is removed and treated as a miss.
+           Otherwise, the entry is moved to the end (most recently used).
+
+           Returns
+           -------
+           Optional[V]
+               The cached value, or None if not found or expired.
+           """
+           with self._lock:
+               if key not in self._cache:
+                   self.misses += 1
+                   return None
+
+               value, size, expiry = self._cache[key]
+               now = time.time()
+               if self.default_ttl is not None and now > expiry:
+                   # Expired: remove entry
+                   self._cache.pop(key)
+                   self._total_size -= size
+                   self.misses += 1
+                   return None
+
+               # Cache hit: promote to MRU position
+               self.hits += 1
+               self._cache.move_to_end(key)
+               return value
+
+       def set(
+           self,
+           key: K,
+           value: V,
+           size: int = 1,
+           ttl: Optional[float] = None,
+       ) -> None:
+           """Insert or update a value in the cache.
+
+           Parameters
+           ----------
+           key : K
+               The cache key (must be hashable).
+           value : V
+               The value to store.
+           size : int, default 1
+               The size of this entry for eviction purposes.
+           ttl : float, optional
+               Override TTL for this specific entry in seconds.
+               If None, the cache's default_ttl is used.
+           """
+           if size <= 0:
+               raise ValueError("size must be a positive integer")
+
+           with self._lock:
+               # If key already exists, remove old entry to adjust size
+               if key in self._cache:
+                   old_value, old_size, _ = self._cache[key]
+                   self._total_size -= old_size
+                   self._cache.pop(key)
+
+               expiry = time.time() + (ttl if ttl is not None else self.default_ttl or 0)
+               # If default_ttl is None, we treat expiry as never (use a large number or check in get)
+               # Let's use float('inf') for never-expiring, but we need to handle in get.
+               # Better: store expiry as None if no TTL, and check accordingly.
+               # Refactor: store (value, size, expiry) where expiry is float or None.
+               # Let's just use 0 or handle None in get. I'll store expiry as float('inf') if None,
+               # but then `now > float('inf')` is False, which is correct.
+               # Actually, `time.time() > float('inf')` is always False. Good.
+               # But if default_ttl is None and ttl is None, expiry = -1 or inf? Let's use float('inf').
+
+               expiry = time.time() + (ttl if ttl is not None else (self.default_ttl if self.default_ttl is not None else float('inf')))
+               # Wait, if default_ttl is None, we want no expiry. float('inf') works.
+               # But if user passes ttl=0, expiry = time.time(), which expires immediately. That's fine.
+
+               self._cache[key] = (value, size, expiry)
+               self._total_size += size
+
+               # Size-based eviction: remove LRU entries until under limit
+               while self._total_size > self.max_size and self._cache:
+                   _, evicted_size, _ = self._cache.popitem(last=False)
+                   self._total_size -= evicted_size
+
+       def peek_most_recent(self) -> Optional[K]:
+           """Return the most recently used key without removing it."""
+           with self._lock:
+               if not self._cache:
+                   return None
+               return next(reversed(self._cache))
+
+       def peek_least_recent(self) -> Optional[K]:
+           """Return the least recently used key without removing it."""
+           with self._lock:
+               if not self._cache:
+                   return None
+               return next(iter(self._cache))
+
+       def stats(self) -> dict[str, Any]:
+           """Return hit/miss statistics and current cache size."""
+           with self._lock:
+               return {
+                   "hits": self.hits,
+                   "misses": self.misses,
+                   "hit_rate": self.hits / (self.hits + self.misses) if (self.hits + self.misses) else 0.0,
+                   "total_size": self._total_size,
+                   "max_size": self.max_size,
+                   "item_count": len(self._cache),
+               }
+
+   # -----------------------------------------------------------------------
+   # Decorator
+   # -----------------------------------------------------------------------
+
+   def lru_cache_with_ttl(
+       max_size: int = 128,
+       default_ttl: Optional[float] = None,
+       typed: bool = False,
+   ) -> Callable[[Callable[P, R]], Callable[P, R]]:
+       """A decorator that memoizes a function using a thread-safe LRU cache
+       with per-entry TTL and size-based eviction.
+
+       Parameters
+       ----------
+       max_size : int, default 12

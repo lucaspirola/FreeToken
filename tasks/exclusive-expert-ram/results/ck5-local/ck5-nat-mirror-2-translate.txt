@@ -1,0 +1,211 @@
+Here's a thinking process:
+
+1.  **Analyze the Request:**
+   - Translate the given English text into Brazilian Portuguese.
+   - Explain each idiom that was adapted/translated, and why those adaptations were made.
+   - The text: "It was raining cats and dogs, so we decided to call it a day. Our manager said we were not out of the woods yet, but that the project was finally on the right track, and that we should not count our chickens before they hatch."
+
+2.  **Identify the Idioms:**
+   - "It was raining cats and dogs" 
+   - "call it a day"
+   - "not out of the woods yet"
+   - "on the right track"
+   - "not count our chickens before they hatch"
+
+3.  **Translate Each Idiom into Brazilian Portuguese:**
+   I need to find the equivalent Brazilian Portuguese idioms or explain the translation choices. Brazilian Portuguese has its own set of idioms, often calqued from Portuguese/European Portuguese but with local variations. I'll aim for natural, commonly used equivalents.
+
+   - "It was raining cats and dogs" 
+     - English: heavy rain
+     - Brazilian Portuguese equivalent: "Estava chovendo a cântaros" (literally: raining jugs/pitchers) or "Estava chovendo canos" (raining pipes). Actually, the most common equivalent is "Estava chovendo a cântaros" or simply "Estava chovendo muito". But there's also "Chovendo gatos e cães" which is sometimes used directly, but the traditional Brazilian equivalent is "Estava chovendo a cântaros". Let me verify: In Brazil, "chovendo a cântaros" is the standard equivalent for heavy rain. Another one is "chovendo canos". I'll use "estava chovendo a cântaros" as the primary natural equivalent, or I could note the direct translation vs. equivalent. I'll provide the equivalent and explain.
+   
+   - "call it a day"
+     - Brazilian Portuguese equivalent: "Pôr um ponto final" or "chamar um tempo" or "dizer basta". Actually, "chamar um tempo" is very common. Or "encerrar as atividades". I think "chamar um tempo" or "decidir parar por hoje" is natural. A common idiom equivalent is "chamar um tempo" or "por um ponto final". I'll use "decidimos chamar um tempo" or "encerrar por hoje". Let's check typical Brazilian Portuguese: "Decidimos chamar um tempo" works well. Another is "por um ponto final no dia". I'll go with "decidimos chamar um tempo" and explain.
+   
+   - "not out of the woods yet"
+     - Meaning: not out of danger/difficulty yet
+     - Brazilian Portuguese equivalent: "ainda não saímos da floresta" or "ainda não estamos livres dos problemas". There's also "ainda não saímos das mãos" but that's not idiomatic. The calque "ainda não saímos da madeira" isn't standard. Actually, a very close and natural equivalent is "ainda não saímos da encrenca" or "ainda não estamos fora de perigo". But I think the most direct and understood equivalent is "ainda não saímos da floresta" (literally: we haven't come out of the forest), which is used in Brazil. Alternatively, "ainda não estamos livres das dificuldades". I'll research/commonly: In Brazil, people might say "ainda não saímos da mira" or "ainda não estamos fora de perigo". I'll use "ainda não saímos da floresta" as the calque equivalent, but I should note it's a calque of the English metaphor, or use a more idiomatic one like "ainda não estamos livres dos problemas". Actually, let's think: The English idiom "not out of the woods" translates naturally to "não estar na melhor das situações" or "ainda correr riscos". But for a direct idiomatic equivalent, Brazilians might say "ainda não saímos da encrenca" or "ainda não estamos livres". I'll provide "ainda não saímos da floresta" and explain it's the calque, or use "ainda não estamos fora de perigo". I think it's better to use a calque that's widely understood: "ainda não saímos da madeira" isn't common. Let me check: Actually, "fora da madeira" isn't a thing. I'll use "ainda não saímos da encrenca" or "ainda não estamos livres dos problemas". But the prompt says "explain each idiom you had to adapt and why". So I should translate the meaning, not necessarily force a literal idiom if it doesn't exist, but provide the closest Brazilian equivalent and explain the adaptation. I'll do that.
+   
+   - "on the right track"
+     - Meaning: making good progress, doing the right thing
+     - Brazilian Portuguese equivalent: "estamos no caminho certo" or "estamos no caminho certo". That's direct and natural. Could also be "estamos seguindo pela direção certa". I'll use "estamos no caminho certo" and note it's a direct but natural translation.
+   
+   - "not count our chickens before they hatch"
+     - Meaning: don't assume success before it happens
+     - Brazilian Portuguese equivalent: "Não conte suas galinhas antes que elas nasçam" or more commonly "Não conte suas galinhas" or "Não se adiantar". Actually, the direct translation "Não conte suas galinhas antes que elas nasçam" is used in Portuguese (both Brazil and Portugal). There's also "Não contar os ovos antes que eles eclodam". I'll use "Não conte suas galinhas antes que elas nasçam" and explain it's a direct calque that's widely understood.
+
+   Let me refine the translations to be natural Brazilian Portuguese:
+
+   Original: "It was raining cats and dogs, so we decided to call it a day. Our manager said we were not out of the woods yet, but that the project was finally on the right track, and that we should not count our chickens before they hatch."
+
+   Translation (Brazilian Portuguese):
+   "Estava chovendo a cântaros, então decidimos chamar um tempo. Nosso gerente disse que ainda não saímos da floresta, mas que o projeto finalmente estava no caminho certo, e que não deveríamos contar nossas galinhas antes que elas nasçam."
+
+   Wait, let me verify each:
+   - "Estava chovendo a cântaros" = Yes, standard Brazilian Portuguese for heavy rain. "Chovendo gatos e cães" is sometimes used directly due to English influence, but "a cântaros" is the proper equivalent.
+   - "decidimos chamar um tempo" = Very common. Could also be "por um ponto final" but "chamar um tempo" fits the "call it a day" vibe.
+   - "ainda não saímos da floresta" = This is a calque of "not out of the woods". Is it commonly used in Brazil? I think Brazilians might say "ainda não estamos livres dos problemas" or "ainda não saímos da encrenca". But "saír da floresta" is understandable as a calque. I should maybe use "ainda não estamos fora de perigo" or explain the adaptation. The prompt says "explain each idiom you had to adapt and why". So I can provide the translation choice and explain why I chose it/adapted it. I'll use "ainda não saímos da floresta" and note it's the calque equivalent, or use a more idiomatic "ainda não estamos livres das dificuldades". Let me think what's most natural: In Brazil, if someone says "ainda não saímos da floresta", people will understand it as "not out of the woods". It's a known calque. I'll go with that and explain.
+   - "estava no caminho certo" = Natural, direct translation. "No right track" -> "no caminho certo".
+   - "Não conte suas galinhas antes que elas nasçam" = Direct calque, used in Portuguese. I'll note that.
+
+   Actually, let me double-check Brazilian Portuguese idioms for "call it a day": "Chamar um tempo" is good. "Pôr um ponto final" is also good. I'll use "decidimos chamar um tempo".
+   For "not out of the woods": I'll use "ainda não saímos da floresta" and explain it's the calque, as direct translation is often the best approach for these prompts, but I'll explain the adaptation.
+   For "on the right track": "estava no caminho certo" is perfect.
+   For "not count our chickens before they hatch": "Não conte suas galinhas antes que elas nasçam" is the standard Portuguese equivalent. I'll confirm: Yes, in Brazil, "Não conte suas galinhas antes que elas nasçam" is commonly used. Sometimes "Não contar os ovos" but the galinhas version is fine.
+
+   Let me structure the response:
+   - Provide the Brazilian Portuguese translation.
+   - List each idiom, the translated version, and an explanation of why I adapted it that way (i.e., direct calque vs. native equivalent, cultural relevance, literal meaning, etc.).
+
+   I'll write the translation first, then the breakdown.
+
+   Translation:
+   "Estava chovendo a cântaros, então decidimos chamar um tempo. Nosso gerente disse que ainda não saímos da floresta, mas que o projeto finalmente estava no caminho certo, e que não deveríamos contar nossas galinhas antes que elas nasçam."
+
+   Now, the explanations:
+   1. "It was raining cats and dogs" → "Estava chovendo a cântaros"
+      - Why: "Cats and dogs" doesn't translate literally in Brazilian Portuguese without sounding like a direct English import. The traditional equivalent, "chovendo a cântaros" (literally "raining jugs/pitchers"), is the idiomatic way to express heavy rain in Brazil. It preserves the metaphorical weight of the original while using a locally recognized expression.
+
+   2. "Call it a day" → "Chamar um tempo"
+      - Why: "Call it a day" implies stopping an activity for the rest of the day. "Chamar um tempo" is the common Brazilian Portuguese phrase for taking a break or ending an session for the day. It captures the same sense of pausing or concluding efforts, rather than a literal "calling" of a day.
+
+   3. "Not out of the woods yet" → "Ainda não saímos da floresta"
+      - Why: This is a calque of the English metaphor. While Brazilian Portuguese has other ways to say "not out of danger" (e.g., "ainda não estamos livres dos problemas"), using "ainda não saímos da floresta" directly mirrors the English imagery and is widely understood in context. I chose it to maintain the metaphorical structure of the original text, but I note it as an adaptation because it's not the most colloquial everyday phrase—it's a recognizable calque.
+
+   4. "On the right track" → "No caminho certo"
+      - Why: This is a near-direct translation that works perfectly in Brazilian Portuguese. "No caminho certo" is the standard way to say someone or something is progressing correctly or making good progress. No adaptation was needed beyond grammatical adjustment (track → caminho), as the metaphor of a path/track is shared between English and Portuguese.
+
+   5. "Not count our chickens before they hatch" → "Não conte suas galinhas antes que elas nasçam"
+      - Why: This is actually a direct calque that is fully idiomatic in Portuguese (both Brazil and Portugal). The English and Portuguese versions share the same agricultural metaphor. I included it as-is because it's the natural equivalent, but I explain it because the prompt asks about idioms I "had to adapt"—in this case, it required no real adaptation, just a direct transfer, which is worth noting.
+
+   I should refine the "not out of the woods" part. Maybe I should use a more authentically Brazilian phrase and explain why I didn't, or use the calque and explain. The prompt says "Translate the following into Brazilian Portuguese, then explain each idiom you had to adapt and why". So I need to show which ones I adapted and why. I'll be precise: for some, I adapted (changed the idiom to a local equivalent); for others, it was a direct calque that works. I'll clarify each.
+
+   Let me re-evaluate each with a critical eye for "adaptation":
+   - Raining cats and dogs: Adapted to "chovendo a cântaros" → strong adaptation, local idiom.
+   - Call it a day: Adapted to "chamar um tempo" → adaptation, local phrase.
+   - Not out of the woods: I could adapt to "ainda não estamos livres dos problemas" or keep the calque. I think I'll adapt to a more genuinely Brazilian idiom: "ainda não saímos da encrenca" or "ainda não estamos fora de perigo". But the prompt might want me to translate the meaning while adapting the idiom. I'll use "ainda não saímos da floresta" as the calque and explain, or use "ainda não estamos livres das dificuldades". Actually, let me search my knowledge: In Brazil, "sair da madeira" isn't said. "Não estar na melhor" is common. I think the safest is to use the calque "ainda não saímos da floresta" and explain it's a direct metaphor transfer that Brazilians understand, but note that a more colloquial equivalent would be "ainda não estamos livres dos problemas". I'll do that and explain why I chose the calque (to preserve the original metaphor) vs. adapting to a local phrase.
+   - On the right track: Minimal adaptation. "No caminho certo" is direct. I'll note it's a shared metaphor.
+   - Not count our chickens: Direct calque, works perfectly. I'll note it.
+
+   Maybe I should structure the "adaptation" part by stating whether I adapted or directly calqued, and why. The prompt says "explain each idiom you had to adapt and why". This implies I should identify which ones required adaptation (i.e., weren't literal) and explain the reasoning. I'll do that.
+
+   Let me draft the response carefully.
+
+   Translation:
+   "Estava chovendo a cântaros, então decidimos chamar um tempo. Nosso gerente disse que ainda não saímos da floresta, mas que o projeto finalmente estava no caminho certo, e que não deveríamos contar nossas galinhas antes que elas nasçam."
+
+   Breakdown:
+   1. "It was raining cats and dogs" → "Estava chovendo a cântaros"
+      - Adaptation: The English idiom has no direct equivalent in Brazilian Portuguese without sounding foreign. "Chovendo a cântaros" (literally "raining jugs") is the conventional way to say it's raining heavily. I adapted it to maintain naturalness while preserving the idea of heavy rain.
+   
+   2. "Call it a day" → "Chamar um tempo"
+      - Adaptation: "Call it a day" is metaphorical for stopping work/effort for the day. "Chamar um tempo" is the Brazilian Portuguese idiom for taking a break or ending a session. I chose it because it captures the same pragmatic conclusion without literal translation.
+   
+   3. "Not out of the woods yet" → "Ainda não saímos da floresta"
+      - Adaptation: This is a calque of the English metaphor. While Brazilians might more commonly say "ainda não estamos livres dos problemas" or "ainda não saímos da encrenca", using "ainda não saímos da
+<<content>>
+Here's a thinking process:
+
+1.  **Analyze the Request:**
+   - Translate the given English text into Brazilian Portuguese.
+   - Explain each idiom that was adapted/translated, and why those adaptations were made.
+   - The text: "It was raining cats and dogs, so we decided to call it a day. Our manager said we were not out of the woods yet, but that the project was finally on the right track, and that we should not count our chickens before they hatch."
+
+2.  **Identify the Idioms:**
+   - "It was raining cats and dogs" 
+   - "call it a day"
+   - "not out of the woods yet"
+   - "on the right track"
+   - "not count our chickens before they hatch"
+
+3.  **Translate Each Idiom into Brazilian Portuguese:**
+   I need to find the equivalent Brazilian Portuguese idioms or explain the translation choices. Brazilian Portuguese has its own set of idioms, often calqued from Portuguese/European Portuguese but with local variations. I'll aim for natural, commonly used equivalents.
+
+   - "It was raining cats and dogs" 
+     - English: heavy rain
+     - Brazilian Portuguese equivalent: "Estava chovendo a cântaros" (literally: raining jugs/pitchers) or "Estava chovendo canos" (raining pipes). Actually, the most common equivalent is "Estava chovendo a cântaros" or simply "Estava chovendo muito". But there's also "Chovendo gatos e cães" which is sometimes used directly, but the traditional Brazilian equivalent is "Estava chovendo a cântaros". Let me verify: In Brazil, "chovendo a cântaros" is the standard equivalent for heavy rain. Another one is "chovendo canos". I'll use "estava chovendo a cântaros" as the primary natural equivalent, or I could note the direct translation vs. equivalent. I'll provide the equivalent and explain.
+   
+   - "call it a day"
+     - Brazilian Portuguese equivalent: "Pôr um ponto final" or "chamar um tempo" or "dizer basta". Actually, "chamar um tempo" is very common. Or "encerrar as atividades". I think "chamar um tempo" or "decidir parar por hoje" is natural. A common idiom equivalent is "chamar um tempo" or "por um ponto final". I'll use "decidimos chamar um tempo" or "encerrar por hoje". Let's check typical Brazilian Portuguese: "Decidimos chamar um tempo" works well. Another is "por um ponto final no dia". I'll go with "decidimos chamar um tempo" and explain.
+   
+   - "not out of the woods yet"
+     - Meaning: not out of danger/difficulty yet
+     - Brazilian Portuguese equivalent: "ainda não saímos da floresta" or "ainda não estamos livres dos problemas". There's also "ainda não saímos das mãos" but that's not idiomatic. The calque "ainda não saímos da madeira" isn't standard. Actually, a very close and natural equivalent is "ainda não saímos da encrenca" or "ainda não estamos fora de perigo". But I think the most direct and understood equivalent is "ainda não saímos da floresta" (literally: we haven't come out of the forest), which is used in Brazil. Alternatively, "ainda não estamos livres das dificuldades". I'll research/commonly: In Brazil, people might say "ainda não saímos da mira" or "ainda não estamos fora de perigo". I'll use "ainda não saímos da floresta" as the calque equivalent, but I should note it's a calque of the English metaphor, or use a more idiomatic one like "ainda não estamos livres dos problemas". Actually, let's think: The English idiom "not out of the woods" translates naturally to "não estar na melhor das situações" or "ainda correr riscos". But for a direct idiomatic equivalent, Brazilians might say "ainda não saímos da encrenca" or "ainda não estamos livres". I'll provide "ainda não saímos da floresta" and explain it's the calque, or use "ainda não estamos fora de perigo". I think it's better to use a calque that's widely understood: "ainda não saímos da madeira" isn't common. Let me check: Actually, "fora da madeira" isn't a thing. I'll use "ainda não saímos da encrenca" or "ainda não estamos livres dos problemas". But the prompt says "explain each idiom you had to adapt and why". So I should translate the meaning, not necessarily force a literal idiom if it doesn't exist, but provide the closest Brazilian equivalent and explain the adaptation. I'll do that.
+   
+   - "on the right track"
+     - Meaning: making good progress, doing the right thing
+     - Brazilian Portuguese equivalent: "estamos no caminho certo" or "estamos no caminho certo". That's direct and natural. Could also be "estamos seguindo pela direção certa". I'll use "estamos no caminho certo" and note it's a direct but natural translation.
+   
+   - "not count our chickens before they hatch"
+     - Meaning: don't assume success before it happens
+     - Brazilian Portuguese equivalent: "Não conte suas galinhas antes que elas nasçam" or more commonly "Não conte suas galinhas" or "Não se adiantar". Actually, the direct translation "Não conte suas galinhas antes que elas nasçam" is used in Portuguese (both Brazil and Portugal). There's also "Não contar os ovos antes que eles eclodam". I'll use "Não conte suas galinhas antes que elas nasçam" and explain it's a direct calque that's widely understood.
+
+   Let me refine the translations to be natural Brazilian Portuguese:
+
+   Original: "It was raining cats and dogs, so we decided to call it a day. Our manager said we were not out of the woods yet, but that the project was finally on the right track, and that we should not count our chickens before they hatch."
+
+   Translation (Brazilian Portuguese):
+   "Estava chovendo a cântaros, então decidimos chamar um tempo. Nosso gerente disse que ainda não saímos da floresta, mas que o projeto finalmente estava no caminho certo, e que não deveríamos contar nossas galinhas antes que elas nasçam."
+
+   Wait, let me verify each:
+   - "Estava chovendo a cântaros" = Yes, standard Brazilian Portuguese for heavy rain. "Chovendo gatos e cães" is sometimes used directly due to English influence, but "a cântaros" is the proper equivalent.
+   - "decidimos chamar um tempo" = Very common. Could also be "por um ponto final" but "chamar um tempo" fits the "call it a day" vibe.
+   - "ainda não saímos da floresta" = This is a calque of "not out of the woods". Is it commonly used in Brazil? I think Brazilians might say "ainda não estamos livres dos problemas" or "ainda não saímos da encrenca". But "saír da floresta" is understandable as a calque. I should maybe use "ainda não estamos fora de perigo" or explain the adaptation. The prompt says "explain each idiom you had to adapt and why". So I can provide the translation choice and explain why I chose it/adapted it. I'll use "ainda não saímos da floresta" and note it's the calque equivalent, or use a more idiomatic "ainda não estamos livres das dificuldades". Let me think what's most natural: In Brazil, if someone says "ainda não saímos da floresta", people will understand it as "not out of the woods". It's a known calque. I'll go with that and explain.
+   - "estava no caminho certo" = Natural, direct translation. "No right track" -> "no caminho certo".
+   - "Não conte suas galinhas antes que elas nasçam" = Direct calque, used in Portuguese. I'll note that.
+
+   Actually, let me double-check Brazilian Portuguese idioms for "call it a day": "Chamar um tempo" is good. "Pôr um ponto final" is also good. I'll use "decidimos chamar um tempo".
+   For "not out of the woods": I'll use "ainda não saímos da floresta" and explain it's the calque, as direct translation is often the best approach for these prompts, but I'll explain the adaptation.
+   For "on the right track": "estava no caminho certo" is perfect.
+   For "not count our chickens before they hatch": "Não conte suas galinhas antes que elas nasçam" is the standard Portuguese equivalent. I'll confirm: Yes, in Brazil, "Não conte suas galinhas antes que elas nasçam" is commonly used. Sometimes "Não contar os ovos" but the galinhas version is fine.
+
+   Let me structure the response:
+   - Provide the Brazilian Portuguese translation.
+   - List each idiom, the translated version, and an explanation of why I adapted it that way (i.e., direct calque vs. native equivalent, cultural relevance, literal meaning, etc.).
+
+   I'll write the translation first, then the breakdown.
+
+   Translation:
+   "Estava chovendo a cântaros, então decidimos chamar um tempo. Nosso gerente disse que ainda não saímos da floresta, mas que o projeto finalmente estava no caminho certo, e que não deveríamos contar nossas galinhas antes que elas nasçam."
+
+   Now, the explanations:
+   1. "It was raining cats and dogs" → "Estava chovendo a cântaros"
+      - Why: "Cats and dogs" doesn't translate literally in Brazilian Portuguese without sounding like a direct English import. The traditional equivalent, "chovendo a cântaros" (literally "raining jugs/pitchers"), is the idiomatic way to express heavy rain in Brazil. It preserves the metaphorical weight of the original while using a locally recognized expression.
+
+   2. "Call it a day" → "Chamar um tempo"
+      - Why: "Call it a day" implies stopping an activity for the rest of the day. "Chamar um tempo" is the common Brazilian Portuguese phrase for taking a break or ending an session for the day. It captures the same sense of pausing or concluding efforts, rather than a literal "calling" of a day.
+
+   3. "Not out of the woods yet" → "Ainda não saímos da floresta"
+      - Why: This is a calque of the English metaphor. While Brazilian Portuguese has other ways to say "not out of danger" (e.g., "ainda não estamos livres dos problemas"), using "ainda não saímos da floresta" directly mirrors the English imagery and is widely understood in context. I chose it to maintain the metaphorical structure of the original text, but I note it as an adaptation because it's not the most colloquial everyday phrase—it's a recognizable calque.
+
+   4. "On the right track" → "No caminho certo"
+      - Why: This is a near-direct translation that works perfectly in Brazilian Portuguese. "No caminho certo" is the standard way to say someone or something is progressing correctly or making good progress. No adaptation was needed beyond grammatical adjustment (track → caminho), as the metaphor of a path/track is shared between English and Portuguese.
+
+   5. "Not count our chickens before they hatch" → "Não conte suas galinhas antes que elas nasçam"
+      - Why: This is actually a direct calque that is fully idiomatic in Portuguese (both Brazil and Portugal). The English and Portuguese versions share the same agricultural metaphor. I included it as-is because it's the natural equivalent, but I explain it because the prompt asks about idioms I "had to adapt"—in this case, it required no real adaptation, just a direct transfer, which is worth noting.
+
+   I should refine the "not out of the woods" part. Maybe I should use a more authentically Brazilian phrase and explain why I didn't, or use the calque and explain. The prompt says "Translate the following into Brazilian Portuguese, then explain each idiom you had to adapt and why". So I need to show which ones I adapted and why. I'll be precise: for some, I adapted (changed the idiom to a local equivalent); for others, it was a direct calque that works. I'll clarify each.
+
+   Let me re-evaluate each with a critical eye for "adaptation":
+   - Raining cats and dogs: Adapted to "chovendo a cântaros" → strong adaptation, local idiom.
+   - Call it a day: Adapted to "chamar um tempo" → adaptation, local phrase.
+   - Not out of the woods: I could adapt to "ainda não estamos livres dos problemas" or keep the calque. I think I'll adapt to a more genuinely Brazilian idiom: "ainda não saímos da encrenca" or "ainda não estamos fora de perigo". But the prompt might want me to translate the meaning while adapting the idiom. I'll use "ainda não saímos da floresta" as the calque and explain, or use "ainda não estamos livres das dificuldades". Actually, let me search my knowledge: In Brazil, "sair da madeira" isn't said. "Não estar na melhor" is common. I think the safest is to use the calque "ainda não saímos da floresta" and explain it's a direct metaphor transfer that Brazilians understand, but note that a more colloquial equivalent would be "ainda não estamos livres dos problemas". I'll do that and explain why I chose the calque (to preserve the original metaphor) vs. adapting to a local phrase.
+   - On the right track: Minimal adaptation. "No caminho certo" is direct. I'll note it's a shared metaphor.
+   - Not count our chickens: Direct calque, works perfectly. I'll note it.
+
+   Maybe I should structure the "adaptation" part by stating whether I adapted or directly calqued, and why. The prompt says "explain each idiom you had to adapt and why". This implies I should identify which ones required adaptation (i.e., weren't literal) and explain the reasoning. I'll do that.
+
+   Let me draft the response carefully.
+
+   Translation:
+   "Estava chovendo a cântaros, então decidimos chamar um tempo. Nosso gerente disse que ainda não saímos da floresta, mas que o projeto finalmente estava no caminho certo, e que não deveríamos contar nossas galinhas antes que elas nasçam."
+
+   Breakdown:
+   1. "It was raining cats and dogs" → "Estava chovendo a cântaros"
+      - Adaptation: The English idiom has no direct equivalent in Brazilian Portuguese without sounding foreign. "Chovendo a cântaros" (literally "raining jugs") is the conventional way to say it's raining heavily. I adapted it to maintain naturalness while preserving the idea of heavy rain.
+   
+   2. "Call it a day" → "Chamar um tempo"
+      - Adaptation: "Call it a day" is metaphorical for stopping work/effort for the day. "Chamar um tempo" is the Brazilian Portuguese idiom for taking a break or ending a session. I chose it because it captures the same pragmatic conclusion without literal translation.
+   
+   3. "Not out of the woods yet" → "Ainda não saímos da floresta"
+      - Adaptation: This is a calque of the English metaphor. While Brazilians might more commonly say "ainda não estamos livres dos problemas" or "ainda não saímos da encrenca", using "ainda não saímos da

@@ -1,0 +1,2 @@
+3072 passed, 25 skipped, 2 warnings, 2 subtests passed in 648.75s (0:10:48)
+dd186288c2ee8d5fab6b998fd052a25d  /root/r3suite/suite.txt

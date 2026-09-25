@@ -1,0 +1,11 @@
+== ck5-mirror-1m (ceb482c) vs nemotron-reserve-2e-1m (None)
+  decode_1000k          94.3 vs    72.9  129.4%  ok   total 527.5 s, ttft 526.14 s
+  decode_1000k_p1       92.7 vs    76.9  120.5%  ok   total 529.8 s, ttft 528.48 s
+  decode_8k            175.8 vs   170.7  103.0%  ok   total 1.6 s, ttft 0.9 s
+  decode_8k_p1         181.1 vs   177.0  102.3%  ok   total 0.9 s, ttft 0.22 s
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            12.77 (record 12.26)  free_evict_rate 0.862 (record 0.565)
+  ram 12.26 +/- 0.6  ok
+== ck5-mirror: not run in this checkpoint (ARMS), no comparison
+0 point(s) outside the band
