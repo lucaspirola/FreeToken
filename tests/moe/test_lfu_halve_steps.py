@@ -1,6 +1,6 @@
-"""FREETOKEN_LFU_HALVE_STEPS: the LFU aging period is a switch (default 256, the historical
-constant). The CPU reference and the expert-arena v2 kernel halve a layer's counts on the
-same call, and at 64 they halve four times as often."""
+"""FREETOKEN_LFU_HALVE_STEPS: the LFU aging period is a switch (default 64 since the live
+natural-text A/B; 256 is the historical constant). The CPU reference and the expert-arena v2
+kernel halve a layer's counts on the same call, at either period."""
 from __future__ import annotations
 
 import pytest
@@ -19,8 +19,8 @@ def _cpu_cache():
     return cache
 
 
-def test_default_is_256():
-    assert ok.FREETOKEN_LFU_HALVE_STEPS == 256
+def test_default_is_64():
+    assert ok.FREETOKEN_LFU_HALVE_STEPS == 64
 
 
 @pytest.mark.parametrize("period", [256, 64])

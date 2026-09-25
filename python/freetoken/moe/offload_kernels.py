@@ -48,10 +48,11 @@ FREETOKEN_MIRROR_TIEBREAK = os.getenv("FREETOKEN_MIRROR_TIEBREAK", "1").strip() 
 FREETOKEN_MIRROR_DUP_BAND = os.getenv("FREETOKEN_MIRROR_DUP_BAND", "1").strip() == "1"
 
 # LFU aging: a layer's expert counts are halved every this many calls of that layer
-# (decode steps). 256 is the historical constant. The trace-driven simulation
-# (tasks/exclusive-expert-ram/evict-sim, exp/evict-sim) puts the hit-rate optimum
-# near 64 on Nemotron; this switch is for the live A/B. Must be a power of two.
-FREETOKEN_LFU_HALVE_STEPS = int(os.getenv("FREETOKEN_LFU_HALVE_STEPS", "256"))
+# (decode steps). 64 since the live natural-text A/B (tasks/harvest/README.md §d):
+# +4.9% decode on Nemotron NVFP4 and +4.6% on Ornith EXL3 against the historical 256,
+# outputs byte-identical. 256 still wins the repeated-sentence 8K probe, which routes
+# to a narrow expert set and rewards long memory. Must be a power of two.
+FREETOKEN_LFU_HALVE_STEPS = int(os.getenv("FREETOKEN_LFU_HALVE_STEPS", "64"))
 if FREETOKEN_LFU_HALVE_STEPS < 1 or FREETOKEN_LFU_HALVE_STEPS & (FREETOKEN_LFU_HALVE_STEPS - 1):
     raise ValueError(
         f"FREETOKEN_LFU_HALVE_STEPS={FREETOKEN_LFU_HALVE_STEPS} must be a power of two"
@@ -555,7 +556,7 @@ def _ensure_experts_sized_kernel(
     POLICY_LFU: tl.constexpr,
     LFU_RECENCY_CALLS: tl.constexpr,
     LFU_RECENCY_BONUS: tl.constexpr,
-    LFU_HALVE_MASK: tl.constexpr = 255,
+    LFU_HALVE_MASK: tl.constexpr = 63,
 ):
     """Timestamp LRU constrained to one compact GGUF row-size class.
 
@@ -690,7 +691,7 @@ def _ensure_experts_sized_kernel_v2(
     HAS_MIRROR: tl.constexpr,
     MIRROR_BOOK: tl.constexpr,
     DUP_BAND: tl.constexpr = False,
-    LFU_HALVE_MASK: tl.constexpr = 255,
+    LFU_HALVE_MASK: tl.constexpr = 63,
 ):
     """Gated (``FREETOKEN_EXPERT_ARENA=1``) twin of ``_ensure_experts_sized_kernel``.
 
