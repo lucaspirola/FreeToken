@@ -316,17 +316,24 @@ class TritonAttentionBackend(BaseAttnBackend):
         cached_lens = [req.cached_len for req in reqs]
         num_query_tokens = sum(seqlens_q)
         is_decode = max(seqlens_q) == 1
-        prefix_lens = torch.tensor(cached_lens, dtype=torch.int32, device=device)
+        # Host lists go to the device through pinned staging with non_blocking copies (as in the
+        # fa / fi / trtllm backends). torch.tensor(list, device=cuda) is a pageable copy that
+        # synchronizes the current stream; under overlap scheduling that stream is ordered behind
+        # the forward still in flight, so each decode step's metadata waited for the previous step
+        # to finish and the GPU idled while the host prepared the next one (~0.56 ms/token, box
+        # nsys 2026-09-25, tasks/overlap-sync).
+        cpu_kwargs = {"device": "cpu", "dtype": torch.int32, "pin_memory": True}
+        prefix_lens = torch.tensor(cached_lens, **cpu_kwargs).to(device, non_blocking=True)
 
-        indptr = torch.tensor([0] + seqlens_k, dtype=torch.int32, device=device).cumsum_(0)
+        indptr = torch.tensor([0] + seqlens_k, **cpu_kwargs).cumsum_(0).to(device, non_blocking=True)
         if is_decode:
             cu_seqlens_q_gpu = torch.arange(0, padded_size + 1, device=device, dtype=torch.int32)
         elif all(l == 0 for l in cached_lens):
             cu_seqlens_q_gpu = indptr
         else:
             cu_seqlens_q_gpu = torch.tensor(
-                [0] + seqlens_q, dtype=torch.int32, device=device
-            ).cumsum_(0)
+                [0] + seqlens_q, **cpu_kwargs
+            ).cumsum_(0).to(device, non_blocking=True)
         indices = torch.cat([page_table[req.table_idx, : req.device_len] for req in reqs])
         swa_indices = None
         if getattr(self.kvcache, "swa_paged", False):
