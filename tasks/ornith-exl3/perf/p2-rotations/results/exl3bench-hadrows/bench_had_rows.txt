@@ -1,0 +1,16 @@
+gate_up  bm   16 warps 4:   2008.2 us    284.0 GB/s
+gate_up  bm   16 warps 8:   2974.1 us    191.8 GB/s
+gate_up  bm   32 warps 4:   1525.6 us    373.9 GB/s
+gate_up  bm   32 warps 8:   2418.5 us    235.9 GB/s
+gate_up  bm   64 warps 4:   4012.2 us    142.2 GB/s
+gate_up  bm   64 warps 8:   3039.8 us    187.7 GB/s
+gate_up  bm  128 warps 4:   4348.0 us    131.2 GB/s
+gate_up  bm  128 warps 8:   1654.2 us    344.8 GB/s
+down     bm   16 warps 4:    268.3 us    500.2 GB/s
+down     bm   16 warps 8:    393.7 us    340.9 GB/s
+down     bm   32 warps 4:    234.0 us    573.6 GB/s
+down     bm   32 warps 8:    314.4 us    427.0 GB/s
+down     bm   64 warps 4:    593.8 us    226.0 GB/s
+down     bm   64 warps 8:    377.9 us    355.2 GB/s
+down     bm  128 warps 4:    599.2 us    224.0 GB/s
+down     bm  128 warps 8:    229.4 us    585.1 GB/s

@@ -1,0 +1,26 @@
+== short saver vs whole
+ids equal True logits bit-equal True max|d| 0.0
+ids equal to pre-change run False
+== short FT(new) vs exllamav3 off24
+positions 31  vocab 248320
+max|dlogit| 4.1523  mean|dlogit| 0.27017  max|dlogit|/max|logit| 1.67e-01
+top-1 agreement 0.903 (28/31)  first disagreement 3
+top-5 overlap 0.935  KL(exl3||ft) max 1.75e-01 mean 2.61e-02
+== short FT(new) vs FT(v2, prefill-only change) [only if same ids]
+positions 31  vocab 248320
+max|dlogit| 28.6562  mean|dlogit| 1.24549  max|dlogit|/max|logit| 1.16e+00
+top-1 agreement 0.548 (17/31)  first disagreement 17
+top-5 overlap 0.542  KL(exl3||ft) max 2.32e+01 mean 6.96e+00
+== long saver vs whole
+ids equal True logits bit-equal True max|d| 0.0
+ids equal to pre-change run False
+== long FT(new) vs exllamav3 off24
+positions 31  vocab 248320
+max|dlogit| 3.1348  mean|dlogit| 0.25471  max|dlogit|/max|logit| 1.15e-01
+top-1 agreement 0.935 (29/31)  first disagreement 6
+top-5 overlap 0.948  KL(exl3||ft) max 9.55e-02 mean 1.31e-02
+== long FT(new) vs FT(v2, prefill-only change) [only if same ids]
+positions 31  vocab 248320
+max|dlogit| 37.6250  mean|dlogit| 2.51589  max|dlogit|/max|logit| 1.29e+00
+top-1 agreement 0.194 (6/31)  first disagreement 6
+top-5 overlap 0.245  KL(exl3||ft) max 2.82e+01 mean 1.41e+01

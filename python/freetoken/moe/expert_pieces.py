@@ -65,6 +65,10 @@ def iter_expert_pieces(
         return iter_nvfp4_expert_pieces(
             model_path, config, spec_hook(model_path, config), parallel=parallel, workers=workers, chunk=chunk
         )
+    if kind is QuantKind.EXL3:
+        from freetoken.models.exl3_banks import iter_exl3_expert_pieces
+
+        return iter_exl3_expert_pieces(model_path, config)
     raise NotImplementedError(f"{spec.module} provides no expert reader for {kind!r} experts")
 
 

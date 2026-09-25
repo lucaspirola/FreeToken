@@ -1,0 +1,24 @@
+tables: ['CUDA_GRAPH_EVENTS', 'CUPTI_ACTIVITY_KIND_CUDA_EVENT', 'CUPTI_ACTIVITY_KIND_GRAPH_TRACE', 'CUPTI_ACTIVITY_KIND_KERNEL', 'CUPTI_ACTIVITY_KIND_MEMCPY', 'CUPTI_ACTIVITY_KIND_MEMSET', 'CUPTI_ACTIVITY_KIND_RUNTIME', 'CUPTI_ACTIVITY_KIND_SYNCHRONIZATION']
+records by kind: {'graph': 127, 'kernel': 6047, 'memcpy': 7381, 'memset': 128}
+decode window 991.99 ms = 7.811 ms/token (128.0 tok/s); 1.00 graph replays/token, 70.6 eager records/token
+  graph replay               7.233 ms/token   92.6%
+  eager (outside graphs)     0.044 ms/token    0.6%
+  idle                       0.535 ms/token    6.8%
+eager work by name, ms/token:
+   0.0140  memcpy
+   0.0079  index_elementwise_kernel
+   0.0050  _splitk_combine_kernel
+   0.0047  reduce_kernel
+   0.0035  _exl3_gemv_kernel
+   0.0023  unrolled_elementwise_kernel
+   0.0014  DeviceScanKernel
+   0.0014  elementwise_kernel_with_index
+   0.0008  kernel_cutlass_kernel_flashinfernormkernelsfused_add_rmsnormFusedAddRMSNormKernel_object_at__tensorptrbf16gmem
+   0.0008  _shared_expert_add_kernel
+   0.0007  vectorized_elementwise_kernel
+   0.0007  DeviceScanInitKernel
+   0.0003  memset
+   0.0000  _had_rows_kernel
+   0.0000  CatArrayBatchedCopy
+graph replay duration: median 5838.5 us, min 5309.1, max 21964.2
+end of one replay -> start of the next: median 564.8 us, p10 558.6, p90 576.6

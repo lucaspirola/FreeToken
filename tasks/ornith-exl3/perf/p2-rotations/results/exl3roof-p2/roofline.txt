@@ -1,0 +1,44 @@
+# measured bounds: DRAM copy 818 GB/s (read+write), fp16 GEMM 121.6 TF/s, bf16 GEMM 121.5 TF/s (8192^3, fp32 accumulate)
+/root/venv/lib/python3.12/site-packages/torch/profiler/profiler.py:224: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+op                                 kernel                         calls        us        MB    GFLOP    GB/s   TF/s bound   bnd us   eff
+decode GDN in_proj qkvz            _had_rows_kernel                 1.0       2.7      0.02     0.00       8    0.0  DRAM      0.0  0.01
+decode GDN in_proj qkvz            _exl3_gemv_kernel                1.0      30.1     15.79     0.05     525    1.7  DRAM     19.3  0.64
+decode attn q+gate|k|v             _had_rows_kernel                 1.0       2.6      0.02     0.00       6    0.0  DRAM      0.0  0.01
+decode attn q+gate|k|v             _exl3_gemv_kernel                1.0      19.9     11.85     0.04     597    1.9  DRAM     14.5  0.73
+decode o_proj / out_proj           _exl3_gemv_kernel                1.0      14.3      5.26     0.02     369    1.2  DRAM      6.4  0.45
+decode shared gate|up              _exl3_gemv_kernel                1.0       9.8      1.32     0.00     135    0.4  DRAM      1.6  0.17
+decode shared down                 _exl3_gemv_kernel                1.0       6.7      0.67     0.00      99    0.3  DRAM      0.8  0.12
+decode lm_head (6 bit)             _had_rows_kernel                 1.0       3.1      0.01     0.00       3    0.0  DRAM      0.0  0.00
+decode lm_head (6 bit)             _exl3_gemv_kernel                1.0     442.9    382.42     1.02     864    2.3  DRAM    467.2  1.05
+decode MoE (8 routes)              _exl3_gemv_kernel                2.0      34.4     15.95     0.05     464    1.5  DRAM     19.5  0.57
+decode MoE (8 routes)              _splitk_silu_had_kernel          1.0       3.2      0.04     0.00      13    0.0  DRAM      0.1  0.02
+decode MoE (8 routes)              _splitk_combine_kernel           1.0       0.8      0.07     0.00      83    0.0  DRAM      0.1  0.10
+prefill M=8192 GDN in_proj qkvz    void at::native::unrolled_elem   1.0      85.8      0.00     0.00       0    0.0  DRAM      0.0  0.00
+prefill M=8192 GDN in_proj qkvz    _reconstruct_folded_kernel       6.0     384.0      0.00     0.00       0    0.0  DRAM      0.0  0.00
+prefill M=8192 GDN in_proj qkvz    cuBLAS mm (fp16, fp32 out)       6.0    3418.9    587.20   412.32     172  120.6    TC   3390.1  0.99
+prefill M=8192 GDN in_proj qkvz    void at::native::elementwise_k   6.0     486.7      0.00     0.00       0    0.0  DRAM      0.0  0.00
+prefill M=8192 attn q+gate|k|v     void at::native::unrolled_elem   1.0      85.9      0.00     0.00       0    0.0  DRAM      0.0  0.00
+prefill M=8192 attn q+gate|k|v     _reconstruct_folded_kernel       5.0     290.9      0.00     0.00       0    0.0  DRAM      0.0  0.00
+prefill M=8192 attn q+gate|k|v     cuBLAS mm (fp16, fp32 out)       5.0    2580.5    440.40   309.24     171  119.8    TC   2542.5  0.98
+prefill M=8192 attn q+gate|k|v     void at::native::elementwise_k   5.0     357.4      0.00     0.00       0    0.0  DRAM      0.0  0.00
+prefill M=8192 o_proj / out_proj   void at::native::unrolled_elem   1.0     169.4      0.00     0.00       0    0.0  DRAM      0.0  0.00
+prefill M=8192 o_proj / out_proj   _reconstruct_folded_kernel       1.0     112.5      0.00     0.00       0    0.0  DRAM      0.0  0.00
+prefill M=8192 o_proj / out_proj   cuBLAS mm (fp16, fp32 out)       1.0    1165.0    151.00   137.44     130  118.0    TC   1130.0  0.97
+prefill M=8192 o_proj / out_proj   void at::native::unrolled_elem   1.0      78.7      0.00     0.00       0    0.0  DRAM      0.0  0.00
+prefill M=8192 shared gate|up      void at::native::unrolled_elem   1.0      85.5      0.00     0.00       0    0.0  DRAM      0.0  0.00
+prefill M=8192 shared gate|up      _reconstruct_folded_kernel       1.0      33.3      0.00     0.00       0    0.0  DRAM      0.0  0.00
+prefill M=8192 shared gate|up      cuBLAS mm (fp16, fp32 out)       1.0     294.3    104.86    34.36     356  116.8    TC    282.5  0.96
+prefill M=8192 shared gate|up      void at::native::unrolled_elem   1.0      26.6      0.00     0.00       0    0.0  DRAM      0.0  0.00
+prefill M=8192 shared down         void at::native::unrolled_elem   1.0      23.0      0.00     0.00       0    0.0  DRAM      0.0  0.00
+prefill M=8192 shared down         _reconstruct_folded_kernel       1.0      17.0      0.00     0.00       0    0.0  DRAM      0.0  0.00
+prefill M=8192 shared down         cuBLAS mm (fp16, fp32 out)       1.0     156.5     77.59    17.18     496  109.8    TC    141.2  0.90
+prefill M=8192 shared down         void at::native::unrolled_elem   1.0      54.4      0.00     0.00       0    0.0  DRAM      0.0  0.00
+prefill M=8192 MoE                 moe_align                        1.0      25.3      0.00     0.00       0    0.0  DRAM      0.0  0.00
+prefill M=8192 MoE                 count_and_sort                   1.0       6.7      0.00     0.00       0    0.0  DRAM      0.0  0.00
+prefill M=8192 MoE                 _had_rows_kernel                 2.0    2268.9    704.64     0.00     311    0.0  DRAM    860.9  0.38
+prefill M=8192 MoE                 _reconstruct_experts_kernel     16.0    2662.8   2113.93     0.00     794    0.0  DRAM   2582.7  0.97
+prefill M=8192 MoE                 _exl3_gemm_kernel               16.0    6440.1   2885.68   412.32     448   64.0  DRAM   3525.6  0.55
+prefill M=8192 MoE                 act_and_mul                      1.0     185.0      0.00     0.00       0    0.0  DRAM      0.0  0.00
+prefill M=8192 MoE                 _splitk_combine_kernel           1.0     647.6      0.00     0.00       0    0.0  DRAM      0.0  0.00
+prefill M=8192 MoE                 Memcpy DtoD (Device -> Device)   1.0      33.8      0.00     0.00       0    0.0  DRAM      0.0  0.00

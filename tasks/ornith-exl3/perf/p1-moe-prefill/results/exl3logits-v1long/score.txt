@@ -1,0 +1,17 @@
+== long pre1 saver vs whole
+ids equal True logits bit-equal True max|d| 0.0
+== long FT pre1 vs exllamav3
+positions 31  vocab 248320
+max|dlogit| 4.9990  mean|dlogit| 0.25976  max|dlogit|/max|logit| 1.83e-01
+top-1 agreement 0.935 (29/31)  first disagreement 10
+top-5 overlap 0.903  KL(exl3||ft) max 9.71e-01 mean 4.34e-02
+== long FT pre0 vs exllamav3
+positions 31  vocab 248320
+max|dlogit| 3.5352  mean|dlogit| 0.26663  max|dlogit|/max|logit| 1.29e-01
+top-1 agreement 0.968 (30/31)  first disagreement 6
+top-5 overlap 0.942  KL(exl3||ft) max 6.43e-02 mean 1.00e-02
+== long FT pre1 vs FT pre0
+positions 31  vocab 248320
+max|dlogit| 3.3594  mean|dlogit| 0.16435  max|dlogit|/max|logit| 1.25e-01
+top-1 agreement 0.903 (28/31)  first disagreement 6
+top-5 overlap 0.955  KL(exl3||ft) max 7.58e-01 mean 3.15e-02

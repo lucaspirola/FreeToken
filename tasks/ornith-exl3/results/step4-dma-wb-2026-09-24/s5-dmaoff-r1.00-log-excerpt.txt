@@ -1,0 +1,11 @@
+[1m[2026-09-24|07:01:38|core|rank=0][0m [32mINFO    [0m Mirror pool: reserve resolved to 768 rows (default: 3 * num_experts)
+[1m[2026-09-24|07:01:57|core|rank=0][0m [32mINFO    [0m mirror warm start: 6076 experts on GPU (slots 0..6076), 4164 mirrored, 1715 duplicated, 768 rows in reserve (28.2% of evictions skip the writeback)
+[1m[2026-09-24|07:01:57|core|rank=0][0m [32mINFO    [0m Mirror pool: 6647 rows pinned (12.27 GiB), 4164 cover the complement of 6076 GPU residents, 768 reserved, up to 1715 duplicates (a duplicate makes its expert's next eviction free of any host traffic)
+[1m[2026-09-24|07:01:57|core|rank=0][0m [32mINFO    [0m Mirror pool: the coverage floor is 4368 of 6076 arena slots, leaving 1708 slots (3.15 GiB) the growable KV may still take
+[1m[2026-09-24|07:02:08|core|rank=0][0m [32mINFO    [0m mirror warm start: 4368 experts on GPU (slots 0..4368), 5872 mirrored, 7 duplicated, 768 rows in reserve (0.2% of evictions skip the writeback)
+Preparing for capturing CUDA graphs...:   0%|          | 0/1 [00:00<?, ?batch/s]Capturing graphs: bs = 1   | avail_mem = 3.13 GiB:   0%|          | 0/1 [00:00<?, ?batch/s][1m[2026-09-24|07:02:23|core|rank=0][0m [32mINFO    [0m mirror warm start: 4368 experts on GPU (slots 0..4368), 5872 mirror
+[1m[2026-09-24|07:02:34|core|rank=0][0m [32mINFO    [0m mirror warm start: 4368 experts on GPU (slots 0..4368), 5872 mirrored, 7 duplicated, 768 rows in reserve (0.2% of evictions skip the writeback)
+[1m[2026-09-24|07:02:49|core|rank=0][0m [32mINFO    [0m mirror warm start: 4368 experts on GPU (slots 0..4368), 5872 mirrored, 7 duplicated, 768 rows in reserve (0.2% of evictions skip the writeback)
+[1m[2026-09-24|07:03:06|core|rank=0][0m [32mINFO    [0m mirror warm start: 4368 experts on GPU (slots 0..4368), 5872 mirrored, 7 duplicated, 768 rows in reserve (0.2% of evictions skip the writeback)
+[1m[2026-09-24|07:03:06|core|rank=0][0m [32mINFO    [0m Growable-KV ceiling validated: 262144 tokens, 2.73 GiB physical, planned final MoE cache 4416 slots
+[1m[2026-09-24|07:03:07|FrontendAPI][0m [32mINFO    [0m API server is ready to serve on 127.0.0.1:30100

@@ -1,0 +1,6 @@
+# ft-dev Vast RTX 5080 box, 2026-09-24. exllamav3 LinearEXL3.forward bsz 1 (input Hadamard + GEMV), 5-bit mul1
+GDN in_proj              K=2048 N=12288:    31.4 us  ( 501.6 GB/s of weights)
+attn q+gate|k|v          K=2048 N=9216:    24.4 us  ( 484.0 GB/s of weights)
+o_proj/out_proj          K=4096 N=2048:    18.6 us  ( 282.2 GB/s of weights)
+shared/expert gate|up    K=2048 N=1024:    12.6 us  ( 103.7 GB/s of weights)
+shared/expert down       K=512 N=2048:    11.0 us  (  59.5 GB/s of weights)

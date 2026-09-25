@@ -1,0 +1,57 @@
+prefill 8000 tokens: wall 9.64 s (830 tok/s); GPU kernel+copy time 10.18 s
+
+category totals:
+  exl3 gemm                        9123.4 ms   89.6%
+  moe routing/sort                  594.7 ms    5.8%
+  norm/act/elementwise              166.2 ms    1.6%
+  hadamard                          116.5 ms    1.1%
+  attention                          88.3 ms    0.9%
+  gdn / fla                          83.7 ms    0.8%
+  other                               3.6 ms    0.0%
+  exl3 gemv (decode path)             2.3 ms    0.0%
+  memcpy DtoD                         1.0 ms    0.0%
+  gemm (cublas/dense bf16)            0.7 ms    0.0%
+  memcpy DtoH                         0.1 ms    0.0%
+  memcpy HtoD                         0.0 ms    0.0%
+
+top kernels:
+      9123.4 ms     800x  [exl3 gemm] _exl3_gemm_kernel
+       583.0 ms     116x  [moe routing/sort] void fast_index_copy_multi<int, 1024ul, 8ul>(MultiIndexCopyParams)
+       116.5 ms     801x  [hadamard] _had_rows_kernel
+        88.3 ms      10x  [attention] _extend_attention_split_kernel
+        72.0 ms     220x  [norm/act/elementwise] void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()
+        44.4 ms     350x  [norm/act/elementwise] void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_inter
+        20.4 ms     320x  [norm/act/elementwise] void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::ope
+        15.8 ms      30x  [gdn / fla] chunk_gated_delta_rule_fwd_kernel_h_blockdim64
+        15.0 ms      30x  [gdn / fla] void causal_conv1d_fwd_kernel<Causal_conv1d_fwd_kernel_traits<128, 4, false, c10::BFloat16, c10::BFloat16> >(ConvParamsBase)
+        12.6 ms      30x  [gdn / fla] chunk_fwd_kernel_o
+        10.7 ms      30x  [gdn / fla] recompute_w_u_fwd_kernel
+         7.9 ms      80x  [gdn / fla] kernel_cutlass_kernel_flashinfernormkernelsfused_add_rmsnormFusedAddRMSNormKernel_object_at__tensorptrbf16gmemalign128oi64204820481_tensorptrbf16gmema
+         7.3 ms      30x  [norm/act/elementwise] _layer_norm_fwd_1pass_kernel
+         5.4 ms      60x  [gdn / fla] l2norm_fwd_kernel
+         5.1 ms     320x  [gdn / fla] void flashinfer::activation::act_and_mul_kernel<__half, &(silu(float const&))>(__half*, __half const*, int)
+         4.6 ms      30x  [gdn / fla] chunk_gated_delta_rule_fwd_kkt_solve_kernel
+         4.5 ms      40x  [norm/act/elementwise] _shared_expert_add_kernel
+         3.5 ms      60x  [norm/act/elementwise] void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul> >(int, at::native::FillFunctor<c10::B
+         3.0 ms      40x  [moe routing/sort] void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x64_64x3_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x64_64x3_t
+         2.5 ms      40x  [other] _writeback_buffer_kernel
+         2.5 ms      10x  [norm/act/elementwise] void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::
+         2.5 ms      20x  [gdn / fla] kernel_cutlass_kernel_flashinfernormkernelsrmsnormRMSNormKernel_object_at__tensorptrbf16gmemalign128oi642562561_tensorptrbf16gmemalign16o2561_tensorpt
+         2.4 ms      30x  [norm/act/elementwise] void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::sigmoid_kernel_cuda(at::TensorIteratorBase&)::{lambda()#2}:
+         2.4 ms      10x  [gdn / fla] void flashinfer::BatchQKApplyRotaryPosIdsCosSinCacheKernel<false, 256u, 8u, 32u, __nv_bfloat16, int>(__nv_bfloat16*, __nv_bfloat16*, __nv_bfloat16*, _
+         2.3 ms       1x  [exl3 gemv (decode path)] _exl3_gemv_kernel
+         2.0 ms      30x  [moe routing/sort] void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_tn_
+         1.8 ms     320x  [moe routing/sort] void moe_align_block_size_kernel<int>(int const*, int*, int*, int*, int, int, unsigned long, int*, bool, bool, int, int)
+         1.5 ms      60x  [norm/act/elementwise] void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()
+         1.5 ms      10x  [norm/act/elementwise] void at::native::vectorized_elementwise_kernel<4, at::native::sigmoid_kernel_cuda(at::TensorIteratorBase&)::{lambda()#2}::operator()() const::{lambda(
+         1.4 ms      30x  [gdn / fla] chunk_local_cumsum_scalar_kernel
+         1.1 ms      30x  [norm/act/elementwise] void at::native::vectorized_elementwise_kernel<4, at::native::exp_kernel_cuda(at::TensorIteratorBase&)::{lambda()#2}::operator()() const::{lambda()#2}
+         1.0 ms     320x  [norm/act/elementwise] void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*,
+         1.0 ms      31x  [moe routing/sort] void at::native::index_elementwise_kernel<128, 4, at::native::gpu_index_kernel<at::native::index_kernel_impl<at::native::OpaqueType<2> >(at::TensorIte
+         1.0 ms     323x  [memcpy DtoD] Memcpy DtoD (Device -> Device)
+         1.0 ms      30x  [norm/act/elementwise] void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::op
+         0.9 ms      30x  [norm/act/elementwise] void at::native::vectorized_elementwise_kernel<4, at::native::neg_kernel_cuda(at::TensorIteratorBase&)::{lambda()#2}::operator()() const::{lambda()#7}
+         0.9 ms      30x  [norm/act/elementwise] void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<float> >(at::TensorIteratorBase&, at::nativ
+         0.9 ms      30x  [moe routing/sort] void at::native::index_elementwise_kernel<128, 4, at::native::index_fill_kernel_impl<at::native::OpaqueType<4> >(at::TensorIterator&, long, long, long
+         0.9 ms     320x  [moe routing/sort] void count_and_sort_expert_tokens_kernel<int>(int const*, int*, int*, unsigned long, bool)
+         0.9 ms      30x  [moe routing/sort] void at::native::index_elementwise_kernel<128, 4, at::native::index_copy_kernel_impl<at::native::OpaqueType<4> >(at::TensorIterator&, long, long, long

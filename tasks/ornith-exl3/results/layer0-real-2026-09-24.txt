@@ -1,0 +1,30 @@
+Layer comparison on the REAL Ornith-1.5-35B-A3B-exl3-5.0bpw-hq tensors vs exllamav3 1.5.1
+Box: ft-dev (Vast RTX 5080, sm_120, torch 2.11+cu130, triton 3.6). Checkpoint identical to the
+owner's local copy (shard sizes + md5 of index / quantization_config / config).
+Metric: rel = max|y - ref| / max|ref|.
+
+compare/layer0_ref.py (exllamav3 venv) + compare/layer0_ft.py (FreeToken venv):
+dense linears (rel err vs exllamav3):
+  layers.0.linear_attn.in_proj_qkv        K= 2048 N=  8192 bits=7  1-row 7.42e-04  300-row 6.81e-04
+  layers.0.linear_attn.in_proj_z          K= 2048 N=  4096 bits=7  1-row 6.36e-04  300-row 5.97e-04
+  layers.0.linear_attn.out_proj           K= 4096 N=  2048 bits=7  1-row 4.29e-04  300-row 6.07e-04
+  layers.0.mlp.shared_expert.gate_proj    K= 2048 N=   512 bits=7  1-row 6.01e-04  300-row 7.78e-04
+  layers.0.mlp.shared_expert.up_proj      K= 2048 N=   512 bits=7  1-row 6.93e-04  300-row 7.59e-04
+  layers.0.mlp.shared_expert.down_proj    K=  512 N=  2048 bits=7  1-row 7.78e-04  300-row 8.82e-04
+  layers.3.self_attn.q_proj               K= 2048 N=  8192 bits=7  1-row 5.77e-04  300-row 6.11e-04
+  layers.3.self_attn.k_proj               K= 2048 N=   512 bits=7  1-row 7.35e-04  300-row 5.95e-04
+  layers.3.self_attn.v_proj               K= 2048 N=   512 bits=7  1-row 5.53e-04  300-row 6.63e-04
+  layers.3.self_attn.o_proj               K= 4096 N=  2048 bits=7  1-row 6.41e-04  300-row 7.06e-04
+  lm_head                                 K= 2048 N=248320 bits=6  1-row 1.35e-02  300-row 7.33e-04
+fused layouts (Exl3Config.fuse_parts, as the model loads them) vs exllamav3 per part:
+  layers.0.linear_attn.in_proj_qkvz       parts (8192, 4096)      1-row 5.47e-04  300-row 6.64e-04
+  layers.3.self_attn.qkv_proj             parts (8192, 512, 512)  1-row 6.05e-04  300-row 6.46e-04
+  layers.0.mlp.shared_expert.gate_up_proj parts (512, 512)        1-row 6.10e-04  300-row 7.15e-04
+layer-0 routed MoE (256 experts, top-8, bf16 in/out; banks via the real extent reader + pack)
+  vs exllamav3's per-expert linears (fp16 intermediates): prefill 37 tok 9.75e-03, decode 3 tok via slots 7.51e-03
+
+Attribution against an exact fp32 reference (compare/attribute_*.py):
+  routed MoE: FreeToken prefill 3.16e-03, decode 3.01e-03; exllamav3 per-expert fp16 path 9.50e-03
+  lm_head 1-row: FreeToken 2.16e-04; exllamav3's small-batch kernel 1.33e-02
+    (worst exllamav3 column 154085: exllamav3 -0.9658, exact -1.0168, FreeToken -1.0172)
+=> the two outliers are on exllamav3's side; FreeToken is within 3.2e-3 of exact everywhere.

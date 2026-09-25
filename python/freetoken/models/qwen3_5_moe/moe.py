@@ -15,6 +15,23 @@ from freetoken.layers import (
 if TYPE_CHECKING:
     from freetoken.models.config import ModelConfig
 
+_SIDE_STREAMS: dict = {}
+
+
+def _shared_overlap_enabled() -> bool:
+    """``FREETOKEN_SHARED_EXPERT_OVERLAP=0`` runs the EXL3 decode shared expert on the main stream
+    again (default: a side stream, concurrently with the router, expert loads and routed GEMVs)."""
+    import os
+
+    return os.getenv("FREETOKEN_SHARED_EXPERT_OVERLAP", "1").strip() != "0"
+
+
+def _side_stream(device: torch.device) -> torch.cuda.Stream:
+    s = _SIDE_STREAMS.get(device)
+    if s is None:
+        s = _SIDE_STREAMS[device] = torch.cuda.Stream(device=device)
+    return s
+
 
 class _SharedExpert(BaseOP):
     """Always-present shared SwiGLU expert of width ``shared_expert_intermediate_size``."""
@@ -80,6 +97,20 @@ class Qwen3_5MoE(BaseOP):
         )
         self.shared_expert_gate = LinearReplicated(config.hidden_size, 1, has_bias=False)
 
+    def _overlap_shared(self, hidden_states: torch.Tensor) -> bool:
+        """EXL3 decode runs the shared expert (and its gate) on a side stream."""
+        from freetoken.core import get_global_ctx
+        from freetoken.layers.moe import OffloadMoELayer
+
+        cache = self.experts.offload_cache if isinstance(self.experts, OffloadMoELayer) else None
+        return (
+            get_global_ctx().batch.is_decode
+            and cache is not None
+            and cache.quant_format == "exl3"
+            and hidden_states.is_cuda
+            and _shared_overlap_enabled()
+        )
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -87,7 +118,10 @@ class Qwen3_5MoE(BaseOP):
         # kernel may write into ``hidden_states`` in place, which would corrupt the
         # shared expert's input (HF also evaluates the shared expert first).
         router_logits = self.gate.forward(hidden_states)
-        shared_gate = self.shared_expert_gate.forward(hidden_states)
+        overlap = self._overlap_shared(hidden_states)
+        # overlapped: the shared-expert gate joins the shared expert on the side stream (only the
+        # final add reads it, after the join)
+        shared_gate = None if overlap else self.shared_expert_gate.forward(hidden_states)
         # Decode-only GGUF fast path: the shared expert has the same Q4_K/Q6_K
         # projection types as the routed banks. Read its resident packed rows
         # through the grouped MMVQ launches without duplicating them in the
@@ -128,8 +162,31 @@ class Qwen3_5MoE(BaseOP):
             )
             return routed.view(num_tokens, hidden_dim)
 
-        shared = self.shared_expert.forward(hidden_states)
-        routed = self.experts.forward(hidden_states=hidden_states, router_logits=router_logits)
+        # EXL3 decode: the shared expert's GEMVs (a few MB, single-warp programs at ~0.2 of the DRAM
+        # bound on their own) run on a side stream, filling the SMs the routed GEMVs and the expert
+        # loads leave idle. The EXL3 routed path returns a fresh tensor (it never writes
+        # hidden_states), so both streams may read it. Captured into the decode CUDA graph as a
+        # fork/join. Its GEMVs use their own split-K counter lane (kernel/triton/exl3.py).
+        if overlap:
+            main = torch.cuda.current_stream(hidden_states.device)
+            side = _side_stream(hidden_states.device)
+            side.wait_stream(main)
+            from freetoken.kernel.triton.exl3 import split_counter_lane
+
+            # lane 1: the shared expert's split-K GEMVs may run while the routed ones do
+            with torch.cuda.stream(side), split_counter_lane(1):
+                shared = self.shared_expert.forward(hidden_states)
+                shared_gate = self.shared_expert_gate.forward(hidden_states)
+            routed = self.experts.forward(hidden_states=hidden_states, router_logits=router_logits)
+            main.wait_stream(side)
+            if not torch.cuda.is_current_stream_capturing():
+                # eager: keep the allocator from recycling either tensor under the other stream
+                shared.record_stream(main)
+                shared_gate.record_stream(main)
+                hidden_states.record_stream(side)
+        else:
+            shared = self.shared_expert.forward(hidden_states)
+            routed = self.experts.forward(hidden_states=hidden_states, router_logits=router_logits)
         from freetoken.kernel.triton.shared_expert import fused_shared_expert_add_
 
         return fused_shared_expert_add_(routed, shared, shared_gate).view(num_tokens, hidden_dim)
