@@ -125,3 +125,48 @@ class HybridBackend(BaseAttnBackend):
     def reset_capture(self) -> None:
         # Only the decode backend is ever captured (see init_capture_graph above).
         self.decode_backend.reset_capture()
+
+
+class DecodeGatedBackend:
+    """Attention backend proxy that calls ``gate(layer_id)`` before every DECODE
+    attention call, on the stream the call is issued on, then delegates.
+
+    Model-agnostic plumbing for the bounded expert mirror's write-back
+    scheduling (``MirrorResidency.attention_gate``): the gate records an event
+    in front of each decode attention kernel (inside the CUDA graph when
+    captured), and the host-issued write-back DMA waits for those events so it
+    overlaps attention -- which uses no PCIe -- rather than the in-graph expert
+    fetches. Every attribute other than the attention entry points is the inner
+    backend's, read and written through (no isinstance check on the backend
+    exists; ``getattr(backend, "dsa_enabled")`` reads through).
+    """
+
+    _GATED = ("forward", "mla_forward", "bsa_forward", "qsa_forward")
+
+    def __init__(self, inner, gate) -> None:
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(self, "_gate", gate)
+        import inspect
+
+        for name in self._GATED:
+            fn = getattr(inner, name, None)
+            if fn is None:
+                continue
+            sig = inspect.signature(fn)
+            params = list(sig.parameters)
+            li, bi = params.index("layer_id"), params.index("batch")
+
+            def gated(*args, _fn=fn, _li=li, _bi=bi, **kwargs):
+                batch = kwargs["batch"] if "batch" in kwargs else args[_bi]
+                if not batch.is_prefill:
+                    layer_id = kwargs["layer_id"] if "layer_id" in kwargs else args[_li]
+                    self._gate(int(layer_id))
+                return _fn(*args, **kwargs)
+
+            object.__setattr__(self, name, gated)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def __setattr__(self, name, value) -> None:
+        setattr(self._inner, name, value)
