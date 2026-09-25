@@ -15,6 +15,23 @@ from freetoken.layers import (
 if TYPE_CHECKING:
     from freetoken.models.config import ModelConfig
 
+_SIDE_STREAMS: dict = {}
+
+
+def _shared_overlap_enabled() -> bool:
+    """``FREETOKEN_SHARED_EXPERT_OVERLAP=0`` runs the EXL3 decode shared expert on the main stream
+    again (default: a side stream, concurrently with the router, expert loads and routed GEMVs)."""
+    import os
+
+    return os.getenv("FREETOKEN_SHARED_EXPERT_OVERLAP", "1").strip() != "0"
+
+
+def _side_stream(device: torch.device) -> torch.cuda.Stream:
+    s = _SIDE_STREAMS.get(device)
+    if s is None:
+        s = _SIDE_STREAMS[device] = torch.cuda.Stream(device=device)
+    return s
+
 
 class _SharedExpert(BaseOP):
     """Always-present shared SwiGLU expert of width ``shared_expert_intermediate_size``."""
@@ -128,8 +145,35 @@ class Qwen3_5MoE(BaseOP):
             )
             return routed.view(num_tokens, hidden_dim)
 
-        shared = self.shared_expert.forward(hidden_states)
-        routed = self.experts.forward(hidden_states=hidden_states, router_logits=router_logits)
+        # EXL3 decode: the shared expert's GEMVs (a few MB, single-warp programs at ~0.2 of the DRAM
+        # bound on their own) run on a side stream, filling the SMs the routed GEMVs and the expert
+        # loads leave idle. The EXL3 routed path returns a fresh tensor (it never writes
+        # hidden_states), so both streams may read it. Captured into the decode CUDA graph as a
+        # fork/join. Its GEMVs use their own split-K counter lane (kernel/triton/exl3.py).
+        if (
+            ctx.batch.is_decode
+            and cache is not None
+            and cache.quant_format == "exl3"
+            and hidden_states.is_cuda
+            and _shared_overlap_enabled()
+        ):
+            main = torch.cuda.current_stream(hidden_states.device)
+            side = _side_stream(hidden_states.device)
+            side.wait_stream(main)
+            from freetoken.kernel.triton.exl3 import split_counter_lane
+
+            # lane 1: the shared expert's split-K GEMVs may run while the routed ones do
+            with torch.cuda.stream(side), split_counter_lane(1):
+                shared = self.shared_expert.forward(hidden_states)
+            routed = self.experts.forward(hidden_states=hidden_states, router_logits=router_logits)
+            main.wait_stream(side)
+            if not torch.cuda.is_current_stream_capturing():
+                # eager: keep the allocator from recycling either tensor under the other stream
+                shared.record_stream(main)
+                hidden_states.record_stream(side)
+        else:
+            shared = self.shared_expert.forward(hidden_states)
+            routed = self.experts.forward(hidden_states=hidden_states, router_logits=router_logits)
         from freetoken.kernel.triton.shared_expert import fused_shared_expert_add_
 
         return fused_shared_expert_add_(routed, shared, shared_gate).view(num_tokens, hidden_dim)

@@ -330,6 +330,40 @@ def test_split_k_decode_is_deterministic():
 
 
 @cuda
+def test_concurrent_split_k_gemvs_on_their_own_counter_lanes_match_serial():
+    """The EXL3 decode shared expert runs on a side stream beside the routed GEMVs
+    (models/qwen3_5_moe/moe.py). Split-K GEMVs running concurrently must count arrivals in
+    separate counter lanes; on one lane they corrupt each other's reductions."""
+    from freetoken.kernel.triton.exl3 import Exl3Parts, split_counter_lane
+    from freetoken.layers.quantization.linear.exl3 import exl3_forward, pick_split_k
+    from freetoken.moe.fused_exl3 import fused_experts_exl3
+
+    k, n = 2048, 1024
+    assert pick_split_k(1, n // 128, k, torch.device("cuda")) > 1
+    trs, suh, svh = _dense_case(k, (n,), 5, "mul1", seed=7)
+    parts = Exl3Parts.build(k, (n,), 5, "mul1", "cuda")
+    x = torch.randn(1, k, generator=torch.Generator().manual_seed(8)).to(torch.bfloat16).cuda()
+    dense = (trs[0].reshape(-1).cuda(), suh.cuda(), svh.cuda(), parts, torch.bfloat16)
+    banks = tuple(b.cuda() for b in _moe_banks(5, "mul1", 12, seed=9))
+    xm, w, ids = (t.cuda() for t in _routing(1, 12, seed=10))
+    kw = dict(bits=5, codebook="mul1", is_prefill=False)
+    ref_dense = exl3_forward(x, *dense)
+    ref_moe = fused_experts_exl3(xm, banks, w, ids, **kw)
+    with split_counter_lane(1):
+        exl3_forward(x, *dense)  # allocates lane 1
+    main, side = torch.cuda.current_stream(), torch.cuda.Stream()
+    for _ in range(50):
+        side.wait_stream(main)
+        with torch.cuda.stream(side), split_counter_lane(1):
+            d = [exl3_forward(x, *dense) for _ in range(4)]
+        m = [fused_experts_exl3(xm, banks, w, ids, **kw) for _ in range(4)]
+        main.wait_stream(side)
+        torch.cuda.synchronize()
+        assert all(torch.equal(t, ref_dense) for t in d)
+        assert all(torch.equal(t, ref_moe) for t in m)
+
+
+@cuda
 @pytest.mark.parametrize("codebook", tuple(CODEBOOKS))
 def test_reconstruct_path_matches_gemm_path(monkeypatch, codebook):
     """Long prefills decode W_hat once per part and use cuBLAS; slabs split a part's columns. The

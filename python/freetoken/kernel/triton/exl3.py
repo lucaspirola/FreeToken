@@ -714,19 +714,43 @@ def _inkernel_reduce() -> bool:
 
 
 _COUNTERS: dict = {}
+# Which counter buffer the next GEMVs use. GEMVs issued in stream order may share one buffer
+# (each launch leaves it zeroed), but GEMVs that can run CONCURRENTLY on another stream must not:
+# the shared expert on its side stream (models/qwen3_5_moe/moe.py) takes lane 1 while the routed
+# GEMVs use lane 0, else both launches count arrivals in the same slots and a split's partial
+# is summed by the wrong program (seen as non-identical greedy output, 2026-09-24).
+_COUNTER_LANE = 0
+
+
+class split_counter_lane:
+    """``with split_counter_lane(1): ...`` -- GEMVs launched inside use counter lane 1."""
+
+    def __init__(self, lane: int):
+        self.lane = lane
+
+    def __enter__(self):
+        global _COUNTER_LANE
+        self.prev, _COUNTER_LANE = _COUNTER_LANE, self.lane
+        return self
+
+    def __exit__(self, *exc):
+        global _COUNTER_LANE
+        _COUNTER_LANE = self.prev
+        return False
 
 
 def _split_counters(n: int, device: torch.device) -> torch.Tensor:
     """Zeroed int32 arrival counters for the in-kernel split-K reduction, one per (row, 128
-    output columns). Every launch leaves them zero again, so one buffer per device serves all
-    GEMVs issued in stream order; it is allocated (or grown) outside graph capture, on the
-    warm-up pass that precedes it."""
-    buf = _COUNTERS.get(device)
+    output columns). Every launch leaves them zero again, so one buffer per device and counter
+    lane serves all GEMVs issued in stream order on that lane; it is allocated (or grown) outside
+    graph capture, on the warm-up pass that precedes it."""
+    key = (device, _COUNTER_LANE)
+    buf = _COUNTERS.get(key)
     if buf is None or buf.numel() < n:
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("EXL3 split-K counters must be allocated before CUDA-graph capture")
         buf = torch.zeros(max(n, 1 << 14), dtype=torch.int32, device=device)
-        _COUNTERS[device] = buf
+        _COUNTERS[key] = buf
     return buf
 
 

@@ -1,23 +1,26 @@
 #!/bin/bash
 # E2E Ornith EXL3 5.0bpw + RAM saver (auto pool, ratio 1.00): two chats, then probe 8K/32K/80K/128K x2.
 # Same recipe as /root/s5wt.sh (step 5/6), outputs under /root/K/results/exl3e2e-$TAG.
-# Usage: WT=<tree> PREROT=0|1 job-e2e.sh TAG     (holds /root/gpu.lock for its life)
+# RESIDENCY=whole serves every expert from pinned RAM through the GPU LFU cache instead of the saver
+# (mirror); both cross PCIe on misses (20.2 GB of routed experts do not fit a 16 GB GPU).
+# Usage: WT=<tree> PREROT=0|1 [RESIDENCY=mirror|whole] job-e2e.sh TAG     (holds /root/gpu.lock for its life)
 TAG=${1:?tag}; W=${WT:?tree}; O=/root/K/results/exl3e2e-$TAG; mkdir -p $O
 cd $W; export PYTHONPATH=$W/python
 export CUDA_HOME=/usr/local/cuda-13.0 PATH=/usr/local/cuda-13.0/bin:$PATH TVM_FFI_CUDA_ARCH_LIST=12.0
 export FREETOKEN_EXPERT_ARENA=1 FREETOKEN_ARENA_STEP_SLOTS=8 FREETOKEN_GROWABLE_OVERLAP=1 FREETOKEN_SCHEDULER_INVARIANT=warn
 export FREETOKEN_EXL3_GEMV_PREROT=${PREROT:?0 or 1}
 M=/root/models/Ornith-1.5-35B-A3B-exl3-5.0bpw-hq; PORT=30100; LOG=$O/server.log
+RES="--expert-residency mirror --moe-mirror-host-rows -1"; [ "${RESIDENCY:-mirror}" = whole ] && RES="--expert-residency whole"
 C=/root/K/ft-cache; mkdir -p $C/spill
 exec 9>/root/gpu.lock; flock 9
-echo "=== exl3 e2e $TAG prerot=$PREROT $(date -u +%FT%TZ) code $(git -C $W log --oneline -1) dirty=$(git -C $W status --porcelain python | wc -l)"
+echo "=== exl3 e2e $TAG prerot=$PREROT residency=${RESIDENCY:-mirror} $(date -u +%FT%TZ) code $(git -C $W log --oneline -1) dirty=$(git -C $W status --porcelain python | wc -l)"
 while pgrep -f "ft serve" >/dev/null || [ "$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ')" -gt 16 ]; do sleep 5; done
 git -C $W diff > $O/tree.diff
 setsid nohup /root/venv/bin/ft serve --model $M --text-model-only --host 127.0.0.1 --port $PORT \
   --max-running-requests 1 --kv-grow-step-tokens 65536 \
   --num-tokens 262144 --max-seq-len-override 262144 --kv-cache-dtype q8_0 \
   --attention-backend triton --moe-backend offload --moe-cache-auto --moe-cache-policy lfu \
-  --expert-residency mirror --moe-mirror-host-rows -1 --memory-ratio 1.00 --max-prefill-length 8192 \
+  $RES --memory-ratio 1.00 --max-prefill-length 8192 \
   --session-spill-ram-gb 1 --session-spill-disk-gb 50 --session-spill-limit-gb 50 --session-spill-dir $C/spill \
   --served-model-name ornith --reasoning-parser qwen3 --tool-call-parser qwen3_coder \
   --force-nonempty-content --max-output-tokens 65536 > $LOG 2>&1 < /dev/null &
