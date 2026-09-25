@@ -504,6 +504,17 @@ class MirrorResidency:
                     row = int(state[2 + s])
                     for pool_view, stage_view in wb["views"]:
                         pool_view[row].copy_(stage_view[s], non_blocking=True)
+                if gate is not None and hi < head:
+                    # Publish each chunk as it lands, not only the last one:
+                    # the ring (wb_stage_rows) holds about one step of
+                    # write-backs because the previous step's slots free up
+                    # early in the next step. With a single publish behind the
+                    # last attention layer they freed near the END of the step,
+                    # the ring stayed full and the next step's victims fell
+                    # back to in-graph SM stores (1M box nsys, f98c7c5: ~10 MB
+                    # per step moved from DMA to SM stores, fetch kernels
+                    # without any DMA beside them 1070 vs 529 us mean).
+                    self._mirror["wb_state"][1:2].fill_(hi)
             # Stream-ordered behind the copies: only now may the resolve
             # kernel reuse these ring slots or read these pool rows.
             self._mirror["wb_state"][1:2].fill_(head)
