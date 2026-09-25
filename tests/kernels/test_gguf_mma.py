@@ -36,7 +36,7 @@ def _packed_rows(qtype: int, rows: int, seed: int) -> np.ndarray:
 
 
 @pytest.mark.parametrize("qtype", [GGML_Q4_K, GGML_Q6_K])
-@pytest.mark.parametrize("tokens", [7, 16, 129])
+@pytest.mark.parametrize("tokens", [1, 3, 7, 16, 129])
 def test_mma_matches_reference(qtype, tokens):
     from freetoken.kernel.gguf import ggml_mul_mat_a8_mma
 
@@ -61,6 +61,26 @@ def test_mma_matches_reference(qtype, tokens):
     rel = ((got - ref).norm() / (ref.norm() + 1e-12)).item()
     assert got.shape == (tokens, out_features)
     assert rel < 0.02, rel
+
+
+@pytest.mark.parametrize("qtype", [GGML_Q4_K, GGML_Q6_K])
+@pytest.mark.parametrize("nrows", [320, 512])
+def test_activation_padding_covers_the_launched_tile(qtype, nrows):
+    """The y-tile loads read J whole columns from each column tile's start, so the
+    last tile reads up to J - 1 blocks past the quantized activations; both entry
+    points must pad them by the J they launch. The pad used to be a J_max rounded
+    DOWN from ne11 -- 0 blocks for fewer than 8 columns, and the MoE entry passed
+    ne11 = 1 -- and a 7-token call read 144 B past its buffer: the illegal address
+    of the round-2 suite at test_mma_matches_reference[7-12] (whether it faults
+    depends on what the caching allocator placed after the buffer, hence a check
+    of the sizing rule rather than of a crash)."""
+    from freetoken.kernel.gguf import _mma_module
+
+    hook = _mma_module().mmq_tile_and_pad
+    for ncols in list(range(1, 300)) + [511, 512, 513, 4096, 8192]:
+        tile, pad = hook(qtype, nrows, ncols)
+        assert 8 <= tile <= 128 and tile % 8 == 0, (ncols, tile)
+        assert pad >= tile, (ncols, tile, pad)
 
 
 @pytest.mark.parametrize("qtype", [GGML_Q4_K, GGML_Q6_K])
