@@ -987,6 +987,41 @@ def test_triton_backend_stores_kv_and_matches_reference(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton attention needs CUDA")
+@pytest.mark.parametrize("extend_lens", [(1, 1), (3, 2)], ids=["decode", "prefill-with-prefix"])
+def test_triton_prepare_metadata_never_synchronizes(monkeypatch, extend_lens):
+    """Under overlap scheduling the scheduler stream is ordered behind the forward in flight, so a
+    blocking host->device copy here stalls the host until that forward ends (the GPU then idles
+    while the next step is prepared). The metadata must be built with non-blocking copies only."""
+    from freetoken.attention.triton import TritonAttentionBackend
+
+    device = torch.device("cuda")
+    page_table = torch.arange(16, dtype=torch.int32, device=device).view(2, 8)
+    ctx = SimpleNamespace(kv_cache=SimpleNamespace(device=device), page_table=page_table)
+    monkeypatch.setattr("freetoken.attention.triton.get_global_ctx", lambda: ctx)
+    backend = TritonAttentionBackend(SimpleNamespace())
+    cached = (4, 2)
+    batch = SimpleNamespace(
+        padded_reqs=[
+            SimpleNamespace(extend_len=e, device_len=c + e, cached_len=c, table_idx=i)
+            for i, (e, c) in enumerate(zip(extend_lens, cached))
+        ],
+        positions=None,
+    )
+    torch.cuda.synchronize()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        backend.prepare_metadata(batch)
+    finally:
+        torch.cuda.set_sync_debug_mode(0)
+    md = batch.attn_metadata
+    lens_k = [c + e for e, c in zip(extend_lens, cached)]
+    assert md.prefix_lens.tolist() == list(cached)
+    assert md.indptr.tolist() == [0, lens_k[0], lens_k[0] + lens_k[1]]
+    assert md.cu_seqlens_q_gpu.tolist() == [0, extend_lens[0], extend_lens[0] + extend_lens[1]]
+    assert md.indices.tolist() == list(range(lens_k[0])) + list(range(8, 8 + lens_k[1]))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton attention needs CUDA")
 def test_triton_backend_applies_the_batch_block_ends_only_when_the_spec_asks(monkeypatch):
     from freetoken.attention import AttentionSpec
     from freetoken.attention.triton import TritonAttentionBackend
