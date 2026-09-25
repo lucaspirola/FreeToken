@@ -3,6 +3,11 @@
 
   nsys_window.py SIZE SESSION OUTPUT [SKIP] [WINDOW]
 
+START_AT (env, seconds after the request is sent): start nsys at that time instead, before the
+first token, so decode step 1 is in the trace (the TTFT of a 1M pass-1 request is stable,
+720.5-720.7 s here; `nsys start` itself takes about 0.3 s, so starting at the first token loses
+the first ~30 steps). The window is then counted from the first token.
+
 Sends the same prompt probe_decode.py sends for SIZE (pass 1, no tag), max_tokens
 SKIP + WINDOW + 64. After the first token and SKIP more, it runs `nsys start`; after WINDOW
 further tokens, `nsys stop`. Prefill is never traced, so a 1M request yields a small report.
@@ -22,7 +27,18 @@ body = json.dumps({"model": MODEL, "messages": [{"role": "user", "content": prom
                    "max_tokens": SKIP + WINDOW + 64, "temperature": 0, "stream": True,
                    "chat_template_kwargs": {"enable_thinking": False}}).encode()
 req = urllib.request.Request(URL, data=body, headers={"Content-Type": "application/json"})
+import threading
+START_AT = float(os.environ.get("START_AT", "0") or 0)
 m0 = time.monotonic(); n = 0; state = "wait"; t_start = t_stop = None; n_start = n_stop = 0; ttft = None
+lock = threading.Lock()
+def early_start():
+    global state, t_start, n_start
+    with lock:
+        if state == "wait":
+            subprocess.run([NSYS, "start", f"--session={SESSION}", f"--output={OUT}", "--force-overwrite=true"], check=False)
+            state, t_start, n_start = "on", time.monotonic(), 0
+if START_AT > 0:
+    threading.Timer(START_AT, early_start).start()
 with urllib.request.urlopen(req, timeout=7200) as r:
     for line in r:
         if not line.startswith(b"data:"):
@@ -37,8 +53,10 @@ with urllib.request.urlopen(req, timeout=7200) as r:
                 if ttft is None:
                     ttft = time.monotonic() - m0
                 if state == "wait" and n >= 1 + SKIP:
-                    subprocess.run([NSYS, "start", f"--session={SESSION}", f"--output={OUT}", "--force-overwrite=true"], check=False)
-                    state, t_start, n_start = "on", time.monotonic(), n
+                    with lock:
+                        if state == "wait":
+                            subprocess.run([NSYS, "start", f"--session={SESSION}", f"--output={OUT}", "--force-overwrite=true"], check=False)
+                            state, t_start, n_start = "on", time.monotonic(), n
                 elif state == "on" and n >= n_start + WINDOW:
                     t_stop, n_stop = time.monotonic(), n
                     subprocess.run([NSYS, "stop", f"--session={SESSION}"], check=False)
