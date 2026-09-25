@@ -109,6 +109,10 @@ class ExpertResidency(Protocol):
         """After the previous step's results were drained (that step is
         complete): hand its finished device work to the host, no snapshot."""
 
+    def attention_gate_hook(self):
+        """A ``gate(layer_id)`` callable the engine runs before each decode
+        attention call (``DecodeGatedBackend``), or None for no gating."""
+
 
 class WholeModelResidency:
     """Whole model pinned in host RAM: nothing to do behind a miss."""
@@ -159,6 +163,9 @@ class WholeModelResidency:
         return None
 
     def issue_writebacks(self) -> None:
+        return None
+
+    def attention_gate_hook(self):
         return None
 
     def attach(self, cache, banks) -> None:
@@ -420,6 +427,47 @@ class MirrorResidency:
         if self._wb is not None:
             self._wb_issue_completed()
 
+    def attention_gate_hook(self):
+        """Schedule the write-back DMA behind decode attention.
+
+        The ring -> pool DMA is issued by the host right after a step is
+        launched and used to start at once, beside that step's in-graph expert
+        fetches, which read the same PCIe link and host memory the other way
+        (nsys at 1M, exp/reorg-next 2dc6757 results/nsys1m-local: fetches
+        176 vs 139 us at 70 MB/step of write-back). Decode attention uses no
+        PCIe (3.6 ms/step at 1M on Nemotron), so the DMA is split into one
+        chunk per decode attention layer and each chunk waits for an event
+        recorded just before that layer's attention (``attention_gate``):
+        inside the CUDA graph an external-event record node, so one capture
+        serves every replay; eager decode records it the same way. The events
+        are the latest records when the host issues the DMA (after the
+        launch), so the chunks follow the step just launched. With no decode
+        attention recorded yet (or after a prefill), the waits are satisfied
+        and the DMA starts at once, as before.
+
+        ``FREETOKEN_MIRROR_WB_AT_ATTENTION=0`` restores the ungated DMA.
+        """
+        if getattr(self, "_wb", None) is None:
+            return None
+        if os.environ.get("FREETOKEN_MIRROR_WB_AT_ATTENTION", "1").strip() == "0":
+            logger.info_rank0("mirror DMA writebacks: not gated on attention "
+                              "(FREETOKEN_MIRROR_WB_AT_ATTENTION=0)")
+            return None
+        self._attn_gates = {}
+        self._attn_gate_list = []
+        logger.info_rank0("mirror DMA writebacks: one chunk per decode attention layer, "
+                          "issued behind that layer's attention start event")
+        return self.attention_gate
+
+    def attention_gate(self, layer_id: int) -> None:
+        """Record layer ``layer_id``'s gate event on the current stream (the
+        decode stream, or the graph being captured)."""
+        ev = self._attn_gates.get(layer_id)
+        if ev is None:
+            ev = self._attn_gates[layer_id] = torch.cuda.Event(external=True)
+            self._attn_gate_list = [self._attn_gates[k] for k in sorted(self._attn_gates)]
+        ev.record()
+
     def _wb_issue_completed(self) -> None:
         wb = self._wb
         pending = wb["pending"]
@@ -440,12 +488,22 @@ class MirrorResidency:
         rows = wb["rows"]
         assert head - issued <= rows, (head, issued, rows)
         wb["peak_pending"] = max(wb["peak_pending"], head - issued)
-        with torch.cuda.stream(wb["stream"]):
-            for idx in range(issued, head):
-                s = idx % rows
-                row = int(state[2 + s])
-                for pool_view, stage_view in wb["views"]:
-                    pool_view[row].copy_(stage_view[s], non_blocking=True)
+        gates = getattr(self, "_attn_gate_list", None) or [None]
+        per = -(-(head - issued) // len(gates))
+        stream = wb["stream"]
+        with torch.cuda.stream(stream):
+            for j, gate in enumerate(gates):
+                lo = issued + j * per
+                hi = min(head, lo + per)
+                if lo >= hi:
+                    break
+                if gate is not None:        # see attention_gate_hook
+                    stream.wait_event(gate)
+                for idx in range(lo, hi):
+                    s = idx % rows
+                    row = int(state[2 + s])
+                    for pool_view, stage_view in wb["views"]:
+                        pool_view[row].copy_(stage_view[s], non_blocking=True)
             # Stream-ordered behind the copies: only now may the resolve
             # kernel reuse these ring slots or read these pool rows.
             self._mirror["wb_state"][1:2].fill_(head)

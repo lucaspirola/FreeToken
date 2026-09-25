@@ -14,6 +14,7 @@ from freetoken.attention import (
     attention_backend_info,
     create_attention_backend,
 )
+from freetoken.attention.base import DecodeGatedBackend
 from freetoken.core import Batch, Context, Req, set_global_ctx
 from freetoken.distributed import (
     destroy_distributed,
@@ -822,6 +823,16 @@ class Engine:
         self.ctx.attn_backend = self.attn_backend = create_attention_backend(
             config.attention_backend, config.model_config
         )
+        # Bounded mirror: gate the write-back DMA on decode attention (see
+        # MirrorResidency.attention_gate); every other residency returns None.
+        _gate = getattr(
+            getattr(getattr(self, "moe_offload_cache", None), "residency", None),
+            "attention_gate_hook", lambda: None,
+        )()
+        if _gate is not None:
+            self.ctx.attn_backend = self.attn_backend = DecodeGatedBackend(
+                self.attn_backend, _gate
+            )
 
         # ======================= Sampler initialization ========================
         self.sampler = Sampler(self.device, config.model_config.vocab_size)
