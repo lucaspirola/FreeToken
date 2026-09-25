@@ -933,9 +933,11 @@ class Scheduler(SchedulerIOMixin):
         with self.cache_manager.lazy_free_region():
             for i, req in enumerate(batch.reqs):
                 if isinstance(req, ChunkedReq):
-                    # Don't cache intermediate chunks; the full prompt is cached once when the
-                    # final chunk is processed. Caching here snapshots a handle the next chunk
-                    # already copied (overlap), so cache_req double-frees the prior chunk.
+                    # Don't cache intermediate chunks HERE: under overlap the next chunk has
+                    # already copied this handle, so cache_req would double-free the prior
+                    # chunk. A hybrid prompt's chunk boundary is committed instead when that
+                    # next chunk is admitted (CacheManager.commit_chunk_snapshot), before the
+                    # copy; the full prompt is cached when the final chunk is processed.
                     if req.aborted:
                         # Aborted mid-chunked-prefill while this chunk was in flight: the abort
                         # popped the pending continuation (no next chunk launches), and this
@@ -1492,6 +1494,13 @@ class Scheduler(SchedulerIOMixin):
         pool = self.engine.linear_state_pool
         if pool is None or not batch.is_prefill:
             return
+        # Segment snapshots first (CacheManager.commit_prefix_boundary): the tree already names
+        # the slot, and a fresh request of this same batch may restore from it below.
+        for req in batch.reqs:
+            dst = getattr(req, "mamba_boundary_copy", None)
+            if dst is not None:
+                pool.copy_from(req.linear_slot_idx, dst)
+                req.mamba_boundary_copy = None
         for req in batch.reqs:
             if req.mamba_restore_src is not None:
                 pool.copy_from(req.mamba_restore_src, req.linear_slot_idx)
@@ -1726,7 +1735,8 @@ class Scheduler(SchedulerIOMixin):
         cheaper radix snapshots already survive.
         """
         # (The capture itself is driven from _capture_session_states, once per drained
-        # prefill forward -- a chunk commit runs only for a prompt's last chunk.)
+        # prefill forward -- without chunk snapshots a chunk commit runs only for a prompt's
+        # last chunk.)
         pool = getattr(self.cache_manager, "linear_state_pool", None)
         store = self._session_spill_store
         if pool is None or store is None:
@@ -1740,6 +1750,11 @@ class Scheduler(SchedulerIOMixin):
         self._state_capture = PrefillStateCapture(
             pool, stride=store.state_stride_tokens, max_states=store.max_states
         )
+        # The capture reads the frozen ping-pong slot at each chunk's drain; a chunk-snapshot
+        # donation at the next chunk's admission (which, under overlap, precedes that drain)
+        # would hand it the replacement slot instead. The scarce pool it serves has no slot to
+        # spare for chunk snapshots anyway.
+        self.cache_manager.chunk_snapshots = False
         logger.info_rank0(
             "Capturing session recurrent state every %d prefilled tokens (%d slots for "
             "%d running request(s); at most %d x %.0f MiB of host RAM per resident turn)",
@@ -2353,6 +2368,9 @@ class Scheduler(SchedulerIOMixin):
                     )
                     return
 
+        if not handoff:
+            self._release_leases_older_than_prefix(initial, step, future_pages)
+
         # From here on, compact_active_pages computes a decommit ceiling against the
         # CURRENT lock state and engine.shrink_runtime_kv physically decommits against
         # it. A node compaction protects/represents because it is locked stays safe
@@ -2504,6 +2522,93 @@ class Scheduler(SchedulerIOMixin):
         reserved = int(reserve_fn()) if reserve_fn is not None else 0
         return max(head_need, reserved)
 
+    def _newest_evictable_prefix_ns(self) -> int | None:
+        """Last-use stamp (``time.monotonic_ns``) of the most recent unlocked prefix-tree
+        leaf -- in practice the prompt an identity-less request just left -- or None."""
+        prefix = getattr(self.cache_manager, "prefix_cache", None)
+        root = getattr(prefix, "root", getattr(prefix, "root_node", None))
+        if root is None:
+            return None
+        newest, stack = None, [root]
+        while stack:
+            node = stack.pop()
+            if node.children:
+                stack.extend(node.children.values())
+            elif node is not root and node.ref_count == 0:
+                newest = node.timestamp if newest is None else max(newest, node.timestamp)
+        return newest
+
+    def _release_leases_older_than_prefix(self, initial: int, step: int,
+                                          future_pages: int) -> None:
+        """Idle shrink: one LRU across idle session leases and the unleased prefix.
+
+        The shrink below evicts only unlocked prefix pages, and an idle reclaimable lease
+        keeps its whole conversation locked. So when leases fill the base KV step, the page
+        it gives back is the NEWEST thing on the GPU -- the prompt an identity-less client
+        (omp) just sent, which its next turn or an exact repeat would have reused. Release
+        the leases last used before that prompt first, oldest first, each only once its
+        conversation is checkpointed (``require_checkpoint``: it stays restorable by session
+        id), and only until the pages they hand back cover what the shrink will evict; the
+        shrink's LRU eviction then takes their (older) pages first. A lease whose checkpoint
+        fails or is refused stays protected, and the shrink falls back to evicting the
+        prefix as before (counted in ``_shrink_lease_release_fallbacks``)."""
+        sessions = getattr(self, "_sessions", None)
+        if not sessions:
+            return
+        newest_ns = self._newest_evictable_prefix_ns()
+        if newest_ns is None:
+            return
+        cm = self.cache_manager
+        trace = getattr(cm.prefix_cache, "_t", None)
+        if getattr(cm.prefix_cache, "_trace", None) is None:
+            trace = None
+        candidates = sorted(
+            (lease.last_used_at, sid)
+            for sid, lease in sessions.items()
+            if lease.reclaimable
+            and lease.active_uid is None
+            and lease.handle is not None
+            and lease.last_used_at * 1e9 < newest_ns
+        )
+        now = time.monotonic()
+        handed_back = 0
+        for last_used, sid in candidates:
+            used_pages, _ = cm.page_usage()
+            occupied = cm.committed_pages - len(cm.free_slots)
+            target = max(initial, math.ceil((used_pages + future_pages) / step) * step)
+            need = occupied - target
+            if target >= cm.committed_pages or need <= handed_back:
+                break
+            before = cm.prefix_cache.full_evictable_size if cm.is_hybrid else None
+            handle = sessions[sid].handle
+            tokens = int(getattr(handle, "cached_len", 0) or 0)
+            released = self._release_soft_session_handle(
+                sid, "idle shrink: older than the newest unleased prefix",
+                require_checkpoint=True)
+            if not released:
+                self._shrink_lease_release_fallbacks = (
+                    getattr(self, "_shrink_lease_release_fallbacks", 0) + 1)
+                if trace is not None:
+                    trace("shrink_fallback", sid[:40], "age_s", round(now - last_used, 1),
+                          "tokens", tokens, "need_pages", need)
+                break
+            gained = ((cm.prefix_cache.full_evictable_size - before) // cm.page_size
+                      if before is not None else tokens // cm.page_size)
+            handed_back += gained
+            if trace is not None:
+                trace("shrink_release", sid[:40], "age_s", round(now - last_used, 1),
+                      "tokens", tokens, "bytes", tokens * self._kv_bytes_per_token(),
+                      "handed_back_pages", gained, "need_pages", need)
+
+    def _kv_bytes_per_token(self) -> int:
+        """Best effort, for the trace only; 0 when the unit cost cannot be measured."""
+        try:
+            from freetoken.kvcache.cache_status import compute_cache_unit_bytes
+
+            return int(compute_cache_unit_bytes(self.engine)["kv_bytes_per_token"])
+        except Exception:  # noqa: BLE001 -- a trace field must never break the shrink
+            return 0
+
     def _evict_growable_prefix_pages(self, pages: int) -> int:
         """Request only the needed LRU eviction; whole leaves/cascades may overshoot."""
         if pages <= 0:
@@ -2511,6 +2616,11 @@ class Scheduler(SchedulerIOMixin):
         cm = self.cache_manager
         tokens = pages * cm.page_size
         if cm.is_hybrid:
+            trace = (cm.prefix_cache._t
+                     if getattr(cm.prefix_cache, "_trace", None) is not None else None)
+            if trace is not None:
+                trace("shrink_evict_prefix", "tokens", tokens,
+                      "bytes", tokens * self._kv_bytes_per_token())
             result = cm.prefix_cache.evict_full(tokens)
             indices = result.kv_indices
             if result.mamba_slots:

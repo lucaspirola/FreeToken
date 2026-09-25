@@ -67,6 +67,14 @@ class ServerArgs(SchedulerConfig):
     # prompt_tokens_details.cached_tokens, Anthropic cache_read_input_tokens, Responses
     # input_tokens_details.cached_tokens). Mirrors sglang's --enable-cache-report.
     enable_cache_report: bool = False
+    # /v1/messages: drop Claude Code's per-conversation billing-metadata system block
+    # (``x-anthropic-billing-header: ...``) so the system prompt and tools stay a reusable
+    # prefix across conversations. On by default.
+    anthropic_strip_billing_header: bool = True
+    # /v1/messages: keep a system-role message that arrives after the conversation started
+    # in place instead of hoisting it into the leading system text, so each turn only
+    # appends to the previous prompt (prefix reuse turn to turn). On by default.
+    anthropic_system_in_place: bool = True
     # Opt-in allocator telemetry exposed through /v1/stats. It performs no CUDA sync or
     # peak reset; see engine.cuda_memory for the allocator-counter scope.
     cuda_memory_telemetry: bool = False
@@ -811,6 +819,31 @@ def parse_args(
         default=ServerArgs.allowed_local_media_path,
         help="Directory that file:// image refs may be read from. "
         "Unset (default) rejects local files.",
+    )
+
+    parser.add_argument(
+        "--anthropic-strip-billing-header",
+        action=argparse.BooleanOptionalAction,
+        default=ServerArgs.anthropic_strip_billing_header,
+        help=(
+            "/v1/messages: drop a system text block starting with "
+            "'x-anthropic-billing-header:' (Claude Code's client billing metadata, whose "
+            "version suffix changes per conversation and sits ahead of the whole system "
+            "prompt, so it defeats prefix reuse across conversations). Default on."
+        ),
+    )
+
+    parser.add_argument(
+        "--anthropic-system-in-place",
+        action=argparse.BooleanOptionalAction,
+        default=ServerArgs.anthropic_system_in_place,
+        help=(
+            "/v1/messages: a system-role message that arrives after the first user/assistant "
+            "message stays in place (kept as a system turn when the chat template accepts "
+            "one mid-conversation, else folded into the adjacent user turn) instead of being "
+            "hoisted into the leading system text, which would rewrite the prompt ahead of "
+            "the tool list and defeat prefix reuse from one turn to the next. Default on."
+        ),
     )
 
     parser.add_argument(

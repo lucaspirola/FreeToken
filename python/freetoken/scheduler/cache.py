@@ -187,6 +187,13 @@ class CacheManager:
     # it released anything. None = no sessions (unit tests, non-session serving).
     mamba_reclaim_hook = None
     _mamba_donation_skips = 0
+    #: Donate every intermediate prefill chunk's boundary snapshot to the radix tree
+    #: (:meth:`commit_chunk_snapshot`), so any shared prefix -- a system prompt and tool
+    #: list another conversation already sent -- resumes from the last chunk boundary it
+    #: covers instead of only from where an earlier prompt ended. The scheduler turns it off
+    #: when prefill-time state capture owns the frozen slot (the scarce-pool 1M profile);
+    #: FREETOKEN_CHUNK_SNAPSHOTS=0 turns it off for an A/B.
+    chunk_snapshots = os.environ.get("FREETOKEN_CHUNK_SNAPSHOTS", "1") != "0"
 
     @property
     def prefill_chunk_align(self) -> int:
@@ -494,7 +501,7 @@ class CacheManager:
             self.linear_state_pool.free(er.mamba_slots)
             self._free(er.kv_indices)
 
-    def reserve_mamba_slots(self, n: int) -> bool:
+    def reserve_mamba_slots(self, n: int, *, escalate: bool = True) -> bool:
         """Get ``n`` GDN state slots onto the free-list; True when the pool can now serve them.
 
         Escalates through the three reclaim tiers in cost order:
@@ -507,12 +514,17 @@ class CacheManager:
            spilling that lease on demand IS the 3E residency policy: the idle conversation is
            checkpointed, not the live request refused.
 
+        ``escalate=False`` stops after tier 2: an optional snapshot (an intermediate prefill
+        chunk's boundary) is not worth checkpointing an idle conversation for.
+
         Never raises; the caller decides what a shortage means.
         """
         pool = self.linear_state_pool
         if pool.num_free_slots >= n:
             return True
         self.ensure_mamba_slots(n)
+        if not escalate:
+            return pool.num_free_slots >= n
         if pool.num_free_slots < n and self.mamba_reclaim_hook is not None:
             if self.mamba_reclaim_hook(n):
                 self.ensure_mamba_slots(n)
@@ -520,11 +532,11 @@ class CacheManager:
             self._note_pin_starvation("GDN state pool")
         return pool.num_free_slots >= n
 
-    def acquire_mamba_slot(self) -> int | None:
+    def acquire_mamba_slot(self, *, escalate: bool = True) -> int | None:
         """One GDN state slot, or ``None`` when the pool is genuinely full (see
         :meth:`reserve_mamba_slots`). Never raises: every caller treats a snapshot slot as an
         optimization it can do without."""
-        if not self.reserve_mamba_slots(1):
+        if not self.reserve_mamba_slots(1, escalate=escalate):
             return None
         return self.linear_state_pool.alloc(1)[0]
 
@@ -1277,7 +1289,71 @@ class CacheManager:
             req.cache_handle = new_handle
             self.lock(new_handle)
 
-    def _cache_req_hybrid(self, req: Req, *, finished: bool) -> None:
+    def commit_chunk_snapshot(self, req: Req) -> None:
+        """Donate an intermediate prefill chunk's boundary snapshot to the shared radix tree.
+
+        Called for a chunked prompt when its NEXT chunk is admitted (``PrefillAdder``), before
+        that chunk copies the request's handle and ping-pong slots -- the point where the
+        snapshot the previous forward wrote into the frozen ping-pong slot is still intact (the
+        forward after next overwrites it) and where mutating the request cannot leave a stale
+        copy behind (the old reason intermediate chunks were never cached: a commit at the
+        chunk's drain, under overlap, raced a continuation that had already copied them).
+        Every GPU reader of the donated pages/slot is stream-ordered after the forward that
+        wrote them. The replacement slot comes from the free list or LRU snapshot eviction
+        only, never from checkpointing an idle session. No-op unless ``chunk_snapshots``."""
+        if not (self.is_hybrid and self.chunk_snapshots) or req.table_idx == -1:
+            return
+        if req.mamba_last_track_seqlen is None or req.mamba_ping_pong is None:
+            return
+        # A hidden-state probe's pooled sums for this boundary are filled at the chunk's
+        # drain, which under overlap has not happened yet; it keeps the old behavior.
+        if getattr(req, "hidden_states", None) is not None:
+            return
+        self._cache_req_hybrid(req, finished=False, escalate=False)
+
+    def commit_prefix_boundary(self, prev: Req, req: Req, b: int) -> None:
+        """Snapshot the leading system+tools segment ``[0, b)`` into the shared radix tree.
+
+        ``prev`` is the chunk that ended exactly at ``b`` (``PrefillAdder`` cut it there) and
+        ``req`` the continuation just admitted from ``b``; both share the live slot, which
+        holds the state at ``b`` until ``req``'s forward advances it. A fresh slot is named in
+        the tree now and filled by ``req``'s forward before anything else runs
+        (``Scheduler._restore_linear_states`` copies the live slot into it on the engine
+        stream, ahead of every restore of the same batch), so every reader is stream-ordered
+        after the copy. The node is kind ``"segment"``: evicted after chunk snapshots. The
+        slot comes from the free list or snapshot eviction only (never escalates)."""
+        from freetoken.kvcache.hybrid_radix_cache import HybridCacheHandle
+
+        if not (self.is_hybrid and self.chunk_snapshots) or req.table_idx == -1:
+            return
+        if req.linear_slot_idx is None or req.cached_len != b or b <= 0:
+            return
+        if align_down(b, self.page_size) != b:
+            return
+        slot = self.acquire_mamba_slot(escalate=False)
+        if slot is None:
+            self._note_mamba_donation_skipped()
+            return
+        old_handle = req.cache_handle
+        page_indices = self.page_table[req.table_idx, :b]
+        prefix_len, mamba_exist = self.prefix_cache.insert(
+            req.input_ids[:b], page_indices, slot, kind="segment")
+        self.unlock(old_handle)
+        self._free(page_indices[old_handle.cached_len : prefix_len])
+        m = self.prefix_cache.match_prefix(req.input_ids[:b])
+        if prefix_len > old_handle.cached_len:
+            self.page_table[req.table_idx, old_handle.cached_len : prefix_len].copy_(
+                m.kv_indices[old_handle.cached_len : prefix_len])
+        handle = HybridCacheHandle(m.cached_len, m.node, m.kv_indices)
+        self.lock(handle)
+        req.cache_handle = handle
+        prev.cache_handle = handle
+        if mamba_exist:
+            self.linear_state_pool.free([slot])     # the tree already had this snapshot
+        else:
+            req.mamba_boundary_copy = slot
+
+    def _cache_req_hybrid(self, req: Req, *, finished: bool, escalate: bool = True) -> None:
         """Hybrid (GDN) cache_req: commit KV like radix AND manage the GDN state snapshot.
         Prefill chunk commit: DONATE the frozen ping-pong slot (the snapshot the forward wrote
         at the tracked chunk boundary mamba_last_track_seqlen) into the tree; replace it with a
@@ -1324,7 +1400,7 @@ class CacheManager:
             if insert_len == req.cached_len and insert_len > 0:
                 prefix_len, mamba_exist = self.prefix_cache.insert(
                     req.input_ids[:insert_len], page_indices[:insert_len], req.linear_slot_idx,
-                    pooled_sums=_pooled_sums_at(req, insert_len))
+                    pooled_sums=_pooled_sums_at(req, insert_len), kind="end")
                 self.unlock(old_handle)
                 self._free(page_indices[free_upto : max(free_upto, prefix_len)])
                 keep_live = not mamba_exist           # tree now owns linear_slot_idx
@@ -1356,7 +1432,7 @@ class CacheManager:
         # ordering hazard the old lock-then-alloc dance guarded against: nothing has been
         # donated yet, so the eviction this may trigger cannot reclaim a just-committed node
         # (and ``old_handle`` is still locked, so this request's own prefix KV is safe).
-        replacement = self.acquire_mamba_slot()
+        replacement = self.acquire_mamba_slot(escalate=escalate)
         if replacement is None:
             self._note_mamba_donation_skipped()
             req.mamba_last_track_seqlen = None

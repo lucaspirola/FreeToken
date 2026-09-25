@@ -14,6 +14,7 @@ caller (CacheManager / scheduler) does the actual LinearStatePool / KV-pool free
 from __future__ import annotations
 
 import heapq
+import os
 import time
 from dataclasses import dataclass
 from typing import List, NamedTuple, Optional, Tuple
@@ -60,6 +61,14 @@ class EvictResult(NamedTuple):
     mamba_slots: List[int]        # GDN state slots to free
 
 
+def _trace_file():
+    """Measurement only: FREETOKEN_PREFIX_TRACE=<file> appends one line per hybrid match,
+    snapshot insert and eviction (path lengths, not tokens), to see which reuse points a
+    prompt found and which ones eviction took. Unset = no file, no cost."""
+    path = os.environ.get("FREETOKEN_PREFIX_TRACE")
+    return open(path, "a", buffering=1) if path else None
+
+
 class HybridRadixCache:
     def __init__(self, device: torch.device, page_size: int,
                  track_chunk_size: int | None = None) -> None:
@@ -87,6 +96,11 @@ class HybridRadixCache:
         self.full_protected = 0
         self.mamba_evictable = 0     # number of live, unlocked snapshots
         self.mamba_protected = 0
+        self._trace = _trace_file()
+
+    def _t(self, *parts) -> None:
+        if self._trace is not None:
+            self._trace.write(f"{time.monotonic():.3f} " + " ".join(str(p) for p in parts) + "\n")
 
     # ---------------------------------------------------------------- match / insert
     def match_prefix(self, input_ids: torch.Tensor, *, pooled: bool = False) -> HybridMatch:
@@ -113,22 +127,33 @@ class HybridRadixCache:
                 if not seen_snapshot:            # deepest live snapshot, sums or not
                     seen_snapshot, sumless_len = True, end_len
                 if not pooled or cur.pooled_sums is not None:
+                    if self._trace is not None:
+                        self._t("match", len(input_ids), "walk", self._path_len(node),
+                                "hit", end_len, "snaps", self._path_snaps(node))
                     return HybridMatch(
                         self._collect_kv(cur), end_len, cur.mamba_value, cur, sumless_len
                     )
             end_len -= cur.length
             cur = cur.parent
+        if self._trace is not None:
+            self._t("match", len(input_ids), "walk", self._path_len(node), "hit", 0,
+                    "snaps", self._path_snaps(node))
         return HybridMatch(self.empty, 0, None, self.root, sumless_len)
 
     def insert(self, input_ids: torch.Tensor, kv_indices: torch.Tensor,
-               mamba_value: int, pooled_sums: torch.Tensor | None = None) -> Tuple[int, bool]:
+               mamba_value: int, pooled_sums: torch.Tensor | None = None,
+               *, kind: str = "chunk") -> Tuple[int, bool]:
         """Insert the committed KV prefix and DONATE ``mamba_value`` at the (page-aligned) end
         boundary node. Returns (matched_prefix_len, mamba_exist). If the boundary node already
         owns a live snapshot, returns mamba_exist=True and does not attach (caller frees the
         donated slot -- dedup). ``pooled_sums`` (host float32 ``[num_layers, hidden]``, the
         residual-stream sum over ``[0, len(input_ids))``) rides on the node's snapshot --
         the live one, or the one already there: a pooled request that recomputed a prefix
-        some earlier plain request had snapshotted still makes that node pooled-reusable."""
+        some earlier plain request had snapshotted still makes that node pooled-reusable.
+        ``kind`` says what the boundary is -- "chunk" (a prefill-chunk boundary), "segment"
+        (the end of the leading system+tools segment) or "end" (a request's final state); it
+        only orders ``evict_mamba`` and survives a dedup (a "segment"/"end" snapshot landing
+        on an existing chunk snapshot upgrades it)."""
         insert_len = align_down(len(input_ids), self.page_size)
         # Sums describe exactly [0, len(input_ids)); an alignment cut would mislabel them.
         assert pooled_sums is None or insert_len == len(input_ids), (
@@ -146,8 +171,13 @@ class HybridRadixCache:
         if node.mamba_value is not None:
             if pooled_sums is not None and node.pooled_sums is None:
                 node.pooled_sums, node.pooled_count = pooled_sums, insert_len
+            if kind != "chunk":
+                node.snapshot_kind = kind
             return prefix_len, True                 # dedup: caller frees its donated slot
+        if self._trace is not None:
+            self._t("insert", insert_len, "prefix", prefix_len, kind)
         node.mamba_value = mamba_value              # fills a fresh node or a tombstone
+        node.snapshot_kind = kind
         if pooled_sums is not None:
             node.pooled_sums, node.pooled_count = pooled_sums, insert_len
         if node.mamba_ref_count == 0:
@@ -192,6 +222,8 @@ class HybridRadixCache:
         """Evict KV tokens by LRU over UNLOCKED LEAF nodes (an internal node's KV is a prefix
         dependency for all descendants). Frees each evicted node's snapshot too."""
         leaves = [n for n in self._leaves() if n.ref_count == 0]
+        if self._trace is not None:
+            self._t("evict_full", num_tokens, "evictable", self.full_evictable)
         heapq.heapify(leaves)
         kv, mamba, freed = [], [], 0
         while freed < num_tokens and leaves:
@@ -208,16 +240,35 @@ class HybridRadixCache:
                 heapq.heappush(leaves, parent)
         return EvictResult(torch.cat(kv) if kv else self.empty, mamba)
 
+    @staticmethod
+    def _mamba_evict_rank(node: RadixTreeNode) -> int:
+        """Eviction tier of an unlocked snapshot, lowest first: 0 a prefill-chunk boundary no
+        lock passes through, 1 a chunk boundary on a locked path (a session lease or a running
+        request resumes below it, so it is that path's shorter reuse point), 2 a request's
+        end state (the point the next turn of an unleased conversation resumes from) or the
+        end of a leading system+tools segment (what another conversation shares)."""
+        if node.snapshot_kind != "chunk":
+            return 2
+        return 1 if node.ref_count > 0 else 0
+
     def evict_mamba(self, num: int) -> EvictResult:
-        """Evict GDN snapshots by LRU over UNLOCKED snapshot-bearing nodes -- internal nodes
-        too. Internal node -> TOMBSTONE (free the slot, keep KV + children). Leaf node -> free
-        both KV and slot and unlink, then cascade-delete any KV-only tombstone leaves it exposes
-        upward (so a leaf always carries a live snapshot -- mirrors sglang)."""
+        """Evict GDN snapshots over UNLOCKED snapshot-bearing nodes -- internal nodes too --
+        in tier order (:meth:`_mamba_evict_rank`), LRU within a tier and the deeper boundary
+        first among equally recent ones (one insert stamps a prompt's whole path, and its
+        shallow boundaries are the ones other conversations share). Internal node ->
+        TOMBSTONE (free the slot, keep KV + children). Leaf node -> free both KV and slot and
+        unlink, then cascade-delete any KV-only tombstone leaves it exposes upward (so a leaf
+        always carries a live snapshot -- mirrors sglang)."""
         cands = [n for n in self._snapshot_nodes() if n.mamba_ref_count == 0]
-        heapq.heapify(cands)
+        if self._trace is not None:
+            self._t("evict_mamba", num, "cands",
+                    sorted((self._mamba_evict_rank(n), self._path_len(n)) for n in cands))
+        order = [(self._mamba_evict_rank(n), n.timestamp, -self._path_len(n), n.uuid, n)
+                 for n in cands]
+        heapq.heapify(order)
         kv, mamba, freed = [], [], 0
-        while freed < num and cands:
-            node = heapq.heappop(cands)
+        while freed < num and order:
+            node = heapq.heappop(order)[-1]
             if node.mamba_value is None or node.mamba_ref_count != 0 or node.is_root():
                 continue
             if node.is_leaf() and node.ref_count == 0:
@@ -260,6 +311,12 @@ class HybridRadixCache:
     # ---------------------------------------------------------------- helpers
     def _free_node_mamba(self, node: RadixTreeNode, out: List[int]) -> None:
         if node.mamba_value is not None:
+            node.snapshot_kind = "chunk"
+            if self._trace is not None:
+                import traceback
+                caller = [f.name for f in traceback.extract_stack(limit=6)[:-1]]
+                self._t("evict_snap", self._path_len(node), "leaf", node.is_leaf(),
+                        "via", "<".join(reversed(caller)))
             out.append(node.mamba_value)
             node.mamba_value = None
             # The sums describe the state at this boundary; without the snapshot a hit
@@ -286,6 +343,15 @@ class HybridRadixCache:
             freed += parent.length
             parent = self._unlink(parent)
         return parent, freed
+
+    def _path_snaps(self, node: RadixTreeNode) -> List[int]:
+        out, n, end = [], node, self._path_len(node)
+        while not n.is_root():
+            if n.mamba_value is not None:
+                out.append(end)
+            end -= n.length
+            n = n.parent
+        return out[::-1]
 
     def _path_len(self, node: RadixTreeNode) -> int:
         n, total = node, 0
