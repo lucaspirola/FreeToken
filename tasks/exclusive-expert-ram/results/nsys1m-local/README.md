@@ -64,3 +64,67 @@ Step period by quarter of the traced window (ms):
 
 No fix yet: nothing in this trace is a one-line change. The next step decides between write-back
 contention and pool sizing.
+
+## Step-1 traces (`*-s0`) and the write-back switch (`bins-s0.txt`)
+
+These runs were made with `NS_START_AT=700`, which starts the trace in the last seconds of the
+1M prefill, so decode steps 1-206 are all in the trace. The GPU host lock was held across three
+arms, in this order:
+* mirror-wb0 (`FREETOKEN_MIRROR_WB_STAGE_MB=0`: write-backs are SM stores inside the graph, with
+  no DMA staging ring);
+* whole;
+* mirror.
+
+Arena slots during 1M decode: whole 1528, mirror 1512, mirror-wb0 1528 (it has no staging ring).
+
+Step time (ms) and write-back MB per step, in 16-step bins:
+
+| steps | whole | mirror | mirror wb MB/step | mirror-wb0 |
+|---|---|---|---|---|
+| 1-16 | 10.39 | 12.29 | 28.1 | 12.75 |
+| 17-32 | 9.39 | 10.83 | 70.6 | 11.98 |
+| 33-48 | 9.78 | 10.51 | 70.3 | 11.66 |
+| 49-64 | 9.57 | 10.01 | 55.9 | 11.10 |
+| 65-80 | 9.95 | 11.07 | 66.4 | 11.77 |
+| 81-96 | 9.65 | 10.12 | 56.2 | 11.19 |
+| 97-112 | 10.25 | 11.47 | 74.8 | 12.23 |
+| 113-128 | 9.70 | 10.45 | 66.8 | 11.64 |
+| **1-128 mean** | **9.84** | **10.84 (90.7%)** | 61.1 | 11.79 (83.4%) |
+| 129-206 | 9.69 | 10.12 (95.8%) | 33.6 | 10.55 (91.8%) |
+
+The 1-128 ratio (90.7%) reproduces the probe's 1M p1 (90.2%). After step 128 the ratio is 95.8%.
+
+Expert copy kernels per step, split into fetches (> 50 us) and the mirror's staging copies of
+write-back victims (5-50 us):
+
+| steps | whole fetches (mean) | mirror fetches (mean) | mirror staging | mirror bookkeeping |
+|---|---|---|---|---|
+| 1-16 | 9.9 (212 us) | 16.0 (235 us) | 3.5 | 205 us (whole 82) |
+| 17-32 | 9.2 (122 us) | 12.7 (186 us) | 9.1 | 180 us |
+| 33-64 | 11.2 (125 us) | 12.1 (150 us) | 9.0 | 175 us |
+| 65-128 | 11.8 (135 us) | 13.4 (167 us) | 8.8 | 182 us |
+| 129-206 | 10.8 (129 us) | 11.5 (144 us) | 5.0 | 174 us |
+
+Where the pool arm's extra 1.0 ms per step over steps 1-128 comes from (steps 129+ in brackets):
+* **Fetch slowdown under the write-back DMA: about 0.5 ms [+0.17].**
+  * The pool arm fetches take 37 us longer on average (176 vs 139 us).
+  * The slowdown tracks the write-back volume: +52% at 70 MB/step (steps 17-32), +12% at
+    34 MB/step (steps 129+).
+* **More misses: about 0.3 ms [+0.09].** The pool arm has 13.3 fetches per step against 11.1,
+  and 16.0 against 9.9 in steps 1-16. That covers the cold start after the 1M prefill plus 16
+  fewer arena slots.
+* **Write-back burst: about 0.15 ms [+0.08].** It runs at 56-75 MB/step in steps 17-128, twice
+  the later 34 MB/step, costing about 9 staging copies per step.
+* **Mirror bookkeeping: about 0.1 ms [+0.1]**, constant (resolve_swaps, publish_freed and a
+  longer ensure_experts).
+
+The in-graph SM write-back path is not a fix. mirror-wb0 is slower everywhere: 83% over steps
+1-128 and 92% after, because its in-graph write-back stores cost more than the fetch slowdown
+the DMA causes. The DMA ring stays.
+
+No fix is applied. Directions the data supports:
+1. Issue the write-back DMA while decode attention runs. Stage 1 takes 3.6 ms per step at 1M and
+   uses no PCIe, so write-backs would stop overlapping the fetch kernels. This would remove most
+   of the ~0.5 ms fetch slowdown.
+2. Cut the write-back volume at long context with a larger duplicate budget, so more victims are
+   already in the pool. This costs host RAM.
