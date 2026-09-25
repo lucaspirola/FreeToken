@@ -1458,8 +1458,9 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
 
 // The column tile J that mul_mat_q_switch_J launches for ``ncols_max`` columns (fewest tiles, the
 // smallest J among equals). The y-tile loads read J whole columns of every K group from each
-// tile's first column without a bound, so the last tile reads up to J - 1 blocks of
-// block_q8_1_mmq past the quantized activations: the caller pads y by J blocks. (The padding used
+// tile's first column without a bound, rounded up to a multiple of the block's thread count, so
+// the last tile reads past the quantized activations: the caller pads y by that extent
+// (mmq_y_pad_blocks in mmq_ext.cu). (The padding used
 // to come from a J_max rounded DOWN from ne11 -- 0 for ne11 < 8, and the MoE entry passed ne11 = 1
 // -- so a 7-token call read 144 B past its buffer: the illegal address of the round-2 suite at
 // tests/kernels/test_gguf_mma.py::test_mma_matches_reference[7-12].)

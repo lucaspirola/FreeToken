@@ -66,21 +66,27 @@ def test_mma_matches_reference(qtype, tokens):
 @pytest.mark.parametrize("qtype", [GGML_Q4_K, GGML_Q6_K])
 @pytest.mark.parametrize("nrows", [320, 512])
 def test_activation_padding_covers_the_launched_tile(qtype, nrows):
-    """The y-tile loads read J whole columns from each column tile's start, so the
-    last tile reads up to J - 1 blocks past the quantized activations; both entry
-    points must pad them by the J they launch. The pad used to be a J_max rounded
-    DOWN from ne11 -- 0 blocks for fewer than 8 columns, and the MoE entry passed
-    ne11 = 1 -- and a 7-token call read 144 B past its buffer: the illegal address
-    of the round-2 suite at test_mma_matches_reference[7-12] (whether it faults
-    depends on what the caching allocator placed after the buffer, hence a check
-    of the sizing rule rather than of a crash)."""
+    """Each y-tile load of mul_mat_q copies J * MMQ_TILE_Y_K ints from its column tile's
+    first column in steps of nthreads with no bound on the index, so it reads
+    ceil(J * 36 / nthreads) * nthreads ints; the last tile starts at most one block
+    before the end of the quantized activations, so both entry points must pad them by
+    that extent. Two short pads faulted the round-2 suite:
+    * a J_max rounded DOWN from ne11 (0 blocks for fewer than 8 columns; the MoE entry
+      passed ne11 = 1): test_mma_matches_reference[7-12] read 144 B past its buffer;
+    * J blocks (fe95df1): J = 8 on a 256-thread config reads 512 ints = 14.2 blocks,
+      and memcheck without the caching allocator flagged the 1-token call reading
+      bytes 1792..1919 of its 1728 B buffer.
+    Whether the read faults depends on what the caching allocator placed after the
+    buffer, hence a check of the sizing rule rather than of a crash."""
     from freetoken.kernel.gguf import _mma_module
 
     hook = _mma_module().mmq_tile_and_pad
+    tile_y_k = 32 + 32 // 8  # MMQ_TILE_Y_K ints per column = one block_q8_1_mmq
     for ncols in list(range(1, 300)) + [511, 512, 513, 4096, 8192]:
-        tile, pad = hook(qtype, nrows, ncols)
+        tile, nthreads, pad = hook(qtype, nrows, ncols)
         assert 8 <= tile <= 128 and tile % 8 == 0, (ncols, tile)
-        assert pad >= tile, (ncols, tile, pad)
+        read_ints = -(-tile * tile_y_k // nthreads) * nthreads
+        assert pad * tile_y_k >= read_ints, (ncols, tile, nthreads, pad)
 
 
 @pytest.mark.parametrize("qtype", [GGML_Q4_K, GGML_Q6_K])
