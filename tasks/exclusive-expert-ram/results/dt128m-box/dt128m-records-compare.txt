@@ -1,0 +1,17 @@
+== dt128m-mirror-1m (a2f08c0ad) vs nemotron-reserve-2e-1m (None)
+  decode_1000k          72.7 vs    72.9   99.7%  ok   total 796.6 s, ttft 789.59 s
+  decode_1000k_p1       71.0 vs    76.9   92.3%  ok   total 797.4 s, ttft 790.22 s
+  decode_8k            165.6 vs   170.7   97.0%  ok   total 4.1 s, ttft 0.99 s
+  decode_8k_p1         164.4 vs   177.0   92.9%  ok   total 3.5 s, ttft 0.42 s
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            12.2 (record 12.26)  free_evict_rate 0.821 (record 0.565)
+  ram 12.26 +/- 0.6  ok
+Traceback (most recent call last):
+  File "/root/FT-dh/tasks/exclusive-expert-ram/compare_records.py", line 23, in <module>
+    a, r = load(arm), load(ref)
+           ^^^^^^^^^
+  File "/root/FT-dh/tasks/exclusive-expert-ram/compare_records.py", line 20, in <lambda>
+    load = lambda n: json.load(open(os.path.join(d, f"{n}-record.json")))
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/root/FT-dh/tasks/exclusive-expert-ram/results/dt128m-box/dt128m-mirror-record.json'

@@ -1,0 +1,65 @@
+=== dhw-np 83b6c19 Results: decode-level headroom p envs=[FREETOKEN_DECODE_MEM_PROBE=1 ] 2026-09-25T11:11:26+04:00
+{"target": 8000, "pass": 1, "prompt_tokens": 8014, "ttft_s": 0.25, "prefill_tok_s": 32512.0, "gen_tokens": 127, "decode_tok_s": 169.4, "decode_tok_s_wall": 169.
+{"target": 80000, "pass": 1, "prompt_tokens": 80028, "ttft_s": 10.99, "prefill_tok_s": 7280.0, "gen_tokens": 127, "decode_tok_s": 151.5, "decode_tok_s_wall": 15
+{"target": 8000, "pass": 2, "prompt_tokens": 8016, "ttft_s": 0.81, "prefill_tok_s": 9944.0, "gen_tokens": 127, "decode_tok_s": 167.5, "decode_tok_s_wall": 167.5
+{"target": 80000, "pass": 2, "prompt_tokens": 80030, "ttft_s": 11.17, "prefill_tok_s": 7164.0, "gen_tokens": 127, "decode_tok_s": 159.0, "decode_tok_s_wall": 15
+[2026-09-25|11:13:20|core|rank=0] INFO     Decode memory window closed (prefill): 62 samples, target free 0.38 GiB, free after release 0.41 GiB, min free 0.41 GiB (drop 0.00 GiB), reserved rise 0.00 GiB, allocated peak rise 0.00 GiB
+[2026-09-25|11:13:21|core|rank=0] INFO     Decode memory window closed (prefill): 62 samples, target free 0.38 GiB, free after release 0.41 GiB, min free 0.41 GiB (drop 0.00 GiB), reserved rise 0.00 GiB, allocated peak rise 0.00 GiB
+[2026-09-25|11:13:22|core|rank=0] INFO     Decode memory window closed (prefill): 126 samples, target free 0.38 GiB, free after release 0.41 GiB, min free 0.41 GiB (drop 0.00 GiB), reserved rise 0.00 GiB, allocated peak rise 0.00 GiB
+[2026-09-25|11:13:31|core|rank=0] INFO     KV commit memory: 0.21 GiB mapped, free 1.37 GiB -> 1.16 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:13:34|core|rank=0] INFO     Decode memory window closed (prefill): 126 samples, target free 0.38 GiB, free after release 0.41 GiB, min free 0.41 GiB (drop 0.00 GiB), reserved rise 0.00 GiB, allocated peak rise 0.00 GiB
+[2026-09-25|11:13:36|core|rank=0] INFO     Decode memory window closed (prefill): 126 samples, target free 0.38 GiB, free after release 0.41 GiB, min free 0.41 GiB (drop 0.00 GiB), reserved rise 0.00 GiB, allocated peak rise 0.00 GiB
+[2026-09-25|11:13:44|core|rank=0] INFO     KV commit memory: 0.21 GiB mapped, free 1.37 GiB -> 1.16 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+=== dhw-128 83b6c19 Results: decode-level headroom p envs=[FREETOKEN_DECODE_MEM_PROBE=1 FREETOKEN_DECODE_FREE_TARGET_MB=128] 2026-09-25T11:14:14+04:00
+{"target": 8000, "pass": 1, "prompt_tokens": 8014, "ttft_s": 0.26, "prefill_tok_s": 30546.0, "gen_tokens": 127, "decode_tok_s": 159.2, "decode_tok_s_wall": 159.
+{"target": 80000, "pass": 1, "prompt_tokens": 80028, "ttft_s": 11.31, "prefill_tok_s": 7073.0, "gen_tokens": 127, "decode_tok_s": 146.4, "decode_tok_s_wall": 14
+{"target": 8000, "pass": 2, "prompt_tokens": 8016, "ttft_s": 0.8, "prefill_tok_s": 10004.0, "gen_tokens": 127, "decode_tok_s": 163.5, "decode_tok_s_wall": 163.5
+{"target": 80000, "pass": 2, "prompt_tokens": 80030, "ttft_s": 11.1, "prefill_tok_s": 7212.0, "gen_tokens": 127, "decode_tok_s": 153.4, "decode_tok_s_wall": 153
+[2026-09-25|11:15:37|core|rank=0] INFO     Decode memory window closed (prefill): 62 samples, target free 0.12 GiB, free after release 0.16 GiB, min free 0.16 GiB (drop 0.00 GiB), reserved rise 0.00 GiB, allocated peak rise 0.00 GiB
+[2026-09-25|11:15:38|core|rank=0] INFO     Decode memory window closed (prefill): 62 samples, target free 0.12 GiB, free after release 0.16 GiB, min free 0.16 GiB (drop 0.00 GiB), reserved rise 0.00 GiB, allocated peak rise 0.00 GiB
+[2026-09-25|11:15:39|core|rank=0] INFO     Decode memory window closed (prefill): 126 samples, target free 0.12 GiB, free after release 0.16 GiB, min free 0.16 GiB (drop 0.00 GiB), reserved rise 0.00 GiB, allocated peak rise 0.00 GiB
+[2026-09-25|11:15:47|core|rank=0] INFO     KV commit memory: 0.21 GiB mapped, free 1.37 GiB -> 1.16 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:15:51|core|rank=0] INFO     Decode memory window closed (prefill): 126 samples, target free 0.12 GiB, free after release 0.16 GiB, min free 0.15 GiB (drop 0.00 GiB), reserved rise 0.00 GiB, allocated peak rise 0.00 GiB
+[2026-09-25|11:15:53|core|rank=0] INFO     Decode memory window closed (prefill): 126 samples, target free 0.12 GiB, free after release 0.16 GiB, min free 0.16 GiB (drop 0.00 GiB), reserved rise 0.00 GiB, allocated peak rise 0.00 GiB
+[2026-09-25|11:16:01|core|rank=0] INFO     KV commit memory: 0.21 GiB mapped, free 1.37 GiB -> 1.16 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+=== dhw-1m 83b6c19 Results: decode-level headroom p envs=[FREETOKEN_DECODE_MEM_PROBE=1 ] 2026-09-25T11:16:31+04:00
+{"target": 8000, "pass": 1, "prompt_tokens": 8014, "ttft_s": 0.25, "prefill_tok_s": 32126.0, "gen_tokens": 127, "decode_tok_s": 166.9, "decode_tok_s_wall": 166.
+{"target": 1000000, "pass": 1, "prompt_tokens": 1000030, "ttft_s": 793.34, "prefill_tok_s": 1261.0, "gen_tokens": 127, "decode_tok_s": 79.7, "decode_tok_s_wall"
+{"target": 8000, "pass": 2, "prompt_tokens": 8016, "ttft_s": 0.95, "prefill_tok_s": 8420.0, "gen_tokens": 127, "decode_tok_s": 161.3, "decode_tok_s_wall": 161.3
+{"target": 1000000, "pass": 2, "prompt_tokens": 1000032, "ttft_s": 794.26, "prefill_tok_s": 1259.0, "gen_tokens": 127, "decode_tok_s": 85.9, "decode_tok_s_wall"
+[2026-09-25|11:17:59|core|rank=0] INFO     Decode memory window closed (prefill): 62 samples, target free 0.38 GiB, free after release 0.41 GiB, min free 0.41 GiB (drop 0.00 GiB), reserved rise 0.00 GiB, allocated peak rise 0.00 GiB
+[2026-09-25|11:18:00|core|rank=0] INFO     Decode memory window closed (prefill): 62 samples, target free 0.38 GiB, free after release 0.41 GiB, min free 0.41 GiB (drop 0.00 GiB), reserved rise 0.00 GiB, allocated peak rise 0.00 GiB
+[2026-09-25|11:18:05|core|rank=0] INFO     Decode memory window closed (prefill): 126 samples, target free 0.38 GiB, free after release 0.41 GiB, min free 0.41 GiB (drop 0.00 GiB), reserved rise 0.00 GiB, allocated peak rise 0.00 GiB
+[2026-09-25|11:18:14|core|rank=0] INFO     KV commit memory: 0.21 GiB mapped, free 1.37 GiB -> 1.16 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:18:28|core|rank=0] INFO     KV commit memory: 0.19 GiB mapped, free 1.33 GiB -> 1.14 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:18:48|core|rank=0] INFO     KV commit memory: 0.21 GiB mapped, free 1.35 GiB -> 1.14 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:19:15|core|rank=0] INFO     KV commit memory: 0.19 GiB mapped, free 1.35 GiB -> 1.16 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:19:48|core|rank=0] INFO     KV commit memory: 0.21 GiB mapped, free 1.37 GiB -> 1.16 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:20:26|core|rank=0] INFO     KV commit memory: 0.19 GiB mapped, free 1.33 GiB -> 1.14 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:21:12|core|rank=0] INFO     KV commit memory: 0.21 GiB mapped, free 1.35 GiB -> 1.14 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:22:02|core|rank=0] INFO     KV commit memory: 0.19 GiB mapped, free 1.35 GiB -> 1.16 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:22:59|core|rank=0] INFO     KV commit memory: 0.21 GiB mapped, free 1.37 GiB -> 1.16 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:24:03|core|rank=0] INFO     KV commit memory: 0.19 GiB mapped, free 1.33 GiB -> 1.14 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:25:12|core|rank=0] INFO     KV commit memory: 0.21 GiB mapped, free 1.35 GiB -> 1.14 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:26:27|core|rank=0] INFO     KV commit memory: 0.19 GiB mapped, free 1.35 GiB -> 1.16 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:27:48|core|rank=0] INFO     KV commit memory: 0.21 GiB mapped, free 1.37 GiB -> 1.16 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:29:16|core|rank=0] INFO     KV commit memory: 0.19 GiB mapped, free 1.33 GiB -> 1.14 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:30:49|core|rank=0] INFO     KV commit memory: 0.21 GiB mapped, free 1.34 GiB -> 1.13 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:31:16|core|rank=0] INFO     Decode memory window closed (prefill): 126 samples, target free 0.38 GiB, free after release 0.41 GiB, min free 0.41 GiB (drop 0.00 GiB), reserved rise 0.00 GiB, allocated peak rise 0.01 GiB
+[2026-09-25|11:31:22|core|rank=0] INFO     Decode memory window closed (prefill): 126 samples, target free 0.38 GiB, free after release 0.41 GiB, min free 0.41 GiB (drop 0.00 GiB), reserved rise 0.00 GiB, allocated peak rise 0.00 GiB
+[2026-09-25|11:31:31|core|rank=0] INFO     KV commit memory: 0.21 GiB mapped, free 1.37 GiB -> 1.16 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:31:45|core|rank=0] INFO     KV commit memory: 0.19 GiB mapped, free 1.33 GiB -> 1.14 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:32:06|core|rank=0] INFO     KV commit memory: 0.21 GiB mapped, free 1.35 GiB -> 1.14 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:32:32|core|rank=0] INFO     KV commit memory: 0.19 GiB mapped, free 1.35 GiB -> 1.16 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:33:05|core|rank=0] INFO     KV commit memory: 0.21 GiB mapped, free 1.37 GiB -> 1.16 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:33:44|core|rank=0] INFO     KV commit memory: 0.19 GiB mapped, free 1.33 GiB -> 1.14 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:34:29|core|rank=0] INFO     KV commit memory: 0.21 GiB mapped, free 1.35 GiB -> 1.14 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:35:20|core|rank=0] INFO     KV commit memory: 0.19 GiB mapped, free 1.35 GiB -> 1.16 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:36:17|core|rank=0] INFO     KV commit memory: 0.21 GiB mapped, free 1.37 GiB -> 1.16 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:37:20|core|rank=0] INFO     KV commit memory: 0.19 GiB mapped, free 1.33 GiB -> 1.14 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:38:29|core|rank=0] INFO     KV commit memory: 0.21 GiB mapped, free 1.35 GiB -> 1.14 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:39:44|core|rank=0] INFO     KV commit memory: 0.19 GiB mapped, free 1.35 GiB -> 1.16 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:41:06|core|rank=0] INFO     KV commit memory: 0.21 GiB mapped, free 1.37 GiB -> 1.16 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:42:33|core|rank=0] INFO     KV commit memory: 0.19 GiB mapped, free 1.33 GiB -> 1.14 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+[2026-09-25|11:44:06|core|rank=0] INFO     KV commit memory: 0.21 GiB mapped, free 1.34 GiB -> 1.13 GiB, overhead 0.00 GiB (cushion 0.25 GiB)
+DHW-DONE

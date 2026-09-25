@@ -1,0 +1,60 @@
+[dhw-np] starting: model=NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 rows=-1 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/decode-headroom@83b6c19 venv=/home/lucas/ai/FreeToken/.venv launcher=systemd
+Running as unit: ft-measure-dhw-np.service; invocation ID: 5567213860534e718c53031f2ff00395
+[dhw-np] ready after 87s
+Sep 25 11:11:40 TESSERACT serve-default.sh[3258186]: [2026-09-25|11:11:40|core|rank=0] INFO     Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode graphs enabled, prefill overlap on (layers assembled from resident slots + pool rows, no disk)
+Sep 25 11:11:40 TESSERACT serve-default.sh[3258186]: [2026-09-25|11:11:40|core|rank=0] INFO     Mirror pool: reserve resolved to 256 rows (FREETOKEN_MIRROR_RESERVE_ROWS='256')
+Sep 25 11:12:07 TESSERACT serve-default.sh[3258186]: [2026-09-25|11:12:07|core|rank=0] INFO     Mirror pool: 1866 rows pinned (9.77 GiB), 771 cover the complement of 2173 GPU residents, 256 reserved, up to 839 duplicates (a duplicate makes its expert's next eviction free of any host traffic)
+Sep 25 11:12:07 TESSERACT serve-default.sh[3258186]: [2026-09-25|11:12:07|core|rank=0] INFO     Mirror pool: the coverage floor is 1336 of 2173 arena slots, leaving 837 slots (4.38 GiB) the growable KV may still take
+Sep 25 11:12:07 TESSERACT serve-default.sh[3258186]: [2026-09-25|11:12:07|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+Sep 25 11:12:53 TESSERACT serve-default.sh[3258186]: [2026-09-25|11:12:53|core|rank=0] INFO     Prefill headroom: transient 1.00 GiB measured on a 8192-token chunk (empty prefix 1.00 GiB, after a 8192-token prefix 1.00 GiB, allocator peak 0.59 GiB); headroom 1.00 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 1336 -> 1928 of 2173 slots, 1.15 GiB free (target 1.13 GiB), 245 slots below the ratio plan
+[dhw-np] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8014, "ttft_s": 0.25, "prefill_tok_s": 32512.0, "gen_tokens": 127, "decode_tok_s": 169.4, "decode_tok_s_wall": 169.4, "total_s": 1.0, "ttft_mono_s": 0.246, "prefill_tok_s_mono": 32512.0, "total_mono_s": 0.99, "t_start_wall": 1790320401.642, "gap1_ms": 22.5, "max_gap_ms": 22.5, "median_gap_ms": 5.7, "decode_tok_s_after_gap1": 173.3}
+{"target": 80000, "pass": 1, "prompt_tokens": 80028, "ttft_s": 10.99, "prefill_tok_s": 7280.0, "gen_tokens": 127, "decode_tok_s": 151.5, "decode_tok_s_wall": 151.5, "total_s": 11.8, "ttft_mono_s": 10.993, "prefill_tok_s_mono": 7280.0, "total_mono_s": 11.83, "t_start_wall": 1790320402.634, "gap1_ms": 31.0, "max_gap_ms": 31.0, "median_gap_ms": 6.3, "decode_tok_s_after_gap1": 156.1}
+{"target": 8000, "pass": 2, "prompt_tokens": 8016, "ttft_s": 0.81, "prefill_tok_s": 9944.0, "gen_tokens": 127, "decode_tok_s": 167.5, "decode_tok_s_wall": 167.5, "total_s": 1.6, "ttft_mono_s": 0.806, "prefill_tok_s_mono": 9944.0, "total_mono_s": 1.56, "t_start_wall": 1790320414.46, "gap1_ms": 26.1, "max_gap_ms": 26.1, "median_gap_ms": 5.8, "decode_tok_s_after_gap1": 172.1}
+{"target": 80000, "pass": 2, "prompt_tokens": 80030, "ttft_s": 11.17, "prefill_tok_s": 7164.0, "gen_tokens": 127, "decode_tok_s": 159.0, "decode_tok_s_wall": 159.0, "total_s": 12.0, "ttft_mono_s": 11.17, "prefill_tok_s_mono": 7164.0, "total_mono_s": 11.96, "t_start_wall": 1790320416.019, "gap1_ms": 33.8, "max_gap_ms": 33.8, "median_gap_ms": 6.0, "decode_tok_s_after_gap1": 164.7}
+{
+  "arm": "dhw-np",
+  "model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+  "rows": "-1",
+  "commit": "83b6c19",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 12.84,
+  "rss_ready_gib": 13.9,
+  "devzero_gib": 0.09,
+  "ram_after_80k_gib": 12.79,
+  "rss_gib": 13.93,
+  "locked_gib": 0.0,
+  "anon_gib": 12.8,
+  "file_gib": 0.67,
+  "unevict_gib": 0.0,
+  "shmem_gib": 0.09,
+  "current_gib": 13.53,
+  "peak_current_gib": 14.39,
+  "gpu_mib": "14580",
+  "decode_8k_p1": 169.4,
+  "ttft_8k_p1": 0.25,
+  "total_8k_p1": 1.0,
+  "ttft_mono_8k_p1": 0.25,
+  "decode_80k_p1": 151.5,
+  "ttft_80k_p1": 10.99,
+  "total_80k_p1": 11.8,
+  "ttft_mono_80k_p1": 10.99,
+  "decode_8k": 167.5,
+  "ttft_8k": 0.81,
+  "total_8k": 1.6,
+  "ttft_mono_8k": 0.81,
+  "decode_80k": 159.0,
+  "ttft_80k": 11.17,
+  "total_80k": 12.0,
+  "ttft_mono_80k": 11.17,
+  "coverage_faults": 0,
+  "starved": 0,
+  "swaps": 5299,
+  "retained_rows": 4165,
+  "free_evict_rate": 0.843,
+  "buffer_free_evictions": 1256
+}
+69 arms -> /home/lucas/ai/FreeToken-wt/decode-headroom/tasks/exclusive-expert-ram/results/sweep.tsv
+[dhw-np] stopping

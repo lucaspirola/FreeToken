@@ -35,6 +35,7 @@ one-line delegations, so the scheduler's call sites are unchanged.
 from __future__ import annotations
 
 import math
+import os
 import time
 
 import torch
@@ -543,8 +544,69 @@ class GrowableKvController:
         GiB), the level every start held before the transient was measured. A
         decode step allocates no activations outside its captured graph pool, so
         the transient is dead weight between prefills, and the cushion still
-        covers a KV grow at a decode boundary and host-side restores."""
+        covers a KV grow at a decode boundary and host-side restores.
+
+        ``FREETOKEN_DECODE_FREE_TARGET_MB`` overrides it for measurement only (the
+        decode-level A/B); ``FREETOKEN_DECODE_MEM_PROBE=1`` logs what decode windows
+        actually use (``_sample_decode_memory``)."""
+        override = os.environ.get("FREETOKEN_DECODE_FREE_TARGET_MB", "").strip()
+        if override:
+            return int(float(override) * 1024 * 1024)
         return growable_headroom_bytes(0) + PREFILL_HEADROOM_MARGIN_BYTES
+
+    # ------------------------------------------------------------------
+    # Decode memory probe (FREETOKEN_DECODE_MEM_PROBE=1): what a decode window
+    # really takes out of the free VRAM the decode level holds back. Sampled at
+    # every batch boundary of a window (prefill_headroom_transition), opened by
+    # release_prefill_headroom, closed by the next reserve or KV grow.
+    # ------------------------------------------------------------------
+
+    _DECODE_MEM_PROBE = os.environ.get("FREETOKEN_DECODE_MEM_PROBE", "0").strip() not in (
+        "", "0", "false", "no", "off",
+    )
+
+    def _open_decode_memory_window(self) -> None:
+        if not self._DECODE_MEM_PROBE:
+            return
+        dev = self.engine.device
+        torch.cuda.reset_peak_memory_stats(dev)
+        free = int(torch.cuda.mem_get_info(dev)[0])
+        self._mem_window = {
+            "samples": 0,
+            "free0": free,
+            "free_min": free,
+            "reserved0": int(torch.cuda.memory_reserved(dev)),
+            "reserved_max": int(torch.cuda.memory_reserved(dev)),
+            "allocated0": int(torch.cuda.memory_allocated(dev)),
+        }
+
+    def _sample_decode_memory(self) -> None:
+        w = getattr(self, "_mem_window", None)
+        if w is None:
+            return
+        dev = self.engine.device
+        w["samples"] += 1
+        w["free_min"] = min(w["free_min"], int(torch.cuda.mem_get_info(dev)[0]))
+        w["reserved_max"] = max(w["reserved_max"], int(torch.cuda.memory_reserved(dev)))
+        if w["samples"] % 4096 == 0:
+            self._log_decode_memory_window(closing=False)
+
+    def _log_decode_memory_window(self, *, closing: bool, why: str = "") -> None:
+        w = getattr(self, "_mem_window", None)
+        if w is None:
+            return
+        dev = self.engine.device
+        peak = int(torch.cuda.max_memory_allocated(dev))
+        logger.info_rank0(
+            "Decode memory window%s: %d samples, target free %s, free after release %s, "
+            "min free %s (drop %s), reserved rise %s, allocated peak rise %s",
+            f" closed ({why})" if closing else " (running)",
+            w["samples"], mem_GB(self.decode_free_target_bytes()), mem_GB(w["free0"]),
+            mem_GB(w["free_min"]), mem_GB(w["free0"] - w["free_min"]),
+            mem_GB(w["reserved_max"] - w["reserved0"]), mem_GB(peak - w["allocated0"]),
+        )
+        if closing:
+            self._mem_window = None
 
     def dynamic_enabled(self) -> bool:
         """On unless ``FREETOKEN_DYNAMIC_PREFILL_HEADROOM=0`` (the static
@@ -574,6 +636,8 @@ class GrowableKvController:
         if not self.dynamic_enabled():
             return None
         full = bool(getattr(self, "_decode_level", False))
+        if full and not prefill:
+            self._sample_decode_memory()
         if prefill and full:
             return "reserve"
         if not prefill and not prefill_pending and not full:
@@ -616,6 +680,7 @@ class GrowableKvController:
         t0 = time.perf_counter()
         torch.cuda.synchronize(self.engine.device)
         self._log_decode_window(moe)
+        self._log_decode_memory_window(closing=True, why="prefill")
         live_free = self.engine._sync_get_memory()[0]
         target_moe = old_moe
         released = 0
@@ -679,6 +744,7 @@ class GrowableKvController:
                 self.engine.sync_all_ranks()
         self._decode_level = True
         self._release_decode_totals = self._decode_totals(moe)
+        self._open_decode_memory_window()
         logger.info_rank0(
             "Prefill headroom released to decode: MoE slots %d -> %d (%s committed, "
             "%s free before, target %s, %.1f ms)",
@@ -858,7 +924,20 @@ class GrowableKvController:
                         f"need {mem_GB(required_free)} free, have "
                         f"{mem_GB(live_free)}{hint}"
                     )
+            if self._DECODE_MEM_PROBE:
+                dev = self.engine.device
+                free_pre = int(torch.cuda.mem_get_info(dev)[0])
             pool.commit_pages(target_pages)
+            if self._DECODE_MEM_PROBE:
+                torch.cuda.synchronize(dev)
+                free_post = int(torch.cuda.mem_get_info(dev)[0])
+                # What the commit took beyond the pages it mapped: the cushion's evidence.
+                logger.info_rank0(
+                    "KV commit memory: %s mapped, free %s -> %s, overhead %s (cushion %s)",
+                    mem_GB(commit_bytes), mem_GB(free_pre), mem_GB(free_post),
+                    mem_GB(free_pre - free_post - commit_bytes),
+                    mem_GB(VMM_COMMIT_CUSHION_BYTES),
+                )
             if self.engine.config.tp_info.size > 1:
                 self.engine.sync_all_ranks()
         except Exception:
@@ -874,6 +953,7 @@ class GrowableKvController:
         # The grow left the prefill headroom free; decode takes it back at the
         # next decode-only boundary (release_prefill_headroom).
         self._decode_level = False
+        self._log_decode_memory_window(closing=True, why="KV grow")
         logger.info_rank0(
             "Committed growable KV through %d tokens (%s physical); MoE slots %d -> %d",
             target_pages,

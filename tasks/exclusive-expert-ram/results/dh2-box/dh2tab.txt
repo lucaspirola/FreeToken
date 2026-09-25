@@ -1,0 +1,5 @@
+dt128-1-mirror-np: decode 8K p1 164.2 8K p2 170.1 80K p1 156.9 80K p2 158.8 | hit 0.9657 | windows 5 max drop 0.00 GiB | release slots ('2080', '2192') (6 releases) | faults 0 starved 0 captures 1 tracebacks 0 ooms 0
+dt128-2-mirror-np: decode 8K p1 164.3 8K p2 170.0 80K p1 156.8 80K p2 158.8 | hit 0.9657 | windows 5 max drop 0.00 GiB | release slots ('2080', '2192') (6 releases) | faults 0 starved 0 captures 1 tracebacks 0 ooms 0
+dt128m-mirror-1m: decode 8K p1 164.4 8K p2 165.6 1000K p1 71.0 1000K p2 72.7 | hit 0.9972 | windows 27 max drop 0.02 GiB | release slots ('2008', '2120') (28 releases) | faults 0 starved 0 captures 1 tracebacks 0 ooms 0
+dtdef-1-mirror-np: decode 8K p1 162.0 8K p2 166.6 80K p1 153.7 80K p2 156.1 | hit 0.9624 | windows 5 max drop 0.00 GiB | release slots ('2080', '2144') (6 releases) | faults 0 starved 0 captures 1 tracebacks 0 ooms 0
+dtdef-2-mirror-np: decode 8K p1 161.9 8K p2 166.5 80K p1 153.7 80K p2 156.2 | hit 0.9624 | windows 5 max drop 0.00 GiB | release slots ('2080', '2144') (6 releases) | faults 0 starved 0 captures 1 tracebacks 0 ooms 0
