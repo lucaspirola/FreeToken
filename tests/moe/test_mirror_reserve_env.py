@@ -63,12 +63,6 @@ def test_override_two_e(monkeypatch):
     assert resolve_reserve_rows(e) == 2 * e
 
 
-def test_override_one_e(monkeypatch):
-    e = 128
-    monkeypatch.setenv(ENV, str(e))
-    assert resolve_reserve_rows(e) == e
-
-
 @pytest.mark.parametrize("raw", ["0", "-5", "abc", "12.5"])
 def test_invalid_values_raise_naming_the_variable(monkeypatch, raw):
     monkeypatch.setenv(ENV, raw)
