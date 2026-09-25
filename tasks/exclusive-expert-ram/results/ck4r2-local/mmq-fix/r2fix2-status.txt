@@ -1,0 +1,8 @@
+start 10:27:47
+V tree a1e06dccb gguf MMQ: pad the MoE ids_dst map by the launched column tile 63abc831f gguf MMQ: pad the quantized activations by the y-load extent, not J blocks 76a
+V1 d31a680+fe95df1+d56a058+f528b2e gguf files memcheck no-caching rc=0 142 passed, 1 warning in 231.33s (0:03:51) | ========= ERROR SUMMARY: 0 errors | invalid: 0
+V2.1 d31a680+fix full sequence rc=0 3057 passed, 25 skipped, 2 warnings, 2 subtests passed in 512.44s (0:08:32) | 10:40:14 session finished clean-sync exit=0 | illegal: 0
+V2.2 d31a680+fix full sequence rc=0 3057 passed, 25 skipped, 2 warnings, 2 subtests passed in 492.13s (0:08:12) | 10:48:31 session finished clean-sync exit=0 | illegal: 0
+S tree f3e50a915 gguf MMQ: pad the MoE ids_dst map by the launched column tile 93bf7dcc7 gguf MMQ: pad the quantized activations by the y-load extent, not J blocks 8cc
+S round2+d56a058+f528b2e suite rc=0 3057 passed, 25 skipped, 2 warnings, 2 subtests passed in 498.91s (0:08:18) | illegal: 0
+ALLDONE

@@ -1,0 +1,8 @@
+  /root/FT-round2/python/freetoken/models/gguf/reader.py:112: UserWarning: The given NumPy array is not writable, and PyTorch does not support non-writable tensors. This means writing to this tensor will result in undefined behavior. You may want to copy the array to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at /pytorch/torch/csrc/utils/tensor_numpy.cpp:213.)
+    return torch.from_numpy(self._raw)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+3057 passed, 25 skipped, 2 warnings, 2 subtests passed in 498.91s (0:08:18)
+a1e37bcac064ef64e08015d516d4f18a  /root/r2fix2/V1-memcheck.log
+898d2f86df112b914b475ac448e42e47  /root/r2fix/V1-memcheck.log
+83dca5b23333b5bdd6f864d4090d091e  /root/wbfix/V1-memcheck.log

@@ -1,0 +1,9 @@
+........................................................................ [ 50%]
+......................................................................   [100%]
+=============================== warnings summary ===============================
+tests/moe/test_cpu_moe_mixed_gguf.py::test_mixed_gguf_bf16_layer_matches_native_fused_experts
+  /root/venv/lib/python3.12/site-packages/flashinfer/cute_dsl/utils.py:86: DeprecationWarning: Arch from arch.py is deprecated. Use Arch from enums.py instead.
+    from cutlass.base_dsl.arch import Arch
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+142 passed, 1 warning in 231.33s (0:03:51)
