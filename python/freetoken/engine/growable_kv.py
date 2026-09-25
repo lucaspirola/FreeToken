@@ -61,6 +61,15 @@ VMM_COMMIT_CUSHION_BYTES = 256 * 1024 * 1024
 # an Ornith 8192-token chunk (> 0.61 GiB of transient) could not run in.
 PREFILL_HEADROOM_MARGIN_BYTES = 128 * 1024 * 1024
 
+# Live free VRAM the decode level keeps (GrowableKvController.decode_free_target_bytes).
+# Decode allocates nothing outside its captured graph pool, and a KV grow at a decode
+# boundary shrinks the arena to its own headroom first (_grow_runtime_kv_arena), so decode
+# needs no VMM cushion of its own. Measured (exp/decode-headroom, FREETOKEN_DECODE_MEM_PROBE):
+# decode windows drop at most 0.02 GiB of free VRAM on Linux (ft-dev) and 0.00 on WSL (the
+# owner's host); 128 MiB against the old 0.375 GiB gave 48 more decode slots, +2.1% at 8K and
+# +1.7% at 80K (box, A/B/A), the 1M arm unchanged (0 faults, 0 starved, needles identical).
+DECODE_FREE_TARGET_BYTES = 128 * 1024 * 1024
+
 
 def growable_headroom_bytes(prefill_transient_bytes: int) -> int:
     """Live VRAM every growable-KV commit must leave free on top of the pages it maps.
@@ -540,19 +549,20 @@ class GrowableKvController:
 
     @staticmethod
     def decode_free_target_bytes() -> int:
-        """Live free VRAM decode keeps: the bare VMM cushion plus the margin (0.375
-        GiB), the level every start held before the transient was measured. A
-        decode step allocates no activations outside its captured graph pool, so
-        the transient is dead weight between prefills, and the cushion still
-        covers a KV grow at a decode boundary and host-side restores.
+        """Live free VRAM decode keeps: ``DECODE_FREE_TARGET_BYTES`` (128 MiB), the
+        same for every model. A decode step allocates no activations outside its
+        captured graph pool, so the prefill transient is dead weight between
+        prefills; a KV grow at a decode boundary makes its own room by shrinking
+        the arena. (Before round 3 this was the VMM cushion plus the margin,
+        0.375 GiB.)
 
-        ``FREETOKEN_DECODE_FREE_TARGET_MB`` overrides it for measurement only (the
-        decode-level A/B); ``FREETOKEN_DECODE_MEM_PROBE=1`` logs what decode windows
-        actually use (``_sample_decode_memory``)."""
+        ``FREETOKEN_DECODE_FREE_TARGET_MB`` overrides it (A/B, or a host whose
+        decode windows need more); ``FREETOKEN_DECODE_MEM_PROBE=1`` logs what
+        decode windows actually use (``_sample_decode_memory``)."""
         override = os.environ.get("FREETOKEN_DECODE_FREE_TARGET_MB", "").strip()
         if override:
             return int(float(override) * 1024 * 1024)
-        return growable_headroom_bytes(0) + PREFILL_HEADROOM_MARGIN_BYTES
+        return DECODE_FREE_TARGET_BYTES
 
     # ------------------------------------------------------------------
     # Decode memory probe (FREETOKEN_DECODE_MEM_PROBE=1): what a decode window

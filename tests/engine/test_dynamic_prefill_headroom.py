@@ -14,8 +14,8 @@ import pytest
 
 from freetoken.engine import growable_kv
 from freetoken.engine.growable_kv import (
+    DECODE_FREE_TARGET_BYTES,
     PREFILL_HEADROOM_MARGIN_BYTES,
-    VMM_COMMIT_CUSHION_BYTES,
     GrowableKvController,
 )
 
@@ -42,6 +42,7 @@ def _no_cuda(monkeypatch):
         ),
     )
     monkeypatch.delenv("FREETOKEN_DYNAMIC_PREFILL_HEADROOM", raising=False)
+    monkeypatch.delenv("FREETOKEN_DECODE_FREE_TARGET_MB", raising=False)
     return calls
 
 
@@ -91,7 +92,7 @@ def _controller(*, free_gib=0.5, transient_gib=1.0, **arena_kw):
 
 def test_levels():
     ctl, *_ = _controller()
-    assert ctl.decode_free_target_bytes() == VMM_COMMIT_CUSHION_BYTES + PREFILL_HEADROOM_MARGIN_BYTES
+    assert ctl.decode_free_target_bytes() == DECODE_FREE_TARGET_BYTES == 128 * MIB
     assert ctl.prefill_free_target_bytes() == GIB + PREFILL_HEADROOM_MARGIN_BYTES
 
 
@@ -108,27 +109,36 @@ def test_transitions_follow_the_batch_kind():
 
 def test_release_then_reserve_round_trip(_no_cuda):
     # Startup fill left the transient + margin free (1.125 GiB).
-    ctl, engine, moe, ledger = _controller(free_gib=1.125, size=512)
+    ctl, engine, moe, ledger = _controller(free_gib=1.125, size=512, capacity=2048)
     before, after = ctl.release_prefill_headroom()
     assert _no_cuda == ["empty_cache"]
-    # Decode keeps only cushion + margin (0.375 GiB): 0.75 GiB = 384 rows go back.
-    assert (before, after) == (512, 896)
+    # Decode keeps only 128 MiB: 1.0 GiB = 512 rows go back.
+    assert (before, after) == (512, 1024)
     assert ledger["free"] == ctl.decode_free_target_bytes()
-    assert engine.config.moe_cache_size == 896
+    assert engine.config.moe_cache_size == 1024
     assert ctl._decode_level is True
 
     before, after = ctl.reserve_prefill_headroom()
-    assert (before, after) == (896, 512)
+    assert (before, after) == (1024, 512)
     assert ledger["free"] >= ctl.prefill_free_target_bytes()
     assert ctl._decode_level is False
     assert engine.config.moe_cache_size == 512
 
 
 def test_release_never_leaves_less_than_the_decode_target():
-    ctl, _engine, moe, ledger = _controller(free_gib=0.3, size=512)
+    ctl, _engine, moe, ledger = _controller(free_gib=0.1, size=512)
     ctl.release_prefill_headroom()
-    assert moe.calls == []  # 0.3 GiB < the 0.375 GiB decode level: nothing to give
-    assert ledger["free"] == int(0.3 * GIB)
+    assert moe.calls == []  # 0.1 GiB < the 128 MiB decode level: nothing to give
+    assert ledger["free"] == int(0.1 * GIB)
+
+
+def test_release_keeps_the_override_level(monkeypatch):
+    monkeypatch.setenv("FREETOKEN_DECODE_FREE_TARGET_MB", "384")
+    ctl, _engine, moe, ledger = _controller(free_gib=1.125, size=512)
+    ctl.release_prefill_headroom()
+    # The old 0.375 GiB level, by override: 0.75 GiB = 384 rows go back.
+    assert moe.cache_size == 896
+    assert ledger["free"] == 384 * MIB
 
 
 def test_release_stops_at_capacity():
@@ -161,11 +171,17 @@ def test_env_restores_the_static_reservation(monkeypatch, value):
     assert ctl.prefill_headroom_transition(prefill=False, prefill_pending=False) is None
 
 
-def test_off_without_growable_kv_or_a_measured_transient_above_the_cushion():
+def test_off_without_growable_kv_or_a_prefill_level_above_the_decode_level(monkeypatch):
     ctl, engine, *_ = _controller()
     engine.config.kv_grow_step_tokens = 0
     assert not ctl.dynamic_enabled()
-    ctl, engine, *_ = _controller(transient_gib=0.1)  # below the 256 MiB cushion
+    # A transient below the 256 MiB cushion still holds the prefill level (cushion +
+    # margin, 0.375 GiB) above the 128 MiB decode level: the headroom moves.
+    ctl, engine, *_ = _controller(transient_gib=0.1)
+    assert ctl.dynamic_enabled()
+    # With the decode level overridden up to the prefill level, both are the same.
+    monkeypatch.setenv("FREETOKEN_DECODE_FREE_TARGET_MB", "384")
+    ctl, engine, *_ = _controller(transient_gib=0.1)
     assert not ctl.dynamic_enabled()
 
 
@@ -222,11 +238,11 @@ def test_release_then_teardown_shrink_still_reserves_before_the_next_prefill():
     # A long request's prefill ran at the prefill level; its decode takes the slots back.
     assert ctl.prefill_headroom_transition(prefill=False, prefill_pending=False) == "release"
     ctl.release_prefill_headroom()
-    assert moe.cache_size == 896
+    assert moe.cache_size == 1024
     # Teardown: KV 131072 -> 65536 returns 0.21 GiB. The arena is above the startup
     # fill, so it does not move, and free VRAM is well below the prefill target.
     _kv_shrink(ctl, engine, ledger, int(0.21 * GIB))
-    assert moe.cache_size == 896
+    assert moe.cache_size == 1024
     assert ledger["free"] < ctl.prefill_free_target_bytes()
     # The next request's first prefill chunk must reserve.
     assert ctl.prefill_headroom_transition(prefill=True, prefill_pending=True) == "reserve"
