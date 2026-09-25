@@ -13,7 +13,10 @@ Per client, in this order:
   next      the client's next turn of the post-/clear conversation (turn N+1 must resume
             turn N's end state)
 Only the main-model calls are replayed; the clients' side calls (Claude Code's
-0-tool call, omp's judge/title calls, Codex's title call) are left out.
+0-tool call, omp's judge/title calls, Codex's title call) are left out. The captures
+(capture.sh, redact.py) are picked by structure, not by row number: the main calls are the
+ones carrying the client's full tool list, and /clear is where their conversation length
+drops.
 """
 import json, os, sys, time, urllib.request, uuid, copy, glob
 
@@ -29,8 +32,16 @@ def rows(name):
     return [json.loads(l) for l in open(os.path.join(HERE, f"{name}.jsonl"))]
 
 
+def main_calls(R, items):
+    """(last call before /clear, first call after it, second call after it)."""
+    ntools = max(len(r["body"].get("tools") or []) for r in R if isinstance(r["body"], dict))
+    main = [r for r in R if isinstance(r["body"], dict) and len(r["body"].get("tools") or []) == ntools]
+    cut = next(i for i in range(1, len(main)) if len(main[i]["body"][items]) < len(main[i - 1]["body"][items]))
+    return main[cut - 1], main[cut], main[cut + 1]
+
+
 def filler():
-    src = sorted(glob.glob("/home/lucas/ai/FreeToken-wt/next-measure/python/freetoken/server/*.py"))
+    src = sorted(glob.glob(os.path.join(HERE, "..", "..", "python", "freetoken", "server", "*.py")))
     text = "Reference material the user pasted earlier in this session:\n\n"
     for p in src:
         text += f"=== {os.path.basename(p)} ===\n" + open(p).read() + "\n"
@@ -97,8 +108,7 @@ def cached(u):
 
 
 def claude_code():
-    R = rows("claude-code")
-    a, c = R[3], R[5]           # main call: pre-/clear turn 2, post-/clear turn 1
+    a, c, n = main_calls(rows("claude-code"), "messages")
 
     def prep(r):
         b = copy.deepcopy(r["body"]); b["model"] = MODEL; b["max_tokens"] = GEN; b["stream"] = True
@@ -107,12 +117,11 @@ def claude_code():
     A = prep(a); last = A["messages"][-1]
     last["content"] = [{"type": "text", "text": FILL}] + (last["content"] if isinstance(last["content"], list)
                                                            else [{"type": "text", "text": last["content"]}])
-    return "/v1/messages", cold, A, prep(c), a["headers"], c["headers"], prep(R[7]), R[7]["headers"]
+    return "/v1/messages", cold, A, prep(c), a["headers"], c["headers"], prep(n), n["headers"]
 
 
 def omp():
-    R = rows("omp")
-    a, c = R[29], R[33]         # main call: turn 2 of the /new session, turn 1 after /clear
+    a, c, n = main_calls(rows("omp"), "messages")
 
     def prep(r):
         b = copy.deepcopy(r["body"]); b["model"] = MODEL; b["max_completion_tokens"] = GEN; b["stream"] = True
@@ -123,12 +132,11 @@ def omp():
         last["content"] = [{"type": "text", "text": FILL}] + last["content"]
     else:
         last["content"] = FILL + "\n\n" + last["content"]
-    return "/v1/chat/completions", cold, A, prep(c), a["headers"], c["headers"], prep(R[37]), R[37]["headers"]
+    return "/v1/chat/completions", cold, A, prep(c), a["headers"], c["headers"], prep(n), n["headers"]
 
 
 def codex():
-    R = rows("codex")
-    a, c = R[3], R[5]           # main call: pre-/clear turn 2, post-/clear turn 1
+    a, c, n = main_calls(rows("codex"), "input")
 
     def prep(r):
         b = copy.deepcopy(r["body"]); b["model"] = MODEL; b["max_output_tokens"] = GEN; b["stream"] = True
@@ -137,7 +145,7 @@ def codex():
     A = prep(a)
     A["input"].insert(len(A["input"]) - 1, {"type": "message", "role": "user",
                                             "content": [{"type": "input_text", "text": FILL}]})
-    return "/v1/responses", cold, A, prep(c), a["headers"], c["headers"], prep(R[7]), R[7]["headers"]
+    return "/v1/responses", cold, A, prep(c), a["headers"], c["headers"], prep(n), n["headers"]
 
 
 out = {}
