@@ -1,0 +1,17 @@
+== dh-mirror-1m (a2f08c0ad) vs nemotron-reserve-2e-1m (None)
+  decode_1000k          69.9 vs    72.9   95.9%  ok   total 796.9 s, ttft 789.64 s
+  decode_1000k_p1       68.5 vs    76.9   89.1%  BELOW   total 797.9 s, ttft 790.49 s
+  decode_8k            162.1 vs   170.7   95.0%  ok   total 4.1 s, ttft 1.0 s
+  decode_8k_p1         161.8 vs   177.0   91.4%  ok   total 3.6 s, ttft 0.41 s
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            12.21 (record 12.26)  free_evict_rate 0.817 (record 0.565)
+  ram 12.26 +/- 0.6  ok
+Traceback (most recent call last):
+  File "/root/FT-dh/tasks/exclusive-expert-ram/compare_records.py", line 23, in <module>
+    a, r = load(arm), load(ref)
+           ^^^^^^^^^
+  File "/root/FT-dh/tasks/exclusive-expert-ram/compare_records.py", line 20, in <lambda>
+    load = lambda n: json.load(open(os.path.join(d, f"{n}-record.json")))
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/root/FT-dh/tasks/exclusive-expert-ram/results/dh-box/dh-mirror-record.json'
