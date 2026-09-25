@@ -76,17 +76,22 @@ def test_activation_padding_covers_the_launched_tile(qtype, nrows):
     * J blocks (fe95df1): J = 8 on a 256-thread config reads 512 ints = 14.2 blocks,
       and memcheck without the caching allocator flagged the 1-token call reading
       bytes 1792..1919 of its 1728 B buffer.
-    Whether the read faults depends on what the caching allocator placed after the
-    buffer, hence a check of the sizing rule rather than of a crash."""
+    The MoE entry's ids_dst map has the same unbounded fill: each tile copies J entries
+    from its first column, so the last expert's last tile reads up to J - 1 entries past
+    the routed rows (memcheck: 1..49 B past the 144 B ids_dst of the 9-token top-4 call
+    of test_moe_mma_matches_reference); ids_dst must be padded by J - 1 entries or more.
+    Whether the reads fault depends on what the caching allocator placed after the
+    buffers, hence a check of the sizing rules rather than of a crash."""
     from freetoken.kernel.gguf import _mma_module
 
     hook = _mma_module().mmq_tile_and_pad
     tile_y_k = 32 + 32 // 8  # MMQ_TILE_Y_K ints per column = one block_q8_1_mmq
     for ncols in list(range(1, 300)) + [511, 512, 513, 4096, 8192]:
-        tile, nthreads, pad = hook(qtype, nrows, ncols)
+        tile, nthreads, pad, ids_pad = hook(qtype, nrows, ncols)
         assert 8 <= tile <= 128 and tile % 8 == 0, (ncols, tile)
         read_ints = -(-tile * tile_y_k // nthreads) * nthreads
         assert pad * tile_y_k >= read_ints, (ncols, tile, nthreads, pad)
+        assert ids_pad >= tile - 1, (ncols, tile, ids_pad)
 
 
 @pytest.mark.parametrize("qtype", [GGML_Q4_K, GGML_Q6_K])
