@@ -1,0 +1,300 @@
+78202.555 match 16 walk 0 hit 0 snaps []
+78202.690 insert 17 prefix 0 end
+78202.935 match 8013 walk 8 hit 0 snaps []
+78203.930 insert 7936 prefix 8 chunk
+78203.930 match 7936 walk 7936 hit 7936 snaps [7936]
+78204.393 insert 8077 prefix 7936 end
+78224.460 match 8013 walk 8013 hit 7936 snaps [7936]
+78225.365 insert 8077 prefix 8054 end
+78225.429 match 8013 walk 8013 hit 7936 snaps [7936]
+78226.339 insert 8141 prefix 8077 end
+78226.365 match 8015 walk 9 hit 0 snaps []
+78227.017 insert 7936 prefix 9 chunk
+78227.018 match 7936 walk 7936 hit 7936 snaps [7936]
+78227.649 insert 8143 prefix 7936 end
+78227.756 match 19054 walk 3 hit 0 snaps []
+78228.372 insert 8064 prefix 3 chunk
+78228.372 match 8064 walk 8064 hit 8064 snaps [8064]
+78229.105 insert 16256 prefix 8064 chunk
+78229.105 match 16256 walk 16256 hit 16256 snaps [8064, 16256]
+78229.951 evict_mamba 1 cands [(0, 7936), (0, 7936), (1, 8064), (2, 17), (2, 8077), (2, 8077), (2, 8141), (2, 8143)]
+78229.951 evict_snap 7936 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78229.951 insert 18688 prefix 16256 chunk
+78229.951 match 18688 walk 18688 hit 18688 snaps [8064, 16256, 18688]
+78229.951 evict_mamba 1 cands [(0, 7936), (1, 8064), (1, 16256), (2, 17), (2, 8077), (2, 8077), (2, 8141), (2, 8143)]
+78229.952 evict_snap 7936 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<commit_prefix_boundary
+78229.952 insert 18800 prefix 18688 segment
+78229.952 match 18800 walk 18800 hit 18800 snaps [8064, 16256, 18688, 18800]
+78230.750 evict_mamba 1 cands [(1, 8064), (1, 16256), (1, 18688), (2, 17), (2, 8077), (2, 8077), (2, 8141), (2, 8143)]
+78230.750 evict_snap 18688 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78230.751 insert 18928 prefix 18800 chunk
+78230.751 match 18928 walk 18928 hit 18928 snaps [8064, 16256, 18800, 18928]
+78230.974 insert 19086 prefix 18928 end
+78230.974 match 19086 walk 19086 hit 19086 snaps [8064, 16256, 18800, 18928, 19086]
+78231.111 match 45478 walk 3 hit 0 snaps []
+78231.111 match 45478 walk 3 hit 0 snaps []
+78231.111 evict_mamba 1 cands [(1, 8064), (1, 16256), (1, 18928), (2, 17), (2, 8077), (2, 8077), (2, 8141), (2, 8143), (2, 18800)]
+78231.112 evict_snap 18928 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<_try_allocate_one<try_add_one
+78231.743 evict_mamba 1 cands [(1, 8064), (1, 16256), (2, 17), (2, 8077), (2, 8077), (2, 8141), (2, 8143), (2, 18800)]
+78231.743 evict_snap 16256 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78231.743 insert 8064 prefix 3 chunk
+78231.744 match 8064 walk 8064 hit 8064 snaps [8064]
+78232.498 evict_mamba 1 cands [(1, 8064), (2, 17), (2, 8077), (2, 8077), (2, 8141), (2, 8143), (2, 18800)]
+78232.498 evict_snap 8064 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78232.498 insert 16256 prefix 8064 chunk
+78232.498 match 16256 walk 16256 hit 16256 snaps [8064, 16256]
+78233.375 evict_mamba 1 cands [(1, 8064), (2, 17), (2, 8077), (2, 8077), (2, 8141), (2, 8143), (2, 18800)]
+78233.375 evict_snap 8064 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78233.375 insert 24448 prefix 16256 chunk
+78233.375 match 24448 walk 24448 hit 24448 snaps [16256, 24448]
+78233.375 evict_full 2619 evictable 16304
+78233.375 evict_snap 17 leaf True via evict_full<_allocate<allocate_paged<_prepare_batch<_schedule_next_batch
+78233.375 evict_snap 8077 leaf True via evict_full<_allocate<allocate_paged<_prepare_batch<_schedule_next_batch
+78233.375 evict_snap 8141 leaf True via evict_full<_allocate<allocate_paged<_prepare_batch<_schedule_next_batch
+78233.375 evict_snap 8077 leaf True via evict_full<_allocate<allocate_paged<_prepare_batch<_schedule_next_batch
+78234.345 insert 32640 prefix 24448 chunk
+78234.345 match 32640 walk 32640 hit 32640 snaps [16256, 24448, 32640]
+78234.345 evict_full 2647 evictable 8140
+78234.345 evict_snap 8143 leaf True via evict_full<_allocate<allocate_paged<_prepare_batch<_schedule_next_batch
+78235.400 insert 40832 prefix 32640 chunk
+78235.400 match 40832 walk 40832 hit 40832 snaps [16256, 24448, 32640, 40832]
+78236.564 insert 45184 prefix 40832 chunk
+78236.564 match 45184 walk 45184 hit 45184 snaps [16256, 24448, 32640, 40832, 45184]
+78236.567 insert 45300 prefix 45184 segment
+78236.568 match 45300 walk 45300 hit 45300 snaps [16256, 24448, 32640, 40832, 45184, 45300]
+78237.423 insert 45428 prefix 45300 chunk
+78237.424 match 45428 walk 45428 hit 45428 snaps [16256, 24448, 32640, 40832, 45184, 45300, 45428]
+78237.649 insert 45510 prefix 45428 end
+78237.649 match 45510 walk 45510 hit 45510 snaps [16256, 24448, 32640, 40832, 45184, 45300, 45428, 45510]
+78237.708 match 18993 walk 3587 hit 0 snaps []
+78237.708 match 18993 walk 3587 hit 0 snaps []
+78237.708 evict_mamba 1 cands [(1, 16256), (1, 24448), (1, 32640), (1, 40832), (1, 45184), (1, 45428), (2, 18800), (2, 45300)]
+78237.708 evict_snap 45428 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<_try_allocate_one<try_add_one
+78238.345 evict_mamba 1 cands [(1, 16256), (1, 24448), (1, 32640), (1, 40832), (1, 45184), (2, 18800), (2, 45300)]
+78238.346 evict_snap 45184 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78238.346 insert 8064 prefix 3587 chunk
+78238.346 match 8064 walk 8064 hit 8064 snaps [8064]
+78239.080 evict_mamba 1 cands [(1, 16256), (1, 24448), (1, 32640), (1, 40832), (2, 18800), (2, 45300)]
+78239.080 evict_snap 40832 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78239.081 insert 16256 prefix 8064 chunk
+78239.081 match 16256 walk 16256 hit 16256 snaps [8064, 16256]
+78239.905 evict_mamba 1 cands [(1, 8064), (1, 16256), (1, 24448), (1, 32640), (2, 18800), (2, 45300)]
+78239.905 evict_snap 32640 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78239.905 insert 18688 prefix 16256 chunk
+78239.905 match 18688 walk 18688 hit 18688 snaps [8064, 16256, 18688]
+78239.906 evict_mamba 1 cands [(1, 8064), (1, 16256), (1, 16256), (1, 24448), (2, 18800), (2, 45300)]
+78239.906 evict_snap 24448 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<commit_prefix_boundary
+78239.906 insert 18739 prefix 18688 segment
+78239.906 match 18739 walk 18739 hit 18739 snaps [8064, 16256, 18688, 18739]
+78240.199 evict_mamba 1 cands [(1, 8064), (1, 16256), (1, 16256), (1, 18688), (2, 18800), (2, 45300)]
+78240.199 evict_snap 16256 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78240.199 insert 18867 prefix 18739 chunk
+78240.199 match 18867 walk 18867 hit 18867 snaps [8064, 16256, 18688, 18739, 18867]
+78240.402 insert 19025 prefix 18867 end
+78240.402 match 19025 walk 19025 hit 19025 snaps [8064, 16256, 18688, 18739, 18867, 19025]
+78240.407 shrink_evict_prefix tokens 14495 bytes 47311680
+78240.407 evict_full 14495 evictable 19083
+78240.407 evict_snap 19086 leaf True via evict_full<_evict_growable_prefix_pages<_maybe_shrink_growable_kv<decorate_context<overlap_loop
+78240.407 evict_snap 18800 leaf True via evict_full<_evict_growable_prefix_pages<_maybe_shrink_growable_kv<decorate_context<overlap_loop
+78240.477 match 18993 walk 18993 hit 18867 snaps [8064, 16256, 18688, 18739, 18867]
+78240.478 match 18993 walk 18993 hit 18867 snaps [8064, 16256, 18688, 18739, 18867]
+78241.414 insert 19025 prefix 18996 end
+78241.414 match 19025 walk 19025 hit 19025 snaps [8064, 16256, 18688, 18739, 18867, 19025]
+78241.474 match 19031 walk 3587 hit 0 snaps []
+78241.474 match 19031 walk 3587 hit 0 snaps []
+78242.101 evict_mamba 1 cands [(1, 8064), (1, 16256), (1, 18688), (1, 18867), (2, 18739), (2, 19025), (2, 45300)]
+78242.101 evict_snap 18867 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78242.101 insert 8064 prefix 3587 chunk
+78242.101 match 8064 walk 8064 hit 8064 snaps [8064]
+78242.833 evict_mamba 1 cands [(1, 8064), (1, 16256), (1, 18688), (2, 18739), (2, 19025), (2, 45300)]
+78242.833 evict_snap 18688 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78242.833 insert 16256 prefix 8064 chunk
+78242.833 match 16256 walk 16256 hit 16256 snaps [8064, 16256]
+78243.643 evict_mamba 1 cands [(1, 8064), (1, 8064), (1, 16256), (2, 18739), (2, 19025), (2, 45300)]
+78243.643 evict_snap 16256 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78243.643 insert 18688 prefix 16256 chunk
+78243.643 match 18688 walk 18688 hit 18688 snaps [8064, 16256, 18688]
+78243.643 evict_mamba 1 cands [(1, 8064), (1, 8064), (1, 16256), (2, 18739), (2, 19025), (2, 45300)]
+78243.643 evict_snap 8064 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<commit_prefix_boundary
+78243.643 insert 18757 prefix 18688 segment
+78243.643 match 18757 walk 18757 hit 18757 snaps [8064, 16256, 18688, 18757]
+78244.420 evict_mamba 1 cands [(1, 8064), (1, 16256), (1, 18688), (2, 18739), (2, 19025), (2, 45300)]
+78244.420 evict_snap 18688 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78244.420 insert 19013 prefix 18757 chunk
+78244.420 match 19013 walk 19013 hit 19013 snaps [8064, 16256, 18757, 19013]
+78244.608 insert 19063 prefix 19013 end
+78244.608 match 19063 walk 19063 hit 19063 snaps [8064, 16256, 18757, 19013, 19063]
+78244.751 shrink_release auto:claude-code:39dc68516e52dc769b73faf age_s 7.0 tokens 45510 bytes 148544640 handed_back_pages 41923 need_pages 10917
+78244.751 shrink_evict_prefix tokens 10917 bytes 35633088
+78244.751 evict_full 10917 evictable 57390
+78244.751 evict_snap 45510 leaf True via evict_full<_evict_growable_prefix_pages<_maybe_shrink_growable_kv<decorate_context<overlap_loop
+78244.751 evict_snap 45300 leaf True via evict_full<_evict_growable_prefix_pages<_maybe_shrink_growable_kv<decorate_context<overlap_loop
+78244.778 match 8775 walk 3 hit 0 snaps []
+78245.389 insert 8064 prefix 3 chunk
+78245.389 match 8064 walk 8064 hit 8064 snaps [8064]
+78245.714 evict_mamba 1 cands [(1, 8064), (1, 16256), (1, 19013), (2, 18739), (2, 18757), (2, 19025), (2, 19025)]
+78245.714 evict_snap 19013 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78245.714 insert 8576 prefix 8064 chunk
+78245.715 match 8576 walk 8576 hit 8576 snaps [8064, 8576]
+78245.715 evict_mamba 1 cands [(1, 8064), (1, 8064), (1, 16256), (2, 18739), (2, 18757), (2, 19025), (2, 19025)]
+78245.715 evict_snap 16256 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<commit_prefix_boundary
+78245.715 insert 8655 prefix 8576 segment
+78245.715 match 8655 walk 8655 hit 8655 snaps [8064, 8576, 8655]
+78246.194 insert 8807 prefix 8655 end
+78246.333 match 35302 walk 3 hit 0 snaps []
+78246.333 evict_mamba 1 cands [(0, 8064), (0, 8576), (1, 8064), (2, 8655), (2, 8807), (2, 18739), (2, 18757), (2, 19025), (2, 19025)]
+78246.333 evict_snap 8576 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<_try_allocate_one<try_add_one
+78246.947 evict_mamba 1 cands [(0, 8064), (1, 8064), (2, 8655), (2, 8807), (2, 18739), (2, 18757), (2, 19025), (2, 19025)]
+78246.948 evict_snap 8064 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78246.948 insert 8064 prefix 3 chunk
+78246.948 match 8064 walk 8064 hit 8064 snaps [8064]
+78247.268 evict_mamba 1 cands [(1, 8064), (2, 8655), (2, 8807), (2, 18739), (2, 18757), (2, 19025), (2, 19025)]
+78247.268 evict_snap 8064 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78247.268 insert 8576 prefix 8064 chunk
+78247.268 match 8576 walk 8576 hit 8576 snaps [8064, 8576]
+78247.268 evict_mamba 1 cands [(1, 8064), (2, 8655), (2, 8807), (2, 18739), (2, 18757), (2, 19025), (2, 19025)]
+78247.268 evict_snap 8064 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<commit_prefix_boundary
+78247.268 insert 8619 prefix 8576 segment
+78247.268 match 8619 walk 8619 hit 8619 snaps [8576, 8619]
+78247.967 evict_mamba 1 cands [(1, 8576), (2, 8655), (2, 8807), (2, 18739), (2, 18757), (2, 19025), (2, 19025)]
+78247.967 evict_snap 8576 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78247.967 insert 16683 prefix 8619 chunk
+78247.967 match 16683 walk 16683 hit 16683 snaps [8619, 16683]
+78247.967 evict_full 2798 evictable 24271
+78247.967 evict_snap 19025 leaf True via evict_full<_allocate<allocate_paged<_prepare_batch<_schedule_next_batch
+78247.967 evict_snap 19025 leaf True via evict_full<_allocate<allocate_paged<_prepare_batch<_schedule_next_batch
+78247.967 evict_snap 18739 leaf True via evict_full<_allocate<allocate_paged<_prepare_batch<_schedule_next_batch
+78248.782 insert 24875 prefix 16683 chunk
+78248.782 match 24875 walk 24875 hit 24875 snaps [8619, 16683, 24875]
+78249.677 insert 33067 prefix 24875 chunk
+78249.677 match 33067 walk 33067 hit 33067 snaps [8619, 16683, 24875, 33067]
+78250.066 insert 35243 prefix 33067 chunk
+78250.066 match 35243 walk 35243 hit 35243 snaps [8619, 16683, 24875, 33067, 35243]
+78250.252 insert 35334 prefix 35243 end
+78250.288 match 8739 walk 8724 hit 8619 snaps [8619]
+78250.288 evict_mamba 1 cands [(0, 16683), (0, 24875), (0, 33067), (0, 35243), (2, 8655), (2, 8807), (2, 18757), (2, 35334)]
+78250.288 evict_snap 35243 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<_try_allocate_one<try_add_one
+78250.761 insert 8771 prefix 8724 end
+78250.796 match 8739 walk 8739 hit 8619 snaps [8619]
+78250.796 evict_mamba 1 cands [(0, 16683), (0, 24875), (0, 33067), (2, 8655), (2, 8771), (2, 8807), (2, 18757), (2, 35334)]
+78250.796 evict_snap 33067 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<_try_allocate_one<try_add_one
+78251.270 insert 8771 prefix 8742 end
+78251.305 match 8759 walk 8739 hit 8619 snaps [8619]
+78251.306 evict_mamba 1 cands [(0, 16683), (0, 24875), (2, 8655), (2, 8771), (2, 8771), (2, 8807), (2, 18757), (2, 35334)]
+78251.306 evict_snap 24875 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<_try_allocate_one<try_add_one
+78251.600 evict_mamba 1 cands [(0, 16683), (2, 8655), (2, 8771), (2, 8771), (2, 8807), (2, 18757), (2, 35334)]
+78251.600 evict_snap 16683 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78251.600 insert 8747 prefix 8739 chunk
+78251.600 match 8747 walk 8747 hit 8747 snaps [8619, 8747]
+78251.774 insert 8791 prefix 8747 end
+78251.809 match 9422 walk 5 hit 0 snaps []
+78251.809 match 9422 walk 5 hit 0 snaps []
+78251.809 evict_mamba 1 cands [(0, 8747), (2, 8619), (2, 8655), (2, 8771), (2, 8771), (2, 8791), (2, 8807), (2, 18757), (2, 35334)]
+78251.809 evict_snap 8747 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<_try_allocate_one<try_add_one
+78251.820 evict_full 5982 evictable 44263
+78251.820 evict_snap 8807 leaf True via evict_full<_allocate<allocate_paged<_prepare_batch<_schedule_next_batch
+78251.820 evict_snap 8655 leaf True via evict_full<_allocate<allocate_paged<_prepare_batch<_schedule_next_batch
+78252.425 insert 8064 prefix 3 chunk
+78252.425 match 8064 walk 8064 hit 8064 snaps [8064]
+78253.197 insert 9088 prefix 8064 chunk
+78253.197 match 9088 walk 9088 hit 9088 snaps [8064, 9088]
+78253.198 evict_mamba 1 cands [(1, 8064), (2, 8619), (2, 8771), (2, 8771), (2, 8791), (2, 18757), (2, 35334)]
+78253.198 evict_snap 8064 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<commit_prefix_boundary
+78253.198 insert 9182 prefix 9088 segment
+78253.198 match 9182 walk 9182 hit 9182 snaps [9088, 9182]
+78253.491 evict_mamba 1 cands [(1, 9088), (2, 8619), (2, 8771), (2, 8771), (2, 8791), (2, 18757), (2, 35334)]
+78253.492 evict_snap 9088 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78253.492 insert 9310 prefix 9182 chunk
+78253.492 match 9310 walk 9310 hit 9310 snaps [9182, 9310]
+78253.678 insert 9454 prefix 9310 end
+78253.678 match 9454 walk 9454 hit 9454 snaps [9182, 9310, 9454]
+78253.774 match 35948 walk 5 hit 0 snaps []
+78253.775 match 35948 walk 5 hit 0 snaps []
+78253.775 evict_mamba 1 cands [(1, 9310), (2, 8619), (2, 8771), (2, 8771), (2, 8791), (2, 9182), (2, 18757), (2, 35334)]
+78253.775 evict_snap 9310 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<_try_allocate_one<try_add_one
+78253.788 evict_full 6629 evictable 35459
+78253.788 evict_snap 35334 leaf True via evict_full<_allocate<allocate_paged<_prepare_batch<_schedule_next_batch
+78254.392 insert 8064 prefix 5 chunk
+78254.392 match 8064 walk 8064 hit 8064 snaps [8064]
+78254.710 evict_mamba 1 cands [(2, 8619), (2, 8771), (2, 8771), (2, 8791), (2, 9182), (2, 18757)]
+78254.710 evict_snap 18757 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78254.710 insert 9088 prefix 8064 chunk
+78254.710 match 9088 walk 9088 hit 9088 snaps [8064, 9088]
+78254.711 evict_mamba 1 cands [(1, 8064), (2, 8619), (2, 8771), (2, 8771), (2, 8791), (2, 9182)]
+78254.711 evict_snap 8064 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<commit_prefix_boundary
+78254.711 insert 9143 prefix 9088 segment
+78254.711 match 9143 walk 9143 hit 9143 snaps [9088, 9143]
+78255.415 evict_mamba 1 cands [(1, 9088), (2, 8619), (2, 8771), (2, 8771), (2, 8791), (2, 9182)]
+78255.415 evict_snap 9088 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78255.415 insert 17207 prefix 9143 chunk
+78255.415 match 17207 walk 17207 hit 17207 snaps [9143, 17207]
+78256.236 evict_mamba 1 cands [(2, 8619), (2, 8771), (2, 8771), (2, 8791), (2, 9143), (2, 9182)]
+78256.236 evict_snap 8771 leaf True via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78256.237 insert 25399 prefix 17207 chunk
+78256.237 match 25399 walk 25399 hit 25399 snaps [9143, 17207, 25399]
+78256.237 evict_full 5512 evictable 8820
+78256.237 evict_snap 8771 leaf True via evict_full<_allocate<allocate_paged<_prepare_batch<_schedule_next_batch
+78256.237 evict_snap 8791 leaf True via evict_full<_allocate<allocate_paged<_prepare_batch<_schedule_next_batch
+78256.237 evict_snap 8619 leaf True via evict_full<_allocate<allocate_paged<_prepare_batch<_schedule_next_batch
+78257.139 insert 33591 prefix 25399 chunk
+78257.139 match 33591 walk 33591 hit 33591 snaps [9143, 17207, 25399, 33591]
+78257.535 insert 35895 prefix 33591 chunk
+78257.535 match 35895 walk 35895 hit 35895 snaps [9143, 17207, 25399, 33591, 35895]
+78257.720 insert 35980 prefix 35895 end
+78257.720 match 35980 walk 35980 hit 35980 snaps [9143, 17207, 25399, 33591, 35895, 35980]
+78257.746 match 9383 walk 9369 hit 9143 snaps [9143]
+78257.746 match 9383 walk 9369 hit 9143 snaps [9143]
+78258.036 evict_mamba 1 cands [(1, 17207), (1, 25399), (1, 33591), (1, 35895), (2, 9182)]
+78258.036 evict_snap 35895 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78258.036 insert 9271 prefix 9271 chunk
+78258.036 match 9271 walk 9271 hit 9271 snaps [9143, 9271]
+78258.216 insert 9415 prefix 9369 end
+78258.216 match 9415 walk 9415 hit 9415 snaps [9143, 9271, 9415]
+78258.241 match 9383 walk 9383 hit 9271 snaps [9143, 9271]
+78258.241 match 9383 walk 9383 hit 9271 snaps [9143, 9271]
+78258.241 evict_mamba 1 cands [(1, 17207), (1, 25399), (1, 33591), (2, 9143), (2, 9182), (2, 9454)]
+78258.241 evict_snap 33591 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<_try_allocate_one<try_add_one
+78258.709 insert 9415 prefix 9386 end
+78258.709 match 9415 walk 9415 hit 9415 snaps [9143, 9271, 9415]
+78258.734 match 9403 walk 9383 hit 9271 snaps [9143, 9271]
+78258.734 match 9403 walk 9383 hit 9271 snaps [9143, 9271]
+78258.734 evict_mamba 1 cands [(1, 17207), (1, 25399), (2, 9143), (2, 9182), (2, 9415), (2, 9454)]
+78258.734 evict_snap 25399 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<_try_allocate_one<try_add_one
+78259.028 evict_mamba 1 cands [(1, 17207), (2, 9143), (2, 9182), (2, 9415), (2, 9454)]
+78259.028 evict_snap 17207 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78259.028 insert 9399 prefix 9383 chunk
+78259.028 match 9399 walk 9399 hit 9399 snaps [9143, 9271, 9399]
+78259.205 insert 9435 prefix 9399 end
+78259.205 match 9435 walk 9435 hit 9435 snaps [9143, 9271, 9399, 9435]
+78259.250 match 408 walk 8 hit 0 snaps []
+78259.250 match 408 walk 8 hit 0 snaps []
+78259.250 evict_mamba 1 cands [(1, 9271), (1, 9399), (2, 9143), (2, 9182), (2, 9415), (2, 9415), (2, 9454)]
+78259.250 evict_snap 9399 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<_try_allocate_one<try_add_one
+78259.996 evict_mamba 1 cands [(1, 9271), (2, 9143), (2, 9182), (2, 9415), (2, 9415), (2, 9454)]
+78259.996 evict_snap 9271 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78259.997 insert 256 prefix 8 chunk
+78259.997 match 256 walk 256 hit 256 snaps [256]
+78259.997 evict_mamba 1 cands [(2, 9143), (2, 9182), (2, 9415), (2, 9415), (2, 9454)]
+78259.997 evict_snap 9454 leaf True via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<commit_prefix_boundary
+78259.997 insert 373 prefix 256 segment
+78259.997 match 373 walk 373 hit 373 snaps [256, 373]
+78260.776 insert 521 prefix 373 end
+78260.777 match 521 walk 521 hit 521 snaps [256, 373, 521]
+78260.792 match 572 walk 56 hit 0 snaps []
+78260.792 match 572 walk 56 hit 0 snaps []
+78260.792 evict_mamba 1 cands [(1, 256), (2, 373), (2, 9143), (2, 9182), (2, 9415), (2, 9415)]
+78260.792 evict_snap 256 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<_try_allocate_one<try_add_one
+78261.533 evict_mamba 1 cands [(2, 373), (2, 9143), (2, 9182), (2, 9415), (2, 9415)]
+78261.533 evict_snap 9182 leaf True via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78261.533 insert 384 prefix 56 chunk
+78261.533 match 384 walk 384 hit 384 snaps [384]
+78261.534 evict_mamba 1 cands [(2, 373), (2, 9143), (2, 9415), (2, 9415)]
+78261.534 evict_snap 9415 leaf True via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<commit_prefix_boundary
+78261.534 insert 401 prefix 384 segment
+78261.534 match 401 walk 401 hit 401 snaps [384, 401]
+78262.298 evict_mamba 1 cands [(1, 384), (2, 373), (2, 9143), (2, 9415)]
+78262.298 evict_snap 384 leaf False via evict_mamba<ensure_mamba_slots<reserve_mamba_slots<acquire_mamba_slot<_cache_req_hybrid
+78262.298 insert 529 prefix 401 chunk
+78262.298 match 529 walk 529 hit 529 snaps [401, 529]
+78262.785 insert 657 prefix 529 end
+78262.785 match 657 walk 657 hit 657 snaps [401, 529, 657]
