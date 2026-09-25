@@ -54,10 +54,11 @@ preflight() {
     sleep 5
   fi
   used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1 | tr -d ' ')
-  [ "$used" = "0" ] || { nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv; die "GPU holds ${used} MiB, must read 0"; }
+  # GPU_IDLE_MIB: what other tenants may hold (under WSL the owner's Windows apps show up, e.g. 17 MiB).
+  [ "$used" -le "${GPU_IDLE_MIB:-0}" ] || { nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv; die "GPU holds ${used} MiB, must read <= ${GPU_IDLE_MIB:-0}"; }
   avail=$(awk '/MemAvailable/ {printf "%d", $2/1048576}' /proc/meminfo)
   [ "$avail" -ge 22 ] || die "MemAvailable ${avail} GiB < 22"
-  echo "preflight ok: GPU 0 MiB, MemAvailable ${avail} GiB, no server, no pytest"
+  echo "preflight ok: GPU ${used} MiB, MemAvailable ${avail} GiB, no server, no pytest"
 }
 
 journal() { journalctl --user -u "ft-measure-$1" -o cat --no-pager > "$OUT/$1-journal.txt" || true; }

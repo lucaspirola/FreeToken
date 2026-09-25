@@ -31,7 +31,7 @@ one() {  # name, then env assignments for measure.sh
   quiet
   flock 9
   used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1 | tr -d ' ')
-  if [ "$used" != 0 ]; then echo "GPU holds $used MiB, skipping $name"; flock -u 9; return; fi
+  if [ "$used" -gt "${GPU_IDLE_MIB:-0}" ]; then echo "GPU holds $used MiB, skipping $name"; flock -u 9; return; fi
   env "$@" "$HERE/measure.sh" "$name" || echo "$name measure exit $?"
   journalctl --user -u "ft-measure-$name" -o cat --no-pager | sed 's/\x1b\[[0-9;]*m//g' > "$OUT/$name-journal.txt" || true
   mv "$HERE"/results/$name-* "$OUT/" 2>/dev/null || true
