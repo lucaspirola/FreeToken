@@ -1,0 +1,51 @@
+[ck5b-whole-a] starting: model=NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 rows=0 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/round3@ceb482c venv=/home/lucas/ai/FreeToken/.venv launcher=systemd
+Running as unit: ft-measure-ck5b-whole-a.service; invocation ID: 4850405c9f7f4db5851607d3342ae7d1
+[ck5b-whole-a] ready after 49s
+Sep 25 18:54:32 TESSERACT serve-default.sh[2377821]: [2026-09-25|18:54:32|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+Sep 25 18:54:36 TESSERACT serve-default.sh[2377821]: [2026-09-25|18:54:36|core|rank=0] INFO     Prefill headroom: transient 0.61 GiB measured on a 8192-token chunk (empty prefix 0.61 GiB, after a 8192-token prefix 0.61 GiB, allocator peak 0.59 GiB); headroom 0.61 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 256 -> 2040 of 2189 slots, 0.75 GiB free (target 0.73 GiB), 149 slots below the ratio plan
+Sep 25 18:54:36 TESSERACT serve-default.sh[2377821]: [2026-09-25|18:54:36|core|rank=0] INFO     Startup geometry: memory ratio 1.00, runtime reserve 0.00 GiB; expert arena 2040 slots; KV 65536 tokens mapped of 1048576 (0.23 GiB); 0.75 GiB free
+[ck5b-whole-a] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8014, "ttft_s": 0.34, "prefill_tok_s": 23630.0, "gen_tokens": 127, "decode_tok_s": 192.7, "decode_tok_s_wall": 192.7, "total_s": 1.0, "ttft_mono_s": 0.339, "prefill_tok_s_mono": 23630.0, "total_mono_s": 0.99, "t_start_wall": 1790348107.815, "gap1_ms": 30.3, "max_gap_ms": 30.3, "median_gap_ms": 4.7, "decode_tok_s_after_gap1": 200.5}
+{"target": 1000000, "pass": 1, "prompt_tokens": 1000030, "ttft_s": 525.12, "prefill_tok_s": 1904.0, "gen_tokens": 127, "decode_tok_s": 96.0, "decode_tok_s_wall": 96.0, "total_s": 526.4, "ttft_mono_s": 493.676, "prefill_tok_s_mono": 2026.0, "total_mono_s": 494.99, "t_start_wall": 1790348108.823, "gap1_ms": 44.3, "max_gap_ms": 44.3, "median_gap_ms": 9.8, "decode_tok_s_after_gap1": 98.5}
+{"target": 8000, "pass": 2, "prompt_tokens": 8016, "ttft_s": 0.92, "prefill_tok_s": 8697.0, "gen_tokens": 127, "decode_tok_s": 176.3, "decode_tok_s_wall": 176.3, "total_s": 1.6, "ttft_mono_s": 0.922, "prefill_tok_s_mono": 8697.0, "total_mono_s": 1.64, "t_start_wall": 1790348635.261, "gap1_ms": 36.4, "max_gap_ms": 36.4, "median_gap_ms": 5.3, "decode_tok_s_after_gap1": 184.3}
+{"target": 1000000, "pass": 2, "prompt_tokens": 1000032, "ttft_s": 522.39, "prefill_tok_s": 1914.0, "gen_tokens": 127, "decode_tok_s": 101.4, "decode_tok_s_wall": 101.4, "total_s": 523.6, "ttft_mono_s": 492.836, "prefill_tok_s_mono": 2029.0, "total_mono_s": 494.08, "t_start_wall": 1790348636.911, "gap1_ms": 38.4, "max_gap_ms": 38.4, "median_gap_ms": 9.3, "decode_tok_s_after_gap1": 103.8}
+{
+  "arm": "ck5b-whole-a",
+  "model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+  "rows": "0",
+  "commit": "ceb482c",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 18.56,
+  "rss_ready_gib": 19.52,
+  "devzero_gib": 15.49,
+  "ram_after_80k_gib": 19.37,
+  "rss_gib": 19.93,
+  "locked_gib": 0.0,
+  "anon_gib": 3.66,
+  "file_gib": 15.53,
+  "unevict_gib": 0.0,
+  "shmem_gib": 15.49,
+  "current_gib": 19.28,
+  "peak_current_gib": 21.93,
+  "gpu_mib": "14494",
+  "decode_8k_p1": 192.7,
+  "ttft_8k_p1": 0.34,
+  "total_8k_p1": 1.0,
+  "ttft_mono_8k_p1": 0.34,
+  "decode_1000k_p1": 96.0,
+  "ttft_1000k_p1": 525.12,
+  "total_1000k_p1": 526.4,
+  "ttft_mono_1000k_p1": 493.68,
+  "decode_8k": 176.3,
+  "ttft_8k": 0.92,
+  "total_8k": 1.6,
+  "ttft_mono_8k": 0.92,
+  "decode_1000k": 101.4,
+  "ttft_1000k": 522.39,
+  "total_1000k": 523.6,
+  "ttft_mono_1000k": 492.84
+}
+74 arms -> /home/lucas/ai/FreeToken-wt/round3/tasks/exclusive-expert-ram/results/sweep.tsv
+[ck5b-whole-a] stopping

@@ -1,0 +1,30 @@
+captures=1 kv_grows=2 tracebacks=0 ooms=0
+[2026-09-25|07:29:31|core|rank=0] INFO     --moe-cache-auto resolved moe_cache_size=2296 num_pages=77312 (prefill_overlap=True)
+[2026-09-25|07:29:45|core|rank=0] INFO     Expert arena parked 2296 -> 1464 slots (4.36 GiB) until the prefill transient is measured
+[2026-09-25|07:29:45|core|rank=0] INFO     Free memory after initialization: 4.26 GiB
+[2026-09-25|07:29:45|core|rank=0] INFO     Start capturing CUDA graphs with sizes: [1]
+[2026-09-25|07:29:45|core|rank=0] INFO     Free GPU memory before capturing CUDA graphs: 4.26 GiB
+Preparing for capturing CUDA graphs...:   0%|          | 0/1 [00:00<?, ?batch/s]Capturing graphs: bs = 1   | avail_mem = 4.26 GiB:   0%|          | 0/1 [00:00<?, ?batch/s]INFO:     127.0.0.1:42596 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-25|07:30:18|core|rank=0] INFO     Free GPU memory after capturing CUDA graphs: 4.21 GiB
+[2026-09-25|07:30:30|core|rank=0] INFO     Prefill warmup complete for lengths [80, 128] in 12.070 s
+[2026-09-25|07:30:44|core|rank=0] INFO     Growable-KV ceiling validated: 1048576 tokens, 3.23 GiB physical, planned final MoE cache 1576 slots
+[2026-09-25|07:30:44|core|rank=0] INFO     Prefill headroom: transient 0.59 GiB measured on a 8192-token chunk (empty prefix 0.59 GiB, after a 8192-token prefix 0.59 GiB, allocator peak 0.59 GiB); headroom 0.59 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 1464 -> 2128 of 2296 slots, 0.73 GiB free (target 0.71 GiB), 168 slots below the ratio plan
+[2026-09-25|07:30:51|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 2128 -> 2192 (0.33 GiB committed, 0.71 GiB free before, target 0.38 GiB, 8.2 ms)
+[2026-09-25|07:31:12|core|rank=0] INFO     Prefill headroom reserved: MoE slots 2192 -> 2120 (0.38 GiB released, 0.75 GiB free, target 0.71 GiB, 48.9 ms)
+[2026-09-25|07:31:12|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 2120 -> 2192 (0.38 GiB committed, 0.75 GiB free before, target 0.38 GiB, 5.0 ms)
+[2026-09-25|07:31:13|core|rank=0] INFO     Prefill headroom reserved: MoE slots 2192 -> 2120 (0.38 GiB released, 0.75 GiB free, target 0.71 GiB, 8.6 ms)
+[2026-09-25|07:31:13|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 2120 -> 2192 (0.38 GiB committed, 0.75 GiB free before, target 0.38 GiB, 4.8 ms)
+[2026-09-25|07:31:17|core|rank=0] INFO     Prefill headroom reserved: MoE slots 2192 -> 2120 (0.38 GiB released, 0.75 GiB free, target 0.71 GiB, 8.9 ms)
+[2026-09-25|07:31:25|core|rank=0] INFO     Growable-KV arena shrink: 2120 -> 2080 slots, 0.21 GiB uncommitted (driver-reported free 0.96 GiB)
+[2026-09-25|07:31:25|core|rank=0] INFO     Growable-KV pre-commit (arena): 0.96 GiB free (driver 0.96 GiB), 0.21 GiB commit, 0.80 GiB required (allocator 2.90 GiB allocated / 2.96 GiB reserved)
+[2026-09-25|07:31:25|core|rank=0] INFO     Committed growable KV through 131072 tokens (0.45 GiB physical); MoE slots 2120 -> 2080
+[2026-09-25|07:31:25|core|rank=0] INFO     KV grew 65536 -> 131072 tokens; MoE cache now 2080 slots
+[2026-09-25|07:31:28|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 2080 -> 2144 (0.33 GiB committed, 0.74 GiB free before, target 0.38 GiB, 8.1 ms)
+[2026-09-25|07:31:31|core|rank=0] INFO     Prefill headroom reserved: MoE slots 2144 -> 2120 (0.12 GiB released, 0.75 GiB free, target 0.71 GiB, 6.1 ms)
+[2026-09-25|07:31:32|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 2120 -> 2184 (0.33 GiB committed, 0.75 GiB free before, target 0.38 GiB, 8.3 ms)
+[2026-09-25|07:31:36|core|rank=0] INFO     Prefill headroom reserved: MoE slots 2184 -> 2120 (0.33 GiB released, 0.75 GiB free, target 0.71 GiB, 8.2 ms)
+[2026-09-25|07:31:44|core|rank=0] INFO     Growable-KV arena shrink: 2120 -> 2080 slots, 0.21 GiB uncommitted (driver-reported free 0.96 GiB)
+[2026-09-25|07:31:44|core|rank=0] INFO     Growable-KV pre-commit (arena): 0.96 GiB free (driver 0.96 GiB), 0.21 GiB commit, 0.80 GiB required (allocator 2.90 GiB allocated / 2.96 GiB reserved)
+[2026-09-25|07:31:44|core|rank=0] INFO     Committed growable KV through 131072 tokens (0.45 GiB physical); MoE slots 2120 -> 2080
+[2026-09-25|07:31:44|core|rank=0] INFO     KV grew 65536 -> 131072 tokens; MoE cache now 2080 slots
+[2026-09-25|07:31:47|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 2080 -> 2144 (0.33 GiB committed, 0.74 GiB free before, target 0.38 GiB, 8.2 ms)

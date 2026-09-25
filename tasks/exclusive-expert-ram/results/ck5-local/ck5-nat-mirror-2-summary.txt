@@ -1,0 +1,219 @@
+Here's a thinking process:
+
+1.  **Analyze User Request:**
+   - User provided a large engineering design document about NVIDIA Nemotron on FreeToken.
+   - Task: "Summarise its main design decisions, then critique them: which decisions look fragile, what measurements are missing, and what would you change first?"
+   - I need to output a summary of main design decisions, followed by a critique addressing fragility, missing measurements, and a first change recommendation.
+
+2.  **Deconstruct the Document:**
+   The document is a technical design/implementation notes for serving Nemotron models (3 Super, 3.5 Lightning) on FreeToken. Key sections:
+   - Status phases
+   - Model sizing (host RAM, VRAM, context, concurrency)
+   - Launch profiles (default, P1, P2)
+   - KV dtype, prefill chunk size
+   - Measured throughput
+   - Decode with context, prefill with context
+   - MoE prefill GEMM
+   - A operand deinterleaving
+   - Speculative decoding (ngram)
+   - 1M single-session profile
+   - Session spill policies
+   - Measured sizing
+   - CLI reference
+
+   I need to extract the "main design decisions" - these are the architectural choices, trade-offs, flag defaults, backend selections, caching strategies, etc.
+
+3.  **Identify Main Design Decisions:**
+   - Hybrid Mamba-2 / full-attention / latent-MoE architecture handling
+   - MoE backend: `offload` as default, with `cpu`/`hybrid` alternatives but noted penalties
+   - KV cache dtype: `q8_0` chosen over `fp8_e4m3` due to prefix reuse stability
+   - `--memory-ratio 1.00` as default, predictive memory allocation, not tuning knob
+   - Growable KV (`--kv-grow-step-tokens`) but with significant prefix cache penalties measured
+   - Expert cache: LFU vs LRU policy, LFU wins for multi-concurrency
+   - CUDA graph handling: dense BS ladder vs elastic, offload-MoE specific optimization
+   - Decode attention kernel: Triton default, b12x rejected for this geometry
+   - NVFP4 kernel tuning: per-block scale loading, deinterleaved A, native CVT
+   - Session spill/spill-to-RAM/disk design for 1M token sessions
+   - Linear state slots minimum 5, with capture strategies
+   - Speculative decoding (ngram) off by default, with specific thresholds and caveats
+   - Pin budget (`FREETOKEN_PIN_BUDGET_GB=17`) for keeping experts in RAM
+   - WSL pin quota considerations
+   - `--moe-pageable-gpu` trade-offs with decode graphs
+   - `--attention-backend triton` requirement for quantized KV
+   - `--max-prefill-length 8192` as fixed, not a throughput lever
+   - `--host-ram-reserve-gb 6` for process footprint + banks
+   - `--session-spill-ram-gb 4` default for look-ahead
+   - `--linear-state-slots 5` minimum floor
+   - `--moe-cache-auto` sizing from free VRAM
+   - `--kv-grow-step-tokens` interaction with prefix cache and elastic graphs
+   - `--moe-extend-cache-tokens 64` default for extend forward optimization
+   - `--speculative ngram` off by default, with strict acceptance criteria
+   - `--cache-type radix` default for prefix reuse
+   - `--moe-cache-policy lfu` for concurrent, `--lru` default for single
+
+   That's a lot. I'll group them logically.
+
+4.  **Critique - Fragile Decisions, Missing Measurements, Improvements:**
+   - Fragile:
+     - `--kv-grow-step-tokens` causing 89% pure loss of prefix cache pages (measured)
+     - `FREETOKEN_PIN_BUDGET_GB=17` requiring `.wslconfig memory=` large, fragile on WSL
+     - `--memory-ratio 1.00` being an override, not tuning knob, with ±25% WARN, but engine predicts from config; if misaligned, OOM or underutilization
+     - `--elastic-initial-requests` retired, causing graph set issues
+     - `--moe-pageable-gpu` disabling decode CUDA graphs, trading off pin budget
+     - `--kv-grow-step-tokens` interaction with prefix cache teardown measured at 89% loss
+     - Speculative decoding ngram having 12× cost at 131K context, gate never closes at k=16
+     - `--max-prefill-length 8192` fixed, not a lever, but the doc says raising it buys <2% gain, fixed overhead
+     - Linear state slots minimum 5, but 4 rejected at startup; 9 default, but 5 chosen for pinning; tight coupling
+     - `--session-spill-ram-gb 4` default, but 12 used in 1M profile example; confusion possible
+     - `--moe-cache-auto` sizing dependent on VRAM left after weights; if VRAM allocation shifts, cache size shifts
+     - `--attention-backend triton` required for q8_0 KV, but bf16 KV with FlashInfer fallback +0.75 GiB at 262K
+     - `--nvfp4-backend` choices tightly coupled to backend selection at bank-load time, can't mix prefill/decode
+     - `--moe-cache-policy lfu` worth 1.80× but only above ~15% miss rate; LRU below that, but default is lru for single
+     - `--kv-grow-step-tokens` costs whole prefix cache on prefix-reuse-heavy workloads, measured 89% teardown loss
+     - Speculative decoding: 16 not default because at 131K it's 0.870x of off, fails 2% criterion; but default 8 is neutral on code/prose, 1.11× on copy at k=8, 1.88× at k=16
+     - `--moe-extend-cache-tokens 64` default: crossover between 64 and 80, but above 128 it fetches 107.8/128 rows at scattered gather rate, paying decode GEMV
+     - `--host-ram-reserve-gb 6` + expert banks 15.4 GiB; on WSL pin budget 0.4×RAM; fragile if RAM config changes
+     - `--linear-state-slots 5` minimum, but auto starts at 1786 slots for KV growth; tight coupling between state slots and KV step costs
+     - `--session-spill-capture-states auto` on below 6 state slots; but 5 is accepted floor; 4 would lose snapshots entirely
+     - `--moe-cache-policy lfu` measured at 16 concurrent; but single-stream default is lru; policy switch requires restart/config change
+     - `--kv-cache-dtype q8_0` chosen over fp8_e4m3 due to 3/6 runs flipped first tokens on cached-prefix reuse; but equal VRAM and reasoning score; q8_0 selected
+     - `--max-seq-len-override 1048576` but tokenizer model_max_length 262144; treat 262K as ceiling, pin working window
+     - `--moe-backend offload` default; cpu/hybrid 3.6× slower decode; but offload requires pinned budget or pageable GPU
+     - `--moe-cache-auto` interacts with `--kv-grow-step-tokens`; growable KV funds KV from expert cache; but measured penalty
+     - `--session-spill-limit-gb 50` total cap; evicts LRU; but if cap hit, refuses or thrashed? doc says refuses if larger than cap
+     - `--moe-mirror-host-rows 0` unset defaults to mirror; aliases read by server/args.py only; fragile if env not set
+     - `--attn` auto picks per model+GPU; but if wrong, falls back to triton; no explicit validation beyond startup
+     - `--cuda-graph-max-bs` tied to max running requests; but dense BS ladder costs 80 MiB, ~0.8s startup; but under single stream only 1
+     - `--moe-cache-size`/`-rate`/`-auto` mutually exclusive; auto enabled by default for offload; but if VRAM changes, size changes; no hysteresis
+     - `--kv-reserve-tokens 8192` floor before MoE cache fills; but growable KV steps from expert cache; interaction not fully measured
+     - `--expert-residency whole`/`mirror`; whole pins every expert row in host RAM; mirror bounds to pool; but unset defaults to mirror via env aliases; if env not set, behavior unclear
+     - `--session-spill-persist on` keeps checkpoints across restarts; but startup adopts manifests matching model + K/V layout fingerprint; if layout changes, checkpoints deleted; fragile migration
+     - `--moe-pageable-gpu` keeps pin-budget overflow banks pageable; but disables decode CUDA graphs; trade-off measured: graphs overlap shared expert calculation; idle telemetry saves model-scoped time-cost ranking
+     - `--moe-cache-policy lfu` 1.80× aggregate throughput at 16 concurrent; but at bs=1, lru default; switch requires config change
+     - `--kv-grow-step-tokens` measured: 565 teardowns vs 67 successful releases, 89% pure loss, 11.5M prefix pages evicted; significant
+     - `--speculative ngram`: at k=16, 131K non-copy case 0.870x of off; gate never closed; default 8 confirmed; but at short context copy arms 1.11× at k=8, 1.61× at k=16; trade-off
+     - `--moe-extend-cache-tokens 64`: measured crossover between 64 and 80; but at m=128, cached path fetches 107.8/128 rows at scattered gather rate 52.9 GB/s vs contiguous 61.9 GB/s; pays decode GEMV; but following decode burst shows no eviction penalty
+     - `--memory-ratio 1.00`: engine predicts from config, measures prefill transient, fills arena; WARN outside ±25%; but `scripts/verify-memory-ratio.sh` checks 1.00 starts and serves 8K/80K/256K; old bisecting script retired; if host changes, ratio may be off
+     - `--host-ram-reserve-gb 6`: minimum MemAvailable kept outside expert banks + RAM checkpoints; but if MemAvailable drops below, server may fail; no auto-adjustment beyond WARN
+     - `--linear-state-slots 5` accepted floor at --max-running-requests 1; 3,4 rejected; default 9; but 5 chosen for pinning; tight coupling with KV step costs; each 131072-token KV step costs ~0.40 GiB and ~76 expert slots; auto starts at 1786 slots; but 5 returns ~188 MiB (35 slots) to MoE cache; if KV grows, slots decrease; but 5 is minimum; if more running requests, slots needed increase; `--max-running-requests 1` with 5 is accepted; with 16, need 96 Mamba slots + 1.5 GiB more host RAM historically; but S11 every launch sizes pool for --max-running-requests up front
+     - `--session-spill-ram-gb 4` default: one look-ahead 1M session fits beside checkpoint being written; but 1M profile example uses 12; confusion; doc says "now defaults to 4 so one 1M look-ahead fits beside the checkpoint being written"; but earlier examples use 12; may be version drift
+     - `--session-spill-disk-gb 64` per-server disk budget; but `--session-spill-limit-gb 50` total cap; if disk fills, cap may refuse; interaction not fully measured
+     - `--moe-cache-auto` sizing from free VRAM; but free VRAM = expert slots not used; runtime headroom not "whatever the ratio leaves"; predicted from config; measures prefill transient; fills growable arena back so exactly that is left free; WARN outside ±25%; but if config changes, prediction may be off; no dynamic re-tuning during runtime
+     - `--kv-grow-step-tokens` costs whole prefix cache on prefix-reuse-heavy; measured 89% loss; but doc says "drop it for prefix-reuse-heavy batch work (replay, evaluation, teacher forcing)"; keep for multi-agent session serving where KV genuinely idle between turns; but default profile P1/P2 may have it on/off; confusion in historical flags
+     - `--moe-backend offload` + `--kv-grow-step-tokens` used to die at init with unsupported VMM tensor dtype: torch.int32; fixed 2026-09-05; but still, interaction fragile; int16/int32/int64 added to VMMTensor._DTYPE_NAMES; but triton still recommended
+     - `--nvfp4-backend` choices: b12x rejected at config for ungated relu2, moe_intermediate_size 1856 ≥ 1024 threshold; auto resolves to b12x here (sm_120, ungated relu2); but that resolution now wrong on this geometry; triton wins; but auto still resolves to b12x and that resolution is now wrong; so must explicitly set triton; fragile if user relies on auto
+     - `--attention-backend triton` required for q8_0 KV; but bf16 KV with FlashInfer fallback +0.75 GiB at 262K; if user sets flashinfer, may fail without --kv-grow-step-tokens; but fixed 2026-09-05; still, interaction
+     - `--moe-cache-policy lfu` worth 1.80× at 16 concurrent; but single-stream default lru; at bs=1, lru 12.0% miss rate vs lfu? doc says lru default for single; at bs=16 lru 99.6% miss rate; lfu 51.1%; worth 1.80×; but if switch from lru to lfu, requires --moe-cache-policy lfu; but single-stream may not benefit; doc says "the lru default for single-stream"; so policy switch only matters for concurrent; but default is lru; user must opt-in lfu; fragile if they don't know
+     - `--moe-cache-auto` size: auto sizes from free VRAM; but free VRAM depends on weights + KV + MoE cache; mutual dependency; if VRAM changes, size recalculated at startup; no runtime adjustment
+     - `--max-running-requests 1` default for single-stream; but P2 profile 16 concurrent; doc says "the default profile still runs one session at a time (single lane, see "Launch profiles")"; but other sessions queue and spill; but if user sets 16 without understanding, may hit pin budget, graph issues, prefix cache teardown
+     - `--cuda-graph-max-bs` = max running requests; but dense BS ladder
+<<content>>
+Here's a thinking process:
+
+1.  **Analyze User Request:**
+   - User provided a large engineering design document about NVIDIA Nemotron on FreeToken.
+   - Task: "Summarise its main design decisions, then critique them: which decisions look fragile, what measurements are missing, and what would you change first?"
+   - I need to output a summary of main design decisions, followed by a critique addressing fragility, missing measurements, and a first change recommendation.
+
+2.  **Deconstruct the Document:**
+   The document is a technical design/implementation notes for serving Nemotron models (3 Super, 3.5 Lightning) on FreeToken. Key sections:
+   - Status phases
+   - Model sizing (host RAM, VRAM, context, concurrency)
+   - Launch profiles (default, P1, P2)
+   - KV dtype, prefill chunk size
+   - Measured throughput
+   - Decode with context, prefill with context
+   - MoE prefill GEMM
+   - A operand deinterleaving
+   - Speculative decoding (ngram)
+   - 1M single-session profile
+   - Session spill policies
+   - Measured sizing
+   - CLI reference
+
+   I need to extract the "main design decisions" - these are the architectural choices, trade-offs, flag defaults, backend selections, caching strategies, etc.
+
+3.  **Identify Main Design Decisions:**
+   - Hybrid Mamba-2 / full-attention / latent-MoE architecture handling
+   - MoE backend: `offload` as default, with `cpu`/`hybrid` alternatives but noted penalties
+   - KV cache dtype: `q8_0` chosen over `fp8_e4m3` due to prefix reuse stability
+   - `--memory-ratio 1.00` as default, predictive memory allocation, not tuning knob
+   - Growable KV (`--kv-grow-step-tokens`) but with significant prefix cache penalties measured
+   - Expert cache: LFU vs LRU policy, LFU wins for multi-concurrency
+   - CUDA graph handling: dense BS ladder vs elastic, offload-MoE specific optimization
+   - Decode attention kernel: Triton default, b12x rejected for this geometry
+   - NVFP4 kernel tuning: per-block scale loading, deinterleaved A, native CVT
+   - Session spill/spill-to-RAM/disk design for 1M token sessions
+   - Linear state slots minimum 5, with capture strategies
+   - Speculative decoding (ngram) off by default, with specific thresholds and caveats
+   - Pin budget (`FREETOKEN_PIN_BUDGET_GB=17`) for keeping experts in RAM
+   - WSL pin quota considerations
+   - `--moe-pageable-gpu` trade-offs with decode graphs
+   - `--attention-backend triton` requirement for quantized KV
+   - `--max-prefill-length 8192` as fixed, not a throughput lever
+   - `--host-ram-reserve-gb 6` for process footprint + banks
+   - `--session-spill-ram-gb 4` default for look-ahead
+   - `--linear-state-slots 5` minimum floor
+   - `--moe-cache-auto` sizing from free VRAM
+   - `--kv-grow-step-tokens` interaction with prefix cache and elastic graphs
+   - `--moe-extend-cache-tokens 64` default for extend forward optimization
+   - `--speculative ngram` off by default, with strict acceptance criteria
+   - `--cache-type radix` default for prefix reuse
+   - `--moe-cache-policy lfu` for concurrent, `--lru` default for single
+
+   That's a lot. I'll group them logically.
+
+4.  **Critique - Fragile Decisions, Missing Measurements, Improvements:**
+   - Fragile:
+     - `--kv-grow-step-tokens` causing 89% pure loss of prefix cache pages (measured)
+     - `FREETOKEN_PIN_BUDGET_GB=17` requiring `.wslconfig memory=` large, fragile on WSL
+     - `--memory-ratio 1.00` being an override, not tuning knob, with ±25% WARN, but engine predicts from config; if misaligned, OOM or underutilization
+     - `--elastic-initial-requests` retired, causing graph set issues
+     - `--moe-pageable-gpu` disabling decode CUDA graphs, trading off pin budget
+     - `--kv-grow-step-tokens` interaction with prefix cache teardown measured at 89% loss
+     - Speculative decoding ngram having 12× cost at 131K context, gate never closes at k=16
+     - `--max-prefill-length 8192` fixed, not a lever, but the doc says raising it buys <2% gain, fixed overhead
+     - Linear state slots minimum 5, but 4 rejected at startup; 9 default, but 5 chosen for pinning; tight coupling
+     - `--session-spill-ram-gb 4` default, but 12 used in 1M profile example; confusion possible
+     - `--moe-cache-auto` sizing dependent on VRAM left after weights; if VRAM allocation shifts, cache size shifts
+     - `--attention-backend triton` required for q8_0 KV, but bf16 KV with FlashInfer fallback +0.75 GiB at 262K
+     - `--nvfp4-backend` choices tightly coupled to backend selection at bank-load time, can't mix prefill/decode
+     - `--moe-cache-policy lfu` worth 1.80× but only above ~15% miss rate; LRU below that, but default is lru for single
+     - `--kv-grow-step-tokens` costs whole prefix cache on prefix-reuse-heavy workloads, measured 89% teardown loss
+     - Speculative decoding: 16 not default because at 131K it's 0.870x of off, fails 2% criterion; but default 8 is neutral on code/prose, 1.11× on copy at k=8, 1.88× at k=16
+     - `--moe-extend-cache-tokens 64` default: crossover between 64 and 80, but above 128 it fetches 107.8/128 rows at scattered gather rate, paying decode GEMV
+     - `--host-ram-reserve-gb 6` + expert banks 15.4 GiB; on WSL pin budget 0.4×RAM; fragile if RAM config changes
+     - `--linear-state-slots 5` minimum, but auto starts at 1786 slots for KV growth; tight coupling between state slots and KV step costs
+     - `--session-spill-capture-states auto` on below 6 state slots; but 5 is accepted floor; 4 would lose snapshots entirely
+     - `--moe-cache-policy lfu` measured at 16 concurrent; but single-stream default is lru; policy switch requires restart/config change
+     - `--kv-cache-dtype q8_0` chosen over fp8_e4m3 due to 3/6 runs flipped first tokens on cached-prefix reuse; but equal VRAM and reasoning score; q8_0 selected
+     - `--max-seq-len-override 1048576` but tokenizer model_max_length 262144; treat 262K as ceiling, pin working window
+     - `--moe-backend offload` default; cpu/hybrid 3.6× slower decode; but offload requires pinned budget or pageable GPU
+     - `--moe-cache-auto` interacts with `--kv-grow-step-tokens`; growable KV funds KV from expert cache; but measured penalty
+     - `--session-spill-limit-gb 50` total cap; evicts LRU; but if cap hit, refuses or thrashed? doc says refuses if larger than cap
+     - `--moe-mirror-host-rows 0` unset defaults to mirror; aliases read by server/args.py only; fragile if env not set
+     - `--attn` auto picks per model+GPU; but if wrong, falls back to triton; no explicit validation beyond startup
+     - `--cuda-graph-max-bs` tied to max running requests; but dense BS ladder costs 80 MiB, ~0.8s startup; but under single stream only 1
+     - `--moe-cache-size`/`-rate`/`-auto` mutually exclusive; auto enabled by default for offload; but if VRAM changes, size changes; no hysteresis
+     - `--kv-reserve-tokens 8192` floor before MoE cache fills; but growable KV steps from expert cache; interaction not fully measured
+     - `--expert-residency whole`/`mirror`; whole pins every expert row in host RAM; mirror bounds to pool; but unset defaults to mirror via env aliases; if env not set, behavior unclear
+     - `--session-spill-persist on` keeps checkpoints across restarts; but startup adopts manifests matching model + K/V layout fingerprint; if layout changes, checkpoints deleted; fragile migration
+     - `--moe-pageable-gpu` keeps pin-budget overflow banks pageable; but disables decode CUDA graphs; trade-off measured: graphs overlap shared expert calculation; idle telemetry saves model-scoped time-cost ranking
+     - `--moe-cache-policy lfu` 1.80× aggregate throughput at 16 concurrent; but at bs=1, lru default; switch requires config change
+     - `--kv-grow-step-tokens` measured: 565 teardowns vs 67 successful releases, 89% pure loss, 11.5M prefix pages evicted; significant
+     - `--speculative ngram`: at k=16, 131K non-copy case 0.870x of off; gate never closed; default 8 confirmed; but at short context copy arms 1.11× at k=8, 1.61× at k=16; trade-off
+     - `--moe-extend-cache-tokens 64`: measured crossover between 64 and 80; but at m=128, cached path fetches 107.8/128 rows at scattered gather rate 52.9 GB/s vs contiguous 61.9 GB/s; pays decode GEMV; but following decode burst shows no eviction penalty
+     - `--memory-ratio 1.00`: engine predicts from config, measures prefill transient, fills arena; WARN outside ±25%; but `scripts/verify-memory-ratio.sh` checks 1.00 starts and serves 8K/80K/256K; old bisecting script retired; if host changes, ratio may be off
+     - `--host-ram-reserve-gb 6`: minimum MemAvailable kept outside expert banks + RAM checkpoints; but if MemAvailable drops below, server may fail; no auto-adjustment beyond WARN
+     - `--linear-state-slots 5` accepted floor at --max-running-requests 1; 3,4 rejected; default 9; but 5 chosen for pinning; tight coupling with KV step costs; each 131072-token KV step costs ~0.40 GiB and ~76 expert slots; auto starts at 1786 slots; but 5 returns ~188 MiB (35 slots) to MoE cache; if KV grows, slots decrease; but 5 is minimum; if more running requests, slots needed increase; `--max-running-requests 1` with 5 is accepted; with 16, need 96 Mamba slots + 1.5 GiB more host RAM historically; but S11 every launch sizes pool for --max-running-requests up front
+     - `--session-spill-ram-gb 4` default: one look-ahead 1M session fits beside checkpoint being written; but 1M profile example uses 12; confusion; doc says "now defaults to 4 so one 1M look-ahead fits beside the checkpoint being written"; but earlier examples use 12; may be version drift
+     - `--session-spill-disk-gb 64` per-server disk budget; but `--session-spill-limit-gb 50` total cap; if disk fills, cap may refuse; interaction not fully measured
+     - `--moe-cache-auto` sizing from free VRAM; but free VRAM = expert slots not used; runtime headroom not "whatever the ratio leaves"; predicted from config; measures prefill transient; fills growable arena back so exactly that is left free; WARN outside ±25%; but if config changes, prediction may be off; no dynamic re-tuning during runtime
+     - `--kv-grow-step-tokens` costs whole prefix cache on prefix-reuse-heavy; measured 89% loss; but doc says "drop it for prefix-reuse-heavy batch work (replay, evaluation, teacher forcing)"; keep for multi-agent session serving where KV genuinely idle between turns; but default profile P1/P2 may have it on/off; confusion in historical flags
+     - `--moe-backend offload` + `--kv-grow-step-tokens` used to die at init with unsupported VMM tensor dtype: torch.int32; fixed 2026-09-05; but still, interaction fragile; int16/int32/int64 added to VMMTensor._DTYPE_NAMES; but triton still recommended
+     - `--nvfp4-backend` choices: b12x rejected at config for ungated relu2, moe_intermediate_size 1856 ≥ 1024 threshold; auto resolves to b12x here (sm_120, ungated relu2); but that resolution now wrong on this geometry; triton wins; but auto still resolves to b12x and that resolution is now wrong; so must explicitly set triton; fragile if user relies on auto
+     - `--attention-backend triton` required for q8_0 KV; but bf16 KV with FlashInfer fallback +0.75 GiB at 262K; if user sets flashinfer, may fail without --kv-grow-step-tokens; but fixed 2026-09-05; still, interaction
+     - `--moe-cache-policy lfu` worth 1.80× at 16 concurrent; but single-stream default lru; at bs=1, lru 12.0% miss rate vs lfu? doc says lru default for single; at bs=16 lru 99.6% miss rate; lfu 51.1%; worth 1.80×; but if switch from lru to lfu, requires --moe-cache-policy lfu; but single-stream may not benefit; doc says "the lru default for single-stream"; so policy switch only matters for concurrent; but default is lru; user must opt-in lfu; fragile if they don't know
+     - `--moe-cache-auto` size: auto sizes from free VRAM; but free VRAM depends on weights + KV + MoE cache; mutual dependency; if VRAM changes, size recalculated at startup; no runtime adjustment
+     - `--max-running-requests 1` default for single-stream; but P2 profile 16 concurrent; doc says "the default profile still runs one session at a time (single lane, see "Launch profiles")"; but other sessions queue and spill; but if user sets 16 without understanding, may hit pin budget, graph issues, prefix cache teardown
+     - `--cuda-graph-max-bs` = max running requests; but dense BS ladder

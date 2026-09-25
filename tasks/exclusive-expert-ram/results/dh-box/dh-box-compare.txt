@@ -1,0 +1,10 @@
+== dh-mirror-1m (a2f08c0ad) vs same-box whole
+  decode_1000k          69.9  (no same-box reference)
+  decode_1000k_p1       68.5  (no same-box reference)
+  decode_8k            162.1  (no same-box reference)
+  decode_8k_p1         161.8  (no same-box reference)
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            12.21  free_evict_rate 0.817
+  ram 12.26 +/- 0.6  ok
+0 point(s) outside the band

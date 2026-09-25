@@ -1,0 +1,116 @@
+code: ceb482c Decode free target 128 MiB by default, for every model (was VMM cushion + margin, 0.375 GiB)
+preflight ok: GPU 0 MiB, MemAvailable 26 GiB, no server, no pytest
+checkpoint label: ck5
+code: ceb482c Decode free target 128 MiB by default, for every model (was VMM cushion + margin, 0.375 GiB)
+preflight ok: GPU 0 MiB, MemAvailable 26 GiB, no server, no pytest
+=== arm ck5-mirror-1m ===
+[ck5-mirror-1m] starting: model=NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 rows=-1 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/round3@ceb482c venv=/home/lucas/ai/FreeToken/.venv launcher=systemd
+Running as unit: ft-measure-ck5-mirror-1m.service; invocation ID: eb4839933e9e4fccbea69b2958b73942
+[ck5-mirror-1m] ready after 59s
+Sep 25 17:50:48 TESSERACT serve-default.sh[2048371]: [2026-09-25|17:50:48|core|rank=0] INFO     Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode graphs enabled, prefill overlap on (layers assembled from resident slots + pool rows, no disk)
+Sep 25 17:50:48 TESSERACT serve-default.sh[2048371]: [2026-09-25|17:50:48|core|rank=0] INFO     Mirror pool: reserve resolved to 256 rows (FREETOKEN_MIRROR_RESERVE_ROWS='256')
+Sep 25 17:50:59 TESSERACT serve-default.sh[2048371]: [2026-09-25|17:50:59|core|rank=0] INFO     Mirror pool: 1850 rows pinned (9.69 GiB), 755 cover the complement of 2189 GPU residents, 256 reserved, up to 839 duplicates (a duplicate makes its expert's next eviction free of any host traffic)
+Sep 25 17:50:59 TESSERACT serve-default.sh[2048371]: [2026-09-25|17:50:59|core|rank=0] INFO     Mirror pool: the coverage floor is 1352 of 2189 arena slots, leaving 837 slots (4.38 GiB) the growable KV may still take
+Sep 25 17:50:59 TESSERACT serve-default.sh[2048371]: [2026-09-25|17:50:59|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+Sep 25 17:51:32 TESSERACT serve-default.sh[2048371]: [2026-09-25|17:51:32|core|rank=0] INFO     Prefill headroom: transient 0.59 GiB measured on a 8192-token chunk (empty prefix 0.59 GiB, after a 8192-token prefix 0.59 GiB, allocator peak 0.59 GiB); headroom 0.59 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 1352 -> 2024 of 2189 slots, 0.74 GiB free (target 0.71 GiB), 165 slots below the ratio plan
+Sep 25 17:51:32 TESSERACT serve-default.sh[2048371]: [2026-09-25|17:51:32|core|rank=0] INFO     Startup geometry: memory ratio 1.00, runtime reserve 0.00 GiB; expert arena 2024 slots; KV 65536 tokens mapped of 1048576 (0.23 GiB); 0.74 GiB free
+[ck5-mirror-1m] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8014, "ttft_s": 0.22, "prefill_tok_s": 36578.0, "gen_tokens": 127, "decode_tok_s": 181.1, "decode_tok_s_wall": 181.1, "total_s": 0.9, "ttft_mono_s": 0.219, "prefill_tok_s_mono": 36578.0, "total_mono_s": 0.91, "t_start_wall": 1790344320.884, "gap1_ms": 19.5, "max_gap_ms": 19.5, "median_gap_ms": 5.3, "decode_tok_s_after_gap1": 184.9}
+{"target": 1000000, "pass": 1, "prompt_tokens": 1000030, "ttft_s": 528.48, "prefill_tok_s": 1892.0, "gen_tokens": 127, "decode_tok_s": 92.7, "decode_tok_s_wall": 92.7, "total_s": 529.8, "ttft_mono_s": 500.63, "prefill_tok_s_mono": 1998.0, "total_mono_s": 501.99, "t_start_wall": 1790344321.812, "gap1_ms": 38.1, "max_gap_ms": 38.1, "median_gap_ms": 10.2, "decode_tok_s_after_gap1": 94.6}
+{"target": 8000, "pass": 2, "prompt_tokens": 8016, "ttft_s": 0.9, "prefill_tok_s": 8860.0, "gen_tokens": 127, "decode_tok_s": 175.8, "decode_tok_s_wall": 175.8, "total_s": 1.6, "ttft_mono_s": 0.905, "prefill_tok_s_mono": 8860.0, "total_mono_s": 1.62, "t_start_wall": 1790344851.647, "gap1_ms": 25.6, "max_gap_ms": 25.6, "median_gap_ms": 5.4, "decode_tok_s_after_gap1": 180.9}
+{"target": 1000000, "pass": 2, "prompt_tokens": 1000032, "ttft_s": 526.14, "prefill_tok_s": 1901.0, "gen_tokens": 127, "decode_tok_s": 94.3, "decode_tok_s_wall": 94.3, "total_s": 527.5, "ttft_mono_s": 500.291, "prefill_tok_s_mono": 1999.0, "total_mono_s": 501.63, "t_start_wall": 1790344853.28, "gap1_ms": 41.5, "max_gap_ms": 41.5, "median_gap_ms": 10.0, "decode_tok_s_after_gap1": 96.6}
+[ck5-mirror-1m] post: NEEDLES_THINK_MAX_TOKENS=65536 NEEDLES_OUT="/home/lucas/ai/FreeToken-wt/round3/tasks/exclusive-expert-ram/results/ck5-mirror-1m-needles.json" python3 /home/lucas/ai/FreeToken-wt/round3/tasks/exclusive-expert-ram/needles.py 21000 120000; python3 /home/lucas/ai/FreeToken-wt/round3/tasks/exclusive-expert-ram/recall.py 21000 120000 240000
+[21000 -> 19927 tok] 5/7  codes=ok multihop=TRUNC counting=FAIL ordering=ok contradiction=ok arithmetic=ok negative=ok
+[120000 -> 112298 tok] 3/7  codes=ok multihop=TRUNC counting=FAIL ordering=TRUNC contradiction=ok arithmetic=TRUNC negative=ok
+wrote /home/lucas/ai/FreeToken-wt/round3/tasks/exclusive-expert-ram/results/ck5-mirror-1m-needles.json
+{"target": 21000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 19757, "completion_tokens": 27, "seconds": 2.1, "planted": ["ZULU-2188", "ROMEO-6864", "KILO-3647"], "recalled": ["ZULU-2188", "ROMEO-6864", "KILO-3647"], "all_three": true, "answer": "ZULU-2188, ROMEO-6864, KILO-3647"}
+{"target": 120000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 112048, "completion_tokens": 27, "seconds": 14.8, "planted": ["ROMEO-1813", "TANGO-6789", "ZULU-5364"], "recalled": ["ROMEO-1813", "TANGO-6789", "ZULU-5364"], "all_three": true, "answer": "ROMEO-1813, TANGO-6789, ZULU-5364"}
+{"target": 240000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 224417, "completion_tokens": 27, "seconds": 40.0, "planted": ["SIERRA-6523", "SIERRA-1067", "ROMEO-9011"], "recalled": ["SIERRA-6523", "SIERRA-1067", "ROMEO-9011"], "all_three": true, "answer": "SIERRA-6523, SIERRA-1067, ROMEO-9011"}
+{
+  "arm": "ck5-mirror-1m",
+  "model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+  "rows": "-1",
+  "commit": "ceb482c",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 12.77,
+  "rss_ready_gib": 13.81,
+  "devzero_gib": 0.09,
+  "ram_after_80k_gib": 12.81,
+  "rss_gib": 13.73,
+  "locked_gib": 0.0,
+  "anon_gib": 13.07,
+  "file_gib": 0.25,
+  "unevict_gib": 0.0,
+  "shmem_gib": 0.09,
+  "current_gib": 13.37,
+  "peak_current_gib": 14.63,
+  "gpu_mib": "14486",
+  "decode_8k_p1": 181.1,
+  "ttft_8k_p1": 0.22,
+  "total_8k_p1": 0.9,
+  "ttft_mono_8k_p1": 0.22,
+  "decode_1000k_p1": 92.7,
+  "ttft_1000k_p1": 528.48,
+  "total_1000k_p1": 529.8,
+  "ttft_mono_1000k_p1": 500.63,
+  "decode_8k": 175.8,
+  "ttft_8k": 0.9,
+  "total_8k": 1.6,
+  "ttft_mono_8k": 0.91,
+  "decode_1000k": 94.3,
+  "ttft_1000k": 526.14,
+  "total_1000k": 527.5,
+  "ttft_mono_1000k": 500.29,
+  "coverage_faults": 0,
+  "starved": 0,
+  "swaps": 53944,
+  "retained_rows": 45890,
+  "free_evict_rate": 0.862,
+  "buffer_free_evictions": 5022
+}
+73 arms -> /home/lucas/ai/FreeToken-wt/round3/tasks/exclusive-expert-ram/results/sweep.tsv
+[ck5-mirror-1m] stopping
+ck5-mirror-1m R3: PASS
+ck5-mirror-1m R6(arm): PASS
+SAME needles   21000 arithmetic   
+SAME needles   21000 codes        
+SAME needles   21000 contradiction
+SAME needles   21000 counting     
+SAME needles   21000 multihop     
+SAME needles   21000 negative     
+SAME needles   21000 ordering     
+SAME needles  120000 arithmetic   
+SAME needles  120000 codes        
+SAME needles  120000 contradiction
+SAME needles  120000 counting     
+SAME needles  120000 multihop     
+SAME needles  120000 negative     
+SAME needles  120000 ordering     
+SAME recall    21000
+SAME recall   120000
+SAME recall   240000
+0 difference(s)
+== ck5-mirror-1m (ceb482c) vs same-box whole
+  decode_1000k          94.3 vs   104.1 (whole-1m)  90.6%  BELOW
+  decode_1000k_p1       92.7 vs    96.9 (whole-1m)  95.7%  ok
+  decode_8k            175.8 vs   176.9 (whole-1m)  99.4%  ok
+  decode_8k_p1         181.1 vs   193.6 (whole-1m)  93.5%  ok
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            12.77  free_evict_rate 0.862
+  ram 12.26 +/- 0.6  ok
+1 point(s) outside the band
+== ck5-mirror-1m (ceb482c) vs nemotron-reserve-2e-1m (None)
+  decode_1000k          94.3 vs    72.9  129.4%  ok   total 527.5 s, ttft 526.14 s
+  decode_1000k_p1       92.7 vs    76.9  120.5%  ok   total 529.8 s, ttft 528.48 s
+  decode_8k            175.8 vs   170.7  103.0%  ok   total 1.6 s, ttft 0.9 s
+  decode_8k_p1         181.1 vs   177.0  102.3%  ok   total 0.9 s, ttft 0.22 s
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            12.77 (record 12.26)  free_evict_rate 0.862 (record 0.565)
+  ram 12.26 +/- 0.6  ok
+== ck5-mirror: not run in this checkpoint (ARMS), no comparison
+0 point(s) outside the band
+checkpoint ck5 arms done. The embedder stays stopped.

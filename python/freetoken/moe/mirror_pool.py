@@ -134,7 +134,37 @@ def resolve_reserve_rows(num_experts: int, *, env: dict | None = None) -> int:
             f"{_RESERVE_ROWS_ENV}={raw!r} must be a positive integer row "
             "count (0 or negative leaves the pool unable to cover anything)"
         )
+    minimum = min_reserve_rows(num_experts)
+    if value < minimum:
+        raise ValueError(
+            f"{_RESERVE_ROWS_ENV}={raw!r} is below the minimum of {minimum} rows "
+            f"(2 x {num_experts} experts per layer) for this model: the first prefill "
+            f"writes the {minimum} decode residents of the prefill double buffer back "
+            "to the pool, and at the arena's coverage floor the reserve is all the "
+            "free rows there are, so a smaller reserve loses coverage in the warmup "
+            f"prefill. Use at least {minimum} (the default is "
+            f"{default_reserve_rows(num_experts)})."
+        )
     return value
+
+
+def min_reserve_rows(num_experts: int) -> int:
+    """The smallest reserve a served model can run with: ``prefill_buffer_slots``.
+
+    The warm start seats residents from slot 0, so the prefill double buffer
+    (the first ``2 * num_experts`` slots) holds sole copies when the first
+    prefill runs. ``_mirror_writeback_buffer`` must land each of them in a free
+    pool row before the fill overwrites its slot. With the arena parked at its
+    coverage floor (``Expert arena parked ... until the prefill transient is
+    measured``) the pool holds the complement plus the reserve and next to no
+    duplicates, so the free rows are the reserve: a reserve under 2E starves
+    the second buffer half's write-backs and the prefill dies with "bounded
+    expert mirror lost coverage before prefill". Measured on Ornith NVFP4
+    (E=256, ft-dev 2026-09-24, exp/lfu-halve lfuab-box): 256 rows die in the
+    warmup prefill, 512 and 768 serve. Decode needs fewer free rows than this
+    (one launch's misses; the prefill boundary drains every write-back first).
+    """
+    return prefill_buffer_slots(num_experts)
 
 
 def prefill_buffer_slots(num_experts: int) -> int:

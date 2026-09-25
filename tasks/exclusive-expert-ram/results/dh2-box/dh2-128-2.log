@@ -1,0 +1,88 @@
+waiting for /root/gpu.lock
+code: a2f08c0ad Decode-level headroom probe (FREETOKEN_DECODE_MEM_PROBE=1) and a measurement override for the target
+preflight ok: GPU 2 MiB, MemAvailable 241 GiB, no server, no pytest
+checkpoint label: dt128-2 (box)
+code: a2f08c0ad Decode-level headroom probe (FREETOKEN_DECODE_MEM_PROBE=1) and a measurement override for the target
+preflight ok: GPU 2 MiB, MemAvailable 241 GiB, no server, no pytest
+=== arm dt128-2-mirror-np 2026-09-25T07:42:26Z ===
+[dt128-2-mirror-np] starting: model=NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 rows=-1 ratio=1.00 port=1920 code=/root/FT-dh@a2f08c0ad venv=/root/venv launcher=nohup
+[dt128-2-mirror-np] server pgid=711048 log=/root/FT-dh/tasks/exclusive-expert-ram/results/dt128-2-mirror-np-server.log
+[dt128-2-mirror-np] ready after 97s
+[2026-09-25|07:42:47|core|rank=0] INFO     Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode graphs enabled, prefill overlap on (layers assembled from resident slots + pool rows, no disk)
+[2026-09-25|07:42:47|core|rank=0] INFO     Mirror pool: reserve resolved to 256 rows (FREETOKEN_MIRROR_RESERVE_ROWS='256')
+[2026-09-25|07:43:05|core|rank=0] INFO     Mirror pool: 1740 rows pinned (9.11 GiB), 648 cover the complement of 2296 GPU residents, 256 reserved, up to 836 duplicates (a duplicate makes its expert's next eviction free of any host traffic)
+[2026-09-25|07:43:05|core|rank=0] INFO     Mirror pool: the coverage floor is 1464 of 2296 arena slots, leaving 832 slots (4.36 GiB) the growable KV may still take
+[2026-09-25|07:43:05|core|rank=0] INFO     Allocating 1048576 tokens for KV cache, K + V = 3.19 GiB
+[2026-09-25|07:44:03|core|rank=0] INFO     Prefill headroom: transient 0.59 GiB measured on a 8192-token chunk (empty prefix 0.59 GiB, after a 8192-token prefix 0.59 GiB, allocator peak 0.59 GiB); headroom 0.59 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 1464 -> 2128 of 2296 slots, 0.73 GiB free (target 0.71 GiB), 168 slots below the ratio plan
+[dt128-2-mirror-np] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8014, "ttft_s": 0.42, "prefill_tok_s": 19080.0, "gen_tokens": 511, "decode_tok_s": 164.3, "decode_tok_s_wall": 164.3, "total_s": 3.5, "ttft_mono_s": 0.42, "prefill_tok_s_mono": 19080.0, "total_mono_s": 3.52, "t_start_wall": 1790322273.678, "gap1_ms": 13.7, "max_gap_ms": 20.4, "median_gap_ms": 5.8, "decode_tok_s_after_gap1": 164.8}
+{"target": 80000, "pass": 1, "prompt_tokens": 80028, "ttft_s": 11.88, "prefill_tok_s": 6736.0, "gen_tokens": 511, "decode_tok_s": 156.8, "decode_tok_s_wall": 156.8, "total_s": 15.1, "ttft_mono_s": 11.881, "prefill_tok_s_mono": 6736.0, "total_mono_s": 15.13, "t_start_wall": 1790322277.205, "gap1_ms": 19.8, "max_gap_ms": 19.8, "median_gap_ms": 6.2, "decode_tok_s_after_gap1": 157.4}
+{"target": 8000, "pass": 2, "prompt_tokens": 8016, "ttft_s": 0.85, "prefill_tok_s": 9421.0, "gen_tokens": 511, "decode_tok_s": 170.0, "decode_tok_s_wall": 170.0, "total_s": 3.9, "ttft_mono_s": 0.851, "prefill_tok_s_mono": 9421.0, "total_mono_s": 3.85, "t_start_wall": 1790322292.34, "gap1_ms": 18.6, "max_gap_ms": 18.6, "median_gap_ms": 5.7, "decode_tok_s_after_gap1": 170.7}
+{"target": 80000, "pass": 2, "prompt_tokens": 80030, "ttft_s": 11.83, "prefill_tok_s": 6765.0, "gen_tokens": 511, "decode_tok_s": 158.8, "decode_tok_s_wall": 158.8, "total_s": 15.0, "ttft_mono_s": 11.831, "prefill_tok_s_mono": 6765.0, "total_mono_s": 15.04, "t_start_wall": 1790322296.196, "gap1_ms": 18.9, "max_gap_ms": 18.9, "median_gap_ms": 6.2, "decode_tok_s_after_gap1": 159.4}
+{
+  "arm": "dt128-2-mirror-np",
+  "model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+  "rows": "-1",
+  "commit": "a2f08c0ad",
+  "venv": "/root/venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 12.16,
+  "rss_ready_gib": 13.16,
+  "devzero_gib": 0.02,
+  "ram_after_80k_gib": 12.22,
+  "rss_gib": 13.18,
+  "locked_gib": 0.0,
+  "anon_gib": 0.0,
+  "file_gib": 0.0,
+  "unevict_gib": 0.0,
+  "shmem_gib": 0.0,
+  "current_gib": 0.0,
+  "peak_current_gib": 0.0,
+  "gpu_mib": "15462",
+  "decode_8k_p1": 164.3,
+  "ttft_8k_p1": 0.42,
+  "total_8k_p1": 3.5,
+  "ttft_mono_8k_p1": 0.42,
+  "decode_80k_p1": 156.8,
+  "ttft_80k_p1": 11.88,
+  "total_80k_p1": 15.1,
+  "ttft_mono_80k_p1": 11.88,
+  "decode_8k": 170.0,
+  "ttft_8k": 0.85,
+  "total_8k": 3.9,
+  "ttft_mono_8k": 0.85,
+  "decode_80k": 158.8,
+  "ttft_80k": 11.83,
+  "total_80k": 15.0,
+  "ttft_mono_80k": 11.83,
+  "coverage_faults": 0,
+  "starved": 0,
+  "swaps": 10320,
+  "retained_rows": 7848,
+  "free_evict_rate": 0.787,
+  "buffer_free_evictions": 1277
+}
+69 arms -> /root/FT-dh/tasks/exclusive-expert-ram/results/sweep.tsv
+[dt128-2-mirror-np] stopping
+=== arm dt128-2-mirror-np done 2026-09-25T07:45:20Z ===
+dt128-2-mirror-np R3: PASS
+dt128-2-mirror-np R6(arm): FAIL (see dt128-2-mirror-np-acceptance-R6.txt; expected on Vast)
+Traceback (most recent call last):
+  File "/root/FT-dh/tasks/exclusive-expert-ram/compare_needles.py", line 24, in <module>
+    a, b = needles(REF), needles(ARM)
+           ^^^^^^^^^^^^
+  File "/root/FT-dh/tasks/exclusive-expert-ram/compare_needles.py", line 13, in needles
+    d = json.load(open(os.path.join(D, f"{arm}-needles.json")))
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/root/FT-dh/tasks/exclusive-expert-ram/results/dt128-2-box/dt128-2-whole-needles.json'
+Traceback (most recent call last):
+  File "/root/FT-dh/tasks/exclusive-expert-ram/compare_records.py", line 23, in <module>
+    a, r = load(arm), load(ref)
+           ^^^^^^^^^
+  File "/root/FT-dh/tasks/exclusive-expert-ram/compare_records.py", line 20, in <lambda>
+    load = lambda n: json.load(open(os.path.join(d, f"{n}-record.json")))
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/root/FT-dh/tasks/exclusive-expert-ram/results/dt128-2-box/dt128-2-mirror-1m-record.json'
+0 point(s) outside the band
+checkpoint dt128-2 (box) arms done 2026-09-25T07:45:40Z

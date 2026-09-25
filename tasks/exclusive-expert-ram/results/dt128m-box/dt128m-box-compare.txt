@@ -1,0 +1,10 @@
+== dt128m-mirror-1m (a2f08c0ad) vs same-box whole
+  decode_1000k          72.7  (no same-box reference)
+  decode_1000k_p1       71.0  (no same-box reference)
+  decode_8k            165.6  (no same-box reference)
+  decode_8k_p1         164.4  (no same-box reference)
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            12.2  free_evict_rate 0.821
+  ram 12.26 +/- 0.6  ok
+0 point(s) outside the band
