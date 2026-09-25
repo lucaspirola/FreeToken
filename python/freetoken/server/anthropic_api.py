@@ -17,6 +17,7 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from fastapi import FastAPI, Request
+from freetoken.message.tokenizer import IN_PLACE_SYSTEM_KEY
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -138,6 +139,8 @@ async def handle_anthropic_messages(
             default_max_tokens=(
                 getattr(state.config, "max_output_tokens", None) or DEFAULT_MAX_OUTPUT_TOKENS
             ),
+            strip_billing_header=getattr(state.config, "anthropic_strip_billing_header", True),
+            system_in_place=getattr(state.config, "anthropic_system_in_place", True),
         )
         spec.session_reclaimable = session_reclaimable
         uid = await submit_generation(spec, state)
@@ -195,7 +198,9 @@ async def handle_anthropic_count_tokens(req: AnthropicCountTokensRequest, state:
     # so it must not fall into the convert/empty-prompt ValueError branch.
     try:
         messages, template_tools, _, ctk = convert_anthropic_prompt(
-            req, reasoning_parser=getattr(state.config, "reasoning_parser", None)
+            req, reasoning_parser=getattr(state.config, "reasoning_parser", None),
+            strip_billing_header=getattr(state.config, "anthropic_strip_billing_header", True),
+            system_in_place=getattr(state.config, "anthropic_system_in_place", True),
         )
     except ValueError as exc:
         return _anthropic_error_response(400, "invalid_request_error", str(exc))
@@ -221,30 +226,69 @@ async def handle_anthropic_count_tokens(req: AnthropicCountTokensRequest, state:
 # Request conversion: Anthropic Messages -> GenSpec (the neutral generation spec;
 # built directly, like vLLM's Responses path — no ChatCompletionRequest pivot).
 # --------------------------------------------------------------------------- #
+#: Claude Code's first system text block: client billing metadata
+#: (``x-anthropic-billing-header: cc_version=2.1.282.f5d; cc_entrypoint=cli;``) whose
+#: version suffix changes per conversation. It sits ahead of the whole system prompt, so a
+#: server-side prefix cache could never reuse the system prompt and tool list across two
+#: conversations (a /clear) while it is rendered.
+BILLING_HEADER_PREFIX = "x-anthropic-billing-header:"
+
+
+def _is_billing_header(text: str | None) -> bool:
+    return bool(text) and text.lstrip().startswith(BILLING_HEADER_PREFIX)
+
+
 def convert_anthropic_prompt(
     req: AnthropicMessagesRequest | AnthropicCountTokensRequest,
     reasoning_parser: str | None = None,
+    strip_billing_header: bool = True,
+    system_in_place: bool = True,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None, list[dict[str, Any]] | None, dict[str, Any]]:
     """(messages, template_tools, parser_tools, chat_template_kwargs) — the prompt
     side of the conversion, shared by /v1/messages and /v1/messages/count_tokens so
-    a counted prompt is exactly the prompt a generation would tokenize."""
-    # Collect all system content (top-level `system` + any system-role messages
-    # Claude Code interleaves in the array) and emit ONE system message at the
-    # front: strict chat templates (e.g. Qwen3.5) require system at the beginning.
+    a counted prompt is exactly the prompt a generation would tokenize.
+
+    ``strip_billing_header`` (``--anthropic-strip-billing-header``, default on) drops a
+    top-level system text block that is Claude Code's billing metadata
+    (:data:`BILLING_HEADER_PREFIX`); it tells the model nothing.
+
+    ``system_in_place`` (``--anthropic-system-in-place``, default on): only the top-level
+    ``system`` plus the system-role messages that come before the first user/assistant
+    message form the leading system text; a later system-role message (Claude Code sends
+    its environment block after the first user turn and a reminder after later ones) stays
+    where it is, as a system message. The tokenizer then keeps it in place when the chat
+    template accepts a mid-conversation system turn, or folds it into the adjacent user
+    turn when it does not (``TokenizeManager.place_system_messages``). Either way a turn
+    only APPENDS to the previous turn's prompt, so the prefix cache can resume it. Off:
+    every system message is hoisted into the leading system text (the old behavior),
+    which rewrites the prompt ahead of the tool list whenever a turn adds one."""
+    # The leading system text: top-level `system` + the system-role messages ahead of the
+    # conversation (+ every later one when system_in_place is off). Emitted as ONE system
+    # message at the front: strict chat templates (e.g. Qwen3.5) require system first.
     system_texts: list[str] = []
     if req.system:
         if isinstance(req.system, str):
             system_texts.append(req.system)
         else:
             system_texts.append(
-                "".join(b.text for b in req.system if b.type == "text" and b.text)
+                "".join(
+                    b.text for b in req.system
+                    if b.type == "text" and b.text
+                    and not (strip_billing_header and _is_billing_header(b.text))
+                )
             )
 
     other: list[dict[str, Any]] = []
+    leading = True
     for msg in req.messages:
         if msg.role == "system":
-            system_texts.append(_content_text(msg.content))
+            if leading or not system_in_place:
+                system_texts.append(_content_text(msg.content))
+            else:
+                other.append({"role": "system", "content": _content_text(msg.content),
+                              IN_PLACE_SYSTEM_KEY: True})
             continue
+        leading = False
 
         if isinstance(msg.content, str):
             other.append({"role": msg.role, "content": msg.content})
@@ -350,9 +394,12 @@ def convert_anthropic_to_genspec(
     model_sampling: dict[str, Any],
     reasoning_parser: str | None = None,
     default_max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    strip_billing_header: bool = True,
+    system_in_place: bool = True,
 ) -> GenSpec:
     messages, template_tools, parser_tools, ctk = convert_anthropic_prompt(
-        req, reasoning_parser=reasoning_parser
+        req, reasoning_parser=reasoning_parser, strip_billing_header=strip_billing_header,
+        system_in_place=system_in_place,
     )
     return GenSpec(
         messages=messages,

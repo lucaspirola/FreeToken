@@ -1,0 +1,22 @@
+claude-code cold {"ttft_s": 3.947, "total_s": 4.163, "usage": {"input_tokens": 19064, "output_tokens": 31, "cache_read_input_tokens": 0}, "tokens": {"prompt": 19064, "cached": 0}}
+claude-code A {"ttft_s": 6.039, "total_s": 6.24, "usage": {"input_tokens": 45489, "output_tokens": 31, "cache_read_input_tokens": 0}, "tokens": {"prompt": 45489, "cached": 0}}
+claude-code clear {"ttft_s": 0.374, "total_s": 0.575, "usage": {"input_tokens": 2390, "output_tokens": 31, "cache_read_input_tokens": 16609}, "tokens": {"prompt": 18999, "cached": 16609}}
+claude-code repeat {"ttft_s": 1.621, "total_s": 1.818, "usage": {"input_tokens": 86, "output_tokens": 31, "cache_read_input_tokens": 18913}, "tokens": {"prompt": 18999, "cached": 18913}}
+claude-code next {"ttft_s": 0.809, "total_s": 0.991, "usage": {"input_tokens": 129, "output_tokens": 31, "cache_read_input_tokens": 18913}, "tokens": {"prompt": 19042, "cached": 18913}}
+omp cold {"ttft_s": 2.223, "total_s": 2.411, "usage": {"prompt_tokens": 8776, "completion_tokens": 31, "total_tokens": 8807, "prompt_tokens_details": {"cached_tokens": 0}, "completion_tokens_details": {"reasoning_tokens": 31}}, "tokens": {"prompt": 8776, "cached": 0}}
+omp A {"ttft_s": 4.814, "total_s": 5.003, "usage": {"prompt_tokens": 35303, "completion_tokens": 31, "total_tokens": 35334, "prompt_tokens_details": {"cached_tokens": 0}, "completion_tokens_details": {"reasoning_tokens": 31}}, "tokens": {"prompt": 35303, "cached": 0}}
+omp clear {"ttft_s": 0.433, "total_s": 0.608, "usage": {"prompt_tokens": 8740, "completion_tokens": 31, "total_tokens": 8771, "prompt_tokens_details": {"cached_tokens": 8619}, "completion_tokens_details": {"reasoning_tokens": 31}}, "tokens": {"prompt": 8740, "cached": 8619}}
+omp repeat {"ttft_s": 0.325, "total_s": 0.507, "usage": {"prompt_tokens": 8740, "completion_tokens": 31, "total_tokens": 8771, "prompt_tokens_details": {"cached_tokens": 8619}, "completion_tokens_details": {"reasoning_tokens": 31}}, "tokens": {"prompt": 8740, "cached": 8619}}
+omp next {"ttft_s": 0.793, "total_s": 0.934, "usage": {"prompt_tokens": 8760, "completion_tokens": 24, "total_tokens": 8784, "prompt_tokens_details": {"cached_tokens": 8619}, "completion_tokens_details": {"reasoning_tokens": 22}}, "tokens": {"prompt": 8760, "cached": 8619}}
+codex cold {"ttft_s": 2.246, "total_s": 2.424, "usage": null, "tokens": null}
+codex A {"ttft_s": 4.769, "total_s": 4.92, "usage": {"input_tokens": 35949, "input_tokens_details": {"cache_write_tokens": 0, "cached_tokens": 0}, "output_tokens": 24, "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 35973}, "tokens": {"prompt": 35949, "cached": 0}}
+codex clear {"ttft_s": 0.311, "total_s": 0.484, "usage": null, "tokens": null}
+codex repeat {"ttft_s": 0.799, "total_s": 0.969, "usage": null, "tokens": null}
+codex next {"ttft_s": 0.809, "total_s": 0.984, "usage": null, "tokens": null}
+replay done
+turn1 stop tool_use usage {'input_tokens': 413, 'output_tokens': 303, 'cache_read_input_tokens': 0}
+turn1 tool_use [["Bash", {"command": "ls -la /srv/demo-repo-7731"}]]
+turn1 text [""]
+turn2 stop end_turn usage {'input_tokens': 433, 'output_tokens': 112, 'cache_read_input_tokens': 339}
+turn2 text "You're working in the directory `/srv/demo-repo-7731`. Its contents are:\n\n- `README.md`\n- `setup.py`\n- `src/`\n\nFINISHED"
+TOOLUSE {"turn1_tool_ok": true, "turn2_mentions_files": true, "turn2_follows_reminder": true, "turn2_cached": 339, "turn2_prompt": 772}

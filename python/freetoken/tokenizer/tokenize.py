@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, List
 
 import torch
 from freetoken.message import TokenizeMsg, UserMsg
+from freetoken.message.tokenizer import IN_PLACE_SYSTEM_KEY
 from freetoken.utils import init_logger
 from transformers import PreTrainedTokenizerBase
 
@@ -48,6 +49,10 @@ def resolve_thinking_mode(chat_template_kwargs: dict[str, Any] | None, tools: An
 
 _EFFORT_PROBE_MESSAGES = [{"role": "user", "content": "ping"}]
 
+_MID_SYSTEM_PROBE_USER = "FTPROBEUSERTURNONE"
+_MID_SYSTEM_PROBE_SYSTEM = "FTPROBEMIDSYSTEM"
+_MID_SYSTEM_PROBE_LAST = "FTPROBEUSERTURNTWO"
+
 
 class TokenizeManager:
     def __init__(self, tokenizer: PreTrainedTokenizerBase, mm_processor: MMProcessor | None = None) -> None:
@@ -58,6 +63,9 @@ class TokenizeManager:
         self._thinking_profile: ThinkingProfile | None = None
         self._effort_lock = threading.Lock()
         self._logged_effort_maps: set[tuple[Any, str | None]] = set()
+        self._mid_system: bool | None = None
+        # head render (system message + tools) -> its token ids; see segment_boundary.
+        self._segment_ids: dict[int, torch.Tensor | None] = {}
 
     def tokenize(self, msgs: List[TokenizeMsg]) -> List[UserMsg]:
         results: List[UserMsg] = []
@@ -76,6 +84,9 @@ class TokenizeManager:
                 )
             )
             input_ids = input_ids.view(-1).to(torch.int32)
+            boundary = (
+                self.segment_boundary(msg, input_ids) if templated and not msg.images else None
+            )
             if msg.images:
                 if self.mm_processor is None:
                     raise ValueError("image input is not supported for this model")
@@ -108,6 +119,7 @@ class TokenizeManager:
                         hidden_states=msg.hidden_states,
                         no_prefix_cache=msg.no_prefix_cache,
                         pin_key=msg.pin_key,
+                        prefix_boundary=boundary,
                     )
                 )
         return results
@@ -120,14 +132,112 @@ class TokenizeManager:
         if not isinstance(msg.text, list):
             return msg.text
         return self._render(
-            msg.text, msg.tools, self._sanitize_effort(msg.chat_template_kwargs or {})
+            self.place_system_messages(msg.text),
+            msg.tools,
+            self._sanitize_effort(msg.chat_template_kwargs or {}),
         )
+
+    def mid_system_supported(self) -> bool:
+        """Does this checkpoint's chat template render a system turn mid-conversation, in
+        place? Probed once (a four-turn system/user/system/user render) and cached. A template
+        that raises (Ornith 1.5, Qwen3.5: "System message must be at the beginning"), drops the
+        turn or moves it elsewhere counts as no; so does the dsv4 encoder."""
+        with self._effort_lock:
+            if self._mid_system is None:
+                self._mid_system = self._probe_mid_system()
+                logger.info(
+                    "chat template mid-conversation system turn: %s",
+                    "kept in place" if self._mid_system else "folded into the adjacent user turn",
+                )
+            return self._mid_system
+
+    def _probe_mid_system(self) -> bool:
+        if self._dsv4_encoder is not None:
+            return False
+        probe = [
+            {"role": "system", "content": "s"},
+            {"role": "user", "content": _MID_SYSTEM_PROBE_USER},
+            {"role": "system", "content": _MID_SYSTEM_PROBE_SYSTEM},
+            {"role": "user", "content": _MID_SYSTEM_PROBE_LAST},
+        ]
+        try:
+            text = self._render(probe, None, {})
+        except Exception:
+            return False
+        u = text.find(_MID_SYSTEM_PROBE_USER)
+        m = text.find(_MID_SYSTEM_PROBE_SYSTEM)
+        v = text.find(_MID_SYSTEM_PROBE_LAST)
+        return 0 <= u < m < v
+
+    def place_system_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Resolve the in-place system turns an adapter marked (:data:`IN_PLACE_SYSTEM_KEY`):
+        kept as system turns when the template accepts them mid-conversation, else appended
+        to the preceding user turn inside ``<system-reminder>`` tags (a standalone user turn
+        when the preceding turn is not a user's). Either way the rendered prompt of one turn
+        stays a prefix of the next turn's. Messages without the key pass through untouched."""
+        if not any(isinstance(m, dict) and m.get(IN_PLACE_SYSTEM_KEY) for m in messages):
+            return messages
+        keep = self.mid_system_supported()
+        out: list[dict[str, Any]] = []
+        for m in messages:
+            if not (isinstance(m, dict) and m.get(IN_PLACE_SYSTEM_KEY)):
+                out.append(m)
+                continue
+            m = {k: v for k, v in m.items() if k != IN_PLACE_SYSTEM_KEY}
+            if keep:
+                out.append(m)
+                continue
+            text = f"<system-reminder>\n{m.get('content') or ''}\n</system-reminder>"
+            prev = out[-1] if out else None
+            if prev is not None and prev.get("role") == "user":
+                content = prev.get("content")
+                if isinstance(content, list):
+                    merged = [*content, {"type": "text", "text": "\n\n" + text}]
+                else:
+                    merged = f"{content}\n\n{text}" if content else text
+                out[-1] = {**prev, "content": merged}
+            else:
+                out.append({"role": "user", "content": text})
+        return out
+
+    def segment_boundary(self, msg: TokenizeMsg, input_ids: torch.Tensor) -> int | None:
+        """Token length of the prompt's leading segment -- its first (system) message plus the
+        tool list, as the template renders them with nothing after -- when those tokens are a
+        strict prefix of ``input_ids``; else None. The segment is what separate conversations
+        of one client share (system prompt + tools), so the scheduler ends a prefill chunk
+        there and snapshots it. The head's token ids are cached per head render."""
+        if not isinstance(msg.text, list) or self._dsv4_encoder is not None:
+            return None
+        messages = msg.text
+        if len(messages) < 2 or not isinstance(messages[0], dict):
+            return None
+        if messages[0].get("role") != "system" or messages[0].get(IN_PLACE_SYSTEM_KEY):
+            return None
+        kwargs = self._sanitize_effort(msg.chat_template_kwargs or {})
+        try:
+            head = self._render([messages[0]], msg.tools, kwargs, add_generation_prompt=False)
+        except Exception:
+            return None
+        key = hash(head)
+        if key not in self._segment_ids:
+            if len(self._segment_ids) > 256:
+                self._segment_ids.clear()
+            ids = self.tokenizer.encode(head, return_tensors="pt", add_special_tokens=False)
+            self._segment_ids[key] = ids.view(-1).to(torch.int32) if ids.numel() else None
+        ids = self._segment_ids[key]
+        if ids is None:
+            return None
+        b = int(ids.numel())
+        if b >= int(input_ids.numel()) or not torch.equal(input_ids[:b], ids):
+            return None
+        return b
 
     def _render(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
         chat_template_kwargs: dict[str, Any],
+        add_generation_prompt: bool = True,
     ) -> str:
         """Raw render, no effort sanitation — the probe needs unsupported values
         to actually reach the template so rejection is observable."""
@@ -149,7 +259,7 @@ class TokenizeManager:
         prompt = self.tokenizer.apply_chat_template(
             messages,
             tokenize=False,
-            add_generation_prompt=True,
+            add_generation_prompt=add_generation_prompt,
             **chat_template_kwargs,
         )
         assert isinstance(prompt, str)

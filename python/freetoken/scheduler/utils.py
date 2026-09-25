@@ -29,6 +29,8 @@ class PendingReq:
     no_prefix_cache: bool = False
     # Resolved client session id for the prefix auto-pin only (see Req.pin_key).
     pin_key: str | None = None
+    # End of the leading system+tools segment (see Req.prefix_boundary).
+    prefix_boundary: int | None = None
 
     @property
     def input_len(self) -> int:
