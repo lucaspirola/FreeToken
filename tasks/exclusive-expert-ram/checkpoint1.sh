@@ -131,7 +131,11 @@ done
 # The gate twice: needles/recall vs the same-commit whole arm, decode pass by pass vs the
 # same-commit whole arms (compare_box.py, the owner's gate) and vs the record
 # (compare_records.py).
-python3 "$HERE/compare_needles.py" "$OUT" ${NEEDLES_REF:-$CK-whole} ${NEEDLES_ARM:-$CK-mirror-1m} > "$OUT/$CK-needles-compare.txt" 2>&1 || true
+# The needles reference defaults to the whole arm, or to whole-1m when only that one ran
+# with needles (ARMS="whole-1m mirror-1m" WHOLE1M_NEEDLES=1).
+REF_DEFAULT=$CK-whole
+[ -f "$OUT/$CK-whole-needles.json" ] || [ ! -f "$OUT/$CK-whole-1m-needles.json" ] || REF_DEFAULT=$CK-whole-1m
+python3 "$HERE/compare_needles.py" "$OUT" ${NEEDLES_REF:-$REF_DEFAULT} ${NEEDLES_ARM:-$CK-mirror-1m} > "$OUT/$CK-needles-compare.txt" 2>&1 || true
 { python3 "$HERE/compare_transient_ab.py" "$OUT" $CK; python3 "$HERE/compare_transient_ab.py" "$OUT" $CK st; } > "$OUT/$CK-transient-ab.txt" 2>&1 || true
 python3 "$HERE/compare_compaction.py" "$OUT" $CK > "$OUT/$CK-compaction.txt" 2>&1 || true
 python3 "$HERE/compare_box.py" "$OUT" $CK > "$OUT/$CK-box-compare.txt" 2>&1 || true

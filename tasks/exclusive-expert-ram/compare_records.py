@@ -20,6 +20,9 @@ d, ck = sys.argv[1], sys.argv[2]
 load = lambda n: json.load(open(os.path.join(d, f"{n}-record.json")))
 bad = 0
 for arm, ref in ((f"{ck}-mirror-1m", "nemotron-reserve-2e-1m"), (f"{ck}-mirror", "nemotron-reserve-2e")):
+    if not os.path.exists(os.path.join(d, f"{arm}-record.json")):
+        print(f"== {arm}: not run in this checkpoint (ARMS), no comparison")
+        continue
     a, r = load(arm), load(ref)
     print(f"== {arm} ({a.get('commit')}) vs {ref} ({r.get('commit')})")
     for k in sorted(k for k in r if re.fullmatch(r"decode_\d+k(_p1)?", k)):

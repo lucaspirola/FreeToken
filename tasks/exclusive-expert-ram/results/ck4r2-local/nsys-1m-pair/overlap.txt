@@ -1,0 +1,62 @@
+===== /tmp/claude-1000/-home-lucas-ai-FreeToken/606da56c-cd31-49f4-adb4-b4ab53d18508/scratchpad/nsys-dec/whole-base.sqlite: 166 graph launches
+   attention launch: _decode_grouped_stage1_kernel grid (1,2,84) block 256 regs 128  x6.0/step
+   attention launch: _decode_stage2_kernel grid (1,32,1) block 128 regs 42  x6.0/step
+   decode attention busy 3792.3 us/step
+   kernel                                                          n/step   us/step  ovl attn us/step outside graph streams
+   ATTN _decode_grouped_stage1_kernel                                 6.0    3769.1               0.0            0% [141]
+   COPY fast_index_copy_multi                                        22.9    1607.4               0.0            0% [141]
+   _decode_nvfp4_marlin_kernel                                       45.9    1151.6               0.0            0% [141]
+   _gemv_splitk_kernel                                               45.9    1027.9               0.0            0% [141]
+   _nvfp4_gemv_splitk_kernel                                         45.9     379.6               0.0            0% [141]
+   kernel                                                            34.9     377.5               0.0            0% [141]
+   _nvfp4_gemv_kernel                                                 1.0     216.6               0.0            0% [141]
+   _selective_state_update_kernel                                    22.9     116.8               0.0            0% [141]
+   unrolled_elementwise_kernel                                       71.8     115.5               0.0            3% [13, 21, 141]
+   vectorized_elementwise_kernel                                    167.5     111.5               0.0            1% [21, 141]
+   gatherTopK                                                        22.9      86.7               0.0            0% [141]
+   _ensure_experts_sized_kernel_v2                                   22.9      84.0               0.0            0% [141]
+   kernel_cutlass_kernel_flashinfernormkernelsrmsnormRMSNormKerne    52.8      69.7               0.0            0% [141]
+   causal_conv1d_update_kernel                                       22.9      45.6               0.0            0% [141]
+   _splitk_reduce_kernel                                             45.9      44.9               0.0            0% [141]
+   reduce_kernel                                                     23.9      34.4               0.0            4% [13, 141]
+   _scatter_gather_elementwise_kernel                                22.9      26.3               0.0            0% [141]
+   _layer_norm_fwd_1pass_kernel                                      22.9      25.5               0.0            0% [141]
+   ATTN _decode_stage2_kernel                                         6.0      23.1               0.0            0% [141]
+   moe_sum_reduce_kernel                                             22.9      22.4               0.0            0% [141]
+   elementwise_kernel                                                22.9      14.7               0.0            0% [141]
+   index_kernel                                                       1.0       7.7               0.0            0% [141]
+   memcpy kind 1 outside : 9.0/step 9.3 us/step 0.00 MB/step
+   memcpy kind 2 outside : 1.0/step 0.8 us/step 0.00 MB/step
+   memcpy kind 8 outside : 10.0/step 22.4 us/step 8.19 MB/step
+   graph launch period median 10260.9 us, mean 10354.2 us
+===== /tmp/claude-1000/-home-lucas-ai-FreeToken/606da56c-cd31-49f4-adb4-b4ab53d18508/scratchpad/nsys-dec/whole-r2.sqlite: 169 graph launches
+   attention launch: _decode_grouped_stage1_kernel grid (1,2,84) block 256 regs 128  x6.0/step
+   attention launch: _decode_stage2_kernel grid (1,32,1) block 128 regs 42  x6.0/step
+   decode attention busy 3870.8 us/step
+   kernel                                                          n/step   us/step  ovl attn us/step outside graph streams
+   ATTN _decode_grouped_stage1_kernel                                 6.0    3847.2               0.0            0% [141]
+   COPY fast_index_copy_multi                                        22.9    1737.4               0.0            0% [141]
+   _decode_nvfp4_marlin_kernel                                       45.8    1172.3               0.0            0% [141]
+   _gemv_splitk_kernel                                               45.8    1048.2               0.0            0% [141]
+   _nvfp4_gemv_splitk_kernel                                         45.8     386.6               0.0            0% [141]
+   kernel                                                            34.8     385.4               0.0            0% [141]
+   _nvfp4_gemv_kernel                                                 1.0     221.7               0.0            0% [141]
+   _selective_state_update_kernel                                    22.9     119.0               0.0            0% [141]
+   unrolled_elementwise_kernel                                       71.6     117.9               0.0            3% [13, 21, 141]
+   vectorized_elementwise_kernel                                    167.1     113.8               0.0            1% [21, 141]
+   gatherTopK                                                        22.9      88.5               0.0            0% [141]
+   _ensure_experts_sized_kernel_v2                                   22.9      87.1               0.0            0% [141]
+   kernel_cutlass_kernel_flashinfernormkernelsrmsnormRMSNormKerne    52.7      70.9               0.0            0% [141]
+   causal_conv1d_update_kernel                                       22.9      46.6               0.0            0% [141]
+   _splitk_reduce_kernel                                             45.8      46.0               0.0            0% [141]
+   reduce_kernel                                                     23.9      35.1               0.0            4% [13, 141]
+   _scatter_gather_elementwise_kernel                                22.9      26.9               0.0            0% [141]
+   _layer_norm_fwd_1pass_kernel                                      22.9      26.0               0.0            0% [141]
+   ATTN _decode_stage2_kernel                                         6.0      23.5               0.0            0% [141]
+   moe_sum_reduce_kernel                                             22.9      22.8               0.0            0% [141]
+   elementwise_kernel                                                22.9      15.0               0.0            0% [141]
+   index_kernel                                                       1.0       7.8               0.0            0% [141]
+   memcpy kind 1 outside : 9.0/step 9.0 us/step 0.00 MB/step
+   memcpy kind 2 outside : 1.0/step 0.8 us/step 0.00 MB/step
+   memcpy kind 8 outside : 10.0/step 23.0 us/step 8.19 MB/step
+   graph launch period median 10376.8 us, mean 10568.2 us

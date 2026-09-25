@@ -1,0 +1,11 @@
+===== /tmp/claude-1000/-home-lucas-ai-FreeToken/606da56c-cd31-49f4-adb4-b4ab53d18508/scratchpad/nsys-dec/whole-base.sqlite: 165 decode steps traced from step 1
+       steps  step ms wb MB/step copies/step copy us/step fetch mean us
+      1-16      10.40       0.00        11.2         1620           145
+     17-32      10.47       0.00        11.9         1718           145
+     33-48      10.33       0.00        11.2         1593           142
+     49-64      10.73       0.00        13.8         1978           144
+     65-80      10.06       0.00        10.1         1309           130
+     81-96       9.90       0.00         9.6         1192           125
+     97-112     10.44       0.00        11.8         1717           146
+    113-128     10.16       0.00        10.4         1396           135
+    129-165     10.50       0.00        11.9         1747           147

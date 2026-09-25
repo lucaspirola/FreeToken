@@ -1,0 +1,10 @@
+== ck4r2-mirror-1m (01548e7) vs same-box whole
+  decode_1000k          92.7 vs    93.3 (whole-1m)  99.4%  ok
+  decode_1000k_p1       85.5 vs    86.4 (whole-1m)  99.0%  ok
+  decode_8k            164.1 vs   166.6 (whole-1m)  98.5%  ok
+  decode_8k_p1         173.9 vs   182.3 (whole-1m)  95.4%  ok
+  coverage_faults    0  ok
+  starved            0  ok
+  ram_gib            13.06  free_evict_rate 0.828
+  ram 12.26 +/- 0.6  OUT
+1 point(s) outside the band
