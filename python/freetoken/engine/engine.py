@@ -248,18 +248,26 @@ def _log_prediction_vs_measurement(what: str, predicted: int, measured: int) -> 
 _PREFILL_TRANSIENT_EST_BYTES_PER_TOKEN = 128 * 1024
 
 
-def _prefill_transient_estimate(config) -> int:
+def _prefill_transient_estimate(config, prediction=None) -> int:
     """Pre-measurement estimate of one ``--max-prefill-length`` chunk's transient VRAM.
 
     ``FREETOKEN_PREFILL_TRANSIENT_MB`` overrides it (e.g. with the value a previous
-    start logged as "Prefill headroom: ... transient"); otherwise it scales with the
-    chunk length, which is what the transient scales with, and never goes below what
-    an earlier start of the same setup measured (``_prefill_transient_recorded``)."""
+    start logged as "Prefill headroom: ... transient"). Otherwise the largest of: the
+    per-token estimate (it scales with the chunk length, which is what the transient
+    scales with); the startup prediction's upper bound (``prediction``, a
+    ``TransientPrediction``: the largest measurement it accepts without a WARN,
+    ``memory_prediction.transient_upper_bound``); and what an earlier start of the same
+    setup measured (``_prefill_transient_recorded``)."""
     raw = os.environ.get("FREETOKEN_PREFILL_TRANSIENT_MB", "").strip()
     if raw:
         return int(float(raw) * 1024 * 1024)
+    from freetoken.engine.memory_prediction import transient_upper_bound
+
     estimate = int(config.max_extend_tokens) * _PREFILL_TRANSIENT_EST_BYTES_PER_TOKEN
-    return max(estimate, _prefill_transient_recorded(config) or 0)
+    bound = None
+    if prediction is not None and int(prediction.chunk_tokens) == int(config.max_extend_tokens):
+        bound = transient_upper_bound(prediction)
+    return max(estimate, bound or 0, _prefill_transient_recorded(config) or 0)
 
 
 # The per-token estimate can price a model's transient low: Ornith EXL3 measured
@@ -791,7 +799,9 @@ class Engine:
         # One prefill chunk's transient VRAM: the planning estimate until
         # _measure_prefill_transient replaces it (the mirror pool is sized from it
         # inside _init_offload_moe_cache, before a forward can run).
-        self.prefill_transient_bytes = _prefill_transient_estimate(config)
+        self.prefill_transient_bytes = _prefill_transient_estimate(
+            config, getattr(getattr(self, "startup_prediction", None), "transient", None)
+        )
         # What the bounded mirror pool is priced with (_validate_growable_ceiling
         # compares it with the measurement).
         self.prefill_transient_sized = self.prefill_transient_bytes
@@ -2260,34 +2270,37 @@ class Engine:
         # The plan above is priced from this start's live free VRAM; a long request
         # then grows the caching allocator's footprint by allocations the startup
         # never made (+24 MiB reserved, +2 MiB outside it, over the first 256K request
-        # of Ornith EXL3 on ft-dev). A pool sized for a transient estimate BELOW the
-        # measured one can leave its floor closer to the plan than that, and the
-        # request then dies on its last KV commit (Ornith: 8 slots = 15 MiB left at
-        # q8_0, 0 at q4_0). Require the runtime shrink's margin in that case, and fail
-        # the load instead: the measurement is recorded, the next start sizes for it.
-        if (
-            _need
-            and self.prefill_transient_measured
-            and self.prefill_transient_sized < self.prefill_transient_bytes
-        ):
+        # of Ornith EXL3 on ft-dev). A floor closer to the plan than that dies on the
+        # request's last KV commit (Ornith, pool priced for a 1024 MiB estimate against
+        # a 1146 MiB measurement: 8 slots = 15 MiB left at q8_0, 0 at q4_0). Require
+        # the runtime shrink's margin above the floor, and fail the load instead.
+        if _need and self.prefill_transient_measured:
             safe_moe, _ = self.growable_kv._plan_growable_kv(
                 self.num_pages, extra_vmm_reserve_bytes=PREFILL_HEADROOM_MARGIN_BYTES
             )
             if _need > safe_moe:
-                record = _prefill_transient_record_path()
-                again = (
-                    f"it is recorded in {record}, so starting again sizes the pool for it"
-                    if record is not None
-                    else f"FREETOKEN_PREFILL_TRANSIENT_MB="
-                    f"{-(-self.prefill_transient_bytes >> 20)} sizes the pool for it"
-                )
+                if self.prefill_transient_sized < self.prefill_transient_bytes:
+                    record = _prefill_transient_record_path()
+                    fix = (
+                        f"the measurement is recorded in {record}, so starting again "
+                        f"sizes the pool for it"
+                        if record is not None
+                        else f"FREETOKEN_PREFILL_TRANSIENT_MB="
+                        f"{-(-self.prefill_transient_bytes >> 20)} sizes the pool for it"
+                    )
+                else:
+                    fix = (
+                        f"raise --moe-mirror-host-rows to at least "
+                        f"{_moe.residency.pool.capacity + _need - safe_moe} (now "
+                        f"{_moe.residency.pool.capacity}) or lower --num-tokens"
+                    )
                 raise RuntimeError(
-                    f"mirror pool sized for a {self.prefill_transient_sized >> 20} MiB "
-                    f"prefill transient, but this start measured "
-                    f"{self.prefill_transient_bytes >> 20} MiB: its coverage floor "
+                    f"mirror pool priced for a {self.prefill_transient_sized >> 20} MiB "
+                    f"prefill transient (this start measured "
+                    f"{self.prefill_transient_bytes >> 20} MiB): its coverage floor "
                     f"({_need} arena slots) leaves the KV ceiling plan ({final_moe}) "
                     f"less than {mem_GB(PREFILL_HEADROOM_MARGIN_BYTES)} for the "
-                    f"allocator growth of a long request; {again}"
+                    f"allocator growth of a long request; {fix}"
                 )
         if _need > final_moe:
             _pool = _moe.residency.pool

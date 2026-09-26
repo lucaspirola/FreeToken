@@ -364,6 +364,20 @@ def runtime_reserve_bytes(
     return int(reserve)
 
 
+def transient_upper_bound(prediction: "TransientPrediction | None") -> int | None:
+    """The largest measured transient this prediction accepts without a WARN.
+
+    ``compare`` flags a measurement when ``(predicted - measured) / measured`` leaves
+    ``+-PREDICTION_WARN_FRACTION``, so any in-band measurement is at most
+    ``predicted / (1 - PREDICTION_WARN_FRACTION)``. Whatever must be priced before the
+    measurement can run (the bounded mirror pool) can take this bound: a model whose
+    measurement exceeds it is outside the calibrated band and WARNs at its first start.
+    None for a coarse prediction (an unmodelled layer kind): it bounds nothing."""
+    if prediction is None or prediction.coarse or prediction.bytes <= 0:
+        return None
+    return ceil(prediction.bytes / (1.0 - PREDICTION_WARN_FRACTION))
+
+
 def compare(predicted: int, measured: int) -> tuple[float, bool]:
     """(relative difference vs the measurement, outside the WARN band)."""
     if measured <= 0:
@@ -382,4 +396,5 @@ __all__ = [
     "predict_prefill_transient",
     "predict_startup",
     "runtime_reserve_bytes",
+    "transient_upper_bound",
 ]
