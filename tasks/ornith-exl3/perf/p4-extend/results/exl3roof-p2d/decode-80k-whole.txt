@@ -1,0 +1,45 @@
+decode at ctx 80000: 127 tokens, request wall 19.83 s; decode window 1.504 s = 84.4 tok/s, 11.85 ms/token; GPU busy 9.50 ms/token (80% of the window)
+mirror counters over the request (prefill of 80000 + 127 decode tokens): {}; 0.0 swaps and 0.0 writebacks per token
+decode window: GPU 1205.9 ms
+  exl3 gemv (decode path)           575.1 ms   47.7%
+  moe routing/sort                  278.3 ms   23.1%
+  other                             220.4 ms   18.3%
+  gemm (cublas/dense bf16)           53.4 ms    4.4%
+  norm/act/elementwise               33.1 ms    2.7%
+  gdn / fla                          30.6 ms    2.5%
+  hadamard                           13.3 ms    1.1%
+  memcpy DtoD                         1.3 ms    0.1%
+  memcpy HtoD                         0.3 ms    0.0%
+  memcpy DtoH                         0.1 ms    0.0%
+
+top kernels, decode window:
+       575.1 ms   30608x [exl3 gemv (decode path)] _exl3_gemv_kernel
+       276.9 ms    5080x [moe routing/sort] void fast_index_copy_multi<int, 1024ul, 8ul>(MultiIndexCopyParams)
+       146.5 ms    1270x [other] _decode_grouped_stage1_kernel
+        23.4 ms    5080x [gemm (cublas/dense bf16)] void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, __nv_bfloat16, __nv_bfloat16, __nv_bfloat
+        22.8 ms    5080x [other] _ensure_experts_sized_kernel_v2
+        21.5 ms    3810x [other] fused_sigmoid_gating_delta_rule_update_kernel
+        21.4 ms    8890x [gemm (cublas/dense bf16)] std::enable_if<!(false), void>::type internal::gemvx::kernel<int, int, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, float, false, true, true
+        16.5 ms    5080x [norm/act/elementwise] _splitk_silu_had_kernel
+        14.2 ms    1270x [other] _decode_stage2_kernel
+        13.7 ms   10161x [gdn / fla] kernel_cutlass_kernel_flashinfernormkernelsfused_add_rmsnormFusedAddRMSNormKernel_object_at__tensorptrbf16gmemalign128oi64204820481_tensorpt
+        13.3 ms    5208x [hadamard] _had_rows_kernel
+         9.3 ms    5080x [other] _router_triton_kernel
+         8.6 ms    5080x [gemm (cublas/dense bf16)] std::enable_if<!(false), void>::type internal::gemvx::kernel<int, int, __nv_bfloat16, float, float, float, false, true, false, false, 6, fal
+         8.0 ms    3810x [gdn / fla] void causal_conv1d_update_kernel<Causal_conv1d_update_kernel_traits<64, 4, c10::BFloat16, c10::BFloat16>, false>(ConvParamsBase)
+         4.6 ms    5081x [norm/act/elementwise] _shared_expert_add_kernel
+         4.4 ms    5081x [other] _splitk_combine_kernel
+         4.4 ms    5080x [gdn / fla] void flashinfer::activation::act_and_mul_kernel<__nv_bfloat16, &(silu(float const&))>(__nv_bfloat16*, __nv_bfloat16 const*, int)
+         4.0 ms    3810x [norm/act/elementwise] _layer_norm_fwd_1pass_kernel
+         3.8 ms    2540x [norm/act/elementwise] void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&):
+         2.7 ms    2540x [gdn / fla] kernel_cutlass_kernel_flashinfernormkernelsrmsnormRMSNormKernel_object_at__tensorptrbf16gmemalign128oi642562561_tensorptrbf16gmemalign16o256
+         1.7 ms    1270x [norm/act/elementwise] void at::native::vectorized_elementwise_kernel<4, at::native::sigmoid_kernel_cuda(at::TensorIteratorBase&)::{lambda()#2}::operator()() const
+         1.7 ms    1270x [gdn / fla] void flashinfer::BatchQKApplyRotaryPosIdsCosSinCacheHeadParallelismKernel<false, 256u, 8u, 32u, __nv_bfloat16, int>(__nv_bfloat16*, __nv_bfl
+         1.5 ms    1270x [other] _store_kv_quant_kernel
+         1.3 ms    1275x [memcpy DtoD] Memcpy DtoD (Device -> Device)
+         1.0 ms    1270x [norm/act/elementwise] void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_
+         0.6 ms     127x [norm/act/elementwise] void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::ArgMaxOps<float>, unsigned int, long, 4, 4> >(at::native::Red
+         0.5 ms     255x [moe routing/sort] void at::native::index_elementwise_kernel<128, 4, at::native::gpu_index_kernel<at::native::index_put_kernel_impl<at::native::OpaqueType<4> >
+         0.5 ms     255x [moe routing/sort] void at::native::index_elementwise_kernel<128, 4, at::native::gpu_index_kernel<at::native::index_kernel_impl<at::native::OpaqueType<4> >(at:
+         0.4 ms     127x [norm/act/elementwise] void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const:
+         0.3 ms     889x [memcpy HtoD] Memcpy HtoD (Pinned -> Device)

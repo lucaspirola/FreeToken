@@ -1,0 +1,7 @@
+short old rc=0 text: 'The user has given me a prompt that starts with a lot of repeated text (the "quick brown fox" sentence repeated many times), and then asks'
+short new rc=0
+short newfree rc=0 text: 'The user has given me a prompt that starts with a lot of repeated text (the "quick brown fox" sentence repeated many times), and then asks'
+long old rc=0 text: 'The user has pasted a huge block of repeated text ("The quick brown fox jumps over the lazy dog while the committee reviews the budget.") and then'
+long new rc=0
+long newfree rc=0 text: 'The user has pasted a huge block of repeated text, but the actual request is at the end: "Write three short sentences about the history of'
+ALLDONE

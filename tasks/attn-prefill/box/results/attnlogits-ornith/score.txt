@@ -1,0 +1,10 @@
+== tri vs fi
+positions 32  vocab 248320
+max|dlogit| 4.0078  mean|dlogit| 0.22763  max|dlogit|/max|logit| 1.44e-01
+top-1 agreement 1.000 (32/32)  first disagreement None
+top-5 overlap 0.931  KL(exl3||ft) max 9.86e-02 mean 9.95e-03
+== tri vs tile
+positions 32  vocab 248320
+max|dlogit| 3.0625  mean|dlogit| 0.22594  max|dlogit|/max|logit| 1.10e-01
+top-1 agreement 0.969 (31/32)  first disagreement 6
+top-5 overlap 0.925  KL(exl3||ft) max 5.86e-02 mean 6.68e-03

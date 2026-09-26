@@ -1,0 +1,8 @@
+# ft-dev Vast RTX 5080 box (docker, AMD EPYC 7402P, PCIe gen4 x16), 2026-09-24. bench_mirror_copy.py
+expert bytes 1.98 MB over 6 banks
+n=0: every bpb 4.1-7.3us (empty launch)
+n=1: bpb8..128: H2D ~85.5us (23.1 GB/s)   D2H ~840us (2.4 GB/s)
+n=2: bpb8..128: H2D ~156.5us (25.3 GB/s)  D2H ~1685us (2.4 GB/s)
+n=4: bpb8..128: H2D ~308us (25.8 GB/s)    D2H ~3374us (2.3 GB/s)
+n=8: bpb8..128: H2D ~611us (25.9 GB/s)    D2H ~6755us (2.3 GB/s)
+DMA reference (torch copy_ of 2 MB, pinned): D2H 85.9us 24.4 GB/s; H2D 89.2us 23.5 GB/s

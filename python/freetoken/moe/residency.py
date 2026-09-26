@@ -1391,21 +1391,10 @@ class MirrorResidency:
         )
 
         mc = config.model_config
-        if mc.expert_quant == "gguf":
+        if mc.expert_quant in SOURCED_MIRROR_FORMATS:
             # Shapes from the source (S12c): metadata-only, no file I/O -- see
             # gguf_mirror_bank_shapes. The NVFP4 branch below is unchanged.
-            from freetoken.models.gguf.reader import gguf_mirror_hooks
-
-            hooks = gguf_mirror_hooks(mc)
-            if hooks is None:
-                raise ValueError(
-                    f"mirror expert RAM has no GGUF expert-row hook for model "
-                    f"type {mc.model_type!r}: it cannot size the pool for this "
-                    f"GGUF checkpoint. Export gguf_expert_row_extents and "
-                    f"gguf_mirror_bank_shapes from that model's gguf module "
-                    f"once its layout is verified."
-                )
-            _extents_fn, bank_shapes_fn = hooks
+            _extents_fn, bank_shapes_fn = sourced_mirror_hooks(mc)
             shapes = bank_shapes_fn(mc)
         else:
             from freetoken.moe.mirror_pool import nvfp4_bank_shapes
@@ -1546,6 +1535,35 @@ def wb_stage_rows(*, top_k: int, moe_layers: int, experts: int, gpu_slots: int,
     return min(max(rows, 4), cap)
 
 
+# Expert formats whose pool rows come from a model-supplied ``source`` (S12c's
+# MirrorExpertPool protocol) instead of an NVFP4 expert source spec.
+SOURCED_MIRROR_FORMATS = ("gguf", "exl3")
+
+
+def sourced_mirror_hooks(mc):
+    """``(row_extents_fn(model_path, config), bank_shapes_fn(config))`` for a sourced format;
+    refuses a model whose row layout for that format was never verified."""
+    if mc.expert_quant == "gguf":
+        from freetoken.models.gguf.reader import gguf_mirror_hooks
+
+        hooks = gguf_mirror_hooks(mc)
+        export = "gguf_expert_row_extents and gguf_mirror_bank_shapes from that model's gguf module"
+    elif mc.expert_quant == "exl3":
+        from freetoken.models.exl3_banks import exl3_mirror_hooks
+
+        hooks = exl3_mirror_hooks(mc)
+        export = "exl3_expert_spec from that model's package"
+    else:
+        raise ValueError(f"mirror expert RAM: {mc.expert_quant!r} experts have no sourced pool rows")
+    if hooks is None:
+        raise ValueError(
+            f"mirror expert RAM has no {mc.expert_quant} expert-row hook for model "
+            f"type {mc.model_type!r}: it cannot locate expert rows in this "
+            f"checkpoint. Export {export} once its layout is verified."
+        )
+    return hooks
+
+
 def build_residency(config, mc, engine) -> ExpertResidency:
     """Choose and build the expert residency, before any expert bank is loaded.
 
@@ -1568,34 +1586,23 @@ def build_residency(config, mc, engine) -> ExpertResidency:
         )
     mirror_rows = config.moe_mirror_host_rows or 0
     cache_factory = getattr(engine.model, "make_offload_moe_cache", None)
-    is_gguf = mc.expert_quant == "gguf"
+    is_sourced = mc.expert_quant in SOURCED_MIRROR_FORMATS
 
     if (
         cache_factory is not None or config.moe_strategy != "offload"
         or config.moe_pageable_gpu or config.moe_cpu_layers is not None
         or config.use_dummy_weight or config.tp_info.size != 1
-        or mc.expert_quant not in ("nvfp4", "gguf")
+        or mc.expert_quant not in ("nvfp4", *SOURCED_MIRROR_FORMATS)
         or (mc.expert_quant == "nvfp4" and config.nvfp4_backend != "triton")
     ):
         raise ValueError(
-            "mirror expert RAM requires native NVFP4 experts (triton backend) "
-            "or GGUF experts, and single-rank GPU offload"
+            "mirror expert RAM requires native NVFP4 experts (triton backend), "
+            "GGUF or EXL3 experts, and single-rank GPU offload"
         )
     mirror_spec = None
-    gguf_row_extents_fn = None
-    if is_gguf:
-        from freetoken.models.gguf.reader import gguf_mirror_hooks
-
-        hooks = gguf_mirror_hooks(mc)
-        if hooks is None:
-            raise ValueError(
-                f"mirror expert RAM has no GGUF expert-row hook for model "
-                f"type {mc.model_type!r}: it cannot locate expert rows in "
-                f"this GGUF checkpoint. Export gguf_expert_row_extents and "
-                f"gguf_mirror_bank_shapes from that model's gguf module once "
-                f"its layout is verified."
-            )
-        gguf_row_extents_fn, _bank_shapes_fn = hooks
+    sourced_row_extents_fn = None
+    if is_sourced:
+        sourced_row_extents_fn, _bank_shapes_fn = sourced_mirror_hooks(mc)
     else:
         from freetoken.models.nvfp4_banks import expert_source_spec
 
@@ -1672,8 +1679,8 @@ def build_residency(config, mc, engine) -> ExpertResidency:
         MirrorResidency._mirror_final_gpu_slots(engine, config),
         reserve=mirror_reserve_rows,
     )
-    if is_gguf:
-        source = gguf_row_extents_fn(config.model_path, mc)
+    if is_sourced:
+        source = sourced_row_extents_fn(config.model_path, mc)
         _check_mirror_host_ram(capacity, source.shapes)
         mirror_pool = MirrorExpertPool(
             config.model_path, mc.num_moe_layers, mc.num_experts, capacity,

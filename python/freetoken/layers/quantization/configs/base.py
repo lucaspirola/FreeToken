@@ -84,6 +84,10 @@ class QuantConfig(ABC):
         """role -> checkpoint tensor for one scheme's tensors."""
         return {role: entry for role, entry in self.stored_tensors(scheme.kind).items() if scheme.has(role)}
 
+    def fuse_parts(self, target: str, scheme: QuantScheme, parts: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """A dialect's own way to combine a fused module's checkpoint parts into the layer's tensors; None keeps the reader's default (each role concatenated along dim 0)."""
+        return None
+
     def get_quant_method(self, layer: Any, prefix: str):
         scheme = self.scheme_for(prefix)
         layer_kind = layer.quant_layer_kind

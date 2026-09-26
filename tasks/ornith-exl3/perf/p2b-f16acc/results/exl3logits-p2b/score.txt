@@ -1,0 +1,34 @@
+== short pre1 saver vs whole
+ids equal True logits bit-equal True max|d| 0.0
+== short FT pre1 vs exllamav3
+positions 31  vocab 248320
+max|dlogit| 4.7773  mean|dlogit| 0.27364  max|dlogit|/max|logit| 1.92e-01
+top-1 agreement 0.903 (28/31)  first disagreement 3
+top-5 overlap 0.968  KL(exl3||ft) max 1.57e-01 mean 2.48e-02
+== short FT pre0 vs exllamav3
+positions 31  vocab 248320
+max|dlogit| 4.4570  mean|dlogit| 0.26706  max|dlogit|/max|logit| 1.79e-01
+top-1 agreement 0.903 (28/31)  first disagreement 3
+top-5 overlap 0.948  KL(exl3||ft) max 1.72e-01 mean 2.41e-02
+== short FT pre1 vs FT pre0
+positions 31  vocab 248320
+max|dlogit| 3.2891  mean|dlogit| 0.12432  max|dlogit|/max|logit| 1.30e-01
+top-1 agreement 1.000 (31/31)  first disagreement None
+top-5 overlap 0.981  KL(exl3||ft) max 1.59e-02 mean 3.05e-03
+== long pre1 saver vs whole
+ids equal True logits bit-equal True max|d| 0.0
+== long FT pre1 vs exllamav3
+positions 31  vocab 248320
+max|dlogit| 5.8428  mean|dlogit| 0.29413  max|dlogit|/max|logit| 2.14e-01
+top-1 agreement 0.935 (29/31)  first disagreement 10
+top-5 overlap 0.916  KL(exl3||ft) max 7.47e-01 mean 4.20e-02
+== long FT pre0 vs exllamav3
+positions 31  vocab 248320
+max|dlogit| 5.7490  mean|dlogit| 0.28311  max|dlogit|/max|logit| 2.10e-01
+top-1 agreement 0.935 (29/31)  first disagreement 10
+top-5 overlap 0.923  KL(exl3||ft) max 6.73e-01 mean 3.78e-02
+== long FT pre1 vs FT pre0
+positions 31  vocab 248320
+max|dlogit| 1.9922  mean|dlogit| 0.14242  max|dlogit|/max|logit| 7.63e-02
+top-1 agreement 1.000 (31/31)  first disagreement None
+top-5 overlap 0.935  KL(exl3||ft) max 1.65e-02 mean 2.36e-03

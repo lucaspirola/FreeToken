@@ -1,0 +1,1594 @@
+diff --git a/python/freetoken/attention/triton.py b/python/freetoken/attention/triton.py
+index 05440f3..d355d2f 100644
+--- a/python/freetoken/attention/triton.py
++++ b/python/freetoken/attention/triton.py
+@@ -75,6 +75,9 @@ class TritonMetadata(BaseAttnMetadata):
+     attn_lse: torch.Tensor | None = None
+     num_kv_splits: torch.Tensor | None = None
+     swa_indices: torch.Tensor | None = None
++    # Per-sequence (query, prefix, KV) lengths as host ints, for extend kernels
++    # that plan on the host (flashinfer); None for decode and graph replay.
++    host_lens: tuple[list[int], list[int], list[int]] | None = None
+ 
+     def get_last_indices(self, bs: int) -> torch.Tensor:
+         return self.cu_seqlens_q_gpu[1 : 1 + bs] - 1
+@@ -283,6 +286,7 @@ class TritonAttentionBackend(BaseAttnBackend):
+                 k_scale=k_scale,
+                 v_scale=v_scale,
+                 block_ends=block_ends,
++                host_lens=metadata.host_lens,
+             )
+         if block_ends is not None:
+             raise NotImplementedError("bidirectional multimodal blocks need the extend kernel path")
+@@ -352,6 +356,7 @@ class TritonAttentionBackend(BaseAttnBackend):
+             prefix_lens=prefix_lens,
+             max_q_len=max(seqlens_q),
+             swa_indices=swa_indices,
++            host_lens=None if is_decode else (seqlens_q, cached_lens, seqlens_k),
+         )
+ 
+     def init_capture_graph(self, max_seq_len: int, bs_list: List[int]) -> None:
+diff --git a/python/freetoken/kernel/triton/attention.py b/python/freetoken/kernel/triton/attention.py
+index b3e3811..b766fa1 100644
+--- a/python/freetoken/kernel/triton/attention.py
++++ b/python/freetoken/kernel/triton/attention.py
+@@ -1689,6 +1689,223 @@ def _extend_attention_split_kernel(
+     )
+ 
+ 
++@triton.jit
++def _extend_attention_split_gqa_kernel(
++    q_ptr,
++    k_extend_ptr,
++    v_extend_ptr,
++    k_cache_ptr,
++    v_cache_ptr,
++    ks_ptr,
++    vs_ptr,
++    o_ptr,
++    qo_indptr_ptr,
++    kv_indptr_ptr,
++    kv_indices_ptr,
++    prefix_lens_ptr,
++    block_ends_ptr,
++    sm_scale,
++    sinks_ptr,
++    stride_qt,
++    stride_qh,
++    stride_ket,
++    stride_keh,
++    stride_vet,
++    stride_veh,
++    stride_kcs,
++    stride_kch,
++    stride_vcs,
++    stride_vch,
++    stride_kss,
++    stride_ksh,
++    stride_vss,
++    stride_vsh,
++    stride_ot,
++    stride_oh,
++    GROUP: tl.constexpr,
++    D: tl.constexpr,
++    BLOCK_D: tl.constexpr,
++    BLOCK_DV: tl.constexpr,
++    BLOCK_M: tl.constexpr,
++    BLOCK_N: tl.constexpr,
++    SLIDING_WINDOW: tl.constexpr,
++    HAS_SINKS: tl.constexpr,
++    K_FORMAT: tl.constexpr,
++    V_FORMAT: tl.constexpr,
++    QBLOCK: tl.constexpr,
++    SLOT_I64: tl.constexpr,
++    HAS_BLOCKS: tl.constexpr,
++):
++    # GQA-packed: one program per (sequence, KV head, block of BLOCK_M // GROUP
++    # tokens); row r is token r // GROUP of the block, query head
++    # kv_head * GROUP + r % GROUP. Every K/V tile is loaded and dequantized once
++    # for all GROUP query heads that read it, instead of once per head.
++    seq_id = tl.program_id(0)
++    kv_head = tl.program_id(1)
++    block_m_id = tl.program_id(2)
++    BLOCK_T: tl.constexpr = BLOCK_M // GROUP
++
++    q_start = tl.load(qo_indptr_ptr + seq_id)
++    q_len = tl.load(qo_indptr_ptr + seq_id + 1) - q_start
++    kv_start = tl.load(kv_indptr_ptr + seq_id)
++    prefix_len = tl.load(prefix_lens_ptr + seq_id)
++
++    rows = tl.arange(0, BLOCK_M)
++    offs_m = block_m_id * BLOCK_T + rows // GROUP      # token index within the chunk
++    q_head = kv_head * GROUP + rows % GROUP            # per-row query head
++    offs_n = tl.arange(0, BLOCK_N)
++    offs_d = tl.arange(0, BLOCK_D)
++    offs_dv = tl.arange(0, BLOCK_DV)
++    mask_m = offs_m < q_len
++    mask_d = offs_d < D
++    mask_dv = offs_dv < D
++    offs_nb = tl.arange(0, BLOCK_D // QBLOCK)
++    offs_nbv = tl.arange(0, BLOCK_DV // QBLOCK)
++    mask_nb = offs_nb < D // QBLOCK
++    mask_nbv = offs_nbv < D // QBLOCK
++    q_abs_pos = prefix_len + offs_m
++
++    q = tl.load(
++        q_ptr
++        + (q_start + offs_m[:, None]) * stride_qt
++        + q_head[:, None] * stride_qh
++        + offs_d[None, :],
++        mask=mask_m[:, None] & mask_d[None, :],
++        other=0.0,
++    )
++
++    if HAS_SINKS:
++        m_i = tl.load(sinks_ptr + q_head).to(tl.float32)
++        l_i = tl.full((BLOCK_M,), 1.0, dtype=tl.float32)
++    else:
++        m_i = tl.zeros((BLOCK_M,), dtype=tl.float32) - float("inf")
++        l_i = tl.zeros((BLOCK_M,), dtype=tl.float32)
++    acc = tl.zeros((BLOCK_M, BLOCK_DV), dtype=tl.float32)
++
++    for start_n in tl.range(0, prefix_len, BLOCK_N):
++        kv_offsets = start_n + offs_n
++        mask_n = kv_offsets < prefix_len
++        key_pos = kv_offsets
++        final_mask = mask_m[:, None] & mask_n[None, :]
++        if SLIDING_WINDOW > 0:
++            window_mask = (key_pos[None, :] + SLIDING_WINDOW) > q_abs_pos[:, None]
++            final_mask = final_mask & window_mask
++
++        skip_tile = False
++        if SLIDING_WINDOW > 0:
++            skip_tile = tl.max(tl.max(final_mask.to(tl.int32), axis=1), axis=0) == 0
++
++        if not skip_tile:
++            slots = tl.load(kv_indices_ptr + kv_start + kv_offsets, mask=mask_n, other=0)
++            if SLOT_I64:
++                # Pools above 2**31 elements overflow a 32-bit slot*stride offset.
++                slots = slots.to(tl.int64)
++            k = _load_kv(
++                k_cache_ptr,
++                ks_ptr,
++                slots[None, :] * stride_kcs + kv_head * stride_kch,
++                offs_d[:, None],
++                slots[None, :] * stride_kss + kv_head * stride_ksh + offs_nb[:, None],
++                mask_n[None, :] & mask_d[:, None],
++                mask_n[None, :] & mask_nb[:, None],
++                q.dtype,
++                K_FORMAT,
++                QBLOCK,
++                True,
++                False,
++            )
++            scores = tl.dot(q.to(k.dtype), k) * sm_scale
++            scores = tl.where(final_mask, scores, -float("inf"))
++
++            row_max = tl.max(scores, axis=1)
++            row_max_fixed = tl.where(row_max == -float("inf"), -1e20, row_max)
++            m_new = tl.maximum(row_max_fixed, m_i)
++            alpha = tl.exp(m_i - m_new)
++            p = tl.exp(scores - m_new[:, None])
++
++            v = _load_kv(
++                v_cache_ptr,
++                vs_ptr,
++                slots[:, None] * stride_vcs + kv_head * stride_vch,
++                offs_dv[None, :],
++                slots[:, None] * stride_vss + kv_head * stride_vsh + offs_nbv[None, :],
++                mask_n[:, None] & mask_dv[None, :],
++                mask_n[:, None] & mask_nbv[None, :],
++                q.dtype,
++                V_FORMAT,
++                QBLOCK,
++                False,
++                False,
++            )
++            acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v)
++            l_i = l_i * alpha + tl.sum(p, axis=1)
++            m_i = m_new
++
++    current_end = tl.minimum(q_len, (block_m_id + 1) * BLOCK_T)
++    if HAS_BLOCKS:
++        # rows inside a multimodal span also attend forward to the span's later keys: the tile loop must reach them
++        block_end = tl.load(block_ends_ptr + q_start + offs_m, mask=mask_m, other=0) - prefix_len
++        current_end = tl.minimum(q_len, tl.maximum(current_end, tl.max(block_end, axis=0)))
++    else:
++        block_end = tl.zeros((BLOCK_M,), dtype=tl.int32)
++    for start_n in tl.range(0, current_end, BLOCK_N):
++        local_kv_offsets = start_n + offs_n
++        mask_n = local_kv_offsets < current_end
++        local_q_pos = offs_m
++        causal_mask = local_kv_offsets[None, :] <= local_q_pos[:, None]
++        if HAS_BLOCKS:
++            causal_mask = causal_mask | (local_kv_offsets[None, :] < block_end[:, None])
++        if SLIDING_WINDOW > 0:
++            causal_mask = causal_mask & (
++                (local_kv_offsets[None, :] + SLIDING_WINDOW) > local_q_pos[:, None]
++            )
++        final_mask = mask_m[:, None] & mask_n[None, :] & causal_mask
++
++        skip_tile = False
++        if SLIDING_WINDOW > 0:
++            skip_tile = tl.max(tl.max(final_mask.to(tl.int32), axis=1), axis=0) == 0
++
++        if not skip_tile:
++            k = tl.load(
++                k_extend_ptr
++                + (q_start + local_kv_offsets[None, :]) * stride_ket
++                + kv_head * stride_keh
++                + offs_d[:, None],
++                mask=mask_n[None, :] & mask_d[:, None],
++                other=0.0,
++            )
++            scores = tl.dot(q.to(k.dtype), k) * sm_scale
++            scores = tl.where(final_mask, scores, -float("inf"))
++
++            row_max = tl.max(scores, axis=1)
++            row_max_fixed = tl.where(row_max == -float("inf"), -1e20, row_max)
++            m_new = tl.maximum(row_max_fixed, m_i)
++            alpha = tl.exp(m_i - m_new)
++            p = tl.exp(scores - m_new[:, None])
++
++            v = tl.load(
++                v_extend_ptr
++                + (q_start + local_kv_offsets[:, None]) * stride_vet
++                + kv_head * stride_veh
++                + offs_dv[None, :],
++                mask=mask_n[:, None] & mask_dv[None, :],
++                other=0.0,
++            )
++            acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v)
++            l_i = l_i * alpha + tl.sum(p, axis=1)
++            m_i = m_new
++
++    out = tl.where(l_i[:, None] == 0.0, 0.0, acc / l_i[:, None])
++    tl.store(
++        o_ptr
++        + (q_start + offs_m[:, None]) * stride_ot
++        + q_head[:, None] * stride_oh
++        + offs_dv[None, :],
++        out.to(o_ptr.dtype.element_ty),
++        mask=mask_m[:, None] & mask_dv[None, :],
++    )
++
++
+ def extend_paged_attention(
+     q: torch.Tensor,
+     k_cache: torch.Tensor,
+@@ -1707,8 +1924,14 @@ def extend_paged_attention(
+     k_scale: torch.Tensor | None = None,
+     v_scale: torch.Tensor | None = None,
+     block_ends: torch.Tensor | None = None,
++    host_lens: tuple[list[int], list[int], list[int]] | None = None,
+ ) -> torch.Tensor:
+-    """Block-tiled causal prefill/extend attention over paged KV cache; block_ends holds per query token the end of the multimodal span it sits in (0 for none), whose later keys the row also attends."""
++    """Block-tiled causal prefill/extend attention over paged KV cache; block_ends holds per query token the end of the multimodal span it sits in (0 for none), whose later keys the row also attends.
++
++    ``host_lens`` (per-sequence query, prefix and KV lengths as host ints) lets
++    an eligible call run on flashinfer's prefill kernel instead
++    (freetoken/kernel/extend_flashinfer.py, ``FREETOKEN_EXTEND_BACKEND=triton``
++    forces this kernel)."""
+ 
+     assert q.is_cuda and k_cache.is_cuda and v_cache.is_cuda
+     assert q.dim() == 3 and k_cache.dim() == 3 and v_cache.dim() == 3
+@@ -1730,6 +1953,16 @@ def extend_paged_attention(
+ 
+     if block_ends is not None:
+         assert block_ends.is_cuda and block_ends.dtype == torch.int32 and block_ends.numel() == num_q_tokens
++    from freetoken.kernel import extend_flashinfer as _fi_extend
++
++    if _fi_extend.eligible(q, k_format, v_format, sliding_window, sinks, block_ends,
++                           k_extend, host_lens):
++        return _fi_extend.extend_attention(
++            q=q, k_cache=k_cache, v_cache=v_cache, k_scale=k_scale, v_scale=v_scale,
++            k_format=k_format, v_format=v_format, kv_indices=kv_indices,
++            k_extend=k_extend, v_extend=v_extend, sm_scale=sm_scale, out=out,
++            host_lens=host_lens,
++        )
+     o = out if out is not None else torch.empty_like(q)
+     sinks_arg = sinks if sinks is not None else q
+     block_ends_arg = block_ends if block_ends is not None else qo_indptr
+@@ -1747,6 +1980,23 @@ def extend_paged_attention(
+         v_format=v_format,
+     )
+     grid = (qo_indptr.numel() - 1, num_q_heads, triton.cdiv(max_q_len, block_m))
++    group = num_q_heads // num_kv_heads
++    split_kernel = _extend_attention_split_kernel
++    if os.getenv("FREETOKEN_EXTEND_GQA", "").strip() == "1" and group > 1 and k_extend is not None:
++        # Rows are (token, query head) pairs of one KV head: BLOCK_M must hold a
++        # whole number of tokens' worth of heads.
++        gm = os.getenv("FREETOKEN_EXTEND_GQA_BLOCK_M", "").strip()
++        block_m = int(gm) if gm else block_m
++        block_m = max(block_m, group, 16)
++        assert block_m % group == 0, (block_m, group)
++        gw = os.getenv("FREETOKEN_EXTEND_GQA_NUM_WARPS", "").strip()
++        num_warps = int(gw) if gw else num_warps
++        gn = os.getenv("FREETOKEN_EXTEND_GQA_BLOCK_N", "").strip()
++        block_n = int(gn) if gn else block_n
++        gs = os.getenv("FREETOKEN_EXTEND_GQA_NUM_STAGES", "").strip()
++        num_stages = int(gs) if gs else num_stages
++        split_kernel = _extend_attention_split_gqa_kernel
++        grid = (qo_indptr.numel() - 1, num_kv_heads, triton.cdiv(max_q_len, block_m // group))
+     if k_extend is not None or v_extend is not None:
+         assert k_extend is not None and v_extend is not None
+         assert k_extend.is_cuda and v_extend.is_cuda
+@@ -1754,7 +2004,7 @@ def extend_paged_attention(
+         assert k_extend.shape[0] == num_q_tokens and v_extend.shape[0] == num_q_tokens
+         assert k_extend.shape[1] == num_kv_heads and v_extend.shape[1] == num_kv_heads
+         assert k_extend.shape[-1] == head_dim and v_extend.shape[-1] == head_dim
+-        _extend_attention_split_kernel[grid](
++        split_kernel[grid](
+             q,
+             k_extend,
+             v_extend,
+diff --git a/python/freetoken/kernel/triton/exl3.py b/python/freetoken/kernel/triton/exl3.py
+index 0772c06..e6b7c3a 100644
+--- a/python/freetoken/kernel/triton/exl3.py
++++ b/python/freetoken/kernel/triton/exl3.py
+@@ -226,7 +226,7 @@ def _had_rows_kernel(
+     out_ptr, stride_opart, stride_om,
+     suh_ptr, suh_expert_stride, suh_part_stride,
+     expert_ptr, had_ptr, P,
+-    SRC_DIV: tl.constexpr, HAS_EXPERT: tl.constexpr, BM: tl.constexpr,
++    SRC_DIV: tl.constexpr, HAS_EXPERT: tl.constexpr, BM: tl.constexpr, KB: tl.constexpr,
+ ):
+     pid_m = tl.program_id(0)
+     pid_k = tl.program_id(1)
+@@ -238,16 +238,17 @@ def _had_rows_kernel(
+         e = tl.load(expert_ptr + rows, mask=rmask, other=0).to(tl.int64)
+     else:
+         e = tl.zeros([BM], dtype=tl.int64)
+-    cols = pid_k * 128 + tl.arange(0, 128)
+-    x = tl.load(x_ptr + src[:, None].to(tl.int64) * stride_xm + cols[None, :], mask=rmask[:, None], other=0.0).to(tl.float32)
+-    s = tl.load(suh_ptr + e[:, None] * suh_expert_stride + part * suh_part_stride + cols[None, :], mask=rmask[:, None], other=0.0).to(tl.float32)
+-    xs = x * s
+-    hi = xs.to(tl.float16)
+-    lo = (xs - hi.to(tl.float32)).to(tl.float16)
+     idx = tl.arange(0, 128)
+-    h = tl.load(had_ptr + idx[:, None] * 128 + idx[None, :])
+-    y = (tl.dot(hi, h) + tl.dot(lo, h)) * 0.08838834764831843
+-    tl.store(out_ptr + part * stride_opart + rows[:, None].to(tl.int64) * stride_om + cols[None, :], y.to(tl.float16), mask=rmask[:, None])
++    h = tl.load(had_ptr + idx[:, None] * 128 + idx[None, :])  # once per program, KB column blocks
++    for i in tl.static_range(KB):
++        cols = (pid_k * KB + i) * 128 + idx
++        x = tl.load(x_ptr + src[:, None].to(tl.int64) * stride_xm + cols[None, :], mask=rmask[:, None], other=0.0).to(tl.float32)
++        s = tl.load(suh_ptr + e[:, None] * suh_expert_stride + part * suh_part_stride + cols[None, :], mask=rmask[:, None], other=0.0).to(tl.float32)
++        xs = x * s
++        hi = xs.to(tl.float16)
++        lo = (xs - hi.to(tl.float32)).to(tl.float16)
++        y = (tl.dot(hi, h) + tl.dot(lo, h)) * 0.08838834764831843
++        tl.store(out_ptr + part * stride_opart + rows[:, None].to(tl.int64) * stride_om + cols[None, :], y.to(tl.float16), mask=rmask[:, None])
+ 
+ 
+ @triton.jit
+@@ -262,7 +263,7 @@ def _exl3_gemm_kernel(
+     P, K,
+     w_ptr, w_expert_stride, e_lo, e_hi,
+     BM: tl.constexpr, BK: tl.constexpr, BITS: tl.constexpr, CB: tl.constexpr, SORTED: tl.constexpr,
+-    DECODED: tl.constexpr,
++    DECODED: tl.constexpr, SRC_DIV: tl.constexpr, F16ACC: tl.constexpr,
+ ):
+     pid_m = tl.program_id(0)
+     pid_n = tl.program_id(1)
+@@ -285,8 +286,11 @@ def _exl3_gemm_kernel(
+     n_tiles = tl.load(ntiles_ptr + part)
+     n_local = pid_n * 128 - tl.load(nstart_ptr + part) + tl.arange(0, 128)
+     tr = tr_ptr + expert * tr_expert_stride + tl.load(word_off_ptr + part)
+-    a_ptr = xh_ptr + part * stride_xpart + rows64[:, None] * stride_xm
+-    acc = tl.zeros([BM, 128], dtype=tl.float32)
++    a_ptr = xh_ptr + part * stride_xpart + (rows64 // SRC_DIV)[:, None] * stride_xm
++    if F16ACC:  # mma.sync with fp16 accumulators: 2x the fp32-accumulate rate on GeForce parts
++        acc = tl.zeros([BM, 128], dtype=tl.float16)
++    else:
++        acc = tl.zeros([BM, 128], dtype=tl.float32)
+     for k0 in range(0, K, BK):
+         kk = k0 + tl.arange(0, BK)
+         a = tl.load(a_ptr + kk[None, :], mask=rmask[:, None], other=0.0)
+@@ -295,12 +299,18 @@ def _exl3_gemm_kernel(
+                         + (pid_n * 128 + tl.arange(0, 128))[None, :])
+         else:
+             w = _exl3_decode(tr, kk[:, None], n_local[None, :], n_tiles, BITS, CB)
+-        acc = tl.dot(a, w, acc)
++        if F16ACC:
++            acc = tl.dot(a, w, acc, out_dtype=tl.float16)
++        else:
++            acc = tl.dot(a, w, acc)
+     idx = tl.arange(0, 128)
+     h = tl.load(had_ptr + idx[:, None] * 128 + idx[None, :])
+-    hi = acc.to(tl.float16)
+-    lo = (acc - hi.to(tl.float32)).to(tl.float16)
+-    y = tl.dot(hi, h) + tl.dot(lo, h)
++    if F16ACC:
++        y = tl.dot(acc, h)
++    else:
++        hi = acc.to(tl.float16)
++        lo = (acc - hi.to(tl.float32)).to(tl.float16)
++        y = tl.dot(hi, h) + tl.dot(lo, h)
+     cols = pid_n * 128 + idx
+     sv = tl.load(svh_ptr + expert * svh_expert_stride + cols).to(tl.float32)
+     y = y * (sv * 0.08838834764831843)[None, :]
+@@ -331,6 +341,26 @@ def _decode_words(a, b, shift, CB: tl.constexpr):
+         return lo + hi
+ 
+ 
++@triton.jit
++def _had128_8x16(v):
++    """128-point Sylvester Hadamard (natural order, unnormalised) of ``v`` viewed ``[8, 16]``
++    (element ``16 a + b``): H128 = H8 (x) H16, so ``Y = H8 @ V @ H16`` -- 8 x 8 x 16 + 8 x 16 x 16
++    fp32 products instead of a 128 x 128 matrix that a single-warp program cannot hold in registers.
++    Entries are (-1)^popcount(i & j), generated, not loaded."""
++    i8 = tl.arange(0, 8)
++    i16 = tl.arange(0, 16)
++    a8 = i8[:, None] & i8[None, :]
++    a8 = a8 ^ (a8 >> 2)
++    a8 = a8 ^ (a8 >> 1)
++    h8 = 1.0 - 2.0 * (a8 & 1).to(tl.float32)
++    a16 = i16[:, None] & i16[None, :]
++    a16 = a16 ^ (a16 >> 2)
++    a16 = a16 ^ (a16 >> 1)
++    h16 = 1.0 - 2.0 * (a16 & 1).to(tl.float32)
++    t = tl.sum(h8[:, :, None] * v[None, :, :], axis=1)
++    return tl.sum(t[:, None, :] * h16[None, :, :], axis=2)
++
++
+ @triton.jit
+ def _exl3_gemv_kernel(
+     xh_ptr, stride_xpart, stride_xm,
+@@ -341,7 +371,10 @@ def _exl3_gemv_kernel(
+     part_of_nb_ptr, word_off_ptr, ntiles_ptr, nstart_ptr,
+     expert_ptr, K_SPLIT,
+     final_ptr, stride_fm, count_ptr,
++    x_ptr, stride_x, suh_ptr, suh_expert_stride, suh_part_stride, rot_ptr,
+     BITS: tl.constexpr, CB: tl.constexpr, HAS_EXPERT: tl.constexpr, REDUCE: tl.constexpr,
++    PRE_ROT: tl.constexpr = False, SRC_DIV: tl.constexpr = 1, KB: tl.constexpr = 1,
++    K_BLOCKS: tl.constexpr = 1, BANDS: tl.constexpr = 1,
+ ):
+     """GEMV in bitstream order. Code ``t`` of a 16x16 tile sits at bit ``t * BITS`` of the tile's
+     stream and is W_hat[r, c] with ``t = 32 (c & 7) + 16 r2 + 8 r1 + 4 (c >> 3) + 2 r3 + r0``, so the
+@@ -364,51 +397,99 @@ def _exl3_gemv_kernel(
+     cl = g % 8
+     start = (32 * BITS * cl + OFF0) // 32  # first word of the group's run (before the wrap)
+     tile = tr_ptr + expert * tr_expert_stride + tl.load(word_off_ptr + part) + nt.to(tl.int64) * WORDS
+-    a_ptr = xh_ptr + part * stride_xpart + p.to(tl.int64) * stride_xm
+     row_words = n_tiles.to(tl.int64) * WORDS
+     acc_lo = tl.zeros([64], dtype=tl.float32)
+     acc_hi = tl.zeros([64], dtype=tl.float32)
+     k_begin = pid_k * K_SPLIT
+-    for k0 in range(k_begin, k_begin + K_SPLIT, 16):
+-        band = tile + (k0 // 16) * row_words
+-        for i in tl.static_range(32):
+-            b0 = (OFF0 % 32) + i * BITS  # relative to word `start`
+-            j0 = b0 // 32
+-            j1 = (b0 + 15) // 32
+-            sh = (j1 + 1) * 32 - (b0 + 16)
+-            r = (i & 1) + 8 * ((i >> 1) & 1) + 2 * ((i >> 3) & 1) + 4 * ((i >> 4) & 1)
+-            hi = tl.load(band + (start + j0) % WORDS).to(tl.uint32, bitcast=True)
+-            lo = tl.load(band + (start + j1) % WORDS).to(tl.uint32, bitcast=True)
+-            w = _decode_words(hi, lo, tl.full([64], sh, tl.uint32), CB).to(tl.float32)
+-            a = tl.load(a_ptr + k0 + r).to(tl.float32)
+-            if (i >> 2) & 1:
+-                acc_hi += w * a
+-            else:
+-                acc_lo += w * a
+-    idx = tl.arange(0, 128)
+-    col_lo = (g // 8) * 16 + cl
+-    h_lo = tl.load(had_ptr + col_lo[:, None] * 128 + idx[None, :]).to(tl.float32)
+-    h_hi = tl.load(had_ptr + (col_lo + 8)[:, None] * 128 + idx[None, :]).to(tl.float32)
+-    y = tl.sum(acc_lo[:, None] * h_lo, axis=0) + tl.sum(acc_hi[:, None] * h_hi, axis=0)
+-    cols = pid_n * 128 + idx
+-    sv = tl.load(svh_ptr + expert * svh_expert_stride + cols).to(tl.float32)
+-    y = y * sv * 0.08838834764831843
+-    tl.store(out_ptr + pid_k * stride_osplit + p.to(tl.int64) * stride_om + cols, y.to(out_ptr.dtype.element_ty))
++    if PRE_ROT:
++        # Input rotation in the prologue (replaces the separate had_rows launch): this
++        # program rotates only the KB 128-blocks its K range touches, from the raw row
++        # x[p // SRC_DIV], into a private fp16 scratch that the loop below reads like xh.
++        # H128 = H8 (x) H16 (Sylvester, natural order), so Y = H8 @ X @ H16 on X = x*suh
++        # viewed [8, 16]; entries are (-1)^popcount(a & b), generated, not loaded.
++        i8 = tl.arange(0, 8)
++        i16 = tl.arange(0, 16)
++        a8 = i8[:, None] & i8[None, :]
++        a8 = a8 ^ (a8 >> 2)
++        a8 = a8 ^ (a8 >> 1)
++        h8 = 1.0 - 2.0 * (a8 & 1).to(tl.float32)
++        a16 = i16[:, None] & i16[None, :]
++        a16 = a16 ^ (a16 >> 2)
++        a16 = a16 ^ (a16 >> 1)
++        h16 = 1.0 - 2.0 * (a16 & 1).to(tl.float32)
++        blk0 = k_begin // 128
++        rot = rot_ptr + ((p.to(tl.int64) * tl.num_programs(1) + pid_n) * tl.num_programs(2) + pid_k) * (KB * 128)
++        src = (p // SRC_DIV).to(tl.int64)
++        within = i8[:, None] * 16 + i16[None, :]
++        for b in tl.static_range(KB):
++            blk = blk0 + b
++            bmask = (within >= 0) & (blk < K_BLOCKS)
++            c2 = blk * 128 + within
++            xv = tl.load(x_ptr + src * stride_x + c2, mask=bmask, other=0.0).to(tl.float32)
++            sv_in = tl.load(suh_ptr + expert * suh_expert_stride + part * suh_part_stride + c2,
++                            mask=bmask, other=0.0).to(tl.float32)
++            xs = xv * sv_in
++            t = tl.sum(h8[:, :, None] * xs[None, :, :], axis=1)
++            y = tl.sum(t[:, None, :] * h16[None, :, :], axis=2) * 0.08838834764831843
++            tl.store(rot + b * 128 + within, y.to(tl.float16))
++        tl.debug_barrier()
++        a_ptr = rot - blk0 * 128
++    else:
++        a_ptr = xh_ptr + part * stride_xpart + p.to(tl.int64) * stride_xm
++    # BANDS 16-row bands per iteration: their loads are all independent, so a single-warp program
++    # keeps BANDS x more bytes in flight (the GEMV is latency-bound at 8 warps per SM)
++    for k00 in range(k_begin, k_begin + K_SPLIT, 16 * BANDS):
++        for bd in tl.static_range(BANDS):
++            k0 = k00 + 16 * bd
++            band = tile + (k0 // 16) * row_words
++            for i in tl.static_range(32):
++                b0 = (OFF0 % 32) + i * BITS  # relative to word `start`
++                j0 = b0 // 32
++                j1 = (b0 + 15) // 32
++                sh = (j1 + 1) * 32 - (b0 + 16)
++                r = (i & 1) + 8 * ((i >> 1) & 1) + 2 * ((i >> 3) & 1) + 4 * ((i >> 4) & 1)
++                hi = tl.load(band + (start + j0) % WORDS).to(tl.uint32, bitcast=True)
++                lo = tl.load(band + (start + j1) % WORDS).to(tl.uint32, bitcast=True)
++                w = _decode_words(hi, lo, tl.full([64], sh, tl.uint32), CB).to(tl.float32)
++                a = tl.load(a_ptr + k0 + r).to(tl.float32)
++                if (i >> 2) & 1:
++                    acc_hi += w * a
++                else:
++                    acc_lo += w * a
+     if REDUCE:
+-        # Split-K reduced in place: the last split of this (row, 128 columns) to finish sums
+-        # every split's plane in split order -- the same fixed order whichever program is
+-        # last, so the result is deterministic -- writes the output, and re-arms the counter
++        # Split-K: each split stores its UNROTATED partial (columns col, col + 8 of its groups);
++        # the last split to finish sums the planes in split order -- the same fixed order whichever
++        # program is last, so the result is deterministic -- and applies the 128-point output
++        # rotation + svh ONCE, instead of every split rotating its own partial. Re-arms the counter
+         # for the next launch (CUDA-graph replays included).
++        col_lo = (g // 8) * 16 + cl
++        plane = out_ptr + pid_k * stride_osplit + p.to(tl.int64) * stride_om + pid_n * 128
++        tl.store(plane + col_lo, acc_lo)
++        tl.store(plane + col_lo + 8, acc_hi)
+         tl.debug_barrier()
+         cnt = count_ptr + p * tl.num_programs(1) + pid_n
+         done = tl.atomic_add(cnt, 1, sem="acq_rel")
+         if done == tl.num_programs(2) - 1:
+-            acc = tl.zeros([128], dtype=tl.float32)
++            i8 = tl.arange(0, 8)
++            i16 = tl.arange(0, 16)
++            o816 = i8[:, None] * 16 + i16[None, :]
++            vsum = tl.zeros([8, 16], dtype=tl.float32)
+             for sp in range(0, tl.num_programs(2)):
+-                acc += tl.load(out_ptr + sp * stride_osplit + p.to(tl.int64) * stride_om + cols,
+-                               cache_modifier=".cg")
+-            tl.store(final_ptr + p.to(tl.int64) * stride_fm + cols, acc.to(final_ptr.dtype.element_ty))
++                vsum += tl.load(out_ptr + sp * stride_osplit + p.to(tl.int64) * stride_om + pid_n * 128 + o816,
++                                cache_modifier=".cg")
++            ocols = pid_n * 128 + o816
++            svo = tl.load(svh_ptr + expert * svh_expert_stride + ocols).to(tl.float32)
++            yo = _had128_8x16(vsum) * svo * 0.08838834764831843
++            tl.store(final_ptr + p.to(tl.int64) * stride_fm + ocols, yo.to(final_ptr.dtype.element_ty))
+             tl.atomic_xchg(cnt, 0)
++        return
++    # acc_lo[g] / acc_hi[g] hold column 16 (g // 8) + (g % 8) / + 8: as [8 tiles, 16 columns]
++    v = tl.reshape(tl.permute(tl.join(tl.reshape(acc_lo, (8, 8)), tl.reshape(acc_hi, (8, 8))), (0, 2, 1)), (8, 16))
++    o816 = tl.arange(0, 8)[:, None] * 16 + tl.arange(0, 16)[None, :]
++    cols = pid_n * 128 + o816
++    sv = tl.load(svh_ptr + expert * svh_expert_stride + cols).to(tl.float32)
++    y = _had128_8x16(v) * sv * 0.08838834764831843
++    tl.store(out_ptr + pid_k * stride_osplit + p.to(tl.int64) * stride_om + cols, y.to(out_ptr.dtype.element_ty))
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -416,6 +497,19 @@ def _exl3_gemv_kernel(
+ # ---------------------------------------------------------------------------
+ 
+ 
++# had_rows tile: rows per program, warps, 128-column blocks per program (each program loads the
++# 128x128 H once and reuses it across its blocks). The kernel is mma-bound, not DRAM-bound: the
++# exact hi/lo split runs two 128-wide dots per element, 137 GFLOP for the MoE gate_up input at
++# 8192 tokens x top-8 (1.13 ms at 121.5 TF/s). Box sweep (perf/bench_had_rows.py), gate_up input:
++# bm16/4 warps/kb1 2.01-2.08 ms -> kb16 1.46 ms; larger bm or 8 warps spill and lose.
++HAD_ROWS_BM = 16
++HAD_ROWS_WARPS = 4
++HAD_ROWS_KB = 16  # clamped to the divisors of K / 128 (down input: 4)
++# ... only from this many rows on: a decode step (a few rows) needs one program per column block
++# to fill the SMs
++HAD_ROWS_KB_MIN_ROWS = 4096
++
++
+ def had_rows(
+     x: torch.Tensor,
+     suh: torch.Tensor,
+@@ -426,6 +520,9 @@ def had_rows(
+     experts: torch.Tensor | None = None,
+     suh_expert_stride: int = 0,
+     out: torch.Tensor | None = None,
++    block_m: int | None = None,
++    num_warps: int | None = None,
++    k_blocks: int | None = None,
+ ) -> torch.Tensor:
+     """``out[part, p] = H_blocks(x[p // src_div] * suh[experts[p], part])`` as fp16 ``[parts, rows, K]``.
+ 
+@@ -438,15 +535,18 @@ def had_rows(
+         out = torch.empty((parts.num_parts, rows, k), dtype=torch.float16, device=x.device)
+     if rows == 0:
+         return out
+-    bm = 16
+-    grid = (triton.cdiv(rows, bm), k // HAD, parts.num_parts)
++    bm = block_m or HAD_ROWS_BM
++    kb = k_blocks or (HAD_ROWS_KB if rows >= HAD_ROWS_KB_MIN_ROWS else 1)
++    while (k // HAD) % kb:
++        kb //= 2
++    grid = (triton.cdiv(rows, bm), k // HAD // kb, parts.num_parts)
+     _had_rows_kernel[grid](
+         x, x.stride(0),
+         out, out.stride(0), out.stride(1),
+         suh, suh_expert_stride, parts.suh_part_stride,
+         experts if experts is not None else x, hadamard_pm1(x.device), rows,
+-        SRC_DIV=src_div, HAS_EXPERT=experts is not None, BM=bm,
+-        num_warps=4,
++        SRC_DIV=src_div, HAS_EXPERT=experts is not None, BM=bm, KB=kb,
++        num_warps=num_warps or HAD_ROWS_WARPS,
+     )
+     return out
+ 
+@@ -470,13 +570,23 @@ def exl3_gemm(
+     block_m: int = 64,
+     decoded: torch.Tensor | None = None,
+     expert_range: tuple[int, int] = (0, 0),
++    block_k: int = 32,
++    num_stages: int = 2,
++    num_warps: int = 4,
++    src_div: int = 0,
++    f16acc: bool = False,
+ ) -> torch.Tensor:
+     """Grouped GEMM: ``out[p] = svh * H(xh[part(n), p] @ W_hat)``; rows sorted per expert when
+     ``sorted_ids`` is given (``tr_expert_stride`` in int32 words), else every row uses expert 0.
+ 
+     ``decoded`` (sorted mode): W_hat already decoded by ``reconstruct_experts`` for the experts in
+-    ``expert_range`` = [lo, hi), fp16 ``[hi - lo, K, N]``; only those experts' row blocks run."""
+-    rows = xh.shape[1]
++    ``expert_range`` = [lo, hi), fp16 ``[hi - lo, K, N]``; only those experts' row blocks run.
++
++    ``src_div > 0``: ``xh`` is the RAW activation ``[T, K]`` fp16 shared by all parts (route ``p``
++    reads row ``p // src_div``) and ``decoded`` must carry the input rotation
++    (``reconstruct_folded(..., fold_out=False)``); rows = ``T * src_div``."""
++    raw = src_div > 0
++    rows = xh.shape[0] * src_div if raw else xh.shape[1]
+     if rows == 0:
+         return out
+     words = _words(trellis)
+@@ -486,7 +596,7 @@ def exl3_gemm(
+     grid = (n_mblocks, parts.n // HAD)
+     dummy = parts.part_of_nb
+     _exl3_gemm_kernel[grid](
+-        xh, xh.stride(0), xh.stride(1),
++        xh, 0 if raw else xh.stride(0), xh.stride(0) if raw else xh.stride(1),
+         out, out.stride(0),
+         words, tr_expert_stride,
+         svh, svh_expert_stride,
+@@ -497,15 +607,24 @@ def exl3_gemm(
+         rows, parts.k,
+         decoded if decoded is not None else xh, decoded.stride(0) if decoded is not None else 0,
+         expert_range[0], expert_range[1],
+-        BM=block_m, BK=32, BITS=parts.bits, CB=CODEBOOKS[parts.codebook], SORTED=sorted_mode,
+-        DECODED=decoded is not None,
+-        num_warps=4, num_stages=2,
++        BM=block_m, BK=block_k, BITS=parts.bits, CB=CODEBOOKS[parts.codebook], SORTED=sorted_mode,
++        DECODED=decoded is not None, SRC_DIV=src_div if raw else 1, F16ACC=f16acc,
++        num_warps=num_warps, num_stages=num_stages,
+     )
+     return out
+ 
+ 
++# 16-row bands per GEMV loop iteration (clamped to divide the split's K range)
++GEMV_BANDS = 1
++# Register cap of the single-warp GEMV program. Uncapped, ptxas gives the loop 80 registers (25
++# warps per SM); 64 is spill-free (ptxas -v, sm_120) and fills the 32 resident blocks an SM allows.
++# The old epilogue (a 128 x 128 H product per program) needed 168 registers plus 1.4 KB of spills,
++# capping the GEMV at 12 warps per SM.
++GEMV_MAXNREG = 64
++
++
+ def exl3_gemv(
+-    xh: torch.Tensor,
++    xh: torch.Tensor | None,
+     trellis: torch.Tensor,
+     svh: torch.Tensor,
+     parts: Exl3Parts,
+@@ -515,40 +634,80 @@ def exl3_gemv(
+     tr_expert_stride: int = 0,
+     svh_expert_stride: int = 0,
+     split_k: int = 1,
++    x: torch.Tensor | None = None,
++    suh: torch.Tensor | None = None,
++    suh_expert_stride: int = 0,
++    src_div: int = 1,
++    bands: int | None = None,
+ ) -> torch.Tensor:
+     """Per-row GEMV (decode) into ``out`` ``[rows, N]`` (any float dtype). With ``split_k > 1``
+     each K split writes a rotated fp32 partial to its own plane of a scratch buffer and the
+     planes are summed in order (the output rotation is linear, so rotating partials is exact):
+-    deterministic, and fixed-shape for CUDA graphs."""
+-    rows = xh.shape[1]
++    deterministic, and fixed-shape for CUDA graphs.
++
++    ``xh=None`` with ``x``/``suh`` (had_rows' arguments) rotates the input inside the GEMV
++    prologue instead of reading a had_rows result: rows = ``x.shape[0] * src_div``, row ``p``
++    reads ``x[p // src_div]`` scaled by ``suh[experts[p]]`` (dense: ``experts=None``)."""
++    pre_rot = xh is None
++    if pre_rot:
++        assert x is not None and suh is not None and x.stride(-1) == 1 and suh.stride(-1) == 1
++        rows = x.shape[0] * src_div
++        device = x.device
++    else:
++        rows = xh.shape[1]
++        device = xh.device
+     if rows == 0:
+         return out
+     k = parts.k
+     if k % (split_k * 16):
+         raise ValueError(f"split_k {split_k} does not divide K {k} into 16-row bands")
+-    dst = out if split_k == 1 else torch.empty((split_k, rows, parts.n), dtype=torch.float32, device=xh.device)
++    dst = out if split_k == 1 else torch.empty((split_k, rows, parts.n), dtype=torch.float32, device=device)
+     words = _words(trellis)
+     grid = (rows, parts.n // HAD, split_k)
+     reduce = split_k > 1 and _inkernel_reduce()
+-    counts = _split_counters(rows * (parts.n // HAD), xh.device) if reduce else parts.part_of_nb
++    counts = _split_counters(rows * (parts.n // HAD), device) if reduce else parts.part_of_nb
++    nb = bands or GEMV_BANDS
++    while (k // split_k) % (16 * nb):
++        nb //= 2
++    kb = 1
++    if pre_rot:
++        k_split = k // split_k
++        kb = max((((i + 1) * k_split - 1) // HAD) - (i * k_split) // HAD + 1 for i in range(split_k))
++        rot = torch.empty((rows * (parts.n // HAD) * split_k, kb * HAD), dtype=torch.float16, device=device)
++        xh = rot  # placeholder for the unused xh pointer
+     _exl3_gemv_kernel[grid](
+-        xh, xh.stride(0), xh.stride(1),
++        xh, xh.stride(0) if not pre_rot else 0, xh.stride(1) if not pre_rot else 0,
+         dst, dst.stride(-2), dst.stride(0) if split_k > 1 else 0,
+         words, tr_expert_stride,
+         svh, svh_expert_stride,
+-        hadamard_pm1(xh.device),
++        hadamard_pm1(device),
+         parts.part_of_nb, parts.word_off, parts.ntiles, parts.nstart,
+         experts if experts is not None else parts.part_of_nb, k // split_k,
+         out, out.stride(-2), counts,
++        x if pre_rot else xh, x.stride(0) if pre_rot else 0,
++        suh if pre_rot else xh, suh_expert_stride, parts.suh_part_stride,
++        rot if pre_rot else xh,
+         BITS=parts.bits, CB=CODEBOOKS[parts.codebook],
+         HAS_EXPERT=experts is not None, REDUCE=reduce,
+-        num_warps=1,
++        PRE_ROT=pre_rot, SRC_DIV=src_div, KB=kb, K_BLOCKS=k // HAD, BANDS=nb,
++        num_warps=1, maxnreg=GEMV_MAXNREG,
+     )
+     if split_k > 1 and not reduce:
+         torch.sum(dst, dim=0, out=out) if out.dtype == torch.float32 else out.copy_(dst.sum(dim=0))
+     return out
+ 
+ 
++def gemv_pre_rot() -> bool:
++    """``FREETOKEN_EXL3_GEMV_PREROT=0`` restores the separate ``had_rows`` launch before a decode GEMV."""
++    return os.getenv("FREETOKEN_EXL3_GEMV_PREROT", "1").strip() != "0"
++
++
++def f16acc_enabled() -> bool:
++    """``FREETOKEN_EXL3_F16ACC=1``: prefill GEMMs (MoE decoded slab, dense folded W_full) accumulate
++    in fp16 (A/B, off by default: default-on only after the logits gate)."""
++    return os.getenv("FREETOKEN_EXL3_F16ACC", "0").strip() == "1"
++
++
+ def _inkernel_reduce() -> bool:
+     """``FREETOKEN_EXL3_SPLITK_INKERNEL=0`` restores the separate ``torch.sum`` reduction."""
+     return os.getenv("FREETOKEN_EXL3_SPLITK_INKERNEL", "1").strip() != "0"
+@@ -734,6 +893,131 @@ def reconstruct_experts(bank: torch.Tensor, parts: Exl3Parts, lo: int, hi: int,
+     return out
+ 
+ 
++@triton.jit
++def _reconstruct_folded_kernel(
++    tr_ptr, tr_expert_stride, out_ptr, out_expert_stride, out_row_stride, e_lo, nb0,
++    suh_ptr, suh_expert_stride, suh_part_stride, svh_ptr, svh_expert_stride, had_ptr,
++    part_of_nb_ptr, word_off_ptr, ntiles_ptr, nstart_ptr,
++    BITS: tl.constexpr, CB: tl.constexpr, FOLD_OUT: tl.constexpr,
++):
++    """One 128x128 tile of ``W_full = diag(suh) H W_hat H diag(svh) / 128`` (both rotations and
++    both sign vectors folded into the weight, exllamav3's reconstruct_had): ``x @ W_full`` equals
++    ``svh * H((H(x * suh)) @ W_hat)`` without rotating any activation."""
++    pid_k = tl.program_id(0)
++    pid_n = tl.program_id(1) + nb0  # global 128-column block; the output holds blocks [nb0, ...)
++    g = tl.program_id(2).to(tl.int64)
++    e = e_lo + g
++    part = tl.load(part_of_nb_ptr + pid_n)
++    n_tiles = tl.load(ntiles_ptr + part)
++    idx = tl.arange(0, 128)
++    n_local = pid_n * 128 - tl.load(nstart_ptr + part) + idx
++    tr = tr_ptr + e * tr_expert_stride + tl.load(word_off_ptr + part)
++    kk = pid_k * 128 + idx
++    w = _exl3_decode(tr, kk[:, None], n_local[None, :], n_tiles, BITS, CB)
++    h = tl.load(had_ptr + idx[:, None] * 128 + idx[None, :])
++    a = tl.dot(h, w)  # H W: 128 exact +-w terms per entry, fp32
++    s = tl.load(suh_ptr + e * suh_expert_stride + part * suh_part_stride + kk).to(tl.float32)
++    cols = pid_n * 128 + idx
++    if FOLD_OUT:
++        hi = a.to(tl.float16)
++        lo = (a - hi.to(tl.float32)).to(tl.float16)
++        b = tl.dot(hi, h) + tl.dot(lo, h)
++        v = tl.load(svh_ptr + e * svh_expert_stride + cols).to(tl.float32)
++        y = b * (s * 0.0078125)[:, None] * v[None, :]
++    else:  # input side only: diag(suh) H W_hat / sqrt(128); the GEMM epilogue keeps H + svh
++        y = a * (s * 0.08838834764831843)[:, None]
++    lcols = (pid_n - nb0) * 128 + idx
++    tl.store(out_ptr + g * out_expert_stride + kk[:, None].to(tl.int64) * out_row_stride + lcols[None, :],
++             y.to(out_ptr.dtype.element_ty))
++
++
++def reconstruct_folded(
++    trellis: torch.Tensor, suh: torch.Tensor, svh: torch.Tensor, parts: Exl3Parts, *,
++    lo: int = 0, hi: int = 1, suh_expert_stride: int = 0, svh_expert_stride: int = 0,
++    out: torch.Tensor | None = None, fold_out: bool = True, cols: tuple[int, int] | None = None,
++) -> torch.Tensor:
++    """``W_full`` fp16 ``[hi - lo, K, N]`` for experts ``[lo, hi)`` of a ``[E, words]`` bank (a dense
++    layer: a flat trellis, ``lo=0, hi=1``): ``x @ W_full[e] = svh * H(H(x * suh) @ W_hat)`` per part,
++    so a plain GEMM on the raw activations replaces had_rows + GEMM + had_cols.
++
++    ``fold_out=False`` folds the input side only (``diag(suh) H W_hat``): the GEMM then reads raw
++    activations and keeps its Hadamard + svh epilogue (the MoE prefill's decoded operand).
++
++    ``cols=(c0, c1)`` (multiples of 128) builds only those output columns, ``[hi - lo, K, c1 - c0]``."""
++    g = hi - lo
++    c0, c1 = cols if cols is not None else (0, parts.n)
++    assert c0 % HAD == 0 and c1 % HAD == 0 and 0 <= c0 < c1 <= parts.n
++    if out is None:
++        out = torch.empty((g, parts.k, c1 - c0), dtype=torch.float16, device=trellis.device)
++    assert out.shape[1:] == (parts.k, c1 - c0) and out.shape[0] >= g and out.is_contiguous()
++    words = _words(trellis)
++    tr_stride = words.stride(0) if words.dim() > 1 else 0
++    if g > 0:
++        _reconstruct_folded_kernel[(parts.k // HAD, (c1 - c0) // HAD, g)](
++            words, tr_stride, out, out.stride(0), out.stride(1), lo, c0 // HAD,
++            suh, suh_expert_stride, parts.suh_part_stride, svh, svh_expert_stride, hadamard_pm1(trellis.device),
++            parts.part_of_nb, parts.word_off, parts.ntiles, parts.nstart,
++            BITS=parts.bits, CB=CODEBOOKS[parts.codebook], FOLD_OUT=fold_out, num_warps=8,
++        )
++    return out
++
++
++@triton.jit
++def _gemm_f16acc_kernel(
++    a_ptr, stride_am, b_ptr, stride_bk, c_ptr, stride_cm, M, N, K,
++    BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr, GROUP: tl.constexpr,
++):
++    pid = tl.program_id(0)
++    n_m = tl.cdiv(M, BM)
++    n_n = tl.cdiv(N, BN)
++    per_group = GROUP * n_n
++    first_m = (pid // per_group) * GROUP
++    group_m = tl.minimum(n_m - first_m, GROUP)
++    pid_m = first_m + (pid % per_group) % group_m
++    pid_n = (pid % per_group) // group_m
++    rm = pid_m * BM + tl.arange(0, BM)
++    rn = pid_n * BN + tl.arange(0, BN)
++    rk = tl.arange(0, BK)
++    a = a_ptr + rm[:, None].to(tl.int64) * stride_am + rk[None, :]
++    b = b_ptr + rk[:, None].to(tl.int64) * stride_bk + rn[None, :]
++    acc = tl.zeros([BM, BN], dtype=tl.float16)
++    for k0 in range(0, K, BK):
++        x = tl.load(a, mask=rm[:, None] < M, other=0.0).to(tl.float16)  # bf16 activations cast here
++        w = tl.load(b, mask=rn[None, :] < N, other=0.0)
++        acc = tl.dot(x, w, acc, out_dtype=tl.float16)
++        a += BK
++        b += BK * stride_bk
++    tl.store(c_ptr + rm[:, None].to(tl.int64) * stride_cm + rn[None, :], acc.to(c_ptr.dtype.element_ty),
++             mask=(rm[:, None] < M) & (rn[None, :] < N))
++
++
++# tiles of gemm_f16acc: box sweep at M=8192 (perf/bench_f16acc.py) put BM128/BK32/4 warps/3 stages
++# first on every Ornith shape, BN256 on the wide ones (in_proj 217, qkv 209 TF/s) and BN128 on the
++# narrow ones (o_proj 196, shared 169-172 TF/s); cuBLAS fp32-accumulate reaches 104-120 TF/s
++GEMM_F16ACC_CFG = dict(BM=128, BN=128, BK=32, GROUP=8, num_warps=4, num_stages=3)
++GEMM_F16ACC_WIDE_N = 4096  # BN=256 from this output width on
++
++
++def gemm_f16acc(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor | None = None, *, out_dtype=torch.float16, **cfg) -> torch.Tensor:
++    """``a @ b`` for fp16 ``b [K, N]`` and fp16 or bf16 ``a [M, K]`` (rounded to fp16 on load, as the
++    host cast would) with FP16 accumulation (exllamav3's hgemm numerics); K a multiple of the K
++    tile. ``out`` may be a column slice of a wider tensor."""
++    m, k = a.shape
++    n = b.shape[1]
++    assert a.dtype in (torch.float16, torch.bfloat16) and b.dtype == torch.float16
++    assert a.stride(1) == 1 and b.stride(1) == 1
++    c = {**GEMM_F16ACC_CFG, **({"BN": 256} if n >= GEMM_F16ACC_WIDE_N else {}), **cfg}
++    assert k % c["BK"] == 0
++    if out is None:
++        out = torch.empty((m, n), dtype=out_dtype, device=a.device)
++    assert out.stride(1) == 1
++    grid = (triton.cdiv(m, c["BM"]) * triton.cdiv(n, c["BN"]),)
++    _gemm_f16acc_kernel[grid](a, a.stride(0), b, b.stride(0), out, out.stride(0), m, n, k,
++                              BM=c["BM"], BN=c["BN"], BK=c["BK"], GROUP=c["GROUP"],
++                              num_warps=c["num_warps"], num_stages=c["num_stages"])
++    return out
++
++
+ def reconstruct(trellis: torch.Tensor, codebook: str) -> torch.Tensor:
+     """Triton decode of a ``[K/16, N/16, 16*bits]`` trellis to ``W_hat`` fp16 ``[K, N]`` (tests, tools)."""
+     kt, nt, width = trellis.shape
+@@ -748,6 +1032,6 @@ def reconstruct(trellis: torch.Tensor, codebook: str) -> torch.Tensor:
+ 
+ __all__ = [
+     "CODEBOOKS", "Exl3Parts", "HAD", "HAD_SCALE", "MCG_MULT", "MUL1_MULT",
+-    "exl3_gemm", "exl3_gemv", "had_cols", "had_rows", "reconstruct_experts", "hadamard_pm1", "hadamard_reference",
++    "exl3_gemm", "exl3_gemv", "f16acc_enabled", "gemm_f16acc", "had_cols", "had_rows", "reconstruct_experts", "reconstruct_folded", "hadamard_pm1", "hadamard_reference",
+     "linear_reference", "reconstruct", "reconstruct_reference", "tile_stream_index",
+ ]
+diff --git a/python/freetoken/layers/quantization/linear/exl3.py b/python/freetoken/layers/quantization/linear/exl3.py
+index 116c368..2162f78 100644
+--- a/python/freetoken/layers/quantization/linear/exl3.py
++++ b/python/freetoken/layers/quantization/linear/exl3.py
+@@ -23,8 +23,26 @@ GEMV_MAX_ROWS = 8
+ # per row block and runs at ~6.5 TF/s on an RTX 5080, 13-18x slower than reconstruct + cuBLAS at
+ # M >= 1024; reconstruct is ahead or level from M=16 on every Ornith shape (bench_dense_crossover-box-2026-09-24.txt).
+ RECONSTRUCT_MIN_ROWS = 16
++# Decode GEMVs with at most this many 128-column blocks rotate their input in the GEMV
++# prologue instead of a separate had_rows launch. Every program rotates the 128-blocks of
++# its own K range, so a K block is rotated once per column block: a small projection
++# saves the launch (o_proj 4096->2048, 16 blocks: 22.7 -> 21.1 us per CUDA-graph replay),
++# a wide one pays more rotation than the launch cost (GDN in_proj 2048->12288, 96
++# blocks: 50.4 -> 51.6 us). Box bench, tasks/ornith-exl3/fuse.
++PREROT_MAX_NBLOCKS = 32
+ # Output columns per cuBLAS call: bounds the fp32 accumulator at rows x this.
+ RECONSTRUCT_SLAB = 2048
++# From this many rows on, reconstruct W_full = diag(suh) H W_hat H diag(svh) (both rotations folded
++# into the weight, as exllamav3's reconstruct_had) and run one plain GEMM on the raw activations:
++# the per-token had_rows + had_cols passes cost 36-60% of every dense prefill projection at 8K rows
++# (tasks/ornith-exl3/perf/RESEARCH.md). FREETOKEN_EXL3_FOLD=0 keeps the rotate-activations path.
++FOLD_MIN_ROWS = 1024
++
++
++def fold_enabled() -> bool:
++    import os
++
++    return os.getenv("FREETOKEN_EXL3_FOLD", "1").strip() != "0"
+ 
+ 
+ def exl3_facts(scheme) -> tuple[int, str]:
+@@ -38,26 +56,40 @@ def _num_sms(index: int) -> int:
+     return torch.cuda.get_device_properties(index).multi_processor_count
+ 
+ 
++GEMV_PROGRAMS_PER_SM = 20
++# the last split sums every split's partial plane serially: past 32 splits that costs more than the
++# extra programs gain (box: o_proj s32 13.3 us, s64 14.4 us)
++GEMV_MAX_SPLIT = 32
++
++
+ def pick_split_k(rows: int, n_blocks: int, k: int, device: torch.device) -> int:
+-    """Split K while the decode grid stays within eight single-warp programs per SM (each split keeps
+-    >= 32 rows of K, a whole number of 16-row bands). Box sweep (tasks/ornith-exl3/perf/README.md):
+-    every Ornith shape was fastest at 256-768 programs."""
+-    target = 8 * _num_sms(device.index or 0)
++    """Split K while the decode grid stays within GEMV_PROGRAMS_PER_SM single-warp programs per SM
++    (each split keeps >= 32 rows of K, a whole number of 16-row bands). Box sweep
++    (tasks/ornith-exl3/perf/d2-gemv): with the 64-register GEMV (32 resident warps per SM) the big
++    Ornith shapes are fastest at 1024-1536 programs (GDN in_proj s16, attn qkv s16, MoE gate|up s16,
++    MoE down s8); at 168 registers (12 warps per SM) it was 256-768."""
++    target = GEMV_PROGRAMS_PER_SM * _num_sms(device.index or 0)
+     split = 1
+-    while rows * n_blocks * split * 2 <= target and k % (split * 2 * 16) == 0 and k // (split * 2) >= 32:
++    while (rows * n_blocks * split * 2 <= target and split * 2 <= GEMV_MAX_SPLIT
++           and k % (split * 2 * 16) == 0 and k // (split * 2) >= 32):
+         split *= 2
+     return split
+ 
+ 
+ def exl3_forward(x2: torch.Tensor, trellis: torch.Tensor, suh: torch.Tensor, svh: torch.Tensor, parts, out_dtype) -> torch.Tensor:
+-    from freetoken.kernel.triton.exl3 import exl3_gemm, exl3_gemv, had_rows
++    from freetoken.kernel.triton.exl3 import exl3_gemm, exl3_gemv, gemv_pre_rot, had_rows
+ 
+     rows = x2.shape[0]
+-    xh = had_rows(x2, suh, parts)
+     if rows <= GEMV_MAX_ROWS:
+         split = pick_split_k(rows, parts.n // 128, parts.k, x2.device)
+         out = torch.empty((rows, parts.n), dtype=out_dtype, device=x2.device)
+-        return exl3_gemv(xh, trellis, svh, parts, out=out, split_k=split)
++        if gemv_pre_rot() and parts.n // 128 <= PREROT_MAX_NBLOCKS:
++            # the input rotation runs in the GEMV prologue: no had_rows launch
++            return exl3_gemv(None, trellis, svh, parts, out=out, split_k=split, x=x2, suh=suh)
++        return exl3_gemv(had_rows(x2, suh, parts), trellis, svh, parts, out=out, split_k=split)
++    if rows >= FOLD_MIN_ROWS and parts.sizes and fold_enabled():
++        return _forward_folded(x2, trellis, suh, svh, parts, out_dtype)
++    xh = had_rows(x2, suh, parts)
+     out = torch.empty((rows, parts.n), dtype=out_dtype, device=x2.device)
+     if rows >= RECONSTRUCT_MIN_ROWS and parts.sizes:
+         return _forward_reconstruct(xh, trellis, svh, parts, out)
+@@ -84,6 +116,35 @@ def _forward_reconstruct(xh: torch.Tensor, trellis: torch.Tensor, svh: torch.Ten
+     return out
+ 
+ 
++def _forward_folded(x2: torch.Tensor, trellis: torch.Tensor, suh: torch.Tensor, svh: torch.Tensor, parts, out_dtype) -> torch.Tensor:
++    """``out = x2 @ W_full``: W_full decoded once with both rotations and sign vectors folded in
++    (fp16, one rounding), the product in cuBLAS (fp16 in, fp32 accumulation, fp16 out)."""
++    from freetoken.kernel.triton.exl3 import f16acc_enabled, gemm_f16acc, reconstruct_folded
++
++    n = parts.n
++    if f16acc_enabled() and x2.stride(1) == 1:
++        # one Triton GEMM per slab: casts x on load and writes out_dtype, no host-side glue
++        out = torch.empty((x2.shape[0], n), dtype=out_dtype, device=x2.device)
++        for c0 in range(0, n, RECONSTRUCT_SLAB):
++            c1 = min(c0 + RECONSTRUCT_SLAB, n)
++            gemm_f16acc(x2, reconstruct_folded(trellis, suh, svh, parts, cols=(c0, c1))[0], out=out[:, c0:c1])
++        return out
++    xf = x2 if x2.dtype == torch.float16 else x2.to(torch.float16)
++    if out_dtype == torch.float16 and n <= RECONSTRUCT_SLAB:
++        return torch.mm(xf, reconstruct_folded(trellis, suh, svh, parts)[0])
++    # column slabs: W_full and the fp16 product exist one slab at a time (the prefill transient
++    # the server reserves), the result lands in out_dtype directly
++    out = torch.empty((x2.shape[0], n), dtype=out_dtype, device=x2.device)
++    for c0 in range(0, n, RECONSTRUCT_SLAB):
++        c1 = min(c0 + RECONSTRUCT_SLAB, n)
++        w = reconstruct_folded(trellis, suh, svh, parts, cols=(c0, c1))[0]
++        if out_dtype == torch.float16:
++            torch.mm(xf, w, out=out[:, c0:c1])
++        else:
++            out[:, c0:c1] = torch.mm(xf, w)
++    return out
++
++
+ class TritonExl3LinearKernel(LinearKernel):
+     name = "triton"
+ 
+diff --git a/python/freetoken/models/qwen3_5_moe/moe.py b/python/freetoken/models/qwen3_5_moe/moe.py
+index c7057e0..439c01f 100644
+--- a/python/freetoken/models/qwen3_5_moe/moe.py
++++ b/python/freetoken/models/qwen3_5_moe/moe.py
+@@ -15,6 +15,23 @@ from freetoken.layers import (
+ if TYPE_CHECKING:
+     from freetoken.models.config import ModelConfig
+ 
++_SIDE_STREAMS: dict = {}
++
++
++def _shared_overlap_enabled() -> bool:
++    """``FREETOKEN_SHARED_EXPERT_OVERLAP=0`` runs the EXL3 decode shared expert on the main stream
++    again (default: a side stream, concurrently with the router, expert loads and routed GEMVs)."""
++    import os
++
++    return os.getenv("FREETOKEN_SHARED_EXPERT_OVERLAP", "1").strip() != "0"
++
++
++def _side_stream(device: torch.device) -> torch.cuda.Stream:
++    s = _SIDE_STREAMS.get(device)
++    if s is None:
++        s = _SIDE_STREAMS[device] = torch.cuda.Stream(device=device)
++    return s
++
+ 
+ class _SharedExpert(BaseOP):
+     """Always-present shared SwiGLU expert of width ``shared_expert_intermediate_size``."""
+@@ -128,8 +145,32 @@ class Qwen3_5MoE(BaseOP):
+             )
+             return routed.view(num_tokens, hidden_dim)
+ 
+-        shared = self.shared_expert.forward(hidden_states)
+-        routed = self.experts.forward(hidden_states=hidden_states, router_logits=router_logits)
++        # EXL3 decode: the shared expert's GEMVs (a few MB, single-warp programs at ~0.2 of the DRAM
++        # bound on their own) run on a side stream, filling the SMs the routed GEMVs and the expert
++        # loads leave idle. The EXL3 routed path returns a fresh tensor (it never writes
++        # hidden_states), so both streams may read it. Captured into the decode CUDA graph as a
++        # fork/join.
++        if (
++            ctx.batch.is_decode
++            and cache is not None
++            and cache.quant_format == "exl3"
++            and hidden_states.is_cuda
++            and _shared_overlap_enabled()
++        ):
++            main = torch.cuda.current_stream(hidden_states.device)
++            side = _side_stream(hidden_states.device)
++            side.wait_stream(main)
++            with torch.cuda.stream(side):
++                shared = self.shared_expert.forward(hidden_states)
++            routed = self.experts.forward(hidden_states=hidden_states, router_logits=router_logits)
++            main.wait_stream(side)
++            if not torch.cuda.is_current_stream_capturing():
++                # eager: keep the allocator from recycling either tensor under the other stream
++                shared.record_stream(main)
++                hidden_states.record_stream(side)
++        else:
++            shared = self.shared_expert.forward(hidden_states)
++            routed = self.experts.forward(hidden_states=hidden_states, router_logits=router_logits)
+         from freetoken.kernel.triton.shared_expert import fused_shared_expert_add_
+ 
+         return fused_shared_expert_add_(routed, shared, shared_gate).view(num_tokens, hidden_dim)
+diff --git a/python/freetoken/moe/fused_exl3.py b/python/freetoken/moe/fused_exl3.py
+index 4b5d836..343f7a4 100644
+--- a/python/freetoken/moe/fused_exl3.py
++++ b/python/freetoken/moe/fused_exl3.py
+@@ -29,15 +29,22 @@ from freetoken.kernel.triton.exl3 import (
+     Exl3Parts,
+     exl3_gemm,
+     exl3_gemv,
++    gemv_pre_rot,
+     had_rows,
+     reconstruct_experts,
++    f16acc_enabled,
++    reconstruct_folded,
+     splitk_combine,
+     splitk_silu_had,
+ )
+ 
+-# tokens per prefill chunk: xh is 2 * chunk * top_k * H fp16 (128 MiB for 2048 x 8 x 2048) and the
+-# down output chunk * top_k * H fp32 (the same); each chunk decodes every expert once
+-PREFILL_CHUNK_TOKENS = 2048
++# tokens per MoE prefill sub-chunk. Each sub-chunk decodes every expert's W_hat once and runs every
++# expert's rows through one grouped GEMM, so the sub-chunk sets how many rows a decoded weight tile
++# serves: at 2048 tokens (~64 rows per expert of 256) the GEMM was bandwidth-starved (25 TF/s) and the
++# reconstruct rewrote all experts 4x per 8K chunk. One sub-chunk per 8K prefill chunk: MoE layer
++# 31.2 -> 13.6 ms at 8192 tokens (bench_moe_prefill.py, box). The rotated input is
++# 2 * tokens * top_k * H fp16 (512 MiB at 8192 x 8 x 2048) and the down output the same in fp32.
++PREFILL_CHUNK_TOKENS = 8192
+ # a chunk of at least this many tokens decodes W_hat into the scratch; shorter ones (extends of a
+ # few hundred tokens touch only part of the experts) keep the in-kernel decode
+ PREFILL_DECODED_MIN_TOKENS = 256
+@@ -48,6 +55,15 @@ PREFILL_DECODE_GROUP = 32
+ # fp16 forward the checkpoint was quantized and calibrated against); bf16 here cost 8x the
+ # rounding error for nothing, since the down projection rounds its rotated input to fp16 anyway
+ ACT_DTYPE = torch.float16
++# decoded prefill: fold the input rotation ``diag(suh) H`` into the decoded W_hat
++# (reconstruct_folded(fold_out=False)), so both GEMMs read the raw activations (route p reads
++# token p // top_k) and the two had_rows launches plus the [2, P, H] rotated buffer disappear.
++# OFF by default: unlike a dense layer, the fold pays the 128x128 Hadamard on every expert's weights
++# (256 x 3 x H x I elements, ~206 GFLOP per 8K chunk) instead of on the routed activations (~43
++# GFLOP), so reconstruct_folded costs 6.18 ms against reconstruct 2.69 + had_rows 2.30 ms and the
++# MoE layer goes 12.18 -> 13.24 ms at 8192 tokens (bench_moe_prefill.py --quick, box).
++# FREETOKEN_EXL3_MOE_FOLD=1 turns it on (A/B only).
++PREFILL_FOLD_INPUT = os.environ.get("FREETOKEN_EXL3_MOE_FOLD", "0") == "1"
+ 
+ 
+ @functools.lru_cache(maxsize=16)
+@@ -83,19 +99,27 @@ def _decode(x, banks, topk_weights, ids, top_k, parts, activation, alpha, limit)
+     tokens = x.shape[0]
+     routes = tokens * top_k
+     dev = x.device
+-    xh = had_rows(x, gu_suh, gu, src_div=top_k, experts=ids, suh_expert_stride=gu_suh.stride(0))
+     if activation == "silu" and _fused_epilogues():
+         # The gate|up output's fp16 rounding, silu*up and the down input rotation are one
+         # launch, and the top-k combine another (was: cast, act, had_rows, and four torch
+-        # ops for the combine). The split-K sums happen inside exl3_gemv.
++        # ops for the combine). The split-K sums happen inside exl3_gemv, and with
++        # FREETOKEN_EXL3_GEMV_PREROT (default) so does the gate|up input rotation.
+         g = torch.empty((routes, gu.n), dtype=torch.float32, device=dev)
+-        exl3_gemv(xh, gu_tr, gu_svh, gu, out=g, experts=ids, tr_expert_stride=gu_tr.stride(0) // 2,
+-                  svh_expert_stride=gu_svh.stride(0), split_k=pick_split_k(routes, gu.n // 128, gu.k, dev))
++        gu_split = pick_split_k(routes, gu.n // 128, gu.k, dev)
++        if gemv_pre_rot():
++            exl3_gemv(None, gu_tr, gu_svh, gu, out=g, experts=ids, tr_expert_stride=gu_tr.stride(0) // 2,
++                      svh_expert_stride=gu_svh.stride(0), split_k=gu_split,
++                      x=x, suh=gu_suh, suh_expert_stride=gu_suh.stride(0), src_div=top_k)
++        else:
++            xh = had_rows(x, gu_suh, gu, src_div=top_k, experts=ids, suh_expert_stride=gu_suh.stride(0))
++            exl3_gemv(xh, gu_tr, gu_svh, gu, out=g, experts=ids, tr_expert_stride=gu_tr.stride(0) // 2,
++                      svh_expert_stride=gu_svh.stride(0), split_k=gu_split)
+         ah = splitk_silu_had(g.unsqueeze(0), dn_suh, ids, dn_suh.stride(0))
+         o = torch.empty((routes, dn.n), dtype=torch.float32, device=dev)
+         exl3_gemv(ah, dn_tr, dn_svh, dn, out=o, experts=ids, tr_expert_stride=dn_tr.stride(0) // 2,
+                   svh_expert_stride=dn_svh.stride(0), split_k=pick_split_k(routes, dn.n // 128, dn.k, dev))
+         return splitk_combine(o.unsqueeze(0), topk_weights, tokens, top_k, x.dtype)
++    xh = had_rows(x, gu_suh, gu, src_div=top_k, experts=ids, suh_expert_stride=gu_suh.stride(0))
+     split = pick_split_k(routes, gu.n // 128, gu.k, dev)
+     g = torch.empty((routes, gu.n), dtype=torch.float32, device=dev)
+     exl3_gemv(xh, gu_tr, gu_svh, gu, out=g, experts=ids, tr_expert_stride=gu_tr.stride(0) // 2,
+@@ -114,6 +138,26 @@ def _prefill_block_m(routes: int, num_experts: int) -> int:
+     return 16 if per_expert < 16 else (32 if per_expert < 64 else 64)
+ 
+ 
++# tile config of the decoded-slab grouped GEMM (exl3_gemm with ``decoded``). Box sweep at 8192
++# tokens (bench_moe_prefill.py): BK 64, 3 stages, 8 warps, BM 32 is the best of 72 configs (GEMM
++# 16.3 -> 6.5 ms per layer with the larger sub-chunk); BM 64/128 lose 5-10%. Overridable for sweeps.
++PREFILL_GEMM: dict | None = None
++
++
++def _prefill_gemm(routes: int, num_experts: int) -> dict:
++    per_expert = routes / max(num_experts, 1)
++    if f16acc_enabled():
++        # fp16 accumulators halve the register tile, so BM 64 / 2 stages wins: GEMM 6.37 -> 4.77 ms
++        # per layer at 8192 tokens (the same 72-config sweep, FREETOKEN_EXL3_F16ACC=1)
++        bm = 16 if per_expert < 16 else (32 if per_expert < 64 else 64)
++        cfg = dict(block_m=bm, block_k=64, num_stages=2, num_warps=8, f16acc=True)
++    else:
++        cfg = dict(block_m=16 if per_expert < 16 else 32, block_k=64, num_stages=3, num_warps=8)
++    if PREFILL_GEMM:
++        cfg.update(PREFILL_GEMM)
++    return cfg
++
++
+ def _prefill(x, banks, topk_weights, topk_ids, top_k, parts, activation, alpha, limit, num_experts):
+     from freetoken.moe.fused import moe_align_block_size
+ 
+@@ -131,33 +175,55 @@ def _prefill(x, banks, topk_weights, topk_ids, top_k, parts, activation, alpha,
+         ids2 = topk_ids[t0:t1]
+         ids = ids2.reshape(-1).contiguous()
+         routes = ids.numel()
+-        bm = _prefill_block_m(routes, num_experts)
+-        sorted_ids, expert_ids, npad = moe_align_block_size(ids2.contiguous(), bm, num_experts)
+-        sort = dict(sorted_ids=sorted_ids, expert_ids=expert_ids, num_post_pad=npad, block_m=bm)
+-        xh = had_rows(xc, gu_suh, gu, src_div=top_k, experts=ids, suh_expert_stride=gu_suh.stride(0))
++        cfg = _prefill_gemm(routes, num_experts) if decoded else dict(block_m=_prefill_block_m(routes, num_experts))
++        sorted_ids, expert_ids, npad = moe_align_block_size(ids2.contiguous(), cfg["block_m"], num_experts)
++        sort = dict(sorted_ids=sorted_ids, expert_ids=expert_ids, num_post_pad=npad, **cfg)
++        fold = decoded and PREFILL_FOLD_INPUT
+         g = torch.empty((routes, gu.n), dtype=ACT_DTYPE, device=x.device)
+         gu_args = dict(tr_expert_stride=gu_tr.stride(0) // 2, svh_expert_stride=gu_svh.stride(0), **sort)
+-        if decoded:
++        if fold:
++            xs = xc.to(torch.float16)
+             for lo in range(0, num_experts, group):
+                 hi = min(lo + group, num_experts)
+-                reconstruct_experts(gu_tr, gu, lo, hi, out=w_gu)
+-                exl3_gemm(xh, gu_tr, gu_svh, gu, out=g, decoded=w_gu, expert_range=(lo, hi), **gu_args)
++                reconstruct_folded(gu_tr, gu_suh, gu_svh, gu, lo=lo, hi=hi, suh_expert_stride=gu_suh.stride(0),
++                                   svh_expert_stride=gu_svh.stride(0), out=w_gu, fold_out=False)
++                exl3_gemm(xs, gu_tr, gu_svh, gu, out=g, decoded=w_gu, expert_range=(lo, hi), src_div=top_k, **gu_args)
++            del xs
+         else:
+-            exl3_gemm(xh, gu_tr, gu_svh, gu, out=g, **gu_args)
+-        del xh
++            xh = had_rows(xc, gu_suh, gu, src_div=top_k, experts=ids, suh_expert_stride=gu_suh.stride(0))
++            if decoded:
++                for lo in range(0, num_experts, group):
++                    hi = min(lo + group, num_experts)
++                    reconstruct_experts(gu_tr, gu, lo, hi, out=w_gu)
++                    exl3_gemm(xh, gu_tr, gu_svh, gu, out=g, decoded=w_gu, expert_range=(lo, hi), **gu_args)
++            else:
++                exl3_gemm(xh, gu_tr, gu_svh, gu, out=g, **gu_args)
++            del xh
+         a = _act(g, activation, alpha, limit)
+         del g
+-        ah = had_rows(a, dn_suh, dn, experts=ids, suh_expert_stride=dn_suh.stride(0))
+-        o = torch.empty((routes, dn.n), dtype=torch.float32, device=x.device)
++        # FREETOKEN_EXL3_F16ACC also keeps the per-route down output in fp16 (exllamav3 does): the
++        # combine then reads half the bytes (it sums in fp32 either way)
++        o_dtype = torch.float16 if f16acc_enabled() else torch.float32
++        o = torch.empty((routes, dn.n), dtype=o_dtype, device=x.device)
+         dn_args = dict(tr_expert_stride=dn_tr.stride(0) // 2, svh_expert_stride=dn_svh.stride(0), **sort)
+-        if decoded:
++        if fold:
+             for lo in range(0, num_experts, group):
+                 hi = min(lo + group, num_experts)
+-                reconstruct_experts(dn_tr, dn, lo, hi, out=w_dn)
+-                exl3_gemm(ah, dn_tr, dn_svh, dn, out=o, decoded=w_dn, expert_range=(lo, hi), **dn_args)
++                reconstruct_folded(dn_tr, dn_suh, dn_svh, dn, lo=lo, hi=hi, suh_expert_stride=dn_suh.stride(0),
++                                   svh_expert_stride=dn_svh.stride(0), out=w_dn, fold_out=False)
++                exl3_gemm(a, dn_tr, dn_svh, dn, out=o, decoded=w_dn, expert_range=(lo, hi), src_div=1, **dn_args)
+         else:
+-            exl3_gemm(ah, dn_tr, dn_svh, dn, out=o, **dn_args)
+-        out[t0:t1] = _combine(o, topk_weights[t0:t1], t1 - t0, top_k, x.dtype)
++            ah = had_rows(a, dn_suh, dn, experts=ids, suh_expert_stride=dn_suh.stride(0))
++            if decoded:
++                for lo in range(0, num_experts, group):
++                    hi = min(lo + group, num_experts)
++                    reconstruct_experts(dn_tr, dn, lo, hi, out=w_dn)
++                    exl3_gemm(ah, dn_tr, dn_svh, dn, out=o, decoded=w_dn, expert_range=(lo, hi), **dn_args)
++            else:
++                exl3_gemm(ah, dn_tr, dn_svh, dn, out=o, **dn_args)
++            del ah
++        # one kernel, fixed k order, no [routes, H] fp32 temporaries (was: cast, mul, sum)
++        out[t0:t1] = splitk_combine(o.unsqueeze(0), topk_weights[t0:t1], t1 - t0, top_k, x.dtype)
+     return out
+ 
+ 
+diff --git a/tasks/ornith-exl3/perf/bench_decode_epilogue.py b/tasks/ornith-exl3/perf/bench_decode_epilogue.py
+index 737bd14..8a1e3b4 100644
+--- a/tasks/ornith-exl3/perf/bench_decode_epilogue.py
++++ b/tasks/ornith-exl3/perf/bench_decode_epilogue.py
+@@ -1,8 +1,9 @@
+ """One Ornith MoE decode layer (EXL3 5.0bpw mul1, H 2048, I 512, top-8) and one dense GEMV
+ (o_proj 4096 -> 2048), replayed in a CUDA graph: split-K reduced by torch.sum vs inside the
+ GEMV (FREETOKEN_EXL3_SPLITK_INKERNEL), MoE epilogues unfused vs fused
+-(FREETOKEN_EXL3_FUSED_EPILOGUE). Prints us per replay and the max difference to the unfused
+-path."""
++(FREETOKEN_EXL3_FUSED_EPILOGUE), input rotation as its own had_rows launch vs inside the GEMV
++prologue (FREETOKEN_EXL3_GEMV_PREROT). Prints us per replay and the max difference to the unfused
++path. A GDN in_proj-shaped dense GEMV (2048 -> 12288) is timed too."""
+ import os
+ 
+ import torch
+@@ -38,6 +39,14 @@ svh = (torch.randn(n, generator=g, device=dev) * 0.05).half()
+ xd = torch.randn(1, k, generator=g, device=dev).to(torch.bfloat16)
+ 
+ 
++k2, n2 = 2048, 12288
++parts2 = Exl3Parts.build(k2, (n2,), BITS, "mul1", "cuda")
++tr2 = torch.randint(-(1 << 31), (1 << 31) - 1, ((k2 // 16) * (n2 // 16) * 8 * BITS,), generator=g, device=dev, dtype=torch.int32)
++suh2 = (torch.randn(1, k2, generator=g, device=dev) * 0.5).half()
++svh2 = (torch.randn(n2, generator=g, device=dev) * 0.05).half()
++xd2 = torch.randn(1, k2, generator=g, device=dev).to(torch.bfloat16)
++
++
+ def moe():
+     return fused_experts_exl3(x, banks, w, ids, bits=BITS, codebook="mul1", is_prefill=False)
+ 
+@@ -46,6 +55,10 @@ def dense():
+     return exl3_forward(xd, tr, suh, svh, parts, torch.bfloat16)
+ 
+ 
++def dense_in():
++    return exl3_forward(xd2, tr2, suh2, svh2, parts2, torch.bfloat16)
++
++
+ def graphed(fn):
+     s = torch.cuda.Stream()
+     s.wait_stream(torch.cuda.current_stream())
+@@ -60,11 +73,12 @@ def graphed(fn):
+ 
+ 
+ ref = {}
+-for label, env in (("unfused, torch.sum", {"FREETOKEN_EXL3_SPLITK_INKERNEL": "0", "FREETOKEN_EXL3_FUSED_EPILOGUE": "0"}),
+-                   ("in-kernel sum", {"FREETOKEN_EXL3_SPLITK_INKERNEL": "1", "FREETOKEN_EXL3_FUSED_EPILOGUE": "0"}),
+-                   ("in-kernel sum + fused", {"FREETOKEN_EXL3_SPLITK_INKERNEL": "1", "FREETOKEN_EXL3_FUSED_EPILOGUE": "1"})):
++for label, env in (("unfused, torch.sum", {"FREETOKEN_EXL3_SPLITK_INKERNEL": "0", "FREETOKEN_EXL3_FUSED_EPILOGUE": "0", "FREETOKEN_EXL3_GEMV_PREROT": "0"}),
++                   ("in-kernel sum", {"FREETOKEN_EXL3_SPLITK_INKERNEL": "1", "FREETOKEN_EXL3_FUSED_EPILOGUE": "0", "FREETOKEN_EXL3_GEMV_PREROT": "0"}),
++                   ("in-kernel sum + fused", {"FREETOKEN_EXL3_SPLITK_INKERNEL": "1", "FREETOKEN_EXL3_FUSED_EPILOGUE": "1", "FREETOKEN_EXL3_GEMV_PREROT": "0"}),
++                   ("+ gemv pre-rotation", {"FREETOKEN_EXL3_SPLITK_INKERNEL": "1", "FREETOKEN_EXL3_FUSED_EPILOGUE": "1", "FREETOKEN_EXL3_GEMV_PREROT": "1"})):
+     os.environ.update(env)
+-    for name, fn in (("moe layer", moe), ("dense o_proj", dense)):
++    for name, fn in (("moe layer", moe), ("dense o_proj", dense), ("dense in_proj", dense_in)):
+         graph, out = graphed(fn)
+         graph.replay()
+         torch.cuda.synchronize()
+diff --git a/tests/kernels/test_exl3.py b/tests/kernels/test_exl3.py
+index 4b39e72..7445423 100644
+--- a/tests/kernels/test_exl3.py
++++ b/tests/kernels/test_exl3.py
+@@ -216,6 +216,70 @@ def test_moe_prefill_chunks_agree_with_one_chunk(monkeypatch):
+     assert rel_err(chunked, whole) < 1e-2
+ 
+ 
++@cuda
++@pytest.mark.parametrize("bits", (2, 5, 8))
++def test_moe_prefill_folded_input_matches_rotated_path(monkeypatch, bits):
++    """The decoded prefill with diag(suh) H folded into W_hat (raw activations into both GEMMs)
++    equals the had_rows + GEMM path up to fp16 rounding of the folded weight."""
++    import freetoken.moe.fused_exl3 as fe
++
++    banks = tuple(b.cuda() for b in _moe_banks(bits, "mul1", E, seed=bits))
++    x, w, ids = (t.cuda() for t in _routing(300, E, seed=5))
++    kw = dict(bits=bits, codebook="mul1", is_prefill=True, num_experts=E)
++    monkeypatch.setattr(fe, "PREFILL_FOLD_INPUT", True)
++    folded = fe.fused_experts_exl3(x, banks, w, ids, **kw)
++    monkeypatch.setattr(fe, "PREFILL_FOLD_INPUT", False)
++    rotated = fe.fused_experts_exl3(x, banks, w, ids, **kw)
++    assert rel_err(folded, rotated) < 3e-3, rel_err(folded, rotated)
++
++
++@cuda
++@pytest.mark.parametrize("m,k,n", ((300, 512, 768), (1024, 2048, 384), (77, 4096, 256)))
++def test_gemm_f16acc_matches_fp32_accumulation(m, k, n):
++    from freetoken.kernel.triton.exl3 import gemm_f16acc
++
++    g = torch.Generator().manual_seed(m)
++    a = (torch.randn(m, k, generator=g) * 0.5).half().cuda()
++    b = (torch.randn(k, n, generator=g) * 0.05).half().cuda()
++    ref = a.float() @ b.float()
++    y = gemm_f16acc(a, b, out_dtype=torch.float32)
++    assert rel_err(y, ref) < 5e-3, rel_err(y, ref)
++    wide = torch.zeros(m, n + 128, dtype=torch.bfloat16, device="cuda")
++    gemm_f16acc(a, b, out=wide[:, 64:64 + n])  # a column slice of a wider bf16 output
++    assert torch.equal(wide[:, 64:64 + n], y.to(torch.bfloat16))
++
++
++@cuda
++def test_f16acc_prefill_paths_match_reference(monkeypatch):
++    """FREETOKEN_EXL3_F16ACC=1: the MoE decoded-slab GEMM and the dense folded GEMM accumulate in
++    fp16; both stay close to the fp32 references (the logits gate decides the default)."""
++    import freetoken.moe.fused_exl3 as fe
++    from freetoken.kernel.triton.exl3 import Exl3Parts
++    from freetoken.layers.quantization.linear import exl3 as lin
++
++    monkeypatch.setenv("FREETOKEN_EXL3_F16ACC", "1")
++    banks = _moe_banks(5, "mul1", E, seed=21)
++    x, w, ids = _routing(300, E, seed=22)
++    ref = fe.fused_experts_exl3_reference(x, banks, w, ids, codebook="mul1")
++    y = fe.fused_experts_exl3(x.cuda(), tuple(b.cuda() for b in banks), w.cuda(), ids.cuda(), bits=5,
++                              codebook="mul1", is_prefill=True, num_experts=E)
++    assert rel_err(y.cpu(), ref) < 1.5e-2, rel_err(y.cpu(), ref)
++    k, sizes = 512, (256, 128, 384)
++    trs, suh, svh = _dense_case(k, sizes, 5, "mul1", seed=23)
++    xd = torch.randn(1100, k, generator=torch.Generator().manual_seed(24)).to(torch.bfloat16)
++    dref, col = [], 0
++    for j, (tr, s) in enumerate(zip(trs, sizes)):
++        dref.append(linear_reference(xd.float(), tr, suh[j], svh[col:col + s], "mul1"))
++        col += s
++    dref = torch.cat(dref, dim=1)
++    parts = Exl3Parts.build(k, sizes, 5, "mul1", "cuda")
++    flat = torch.cat([t.reshape(-1) for t in trs]).cuda()
++    monkeypatch.setattr(lin, "FOLD_MIN_ROWS", 16)
++    monkeypatch.setattr(lin, "RECONSTRUCT_SLAB", 256)
++    yd = lin.exl3_forward(xd.cuda(), flat, suh.cuda(), svh.cuda(), parts, torch.bfloat16)
++    assert rel_err(yd.cpu(), dref) < 1.5e-2, rel_err(yd.cpu(), dref)
++
++
+ @cuda
+ def test_moe_decode_replays_under_a_cuda_graph():
+     from freetoken.moe.fused_exl3 import fused_experts_exl3
+@@ -297,6 +361,7 @@ def test_moe_prefill_decoded_scratch_matches_in_kernel_decode(monkeypatch, codeb
+     banks = tuple(b.cuda() for b in _moe_banks(4, codebook, E, seed=11))
+     x, w, ids = (t.cuda() for t in _routing(300, E, seed=12))
+     kw = dict(bits=4, codebook=codebook, is_prefill=True, num_experts=E)
++    monkeypatch.setattr(fe, "PREFILL_FOLD_INPUT", False)  # the folded weight is a different rounding
+     monkeypatch.setattr(fe, "PREFILL_DECODED_MIN_TOKENS", 1 << 30)
+     in_kernel = fe.fused_experts_exl3(x, banks, w, ids, **kw)
+     monkeypatch.setattr(fe, "PREFILL_DECODED_MIN_TOKENS", 1)
+@@ -341,3 +406,103 @@ def test_inkernel_split_k_reduction_matches_torch_sum(monkeypatch, out_dtype):
+     monkeypatch.setenv("FREETOKEN_EXL3_SPLITK_INKERNEL", "0")
+     summed = exl3_forward(x, *args)
+     assert rel_err(fused.float(), summed.float()) < (1e-6 if out_dtype == torch.float32 else 4e-3)
++
++
++@cuda
++@pytest.mark.parametrize("rows", (1, 3, 8))
++@pytest.mark.parametrize("k,sizes", ((2048, (1024,)), (4096, (2048,)), (2048, (512, 256, 256)), (384, (256,))),
++                         ids=("2048x1024", "4096x2048", "3parts", "k384"))
++def test_gemv_prologue_rotation_matches_had_rows(monkeypatch, rows, k, sizes):
++    """The input rotation computed inside the GEMV prologue (H8 x H16 factorisation, per
++    program over the 128-blocks of its K range) against the separate had_rows launch: the
++    rotated inputs differ at most by fp16 rounding of a reordered fp32 sum, and the prologue
++    path is deterministic (repeat == first, bit for bit)."""
++    from freetoken.kernel.triton.exl3 import Exl3Parts, had_rows
++    from freetoken.layers.quantization.linear.exl3 import exl3_forward
++
++    trs, suh, svh = _dense_case(k, sizes, 5, "mul1", seed=31)
++    parts = Exl3Parts.build(k, sizes, 5, "mul1", "cuda")
++    x = torch.randn(rows, k, generator=torch.Generator().manual_seed(32)).to(torch.bfloat16).cuda()
++    tr = torch.cat([t.reshape(-1) for t in trs]).cuda()
++    args = (tr, suh.cuda(), svh.cuda(), parts, torch.float32)
++    monkeypatch.setenv("FREETOKEN_EXL3_GEMV_PREROT", "1")
++    pre = exl3_forward(x, *args)
++    assert all(torch.equal(pre, exl3_forward(x, *args)) for _ in range(3))
++    monkeypatch.setenv("FREETOKEN_EXL3_GEMV_PREROT", "0")
++    sep = exl3_forward(x, *args)
++    assert rel_err(pre, sep) < 2e-3, rel_err(pre, sep)
++    # the rotation itself: FWHT-by-Kronecker in fp32 vs had_rows' split-fp16 tensor-core dot
++    xh = had_rows(x.contiguous(), suh.cuda(), parts).float()
++    from freetoken.kernel.triton.exl3 import hadamard_reference
++    h = hadamard_reference().double().cuda() / 128 ** 0.5
++    want = torch.stack([((x.double() * suh.cuda()[j].double()).view(rows, -1, 128) @ h).view(rows, k)
++                        for j in range(len(sizes))])
++    assert (xh.double() - want).abs().max() <= 2e-3 * want.abs().max()
++
++
++@cuda
++@pytest.mark.parametrize("tokens", (1, 4))
++def test_moe_decode_prologue_rotation_matches_had_rows(monkeypatch, tokens):
++    """Routed gate|up with the rotation in the GEMV prologue (x[p // top_k] * suh[ids[p]])
++    against had_rows + GEMV, at 1 and 4 tokens (routes share the source row)."""
++    from freetoken.moe.fused_exl3 import fused_experts_exl3
++
++    banks = tuple(b.cuda() for b in _moe_banks(5, "mul1", 12, seed=41))
++    x, w, ids = (t.cuda() for t in _routing(tokens, 12, seed=42))
++    kw = dict(bits=5, codebook="mul1", is_prefill=False)
++    monkeypatch.setenv("FREETOKEN_EXL3_GEMV_PREROT", "1")
++    pre = fused_experts_exl3(x, banks, w, ids, **kw)
++    assert torch.equal(pre, fused_experts_exl3(x, banks, w, ids, **kw))
++    monkeypatch.setenv("FREETOKEN_EXL3_GEMV_PREROT", "0")
++    sep = fused_experts_exl3(x, banks, w, ids, **kw)
++    assert rel_err(pre, sep) < 2e-3, rel_err(pre, sep)
++
++
++@cuda
++@pytest.mark.parametrize("bits", (2, 5, 8))
++@pytest.mark.parametrize("codebook", tuple(CODEBOOKS))
++def test_folded_reconstruct_path_matches_reference(monkeypatch, bits, codebook):
++    """Prefill with both rotations folded into W_full (reconstruct_folded + one fp16 GEMM on the raw
++    activations) against the fp32 reference and against the rotate-activations reconstruct path:
++    the only new rounding is W_full's (and the fp16 GEMM output), same order as the xh rounding."""
++    from freetoken.kernel.triton.exl3 import Exl3Parts, reconstruct_folded, reconstruct_reference, hadamard_reference
++    from freetoken.layers.quantization.linear import exl3 as lin
++
++    k, sizes, rows = 512, (256, 128, 384), 300
++    trs, suh, svh = _dense_case(k, sizes, bits, codebook, seed=11 + bits)
++    x = torch.randn(rows, k, generator=torch.Generator().manual_seed(12)).to(torch.bfloat16)
++    ref, col = [], 0
++    for j, (tr, s) in enumerate(zip(trs, sizes)):
++        ref.append(linear_reference(x.float(), tr, suh[j], svh[col:col + s], codebook))
++        col += s
++    ref = torch.cat(ref, dim=1)
++    parts = Exl3Parts.build(k, sizes, bits, codebook, "cuda")
++    flat = torch.cat([t.reshape(-1) for t in trs]).cuda()
++    args = (x.cuda(), flat, suh.cuda(), svh.cuda(), parts, torch.float32)
++    monkeypatch.setattr(lin, "FOLD_MIN_ROWS", 16)
++    monkeypatch.setenv("FREETOKEN_EXL3_FOLD", "1")
++    folded = lin.exl3_forward(*args)
++    assert rel_err(folded.cpu(), ref) < REL_TOL, rel_err(folded.cpu(), ref)
++    monkeypatch.setenv("FREETOKEN_EXL3_FOLD", "0")
++    rot = lin.exl3_forward(*args)
++    assert rel_err(folded, rot) < 2e-3, rel_err(folded, rot)
++    # W_full itself against diag(suh) H W_hat H diag(svh) in float64
++    w = reconstruct_folded(flat, suh.cuda(), svh.cuda(), parts)[0].double().cpu()
++    h = hadamard_reference().double() / 128 ** 0.5
++    col = 0
++    for j, (tr, s) in enumerate(zip(trs, sizes)):
++        wh = reconstruct_reference(tr, codebook).double()
++        hk = torch.block_diag(*[h] * (k // 128))
++        hn = torch.block_diag(*[h] * (s // 128))
++        want = suh[j].double()[:, None] * (hk @ wh @ hn) * svh[col:col + s].double()[None, :]
++        got = w[:, col:col + s]
++        assert (got - want).abs().max() <= 2e-3 * want.abs().max(), (got - want).abs().max()
++        col += s
++    # column slabs (crossing part boundaries) build the same W_full columns bit for bit
++    full = reconstruct_folded(flat, suh.cuda(), svh.cuda(), parts)[0]
++    for c0, c1 in ((0, 128), (128, 512), (384, 768)):
++        assert torch.equal(reconstruct_folded(flat, suh.cuda(), svh.cuda(), parts, cols=(c0, c1))[0], full[:, c0:c1])
++    monkeypatch.setenv("FREETOKEN_EXL3_FOLD", "1")
++    monkeypatch.setattr(lin, "RECONSTRUCT_SLAB", 256)
++    slabbed = lin.exl3_forward(*args)
++    assert rel_err(slabbed, folded) < 1e-3, rel_err(slabbed, folded)
+diff --git a/tests/kernels/test_kv_quant.py b/tests/kernels/test_kv_quant.py
+index a186e1e..bf4fec4 100644
+--- a/tests/kernels/test_kv_quant.py
++++ b/tests/kernels/test_kv_quant.py
+@@ -495,9 +495,12 @@ def test_ornith_q8_native_score_matches_dequantized_oracle(monkeypatch):
+ @cuda_only
+ @pytest.mark.parametrize("spec", SPECS, ids=IDS)
+ @pytest.mark.parametrize("split", [False, True], ids=["fused", "split"])
+-def test_extend_attention_over_quantized_pool(spec, split):
++@pytest.mark.parametrize("gqa", [False, True], ids=["perhead", "gqa"])
++def test_extend_attention_over_quantized_pool(monkeypatch, spec, split, gqa):
+     """Both extend paths. The split kernel reads the freshly-computed K/V in bf16 and
+-    only the prefix from the quantized pool, so it exercises the mixed case."""
++    only the prefix from the quantized pool, so it exercises the mixed case. ``gqa``
++    runs the split path through the GQA head-packed kernel (FREETOKEN_EXTEND_GQA=1)."""
++    monkeypatch.setenv("FREETOKEN_EXTEND_GQA", "1" if gqa else "0")
+     from freetoken.kernel.triton.attention import extend_paged_attention
+ 
+     head_dim, slots, q_heads, kv_heads = 256, 64, 8, 2
+diff --git a/tests/kernels/test_triton_attention.py b/tests/kernels/test_triton_attention.py
+index 20caeab..cc3fe5a 100644
+--- a/tests/kernels/test_triton_attention.py
++++ b/tests/kernels/test_triton_attention.py
+@@ -674,7 +674,10 @@ def test_decode_triton_attention_with_sinks_matches_reference():
+         (512, 2, None, [2, 4], [3, 2]),
+     ],
+ )
++@pytest.mark.parametrize("gqa", [False, True])
+ def test_extend_triton_attention_matches_reference(
++    monkeypatch,
++    gqa: bool,
+     use_split_inputs: bool,
+     head_dim: int,
+     num_kv_heads: int,
+@@ -684,6 +687,8 @@ def test_extend_triton_attention_matches_reference(
+ ):
+     from freetoken.kernel.triton.attention import extend_paged_attention
+ 
++    # GQA-packed split kernel (FREETOKEN_EXTEND_GQA=1) must match the same reference.
++    monkeypatch.setenv("FREETOKEN_EXTEND_GQA", "1" if gqa else "0")
+     torch.manual_seed(2)
+     device = torch.device("cuda")
+     num_q_heads = 16
+@@ -757,8 +762,10 @@ def test_extend_triton_attention_matches_reference(
+ @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton attention needs CUDA")
+ @pytest.mark.parametrize("use_split_inputs", [False, True])
+ @pytest.mark.parametrize("sliding_window", [None, 48])
+-def test_extend_triton_attention_with_bidirectional_blocks_matches_reference(use_split_inputs: bool, sliding_window: int | None):
++@pytest.mark.parametrize("gqa", [False, True])
++def test_extend_triton_attention_with_bidirectional_blocks_matches_reference(monkeypatch, gqa: bool, use_split_inputs: bool, sliding_window: int | None):
+     """Rows of an image span see the span's later keys across q tiles, text rows stay causal, the window still bounds the past."""
++    monkeypatch.setenv("FREETOKEN_EXTEND_GQA", "1" if gqa else "0")
+     from freetoken.kernel.triton.attention import extend_paged_attention
+ 
+     torch.manual_seed(3)
+@@ -805,7 +812,9 @@ def test_extend_triton_attention_with_bidirectional_blocks_matches_reference(use
+ 
+ @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton attention needs CUDA")
+ @pytest.mark.parametrize("use_split_inputs", [False, True])
+-def test_extend_triton_attention_with_sinks_matches_reference(use_split_inputs: bool):
++@pytest.mark.parametrize("gqa", [False, True])
++def test_extend_triton_attention_with_sinks_matches_reference(monkeypatch, gqa: bool, use_split_inputs: bool):
++    monkeypatch.setenv("FREETOKEN_EXTEND_GQA", "1" if gqa else "0")
+     from freetoken.kernel.triton.attention import extend_paged_attention
+ 
+     torch.manual_seed(12)

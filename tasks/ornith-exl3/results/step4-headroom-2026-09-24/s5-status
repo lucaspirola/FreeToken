@@ -1,0 +1,7 @@
+server pid 139928 kv=q8_0 ratio=1.00 slots=default
+ready after 105s
+chat1 rc=0
+chat2 rc=0
+probe rc=0
+DONE
+ALLDONE
