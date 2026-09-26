@@ -1,0 +1,4 @@
+start 17:59:33 gpu=2 MiB  17:59:33 up 38 days, 23:19,  0 user,  load average: 0.22, 0.65, 1.09
+tree 74edbe823 Merge exp/exl3-longctx 0b708ae into round 5: first-start mirror pool priced from the transient upper bound (2a
+suite rc=0 3433 passed, 25 skipped, 3 warnings, 2 subtests passed in 687.14s (0:11:27) | illegal: 0 | failed-lines: 0
+ALLDONE
