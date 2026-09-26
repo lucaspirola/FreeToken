@@ -1,0 +1,36 @@
+== 8K pass 1 (whole mean 201.3)
+  pol-1-whole     198.8   98.8%  gap 4.9 ms  swaps     - wb     -  hit 0.9816  decode keys 
+  pol-2-band      175.1   87.0%  gap 5.6 ms  swaps  4080 wb     0  hit 0.9546  decode keys 
+  pol-3-tb1       189.2   94.0%  gap 5.1 ms  swaps  2735 wb   648  hit 0.9723  decode keys 
+  pol-4-exact     182.5   90.7%  gap 5.3 ms  swaps  2624 wb   587  hit 0.9720  decode keys 
+  pol-5-exact     185.3   92.1%  gap 5.3 ms  swaps  2698 wb   611  hit 0.9721  decode keys 
+  pol-6-tb1       185.9   92.3%  gap 5.2 ms  swaps  2698 wb   611  hit 0.9721  decode keys 
+  pol-7-band      177.8   88.3%  gap 5.5 ms  swaps  4281 wb     0  hit 0.9542  decode keys 
+  pol-8-whole     203.8  101.2%  gap 4.8 ms  swaps     - wb     -  hit 0.9820  decode keys 
+== 8K pass 2 (whole mean 198.1)
+  pol-1-whole     197.1   99.5%  gap 4.9 ms  swaps     - wb     -  hit 0.9832  decode keys 
+  pol-2-band      185.1   93.5%  gap 5.2 ms  swaps  4093 wb   127  hit 0.9691  decode keys 
+  pol-3-tb1       188.1   95.0%  gap 5.2 ms  swaps  3567 wb   257  hit 0.9846  decode keys 
+  pol-4-exact     193.2   97.6%  gap 5.0 ms  swaps  2343 wb   257  hit 0.9821  decode keys 
+  pol-5-exact     189.5   95.7%  gap 5.1 ms  swaps  2341 wb   257  hit 0.9822  decode keys 
+  pol-6-tb1       187.5   94.7%  gap 5.2 ms  swaps  2318 wb   257  hit 0.9822  decode keys 
+  pol-7-band      184.3   93.1%  gap 5.2 ms  swaps  4101 wb   127  hit 0.9690  decode keys 
+  pol-8-whole     199.0  100.5%  gap 4.9 ms  swaps     - wb     -  hit 0.9832  decode keys 
+== 80K pass 1 (whole mean 167.9)
+  pol-1-whole     166.8   99.3%  gap 5.8 ms  swaps     - wb     -  hit 0.9846  decode keys 
+  pol-2-band      154.4   91.9%  gap 6.3 ms  swaps  7221 wb   795  hit 0.9564  decode keys 
+  pol-3-tb1       158.1   94.1%  gap 6.2 ms  swaps  3705 wb   892  hit 0.9768  decode keys 
+  pol-4-exact     160.2   95.4%  gap 6.0 ms  swaps  3838 wb   953  hit 0.9768  decode keys 
+  pol-5-exact     159.2   94.8%  gap 6.1 ms  swaps  3751 wb   929  hit 0.9769  decode keys 
+  pol-6-tb1       158.2   94.2%  gap 6.2 ms  swaps  3747 wb   929  hit 0.9769  decode keys 
+  pol-7-band      153.2   91.2%  gap 6.3 ms  swaps  6988 wb   795  hit 0.9567  decode keys 
+  pol-8-whole     169.1  100.7%  gap 5.8 ms  swaps     - wb     -  hit 0.9844  decode keys 
+== 80K pass 2 (whole mean 169.1)
+  pol-1-whole     166.8   98.6%  gap 5.8 ms  swaps     - wb     -  hit 0.9856  decode keys 
+  pol-2-band      151.9   89.8%  gap 6.4 ms  swaps  5362 wb     0  hit 0.9723  decode keys 
+  pol-3-tb1       159.8   94.5%  gap 6.1 ms  swaps  2033 wb    84  hit 0.9790  decode keys 
+  pol-4-exact     154.9   91.6%  gap 6.3 ms  swaps  3175 wb    84  hit 0.9836  decode keys 
+  pol-5-exact     159.3   94.2%  gap 6.1 ms  swaps  3240 wb    84  hit 0.9835  decode keys 
+  pol-6-tb1       161.7   95.6%  gap 6.0 ms  swaps  3290 wb    84  hit 0.9836  decode keys 
+  pol-7-band      155.3   91.8%  gap 6.3 ms  swaps  5464 wb     0  hit 0.9723  decode keys 
+  pol-8-whole     171.4  101.4%  gap 5.7 ms  swaps     - wb     -  hit 0.9856  decode keys 

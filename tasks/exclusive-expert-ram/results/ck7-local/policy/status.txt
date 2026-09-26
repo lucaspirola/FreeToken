@@ -1,0 +1,25 @@
+pol-1-whole start 00:18:54 load=6.12 3.71 4.73 gpu=0MiB avail=31.4 sm=277 MHz code=bf1a48e +dirty
+pol-1-whole done 00:22:00 load=6.76 6.88 5.91: captures=1 kv_grows=2 tracebacks=0
+pol-2-band start 00:22:00 load=6.76 6.88 5.91 gpu=0MiB avail=31.5 sm=277 MHz code=bf1a48e +dirty
+pol-2-band done 00:24:33 load=4.35 5.70 5.59: captures=1 kv_grows=2 tracebacks=0
+pol-3-tb1 start 00:24:33 load=4.35 5.70 5.59 gpu=0MiB avail=29.0 sm=277 MHz code=bf1a48e +dirty
+pol-3-tb1 done 00:27:03 load=9.80 7.22 6.16: captures=1 kv_grows=2 tracebacks=0
+pol-4-exact start 00:27:03 load=9.80 7.22 6.16 gpu=0MiB avail=31.4 sm=277 MHz code=bf1a48e +dirty
+pol-4-exact done 00:29:42 load=7.21 6.65 6.07: captures=1 kv_grows=2 tracebacks=0
+pol-5-exact start 00:29:42 load=7.21 6.65 6.07 gpu=0MiB avail=31.5 sm=277 MHz code=bf1a48e +dirty
+pol-5-exact done 00:32:07 load=4.62 6.27 6.03: captures=1 kv_grows=2 tracebacks=0
+pol-6-tb1 start 00:32:07 load=4.62 6.27 6.03 gpu=0MiB avail=31.6 sm=277 MHz code=bf1a48e +dirty
+pol-6-tb1 done 00:34:37 load=3.45 5.11 5.62: captures=1 kv_grows=2 tracebacks=0
+pol-7-band start 00:34:37 load=3.45 5.11 5.62 gpu=0MiB avail=30.5 sm=277 MHz code=bf1a48e +dirty
+pol-7-band done 00:37:14 load=1.17 3.57 4.97: captures=1 kv_grows=2 tracebacks=0
+pol-8-whole start 00:37:14 load=1.17 3.57 4.97 gpu=0MiB avail=31.4 sm=277 MHz code=bf1a48e +dirty
+pol-8-whole done 00:39:12 load=2.15 3.58 4.84: captures=1 kv_grows=2 tracebacks=0
+pol-nat-whole start 00:39:12 load=2.15 3.58 4.84 gpu=0MiB avail=31.5 sm=277 MHz code=bf1a48e +dirty
+pol-nat-whole done 00:42:23 load=4.75 4.16 4.84: captures=1 kv_grows=0 tracebacks=0
+pol-nat-band start 00:42:23 load=4.75 4.16 4.84 gpu=0MiB avail=28.5 sm=277 MHz code=bf1a48e +dirty
+pol-nat-band done 00:46:13 load=4.19 4.21 4.72: captures=1 kv_grows=0 tracebacks=0
+pol-nat-tb1 start 00:46:13 load=4.19 4.21 4.72 gpu=0MiB avail=28.4 sm=277 MHz code=bf1a48e +dirty
+pol-nat-tb1 done 00:50:05 load=4.09 4.38 4.71: captures=1 kv_grows=0 tracebacks=0
+pol-nat-exact start 00:50:05 load=4.09 4.38 4.71 gpu=0MiB avail=28.3 sm=277 MHz code=bf1a48e +dirty
+pol-nat-exact done 00:53:58 load=4.01 4.25 4.59: captures=1 kv_grows=0 tracebacks=0
+POLDONE

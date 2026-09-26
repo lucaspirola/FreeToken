@@ -503,3 +503,49 @@ def test_free_eviction_rate_rises_with_the_band():
                 pool.close()
     print(f"free eviction rate: tie-break {rate[False]:.4f}, band {rate[True]:.4f}")
     assert rate[True] > rate[False], rate
+
+
+def test_default_policy_keeps_a_just_used_duplicate_over_a_colder_expert():
+    """Round 5 (2026-09-27): the band is off by default.
+
+    With LFU halving every 64 calls most counts are 0-2, so ``max(1, sqrt(min))``
+    spans nearly the whole candidate set, and the duplicates in it are mostly
+    experts an admission just retained (count >= 1). The band evicted exactly
+    those, which the next steps fetched again: on Ornith EXL3 at 8K it made
+    1.5-1.9x the swaps of the one-bucket tie-break (hit rate 0.954 vs 0.972,
+    whole model 0.982) and cost 6-7 points of decode
+    (tasks/exclusive-expert-ram/results/ck7-local/README.md).
+
+    Here expert 1 holds a pool row and was just used (count 1, usage 12);
+    expert 0 has no row and is colder (count 0, usage 10). The default must
+    evict expert 0 and pay the writeback; the band (opt-in) evicts expert 1.
+    """
+    import os
+
+    from freetoken.moe import offload_kernels as ok
+
+    if "FREETOKEN_MIRROR_DUP_BAND" not in os.environ:
+        assert ok.FREETOKEN_MIRROR_DUP_BAND is False
+
+    device = torch.device("cuda")
+
+    def victim(dup_band):
+        prev = ok.FREETOKEN_MIRROR_DUP_BAND
+        ok.FREETOKEN_MIRROR_DUP_BAND = dup_band
+        try:
+            cache = _direct_cache(num_layers=2, num_experts=4, cache_size=4, device=device)
+            _seat(
+                cache,
+                slot_of_expert={0: 0, 1: 1, 2: 2, 3: 3},
+                usage={0: 10, 1: 12, 2: 12, 3: 12},
+                frequency={0: 0, 1: 1, 2: 50, 3: 50},
+            )
+            _attach_fake_mirror(cache, [-1, 0, -1, -1, -1, -1, -1, -1])
+            cache.ensure_experts(1, torch.tensor([[0]], dtype=torch.int32, device=device))
+            torch.cuda.synchronize()
+            return int(cache.victim_ids[0].item())
+        finally:
+            ok.FREETOKEN_MIRROR_DUP_BAND = prev
+
+    assert victim(False) == 0
+    assert victim(True) == 1

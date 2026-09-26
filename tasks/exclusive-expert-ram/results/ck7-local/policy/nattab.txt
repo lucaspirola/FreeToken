@@ -1,0 +1,4 @@
+policy/pol-nat-whole-natural.json               167.0 tok/s  100.0%  md5 same as ref 5/5
+policy/pol-nat-band-natural.json                154.0 tok/s   92.2%  md5 same as ref 5/5
+policy/pol-nat-tb1-natural.json                 153.5 tok/s   91.9%  md5 same as ref 5/5
+policy/pol-nat-exact-natural.json               149.5 tok/s   89.5%  md5 same as ref 5/5

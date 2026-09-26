@@ -91,8 +91,31 @@ def run(target_tokens: int, tag: str = "") -> dict:
                                        if len(arrivals) > 2 and m1 > arrivals[1] else None}
 
 
+# PROBE_STATS=1 adds each request's delta of the /v1/stats expert-cache counters, so a
+# pass's decode can be tied to the traffic it caused: "mirror_delta" (saver: swaps,
+# writebacks, free evictions, ...) and "decode_delta" (any offload residency, only with
+# --moe-collect-stats: active and missing experts, layer calls). Off by default; the
+# counters are read at idle.
+STATS = os.environ.get("PROBE_STATS", "").strip() not in ("", "0")
+
+
+def moe_counters() -> dict:
+    try:
+        with urllib.request.urlopen(URL.replace("/chat/completions", "/stats"), timeout=10) as r:
+            moe = (json.load(r).get("scheduler") or {}).get("moe") or {}
+    except Exception:
+        return {}
+    return {block: {k: v for k, v in (moe.get(block) or {}).items() if isinstance(v, int)}
+            for block in ("mirror", "decode")}
+
+
 for p in range(1, PASSES + 1):
     for s in SIZES:
+        before = moe_counters() if STATS else {}
         # The tag is the prefix, so pass 2 misses the prefix cache pass 1 left.
-        print(json.dumps({"target": s, "pass": p, **run(s, f"p{p} " if p > 1 else "")}),
-              flush=True)
+        rec = {"target": s, "pass": p, **run(s, f"p{p} " if p > 1 else "")}
+        if STATS:
+            for block, after in moe_counters().items():
+                prior = before.get(block, {})
+                rec[f"{block}_delta"] = {k: v - prior.get(k, 0) for k, v in after.items()}
+        print(json.dumps(rec), flush=True)

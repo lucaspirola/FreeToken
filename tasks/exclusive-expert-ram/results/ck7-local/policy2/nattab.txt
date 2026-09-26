@@ -1,0 +1,12 @@
+policy2/pol2-nat1-whole-natural.json            168.3 tok/s  100.0%  md5 same as ref 5/5
+policy2/pol2-nat2-tb1-natural.json              153.7 tok/s   91.3%  md5 same as ref 5/5
+policy2/pol2-nat3-band2-natural.json            153.1 tok/s   90.9%  md5 same as ref 5/5
+policy2/pol2-nat4-band2-natural.json            153.3 tok/s   91.1%  md5 same as ref 5/5
+policy2/pol2-nat5-tb1-natural.json              153.6 tok/s   91.2%  md5 same as ref 5/5
+policy2/pol2-nat6-whole-natural.json            167.1 tok/s   99.3%  md5 same as ref 5/5
+pol2-nat1-whole miss/step 16.52 wb/step 0.00 hit 0.9484
+pol2-nat2-tb1 miss/step 17.25 wb/step 7.51 hit 0.9461
+pol2-nat3-band2 miss/step 17.30 wb/step 7.98 hit 0.9459
+pol2-nat4-band2 miss/step 17.30 wb/step 7.98 hit 0.9459
+pol2-nat5-tb1 miss/step 17.25 wb/step 7.51 hit 0.9461
+pol2-nat6-whole miss/step 16.52 wb/step 0.00 hit 0.9484
