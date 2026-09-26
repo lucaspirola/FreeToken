@@ -1077,7 +1077,7 @@ class MirrorResidency:
                           "written back from the GPU" if gpu else "re-read from the checkpoint")
         return len(uncovered)
 
-    def idle_seed(self, should_stop=None, chunk: int = 64) -> dict:
+    def idle_seed(self, should_stop=None, chunk: int = 16) -> dict:
         """Give the residents LFU will evict next a pool row, at a host idle boundary.
 
         A duplicate (an expert with both a GPU slot and a pool row) makes its
@@ -1093,15 +1093,20 @@ class MirrorResidency:
         so outputs cannot change; the pool keeps its capacity and its reserve.
 
         Chunks of ``chunk`` rows; ``should_stop()`` (a request is waiting) is
-        checked between chunks, so a request waits at most one chunk (~64 rows
-        of D2H). Slots of the prefill double buffer are left alone on both sides:
-        their occupants always retain their rows (see the swap kernel) and are
+        checked before any work and between chunks, so a request waits at most
+        the plan (host lists, ~2-3 ms at 10K experts) or one chunk (16 rows,
+        ~30 MiB of D2H on Ornith, ~1 ms on the RTX 5080, where 1218 rows took
+        79-91 ms). Slots of the prefill double buffer are left alone on both
+        sides: their occupants always retain their rows (see the swap kernel) and are
         vacated by every prefill anyway. ``FREETOKEN_MIRROR_IDLE_SEED=0``
         disables it.
         """
         m = getattr(self, "_mirror", None)
         out = {"seeded": 0, "from_free": 0, "from_hot": 0, "stopped": False}
         if m is None or self.cache.device.type != "cuda":
+            return out
+        if should_stop is not None and should_stop():
+            out["stopped"] = True
             return out
         # Host reads and writes pool rows below: no staged DMA may land later.
         self.drain_writebacks()

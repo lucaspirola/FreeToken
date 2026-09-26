@@ -451,7 +451,7 @@ class Scheduler(SchedulerIOMixin):
     def _mirror_idle_seed(self) -> None:
         """Seed pool duplicates of the next eviction victims while nothing runs
         (``MirrorResidency.idle_seed``): saver residencies only, single rank, and it
-        stops between chunks as soon as a request is waiting."""
+        stops before any work and between 16-row chunks as soon as a request is waiting."""
         moe = getattr(getattr(self, "engine", None), "moe_offload_cache", None)
         seed = getattr(getattr(moe, "residency", None), "idle_seed", None)
         if seed is None or not _MIRROR_IDLE_SEED or self.config.tp_info.size != 1:

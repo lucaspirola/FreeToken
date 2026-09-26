@@ -625,6 +625,30 @@ def test_idle_seed_stops_for_a_waiting_request():
             pool.close()
 
 
+def test_idle_seed_yields_between_chunks():
+    """A request arriving mid-seed stops it after the chunk in flight: rows seeded
+    so far are consistent (both maps agree, coverage and reserve hold)."""
+    with tempfile.TemporaryDirectory() as root:
+        write_nvfp4_checkpoint(root, LAYERS, EXPERTS, H, ISZ)
+        cache, pool = _cache(root, _CAP_FULL)
+        try:
+            _decode(cache)
+            checks = []
+            # check 1: before any work; check 2: before chunk 1; check 3: before chunk 2.
+            got = cache.residency.idle_seed(
+                should_stop=lambda: checks.append(1) or len(checks) > 2, chunk=2)
+            assert got["seeded"] <= 2 and (got["stopped"] or got["seeded"] < 2), got
+            fwd = cache._mirror["pool_row_of_id"].cpu().tolist()
+            inv = cache._mirror["id_of_pool_row"].cpu().tolist()
+            assert all(inv[r] == e for e, r in enumerate(fwd) if r >= 0)
+            assert all(fwd[e] == r for r, e in enumerate(inv) if e >= 0)
+            _decode(cache, steps=20, seed=1)
+            st = cache.mirror_stats()
+            assert st["coverage_faults"] == 0 and st["starved_writebacks"] == 0
+        finally:
+            pool.close()
+
+
 def test_idle_seed_cuts_the_next_decode_writebacks():
     """The point of it: the same routed decode after an idle boundary pays fewer
     writebacks when the idle boundary seeded the next victims."""
