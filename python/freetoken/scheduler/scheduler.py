@@ -69,6 +69,8 @@ _COUNTERS_PUBLISH_INTERVAL_S = 2.0
 # ``match_req`` radix walk; 4 covers the head plus the ~2.3 lanes a stage pass actually
 # seats, and the per-pass match memo makes the repeat walks free inside one pass.
 _RECLAIM_SCAN_DEPTH = 4
+# Idle-time duplicate seeding for the bounded expert mirror (MirrorResidency.idle_seed).
+_MIRROR_IDLE_SEED = os.getenv("FREETOKEN_MIRROR_IDLE_SEED", "1").strip() != "0"
 
 Indice2D: TypeAlias = Tuple[torch.Tensor, torch.Tensor]
 
@@ -442,8 +444,29 @@ class Scheduler(SchedulerIOMixin):
                     )
                     self._maybe_retune_pageable_layers(per_layer)
                 self._last_moe_stats_calls = int(moe.decode_miss_stats()["layer_calls"])
+        self._mirror_idle_seed()
         logger.info_rank0("Scheduler is idle, waiting for new reqs...")
         self.cache_manager.check_integrity()
+
+    def _mirror_idle_seed(self) -> None:
+        """Seed pool duplicates of the next eviction victims while nothing runs
+        (``MirrorResidency.idle_seed``): saver residencies only, single rank, and it
+        stops between chunks as soon as a request is waiting."""
+        moe = getattr(getattr(self, "engine", None), "moe_offload_cache", None)
+        seed = getattr(getattr(moe, "residency", None), "idle_seed", None)
+        if seed is None or not _MIRROR_IDLE_SEED or self.config.tp_info.size != 1:
+            return
+        queue = getattr(self, "_recv_from_tokenizer", None)
+        waiting = (lambda: not queue.empty()) if queue is not None else None
+        t0 = time.perf_counter()
+        got = seed(should_stop=waiting)
+        if got["seeded"] or got["stopped"]:
+            logger.info_rank0(
+                "mirror idle seed: %d rows (%d free, %d from hotter duplicates) in %.1f ms%s",
+                got["seeded"], got["from_free"], got["from_hot"],
+                (time.perf_counter() - t0) * 1e3,
+                ", stopped for a waiting request" if got["stopped"] else "",
+            )
 
     def _maybe_retune_pageable_layers(self, per_layer: list[dict]) -> None:
         """Explore one measured host-residency swap at a full idle boundary."""
