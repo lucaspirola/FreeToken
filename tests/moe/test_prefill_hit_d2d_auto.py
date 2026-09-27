@@ -54,10 +54,12 @@ def test_zero_disables_the_auto_split():
     assert asked == []
 
 
-def _prime_stub(*, overlap=True, cached=False):
+def _prime_stub(*, overlap=True, cached=False, blocks=False):
     calls = []
     stub = SimpleNamespace(
         prefill_overlap=overlap, _size_class_enabled=False, _primed_prefill_tokens=None,
+        residency=SimpleNamespace(prefill_begin_blocks_host=lambda: blocks),
+        prefill_hit_d2d=False, prefill_hit_d2d_tokens=0, device=None,
         use_cached_extend=lambda layer, n: cached,
         begin_prefill=lambda n: calls.append(("begin", n)),
         prefetch_prefill_layer=lambda layer: calls.append(("prefetch", layer)),
@@ -83,3 +85,17 @@ def test_prime_mismatch_or_cached_path_leaves_layer_zero_to_begin():
     stub, calls = _prime_stub(overlap=False)
     OffloadMoeCache.prime_prefill(stub, 4096)
     assert calls == []
+
+
+def test_prime_skipped_when_it_would_block_a_busy_gpu(monkeypatch):
+    import torch
+
+    busy = SimpleNamespace(query=lambda: False)
+    idle = SimpleNamespace(query=lambda: True)
+    stub, calls = _prime_stub(blocks=True)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda device=None: busy)
+    OffloadMoeCache.prime_prefill(stub, 8192)
+    assert calls == []  # continuation chunk: layer 0 begins itself, as before
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda device=None: idle)
+    OffloadMoeCache.prime_prefill(stub, 8192)
+    assert calls == [("begin", 8192), ("prefetch", 0)]

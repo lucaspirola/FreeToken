@@ -2346,6 +2346,12 @@ class OffloadMoeCache:
         finds its buffer already filling (``take_primed_prefill``). Skipped when
         layer 0 would not stream (the short-extend cached path) -- the same gate
         ``_prefill_routed`` applies.
+
+        Also skipped when the setup would wait on the host (the saver's per-chunk
+        snapshot sync, the hit/miss split's) while the GPU is still busy -- a
+        continuation chunk behind the previous one: waiting there, before any of
+        this forward is enqueued, drains the GPU (saver 32K/80K prefill -3-4%,
+        results/ab2). On an idle GPU (the first chunk after decode) it costs nothing.
         """
         self._primed_prefill_tokens = None
         if (
@@ -2354,6 +2360,13 @@ class OffloadMoeCache:
             or self._size_class_enabled
             or self.use_cached_extend(0, num_tokens)
         ):
+            return
+        blocks = (
+            self.residency.prefill_begin_blocks_host()
+            or self.prefill_hit_d2d
+            or 0 < num_tokens <= self.prefill_hit_d2d_tokens
+        )
+        if blocks and not torch.cuda.current_stream(self.device).query():
             return
         self.begin_prefill(num_tokens)
         self.prefetch_prefill_layer(0)
