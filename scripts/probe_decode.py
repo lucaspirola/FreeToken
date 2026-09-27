@@ -119,7 +119,10 @@ for p in range(1, PASSES + 1):
     for s in SIZES:
         before = moe_counters() if STATS else {}
         # The tag is the prefix, so pass 2 misses the prefix cache pass 1 left.
-        rec = {"target": s, "pass": p, **run(s, f"p{p} " if p > 1 else "")}
+        # PROBE_TAG prefixes every prompt (e.g. a profiler run that must miss the cache
+        # of an untraced run before it); empty by default, so records are unchanged.
+        tag = os.environ.get("PROBE_TAG", "") + (f"p{p} " if p > 1 else "")
+        rec = {"target": s, "pass": p, **run(s, tag)}
         if STATS:
             for block, after in moe_counters().items():
                 prior = before.get(block, {})
