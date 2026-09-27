@@ -834,6 +834,8 @@ class MirrorResidency:
         # Most ring entries ever waiting for their DMA at once (a lower bound
         # on the demand when ring_full_fallbacks > 0).
         out["wb_peak_pending"] = self._wb["peak_pending"] if self._wb else 0
+        # Rows idle_seed gave to the next eviction victims (host idle boundaries).
+        out["idle_seed_rows"] = getattr(self, "idle_seed_totals", {}).get("rows", 0)
         return out
 
     def mirror_warm_start(self) -> dict:
@@ -1074,6 +1076,115 @@ class MirrorResidency:
         logger.info_rank0("mirror restored coverage for %d experts (%s)", len(uncovered),
                           "written back from the GPU" if gpu else "re-read from the checkpoint")
         return len(uncovered)
+
+    def idle_seed(self, should_stop=None, chunk: int = 16) -> dict:
+        """Give the residents LFU will evict next a pool row, at a host idle boundary.
+
+        A duplicate (an expert with both a GPU slot and a pool row) makes its
+        eviction free; without one the eviction pays a writeback. The swap kernel
+        only makes duplicates of experts it has just admitted (retention), and
+        those are the ones the next steps route to again: the next victims --
+        the coldest residents by the LRU kernel's own key (LFU count, then last
+        use) -- mostly have no host copy. Here, while nothing runs, each of them
+        gets one: into a free row above the reserve first, then into the row of
+        a duplicate held by a strictly hotter resident (which stays on the GPU,
+        so coverage is untouched). The bytes are the resident's own slot copied
+        GPU -> pool, the arena shrink's refill path (``_mirror_refill_uncovered``),
+        so outputs cannot change; the pool keeps its capacity and its reserve.
+
+        Chunks of ``chunk`` rows; ``should_stop()`` (a request is waiting) is
+        checked before any work and between chunks, so a request waits at most
+        the plan (host lists, ~2-3 ms at 10K experts) or one chunk (16 rows,
+        ~30 MiB of D2H on Ornith, ~1 ms on the RTX 5080, where 1218 rows took
+        79-91 ms). Slots of the prefill double buffer are left alone on both
+        sides: their occupants always retain their rows (see the swap kernel) and are
+        vacated by every prefill anyway. ``FREETOKEN_MIRROR_IDLE_SEED=0``
+        disables it.
+        """
+        m = getattr(self, "_mirror", None)
+        out = {"seeded": 0, "from_free": 0, "from_hot": 0, "stopped": False}
+        if m is None or self.cache.device.type != "cuda":
+            return out
+        if should_stop is not None and should_stop():
+            out["stopped"] = True
+            return out
+        # Host reads and writes pool rows below: no staged DMA may land later.
+        self.drain_writebacks()
+        from freetoken.kernel.fast_index_copy import fast_index_copy_multi_jit
+        from freetoken.moe.offload_kernels import _lfu_recency_config
+
+        cache = self.cache
+        pool = self._mirror_pool
+        dev = cache.device
+        base = self._mirror_prefill_base()
+        ids = cache.id_of_slot.cpu().tolist()
+        usage = cache.usage.cpu().tolist()
+        fwd = m["pool_row_of_id"].cpu().tolist()
+        inv = m["id_of_pool_row"].cpu().tolist()
+        lfu = cache.cache_policy_id == 1
+        if lfu:
+            freq = cache.expert_frequency.view(-1).cpu().tolist()
+            recency_tokens, bonus = _lfu_recency_config(cache)
+            step = int(cache.step.item())
+            window = recency_tokens * cache.num_layers
+
+        def key(slot):
+            if not lfu:
+                return (usage[slot],)
+            recent = bonus if recency_tokens and step - usage[slot] <= window else 0
+            return (freq[ids[slot]] + recent, usage[slot])
+
+        live = sorted((s for s in range(base, len(ids)) if ids[s] >= 0), key=key)
+        # Next victims without a host copy, coldest first.
+        cold = [s for s in live if fwd[ids[s]] < 0]
+        # Rows available: free rows above the reserve, then duplicates of the
+        # hottest residents (only ever handed to a strictly colder one).
+        free_rows = [r for r, owner in enumerate(inv) if owner < 0]
+        spare_free = free_rows[: max(0, len(free_rows) - pool.reserve_rows)]
+        hot_dups = [s for s in reversed(live) if fwd[ids[s]] >= 0]
+        plan = []  # (dst row, src slot, hot expert losing the row or -1)
+        hi = 0
+        for s in cold:
+            if spare_free:
+                plan.append((spare_free.pop(), s, -1))
+                continue
+            if hi >= len(hot_dups) or key(hot_dups[hi]) <= key(s):
+                break
+            h = hot_dups[hi]
+            hi += 1
+            plan.append((fwd[ids[h]], s, ids[h]))
+        for begin in range(0, len(plan), chunk):
+            if should_stop is not None and should_stop():
+                out["stopped"] = True
+                break
+            part = plan[begin:begin + chunk]
+            fast_index_copy_multi_jit(
+                m["pool_ptrs"], m["cache_ptrs"], m["feat_bytes"],
+                torch.tensor([r for r, _, _ in part], dtype=torch.int32, device=dev),
+                torch.tensor([s for _, s, _ in part], dtype=torch.int32, device=dev),
+                torch.tensor([len(part)], dtype=torch.int64, device=dev),
+            )
+            torch.cuda.synchronize(dev)
+            for row, slot, hot in part:
+                if hot >= 0:
+                    fwd[hot] = -1
+                    out["from_hot"] += 1
+                else:
+                    out["from_free"] += 1
+                fwd[ids[slot]] = row
+                inv[row] = ids[slot]
+            out["seeded"] += len(part)
+            m["pool_row_of_id"].copy_(torch.tensor(fwd, dtype=torch.int32))
+            m["id_of_pool_row"].copy_(torch.tensor(inv, dtype=torch.int32))
+        if out["seeded"]:
+            self._mirror_publish_free_rows()
+        totals = getattr(self, "idle_seed_totals", None)
+        if totals is None:
+            totals = self.idle_seed_totals = {"calls": 0, "rows": 0, "from_hot": 0}
+        totals["calls"] += 1
+        totals["rows"] += out["seeded"]
+        totals["from_hot"] += out["from_hot"]
+        return out
 
     def _mirror_stage_layer(self, layer_id: int) -> int:
         """Make a prefill materialize's sources available, dropping what it evicts.
