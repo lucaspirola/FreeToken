@@ -1,0 +1,8 @@
+== sd-256k-seed vs sd-256k-whole (bar 91%)
+     8K p1:   184.2 vs   177.7   103.7%  gap 5.0 vs 5.2 ms  ttft 0.34 vs 0.43 s  ok
+     8K p2:   178.7 vs   188.9    94.6%  gap 5.2 vs 4.8 ms  ttft 0.99 vs 0.96 s  ok
+   256K p1:   114.7 vs   119.5    96.0%  gap 8.2 vs 7.8 ms  ttft 81.32 vs 78.35 s  ok
+   256K p2:   114.4 vs   117.8    97.1%  gap 8.2 vs 7.9 ms  ttft 78.41 vs 77.89 s  ok
+  sd-256k-whole: ram_gib=20.26, rss_ready_gib=22.82, anon_gib=3.22, coverage_faults=None, starved=None, code=None
+  sd-256k-seed: ram_gib=16.7, rss_ready_gib=17.61, anon_gib=16.78, coverage_faults=0, starved=0, code=None
+0 point(s) outside the band

@@ -1,0 +1,4 @@
+gate/ck7o-nat-whole-1-natural.json              167.1 tok/s  100.0%  md5 same as ref 5/5
+gate/ck7o-nat-mirror-1-natural.json             154.3 tok/s   92.3%  md5 same as ref 5/5
+gate/ck7o-nat-whole-2-natural.json              167.4 tok/s  100.2%  md5 same as ref 5/5
+gate/ck7o-nat-mirror-2-natural.json             155.8 tok/s   93.3%  md5 same as ref 5/5

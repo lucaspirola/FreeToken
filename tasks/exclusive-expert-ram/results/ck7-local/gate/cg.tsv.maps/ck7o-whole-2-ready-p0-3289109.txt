@@ -1,0 +1,8 @@
+    152416 KiB anon     152416 KiB rss  [heap]
+     94364 KiB anon      94364 KiB rss  [anon-unnamed]
+      1404 KiB anon      32076 KiB rss  /home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/triton/_C/libtriton.so
+--- largest single mappings by Anonymous
+    152416 KiB  14d89000-2656f000 [heap]
+     45320 KiB  73834c4ef000-73834f1ef000 
+     28176 KiB  7383542ed000-7383566ed000 
+     12288 KiB  738359400000-73835a000000 

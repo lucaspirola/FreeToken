@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Table of the policy A/B probe arms: decode tok/s, % of the mean of the whole arms, swaps,
 writebacks and decode hit rate (1 - missing/active, from --moe-collect-stats) per point.
-  poltab.py DIR"""
+  poltab.py DIR [GLOB]  (GLOB default pol*-[0-9]*-probe.jsonl; the idle-seed A/B uses "sd-[0-9]*-probe.jsonl")"""
 import glob, json, os, sys
 from collections import defaultdict
 
 D = sys.argv[1]
 rows = defaultdict(list)
-for f in sorted(glob.glob(os.path.join(D, "pol*-[0-9]*-probe.jsonl"))):
+for f in sorted(glob.glob(os.path.join(D, sys.argv[2] if len(sys.argv) > 2 else "pol*-[0-9]*-probe.jsonl"))):
     arm = os.path.basename(f)[:-len("-probe.jsonl")]
     pol = arm.split("-", 2)[2]
     for line in open(f):

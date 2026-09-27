@@ -1,0 +1,36 @@
+== 8K pass 1 (whole mean 203.4)
+  sd-1-whole      205.3  100.9%  gap 4.7 ms  swaps     - wb     -  hit 0.9821  decode keys 
+  sd-2-tb1        187.5   92.2%  gap 5.2 ms  swaps  2728 wb   641  hit 0.9720  decode keys 
+  sd-3-seed       195.6   96.1%  gap 5.0 ms  swaps  1339 wb     0  hit 0.9869  decode keys 
+  sd-4-seed0      192.7   94.7%  gap 5.1 ms  swaps  1596 wb     0  hit 0.9842  decode keys 
+  sd-5-seed0      193.4   95.1%  gap 5.1 ms  swaps  1583 wb     0  hit 0.9841  decode keys 
+  sd-6-seed       192.8   94.8%  gap 5.1 ms  swaps  1315 wb     0  hit 0.9869  decode keys 
+  sd-7-tb1        185.5   91.2%  gap 5.2 ms  swaps  2694 wb   607  hit 0.9720  decode keys 
+  sd-8-whole      201.6   99.1%  gap 4.8 ms  swaps     - wb     -  hit 0.9819  decode keys 
+== 8K pass 2 (whole mean 201.6)
+  sd-1-whole      201.9  100.2%  gap 4.8 ms  swaps     - wb     -  hit 0.9833  decode keys 
+  sd-2-tb1        178.7   88.7%  gap 5.4 ms  swaps  2243 wb   257  hit 0.9820  decode keys 
+  sd-3-seed       191.3   94.9%  gap 5.0 ms  swaps  1884 wb     0  hit 0.9845  decode keys 
+  sd-4-seed0      175.0   86.8%  gap 5.6 ms  swaps  1892 wb   209  hit 0.9845  decode keys 
+  sd-5-seed0      194.5   96.5%  gap 5.0 ms  swaps  2073 wb   389  hit 0.9841  decode keys 
+  sd-6-seed       191.2   94.9%  gap 5.1 ms  swaps  2033 wb     0  hit 0.9843  decode keys 
+  sd-7-tb1        189.8   94.2%  gap 5.1 ms  swaps  2347 wb   257  hit 0.9822  decode keys 
+  sd-8-whole      201.2   99.8%  gap 4.8 ms  swaps     - wb     -  hit 0.9833  decode keys 
+== 80K pass 1 (whole mean 169.5)
+  sd-1-whole      168.6   99.5%  gap 5.7 ms  swaps     - wb     -  hit 0.9844  decode keys 
+  sd-2-tb1        160.4   94.6%  gap 6.0 ms  swaps  3737 wb   899  hit 0.9770  decode keys 
+  sd-3-seed       164.4   97.0%  gap 5.9 ms  swaps  2321 wb     0  hit 0.9856  decode keys 
+  sd-4-seed0      160.5   94.7%  gap 6.0 ms  swaps  2330 wb   830  hit 0.9853  decode keys 
+  sd-5-seed0      163.6   96.5%  gap 6.0 ms  swaps  2363 wb   834  hit 0.9855  decode keys 
+  sd-6-seed       162.4   95.8%  gap 6.0 ms  swaps  2327 wb     0  hit 0.9856  decode keys 
+  sd-7-tb1        159.0   93.8%  gap 6.1 ms  swaps  3751 wb   933  hit 0.9769  decode keys 
+  sd-8-whole      170.4  100.5%  gap 5.7 ms  swaps     - wb     -  hit 0.9844  decode keys 
+== 80K pass 2 (whole mean 171.1)
+  sd-1-whole      172.0  100.5%  gap 5.7 ms  swaps     - wb     -  hit 0.9856  decode keys 
+  sd-2-tb1        161.4   94.3%  gap 6.0 ms  swaps  3338 wb    84  hit 0.9836  decode keys 
+  sd-3-seed       160.5   93.8%  gap 5.9 ms  swaps  3639 wb     0  hit 0.9864  decode keys 
+  sd-4-seed0      165.7   96.8%  gap 5.9 ms  swaps  2918 wb   890  hit 0.9861  decode keys 
+  sd-5-seed0      155.5   90.9%  gap 6.3 ms  swaps  2616 wb   615  hit 0.9864  decode keys 
+  sd-6-seed       161.9   94.6%  gap 6.0 ms  swaps  2671 wb     0  hit 0.9864  decode keys 
+  sd-7-tb1        160.3   93.7%  gap 6.1 ms  swaps  3248 wb    84  hit 0.9835  decode keys 
+  sd-8-whole      170.2   99.5%  gap 5.7 ms  swaps     - wb     -  hit 0.9856  decode keys 

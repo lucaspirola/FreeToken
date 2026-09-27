@@ -1,0 +1,4 @@
+seed/sd-nat-whole-natural.json                  167.4 tok/s  100.0%  md5 same as ref 5/5
+seed/sd-nat-tb1-natural.json                    153.7 tok/s   91.8%  md5 same as ref 5/5
+seed/sd-nat-seed-natural.json                   153.3 tok/s   91.6%  md5 same as ref 5/5
+seed/sd-nat-seed0-natural.json                  148.0 tok/s   88.4%  md5 same as ref 5/5

@@ -1,0 +1,23 @@
+chain start e472d20 Saver: duplicate-aware eviction (DUP_BAND) off by de 2026-09-27T01:29:52+04:00
+ck7o-warm-whole start 01:29:52 1.20 1.92 3.02 gpu=0 MiB avail=31.5 code=e472d20 
+ck7o-warm-whole done: captures=1 kv_grows=0 tracebacks=0 2026-09-27T01:31:30+04:00
+ck7o-warm-mirror start 01:32:01 7.41 3.88 3.59 gpu=0 MiB avail=28.0 code=9593a1a 
+ck7o-warm-mirror done: captures=1 kv_grows=0 tracebacks=0 2026-09-27T01:34:00+04:00
+8k/80k done 2026-09-27T01:52:28+04:00
+ck7o-whole-256k start 01:52:28 1.73 4.19 4.80 gpu=0 MiB avail=31.4 code=9593a1a 
+ck7o-whole-256k done: captures=1 kv_grows=21 tracebacks=0 2026-09-27T02:23:21+04:00
+QUIET at poll 0 2026-09-27T02:23:51+04:00
+ck7o-mirror-256k start 02:23:51 0.95 2.22 3.56 gpu=0 MiB avail=31.7 code=9593a1a 
+ck7o-mirror-256k done: captures=1 kv_grows=21 tracebacks=0 2026-09-27T02:55:57+04:00
+256k compared: 0 difference(s); 1 point(s) outside the band 2026-09-27T02:56:30+04:00
+ck7o-nat-whole-1 start 02:56:30 2.65 4.06 3.67 gpu=0 MiB avail=31.4 code=9593a1a 
+ck7o-nat-whole-1 done: captures=1 kv_grows=0 tracebacks=0 2026-09-27T02:59:35+04:00
+ck7o-nat-mirror-1 start 03:00:09 1.93 3.43 3.54 gpu=0 MiB avail=29.5 code=9593a1a 
+ck7o-nat-mirror-1 done: captures=1 kv_grows=0 tracebacks=0 2026-09-27T03:03:57+04:00
+ck7o-nat-whole-2 start 03:04:27 4.57 3.63 3.55 gpu=0 MiB avail=31.4 code=9593a1a 
+ck7o-nat-whole-2 done: captures=1 kv_grows=0 tracebacks=0 2026-09-27T03:08:57+04:00
+ck7o-nat-mirror-2 start 03:09:30 1.69 5.67 4.84 gpu=0 MiB avail=31.5 code=9593a1a 
+ck7o-nat-mirror-2 done: captures=1 kv_grows=0 tracebacks=0 2026-09-27T03:13:16+04:00
+ck7o-replay start 03:13:49 1.42 3.26 4.02 gpu=0 MiB avail=28.7 code=9593a1a 
+ck7o-replay done: captures=1 kv_grows=1 tracebacks=0 2026-09-27T03:15:39+04:00
+CHAINDONE 2026-09-27T03:16:11+04:00
