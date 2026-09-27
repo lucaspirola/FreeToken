@@ -1,0 +1,348 @@
+##### target 62000
+  tri   prompt 79740 gen 96 sha1 e7ae06c9a3 1 rep; quoted facts correct [False, False, False]
+  fi    prompt 79740 gen 397 sha1 4dbbaf99e3 1 rep; quoted facts correct [False, False, False]
+  tile  prompt 79740 gen 604 sha1 f929e09bd6 1 rep; quoted facts correct [False, False, False]
+  tri vs fi: first divergent token 63 of 95 / 396
+     tri   ..' a lantern in Porto on day 329.\n\nThe' || ' cities, in order of first appearance, are: Porto, Oaxaca, Cusco, Bergen, Tallinn, Tromso, Nagoya, Hobart, Porto.'
+     fi    ..' a lantern in Porto on day 329.\n\nThe' || ' journey begins in the misty highlands of Cusco, where Dmitri first placed his telescope beneath the Andean stars, a gift of precision aimed at the southern sky. From there, the path arcs'
+  tri vs tile: first divergent token 63 of 95 / 603
+     tri   ..' a lantern in Porto on day 329.\n\nThe' || ' cities, in order of first appearance, are: Porto, Oaxaca, Cusco, Bergen, Tallinn, Tromso, Nagoya, Hobart, Porto.'
+     tile  ..' a lantern in Porto on day 329.\n\nThe' || " journey begins in the misty highlands of Cusco, where Dmitri's telescope first touched down on day 341, casting its gaze across the ancient stone terraces. From there, the"
+##### target 70000
+  tri   prompt 90163 gen 281 sha1 574491423c 1 rep; quoted facts correct [False, False, False]
+  fi    prompt 90163 gen 588 sha1 9916ad0756 1 rep; quoted facts correct [False, False, False]
+  tile  prompt 90163 gen 222 sha1 94723d1802 1 rep; quoted facts correct [False, False, False]
+  tri vs fi: first divergent token 12 of 280 / 587
+     tri   ..'Farid left a quill in Tromso on day ' || '305.\nHiro left a compass in Bergen on day 184.\nChiara left a lantern in Porto on day 324.\n\nThe journey begins in the misty,'
+     fi    ..'Farid left a quill in Tromso on day ' || '140.\nHiro left a compass in Bergen on day 189.\nInes left a violin in Nagoya on day 281.\n\nThe wind howled through the fjords'
+  tri vs tile: first divergent token 42 of 280 / 221
+     tri   ..'Chiara left a lantern in Porto on day 32' || '4.\n\nThe journey begins in the misty, rain-soaked city of Porto, where the first lantern flickers to life on day 0, casting a warm glow over the Douro River.'
+     tile  ..'Chiara left a lantern in Porto on day 32' || "9.\n\nThe journey begins in the misty, northern fjords of Tromso, where Farid's quill rests on day 305, a symbol of scholarly pursuit beneath the aurora"
+##### target 78000
+  tri   prompt 100586 gen 1023 sha1 2624920596 1 rep; quoted facts correct [False, False, False]
+  fi    prompt 100586 gen 1023 sha1 5d4b9030cd 1 rep; quoted facts correct [False, False, False]
+  tile  prompt 100586 gen 1023 sha1 2ac31e247e 1 rep; quoted facts correct [False, False, False]
+  tri vs fi: first divergent token 173 of 1023 / 1023
+     tri   ..'2.\nHiro left a compass in Bergen on day ' || '219.\nInes left a kettle in Tallinn on day 256.\nJonas left a quill in Tromso on day 293.\nAda left a violin'
+     fi    ..'2.\nHiro left a compass in Bergen on day ' || '179.\nInes left a kettle in Tallinn on day 256.\nJonas left a quill in Tromso on day 293.\nAda left a violin'
+  tri vs tile: first divergent token 11 of 1023 / 1023
+     tri   ..'Greta left a lantern in Porto on day 1' || '82.\nHiro left a atlas in Oaxaca on day 214.\nInes left a anchor in Cusco on day 251.\nJonas left a compass in'
+     tile  ..'Greta left a lantern in Porto on day 1' || '62.\nHiro left a atlas in Oaxaca on day 174.\nChiara left a lantern in Porto on day 214.\nDmitri left a atlas in'
+##### target 90000
+  tri   prompt 116221 gen 146 sha1 33fbcc9823 1 rep; quoted facts correct [False, False, False]
+  fi    prompt 116221 gen 148 sha1 3c30f03846 1 rep; quoted facts correct [False, False, False]
+  tile  prompt 116221 gen 143 sha1 3e3ce8b0e5 1 rep; quoted facts correct [False, False, False]
+  tri vs fi: first divergent token 85 of 145 / 147
+     tri   ..' on day 166. From there, the path' || ' sails north to Tallinn, where Chiara left a kettle on day 219. The voyage then circles eastward to Oaxaca, where Chiara left a violin on day '
+     fi    ..' on day 166. From there, the path' || ' travels eastward across the sea to Tallinn, where Chiara deposited a kettle on day 219. The voyage then continues southeast to Nagoya, Japan, where Chiara left a violin on'
+  tri vs tile: first divergent token 0 of 145 / 142
+     tri   ..'' || 'Record 803: Dmitri left a compass in Bergen on day 166.\nRecord 2812: Chiara left a kettle in Tallinn on day 219'
+     tile  ..'' || '803: Dmitri left a compass in Bergen on day 151.\n2812: Chiara left a kettle in Tallinn on day 219.\n562'
+
+first divergence per prompt (None = identical):
+  tri vs fi: [63, 12, 173, 85]
+  tri vs tile: [63, 42, 11, 0]
+
+--- full texts (rep0) ---
+##### 62000 tri
+[/think]Record 553: Dmitri left a telescope in Hobart on day 341.
+Record 1937: Hiro left a atlas in Oaxaca on day 239.
+Record 3872: Chiara left a lantern in Porto on day 329.
+
+The cities, in order of first appearance, are: Porto, Oaxaca, Cusco, Bergen, Tallinn, Tromso, Nagoya, Hobart, Porto.
+
+##### 62000 fi
+[/think]Record 553: Dmitri left a telescope in Hobart on day 341.
+Record 1937: Hiro left a atlas in Oaxaca on day 239.
+Record 3872: Chiara left a lantern in Porto on day 329.
+
+The journey begins in the misty highlands of Cusco, where Dmitri first placed his telescope beneath the Andean stars, a gift of precision aimed at the southern sky. From there, the path arcs northward to Oaxaca, where Hiro laid down an atlas of the region, mapping the rugged coastlines and ancient valleys with meticulous care. The trail then swings westward to the port city of Porto, where Chiara’s lantern casts a warm glow over the Douro River, a beacon for sailors and wanderers alike. Continuing the circuit, the route circles back east to Bergen, where Bruno’s compass needles spin wildly toward magnetic north, guiding him through foggy fjords and stormy seas. The journey descends further south to Tallinn, where Elif’s kettle whistles on a Baltic shore, steaming with the salt of the sea. Heading east again, the path reaches Nagoya, where Greta’s violin sings beneath the cherry blossoms, a melody of springtime in Japan. The trail then climbs back up to Oaxaca, where Hiro’s atlas spreads once more, this time alongside his quill, inked and ready for new maps. From there, the route swings north to Tromso, where Farid’s quill carves words into the Arctic air, a testament to human endurance in the cold. The path then veers west to Porto again, where Ines’s lantern flickers in the night, guiding the way through the city’s historic streets. Finally, the journey concludes back in Porto, where Chiara’s lantern once more illuminates the cobblestones, completing a full circle of global exploration.
+
+##### 62000 tile
+[/think]Record 553: Dmitri left a telescope in Hobart on day 341.
+Record 1937: Hiro left a atlas in Oaxaca on day 239.
+Record 3872: Chiara left a lantern in Porto on day 329.
+
+The journey begins in the misty highlands of Cusco, where Dmitri's telescope first touched down on day 341, casting its gaze across the ancient stone terraces. From there, the path arcs northward to Oaxaca, where Hiro deposited his atlas on day 239, a map of bustling markets and colonial plazas. The route then swings westward to the coastal city of Porto, where Chiara's lantern flickered to life on day 329, its flame dancing against the Atlantic waves. 
+
+Traveling eastward across the continent, we arrive in Tallinn, the capital of Estonia, where Elif's kettle sang on day 328, steam rising from its spout over the medieval rooftops. Continuing south, the trail reaches Tromso, Norway, where Hiro's quill was left on day 329, a solitary writing instrument against the Arctic backdrop. The journey then circles back to Bergen, Norway, where Bruno's compass rested on day 322, needle pointing true toward uncharted waters. 
+
+Venturing further south to the Iberian Peninsula, we find Ada's lantern burning in Porto on day 320, guiding sailors through the harbor mist. The path then crosses to Nagoya, Japan, where Greta's violin case was left on day 327, the instrument resting in a quiet room overlooking the city lights. From Japan, the route traverses the Pacific to Hobart, Tasmania, where Dmitri's telescope has been since day 341, pointing south toward the Antarctic. 
+
+The journey circles back across the Atlantic to Cusco once more, where Ines's anchor has been sitting on day 321, a symbol of stability in the Andean highlands. Continuing eastward, we reach Bergen again, where Farid's quill was left on day 325, ink still fresh in the damp air. The path then moves to Tallinn once more, where Greta's kettle whistled on day 32, a small comfort in the Baltic chill. 
+
+Heading west across Europe, we arrive in Oaxaca, where Farid's atlas has been waiting on day 315, its pages filled with maps of the Sierra Madre mountains. The journey then descends to Cusco, where Greta's anchor has been placed on day 327, completing a circular path through the Andes. Finally, the trail returns to Porto, where Hiro's atlas has been sitting on day 304, closing the loop on this global odyssey of objects and the cities that hold them.
+
+##### 70000 tri
+[/think]Farid left a quill in Tromso on day 305.
+Hiro left a compass in Bergen on day 184.
+Chiara left a lantern in Porto on day 324.
+
+The journey begins in the misty, rain-soaked city of Porto, where the first lantern flickers to life on day 0, casting a warm glow over the Douro River. From there, the path arcs northward to Tromso, where Farid’s quill lands on day 305, a slender plume of ink resting against the Arctic chill. The compass then spins toward Bergen, touching down on day 184, its needle pointing true through the fjords and mist. Finally, the lantern returns to Porto, glowing once more on day 324, completing a circuit that has carried light, ink, and direction across the map’s most distant edges. Along the way, the cities of Oaxaca, Cusco, Tallinn, Nagoya, Hobart, and Bergen each hold a fragment of this story—anchor points where the traveler’s items settle, each a quiet testament to the miles between them. The lantern’s flame, the quill’s ink, and the compass’s needle all trace a silent, looping pilgrimage, weaving through harbors and highlands, always returning to Porto, the city that first welcomed the light.
+
+##### 70000 fi
+[/think]Farid left a quill in Tromso on day 140.
+Hiro left a compass in Bergen on day 189.
+Ines left a violin in Nagoya on day 281.
+
+The wind howled through the fjords of Tromso as Farid carefully placed his quill down, the ink still wet from the midnight hour. He had traveled far from the bustling markets of his homeland to this northern outpost, seeking inspiration in the quiet isolation. The aurora danced above him, a reminder of the journeys yet to come.
+
+High above the city, Hiro adjusted his compass, the needle spinning wildly as it sought true north. Bergen's rainy streets stretched out below, a maze of cobblestone and shadow. He was chasing a atlas that had been left behind in Oaxaca, a map of ancient trade routes that called to his sense of adventure. The city's harbor was alive with the sounds of returning fishermen, their boats creaking against the pier.
+
+Ines moved through the crowded streets of Nagoya, her violin case tucked securely under her arm. The city pulsed with neon lights and the distant hum of trains, but her mind was on the anchor left in Cusco, a symbol of stability in a world of constant motion. She could feel the rhythm of the city matching the beat of her heart, each step bringing her closer to the next destination on her impossible journey.
+
+Farid's quill had found its home in Tromso, a city where the sun barely rises in winter and the stars are constant companions. The cold air nipped at his cheeks as he reflected on the path that had brought him here—from distant deserts to frozen north, each stop a chapter in a story written across continents.
+
+Hiro's compass pointed steadily toward Bergen, guiding him through foggy mornings and crisp evenings. The city's seven mountains stood as silent witnesses to his passage, each peak a milestone in his quest to retrieve the atlas from Oaxaca. He knew the weight of the map he carried, both literal and metaphorical.
+
+Ines's violin sang through the streets of Nagoya, its melody weaving through the city's many layers. From traditional temples to modern skyscrapers, she carried the anchor from Cusco like a talisman, a reminder that no matter how far she traveled, there were roots that held her fast. The city's soundscape became her orchestra, each note a step toward her next stop.
+
+The threads of their journeys intertwined like a tapestry woven across time and space. Farid in Tromso, Hiro in Bergen, Ines in Nagoya—each carrying pieces of others' stories, each leaving fragments of their own. Their paths would cross and recross, circles within circles, until all the anchors were found, all the maps retrieved, and the full picture of their interconnected lives could finally be seen.
+
+##### 70000 tile
+[/think]Farid left a quill in Tromso on day 305.
+Hiro left a compass in Bergen on day 184.
+Chiara left a lantern in Porto on day 329.
+
+The journey begins in the misty, northern fjords of Tromso, where Farid's quill rests on day 305, a symbol of scholarly pursuit beneath the aurora-lit skies. From there, the path arcs eastward to Bergen, where Hiro's compass points true on day 184, guiding through the city's historic wharves and Hanseatic charm. The route then sails south to the vibrant, coastal Porto, where Chiara's lantern glows on day 329, casting warm light over the Ribeira district and the Douro River's eternal flow. These three waypoints trace a curve from the Arctic's edge to the Iberian coast, connecting the cold precision of Tromso with the navigational wisdom of Bergen and the welcoming glow of Porto, each stop a thread in the tapestry of global travel.
+
+##### 78000 tri
+[/think]Greta left a lantern in Porto on day 182.
+Hiro left a atlas in Oaxaca on day 214.
+Ines left a anchor in Cusco on day 251.
+Jonas left a compass in Bergen on day 288.
+Ada left a kettle in Tallinn on day 325.
+Bruno left a quill in Tromso on day 322.
+Chiara left a violin in Nagoya on day 359.
+Dmitri left a telescope in Hobart on day 31.
+Elif left a lantern in Porto on day 108.
+Farid left a atlas in Oaxaca on day 145.
+Greta left a anchor in Cusco on day 182.
+Hiro left a compass in Bergen on day 219.
+Ines left a kettle in Tallinn on day 256.
+Jonas left a quill in Tromso on day 293.
+Ada left a violin in Nagoya on day 330.
+Bruno left a telescope in Hobart on day 2.
+Chiara left a lantern in Porto on day 39.
+Dmitri left a atlas in Oaxaca on day 76.
+Elif left a anchor in Cusco on day 113.
+Farid left a compass in Bergen on day 150.
+Greta left a kettle in Tallinn on day 187.
+Hiro left a quill in Tromso on day 224.
+Ines left a violin in Nagoya on day 261.
+Jonas left a telescope in Hobart on day 138.
+Ada left a lantern in Porto on day 175.
+Bruno left a atlas in Oaxaca on day 212.
+Chiara left a anchor in Cusco on day 249.
+Dmitri left a compass in Bergen on day 286.
+Elif left a kettle in Tallinn on day 323.
+Farid left a quill in Tromso on day 360.
+Greta left a violin in Nagoya on day 32.
+Hiro left a telescope in Hobart on day 69.
+Ines left a lantern in Porto on day 106.
+Jonas left a atlas in Oaxaca on day 143.
+Ada left a anchor in Cusco on day 180.
+Bruno left a compass in Bergen on day 217.
+Chiara left a kettle in Tallinn on day 254.
+Dmitri left a quill in Tromso on day 291.
+Elif left a violin in Nagoya on day 328.
+Farid left a telescope in Hobart on day 0.
+Greta left a lantern in Porto on day 37.
+Hiro left a atlas in Oaxaca on day 74.
+Ines left a anchor in Cusco on day 111.
+Jonas left a compass in Bergen on day 148.
+Ada left a kettle in Tallinn on day 185.
+Bruno left a quill in Tromso on day 222.
+Chiara left a violin in Nagoya on day 259.
+Dmitri left a telescope in Hobart on day 296.
+Elif left a lantern in Porto on day 333.
+Farid left a atlas in Oaxaca on day 5.
+Greta left a anchor in Cusco on day 42.
+Hiro left a compass in Bergen on day 79.
+Ines left a kettle in Tallinn on day 116.
+Jonas left a quill in Tromso on day 153.
+Ada left a violin in Nagoya on day 190.
+Bruno left a telescope in Hobart on day 227.
+Chiara left a lantern in Porto on day 264.
+Dmitri left a atlas in Oaxaca on day 301.
+Elif left a anchor in Cusco on day 338.
+Farid left a compass in Bergen on day 10.
+Greta left a kettle in Tallinn on day 47.
+Hiro left a quill in Tromso on day 84.
+Ines left a violin in Nagoya on day 121.
+Jonas left a telescope in Hobart on day 158.
+Ada left a lantern in Porto on day 195.
+Bruno left a atlas in Oaxaca on day 232.
+Chiara left a anchor in Cusco on day 269.
+Dmitri left a compass in Bergen on day 306.
+Elif left a kettle in Tallinn on day 343.
+Farid left a quill in Tromso on day 15.
+Gre
+
+##### 78000 fi
+[/think]Greta left a lantern in Porto on day 182.
+Hiro left a atlas in Oaxaca on day 214.
+Ines left a anchor in Cusco on day 251.
+Jonas left a compass in Bergen on day 288.
+Ada left a kettle in Tallinn on day 325.
+Bruno left a quill in Tromso on day 322.
+Chiara left a violin in Nagoya on day 359.
+Dmitri left a telescope in Hobart on day 31.
+Elif left a lantern in Porto on day 108.
+Farid left a atlas in Oaxaca on day 145.
+Greta left a anchor in Cusco on day 182.
+Hiro left a compass in Bergen on day 179.
+Ines left a kettle in Tallinn on day 256.
+Jonas left a quill in Tromso on day 293.
+Ada left a violin in Nagoya on day 330.
+Bruno left a telescope in Hobart on day 2.
+Chiara left a lantern in Porto on day 39.
+Dmitri left a atlas in Oaxaca on day 76.
+Elif left a anchor in Cusco on day 113.
+Farid left a compass in Bergen on day 150.
+Greta left a kettle in Tallinn on day 187.
+Hiro left a quill in Tromso on day 224.
+Ines left a violin in Nagoya on day 261.
+Jonas left a telescope in Hobart on day 138.
+Ada left a lantern in Porto on day 175.
+Bruno left a atlas in Oaxaca on day 212.
+Chiara left a anchor in Cusco on day 249.
+Dmitri left a compass in Bergen on day 286.
+Elif left a kettle in Tallinn on day 323.
+Farid left a quill in Tromso on day 360.
+Greta left a violin in Nagoya on day 32.
+Hiro left a telescope in Hobart on day 69.
+Ines left a lantern in Porto on day 106.
+Jonas left a atlas in Oaxaca on day 143.
+Ada left a anchor in Cusco on day 180.
+Bruno left a compass in Bergen on day 217.
+Chiara left a kettle in Tallinn on day 254.
+Dmitri left a quill in Tromso on day 291.
+Elif left a violin in Nagoya on day 328.
+Farid left a telescope in Hobart on day 0.
+Greta left a lantern in Porto on day 37.
+Hiro left a atlas in Oaxaca on day 74.
+Ines left a anchor in Cusco on day 111.
+Jonas left a compass in Bergen on day 148.
+Ada left a kettle in Tallinn on day 185.
+Bruno left a quill in Tromso on day 222.
+Chiara left a violin in Nagoya on day 259.
+Dmitri left a telescope in Hobart on day 296.
+Elif left a lantern in Porto on day 333.
+Farid left a atlas in Oaxaca on day 5.
+Greta left a anchor in Cusco on day 42.
+Hiro left a compass in Bergen on day 79.
+Ines left a kettle in Tallinn on day 116.
+Jonas left a quill in Tromso on day 153.
+Ada left a violin in Nagoya on day 190.
+Bruno left a telescope in Hobart on day 227.
+Chiara left a lantern in Porto on day 264.
+Dmitri left a atlas in Oaxaca on day 301.
+Elif left a anchor in Cusco on day 338.
+Farid left a compass in Bergen on day 10.
+Greta left a kettle in Tallinn on day 47.
+Hiro left a quill in Tromso on day 84.
+Ines left a violin in Nagoya on day 121.
+Jonas left a telescope in Hobart on day 158.
+Ada left a lantern in Porto on day 195.
+Bruno left a atlas in Oaxaca on day 232.
+Chiara left a anchor in Cusco on day 269.
+Dmitri left a compass in Bergen on day 306.
+Elif left a kettle in Tallinn on day 343.
+Farid left a quill in Tromso on day 15.
+Gre
+
+##### 78000 tile
+[/think]Greta left a lantern in Porto on day 162.
+Hiro left a atlas in Oaxaca on day 174.
+Chiara left a lantern in Porto on day 214.
+Dmitri left a atlas in Oaxaca on day 256.
+Elif left a anchor in Cusco on day 253.
+Farid left a compass in Bergen on day 290.
+Greta left a kettle in Tallinn on day 207.
+Hiro left a quill in Tromso on day 244.
+Ines left a violin in Nagoya on day 281.
+Jonas left a telescope in Hobart on day 258.
+Ada left a lantern in Porto on day 255.
+Bruno left a atlas in Oaxaca on day 212.
+Chiara left a anchor in Cusco on day 249.
+Dmitri left a compass in Bergen on day 286.
+Elif left a kettle in Tallinn on day 323.
+Farid left a quill in Tromso on day 360.
+Greta left a violin in Nagoya on day 32.
+Hiro left a telescope in Hobart on day 69.
+Ines left a lantern in Porto on day 106.
+Jonas left a atlas in Oaxaca on day 143.
+Ada left a anchor in Cusco on day 180.
+Bruno left a compass in Bergen on day 217.
+Chiara left a kettle in Tallinn on day 254.
+Dmitri left a quill in Tromso on day 291.
+Elif left a violin in Nagoya on day 328.
+Farid left a telescope in Hobart on day 0.
+Greta left a lantern in Porto on day 37.
+Hiro left a atlas in Oaxaca on day 74.
+Ines left a anchor in Cusco on day 111.
+Jonas left a compass in Bergen on day 148.
+Ada left a kettle in Tallinn on day 185.
+Bruno left a quill in Tromso on day 222.
+Chiara left a violin in Nagoya on day 259.
+Dmitri left a telescope in Hobart on day 296.
+Elif left a lantern in Porto on day 333.
+Farid left a atlas in Oaxaca on day 5.
+Greta left a anchor in Cusco on day 42.
+Hiro left a compass in Bergen on day 79.
+Ines left a kettle in Tallinn on day 116.
+Jonas left a quill in Tromso on day 153.
+Ada left a violin in Nagoya on day 190.
+Bruno left a telescope in Hobart on day 227.
+Chiara left a lantern in Porto on day 264.
+Dmitri left a atlas in Oaxaca on day 301.
+Elif left a anchor in Cusco on day 338.
+Farid left a compass in Bergen on day 10.
+Greta left a kettle in Tallinn on day 47.
+Hiro left a quill in Tromso on day 84.
+Ines left a violin in Nagoya on day 121.
+Jonas left a telescope in Hobart on day 158.
+Ada left a lantern in Porto on day 195.
+Bruno left a atlas in Oaxaca on day 232.
+Chiara left a anchor in Cusco on day 269.
+Dmitri left a compass in Bergen on day 306.
+Elif left a kettle in Tallinn on day 343.
+Farid left a quill in Tromso on day 15.
+Greta left a violin in Nagoya on day 52.
+Hiro left a telescope in Hobart on day 89.
+Ines left a lantern in Porto on day 126.
+Jonas left a atlas in Oaxaca on day 163.
+Ada left a anchor in Cusco on day 200.
+Bruno left a compass in Bergen on day 237.
+Chiara left a kettle in Tallinn on day 274.
+Dmitri left a quill in Tromso on day 311.
+Elif left a violin in Nagoya on day 348.
+Farid left a telescope in Hobart on day 20.
+Greta left a lantern in Porto on day 57.
+Hiro left a atlas in Oaxaca on day 94.
+Ines left a anchor in Cusco on day 131.
+Jonas left a compass in Bergen on day 168.
+Ada
+
+##### 90000 tri
+[/think]Record 803: Dmitri left a compass in Bergen on day 166.
+Record 2812: Chiara left a kettle in Tallinn on day 219.
+Record 5622: Chiara left a violin in Nagoya on day 319.
+
+The journey begins in Bergen, where Dmitri left a compass on day 166. From there, the path sails north to Tallinn, where Chiara left a kettle on day 219. The voyage then circles eastward to Oaxaca, where Chiara left a violin on day 319, completing a circuit that spans the cold northern ports and the vibrant southern highlands.
+
+##### 90000 fi
+[/think]Record 803: Dmitri left a compass in Bergen on day 166.
+Record 2812: Chiara left a kettle in Tallinn on day 219.
+Record 5622: Chiara left a violin in Nagoya on day 319.
+
+The journey begins in Bergen, where Dmitri left a compass on day 166. From there, the path travels eastward across the sea to Tallinn, where Chiara deposited a kettle on day 219. The voyage then continues southeast to Nagoya, Japan, where Chiara left a violin on day 319, completing a circular route that connects the cold northern ports with the eastern cultural center.
+
+##### 90000 tile
+[/think]803: Dmitri left a compass in Bergen on day 151.
+2812: Chiara left a kettle in Tallinn on day 219.
+5622: Chiara left a violin in Nagoya on day 319.
+
+The journey begins in Bergen, where Dmitri left a compass on day 151. From there, the path travels eastward across the sea to Tallinn, where Chiara deposited a kettle on day 219. The voyage then continues southeast to Nagoya, Japan, where Chiara left a violin on day 319, completing a circular route that connects the cold northern ports with the eastern cultural heartland.
+

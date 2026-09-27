@@ -1,0 +1,23 @@
+chain start 4b34dd4 Merge exp/r5-seed-b: idle seeding of the next evicti 2026-09-27T04:01:01+04:00
+ck8o-warm-whole start 04:01:01 6.74 5.93 4.73 gpu=0 MiB avail=31.5 code=4b34dd4 
+ck8o-warm-whole done: captures=1 kv_grows=0 tracebacks=0 2026-09-27T04:03:13+04:00
+ck8o-warm-mirror start 04:03:46 8.11 8.35 5.96 gpu=0 MiB avail=30.4 code=4b34dd4 
+ck8o-warm-mirror done: captures=1 kv_grows=0 tracebacks=0 2026-09-27T04:05:40+04:00
+8k/80k done 2026-09-27T04:24:10+04:00
+ck8o-whole-256k start 04:24:10 7.15 5.41 5.52 gpu=0 MiB avail=31.7 code=4b34dd4 
+ck8o-whole-256k done: captures=1 kv_grows=21 tracebacks=0 2026-09-27T04:55:43+04:00
+QUIET at poll 0 2026-09-27T04:56:16+04:00
+ck8o-mirror-256k start 04:56:16 2.18 3.83 4.01 gpu=0 MiB avail=31.2 code=4b34dd4 
+ck8o-mirror-256k done: captures=1 kv_grows=21 tracebacks=0 2026-09-27T05:28:15+04:00
+256k compared: 0 difference(s); 0 point(s) outside the band 2026-09-27T05:28:48+04:00
+ck8o-nat-whole-1 start 05:28:48 1.39 1.64 2.88 gpu=0 MiB avail=30.9 code=4b34dd4 
+ck8o-nat-whole-1 done: captures=1 kv_grows=0 tracebacks=0 2026-09-27T05:32:17+04:00
+ck8o-nat-mirror-1 start 05:32:50 2.36 2.72 3.13 gpu=0 MiB avail=29.0 code=4b34dd4 
+ck8o-nat-mirror-1 done: captures=1 kv_grows=0 tracebacks=0 2026-09-27T05:36:36+04:00
+ck8o-nat-whole-2 start 05:37:09 1.87 2.32 2.87 gpu=0 MiB avail=31.0 code=4b34dd4 
+ck8o-nat-whole-2 done: captures=1 kv_grows=0 tracebacks=0 2026-09-27T05:40:52+04:00
+ck8o-nat-mirror-2 start 05:41:25 5.86 5.59 4.24 gpu=0 MiB avail=31.4 code=4b34dd4 
+ck8o-nat-mirror-2 done: captures=1 kv_grows=0 tracebacks=0 2026-09-27T05:45:13+04:00
+ck8o-replay start 05:45:46 6.31 5.50 4.49 gpu=0 MiB avail=31.3 code=4b34dd4 
+ck8o-replay done: captures=1 kv_grows=1 tracebacks=0 2026-09-27T05:49:01+04:00
+CHAINDONE 2026-09-27T05:49:34+04:00

@@ -1,0 +1,10 @@
+GDN in_proj (30 layers)      M= 1024 K= 2048 N= 12288  exl3_gemm    8.14 ms (   6.3 TF/s)  reconstruct   0.10 ms + cuBLAS fp16   0.45 ms =   0.55 ms  x14.7
+attn qkv+gate (10 layers)    M= 1024 K= 2048 N=  9216  exl3_gemm    6.06 ms (   6.4 TF/s)  reconstruct   0.08 ms + cuBLAS fp16   0.34 ms =   0.42 ms  x14.4
+attn o_proj / gdn out        M= 1024 K= 4096 N=  2048  exl3_gemm    3.41 ms (   5.0 TF/s)  reconstruct   0.03 ms + cuBLAS fp16   0.17 ms =   0.20 ms  x17.2
+shared expert gate_up        M= 1024 K= 2048 N=  1024  exl3_gemm    0.88 ms (   4.9 TF/s)  reconstruct   0.01 ms + cuBLAS fp16   0.06 ms =   0.07 ms  x13.1
+GDN in_proj (30 layers)      M= 8000 K= 2048 N= 12288  exl3_gemm   61.11 ms (   6.6 TF/s)  reconstruct   0.10 ms + cuBLAS fp16   3.38 ms =   3.48 ms  x17.6
+attn qkv+gate (10 layers)    M= 8000 K= 2048 N=  9216  exl3_gemm   46.06 ms (   6.6 TF/s)  reconstruct   0.08 ms + cuBLAS fp16   2.54 ms =   2.62 ms  x17.6
+attn o_proj / gdn out        M= 8000 K= 4096 N=  2048  exl3_gemm   20.77 ms (   6.5 TF/s)  reconstruct   0.04 ms + cuBLAS fp16   1.14 ms =   1.18 ms  x17.6
+shared expert gate_up        M= 8000 K= 2048 N=  1024  exl3_gemm    5.17 ms (   6.5 TF/s)  reconstruct   0.01 ms + cuBLAS fp16   0.29 ms =   0.30 ms  x17.1
+MoE gate_up per layer        reconstruct one expert [2048x1024]    10.5 us -> 256 experts   2.68 ms
+MoE down per layer           reconstruct one expert [512x2048]     7.1 us -> 256 experts   1.82 ms

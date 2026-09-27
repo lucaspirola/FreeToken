@@ -1,0 +1,29 @@
+/root/exl3-ref/lib/python3.12/site-packages/torch/profiler/profiler.py:224: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+bsz1  GDN in_proj qkvz         K= 2048 N= 12288 total     22.9 us  ( 686.9 GB/s of weights)
+            22.9 us  1.0x void exl3_gemv_int8_sq_kernel<5, 1, false, false, false>(__half const*, unsigned short con
+M=8192 GDN in_proj qkvz         total   2453.7 us  ( 168.0 TF/s overall)
+          2378.9 us  1.0x void f16acc::gemm_kernel<false, 128, true>(__half const*, __half const*, void*, int, int, 
+            74.8 us  1.0x void reconstruct_had_kernel<5, 2, false>(__half*, unsigned short const*, __half const*, __
+bsz1  attn q+gate|k|v          K= 2048 N=  9216 total     16.9 us  ( 698.8 GB/s of weights)
+            16.9 us  1.0x void exl3_gemv_int8_sq_kernel<5, 1, false, false, false>(__half const*, unsigned short con
+M=8192 attn q+gate|k|v          total   1824.6 us  ( 169.5 TF/s overall)
+          1769.2 us  1.0x void f16acc::gemm_kernel<false, 128, true>(__half const*, __half const*, void*, int, int, 
+            55.4 us  1.0x void reconstruct_had_kernel<5, 2, false>(__half*, unsigned short const*, __half const*, __
+bsz1  o_proj / out_proj        K= 4096 N=  2048 total     11.0 us  ( 476.3 GB/s of weights)
+            11.0 us  1.0x void exl3_gemv_int8_sq_kernel<5, 1, false, false, false>(__half const*, unsigned short con
+M=8192 o_proj / out_proj        total    813.9 us  ( 168.9 TF/s overall)
+           785.7 us  1.0x void f16acc::gemm_kernel<false, 64, true>(__half const*, __half const*, void*, int, int, i
+            28.3 us  1.0x void reconstruct_had_kernel<5, 2, false>(__half*, unsigned short const*, __half const*, __
+bsz1  shared/expert gate|up    K= 2048 N=  1024 total      6.2 us  ( 210.5 GB/s of weights)
+             6.2 us  1.0x void exl3_gemv_int8_sq_kernel<5, 1, false, false, false>(__half const*, unsigned short con
+M=8192 shared/expert gate|up    total    213.2 us  ( 161.1 TF/s overall)
+           204.5 us  1.0x void f16acc::gemm_kernel<false, 64, true>(__half const*, __half const*, void*, int, int, i
+             8.7 us  1.0x void reconstruct_had_kernel<5, 2, false>(__half*, unsigned short const*, __half const*, __
+bsz1  shared/expert down       K=  512 N=  2048 total      5.6 us  ( 116.5 GB/s of weights)
+             5.6 us  1.0x void exl3_gemv_int8_sq_kernel<5, 1, false, false, false>(__half const*, unsigned short con
+M=8192 shared/expert down       total    128.3 us  ( 133.9 TF/s overall)
+           122.9 us  1.0x void f16acc::gemm_kernel<false, 128, true>(__half const*, __half const*, void*, int, int, 
+             5.3 us  1.0x void reconstruct_had_kernel<5, 2, false>(__half*, unsigned short const*, __half const*, __
+bsz1  lm_head (6 bit)          K= 2048 N=248320 total    429.3 us  ( 888.5 GB/s of weights)
+           429.3 us  1.0x void exl3_gemv_int8_sq_kernel<6, 1, false, false, false>(__half const*, unsigned short con

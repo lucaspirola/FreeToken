@@ -1,0 +1,4 @@
+start 2026-09-27T06:33:17+04:00 gpu=0 MiB  06:33:17 up 19:36,  1 user,  load average: 2.39, 2.15, 3.54
+tree 7e1df41 Test stub: run_when_idle now calls _mirror_idle_seed
+suite rc=0 3436 passed, 27 skipped, 3 warnings, 2 subtests passed in 474.41s (0:07:54) | illegal: 0 | failed-lines: 0
+ALLDONE

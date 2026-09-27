@@ -1,0 +1,154 @@
+## reach-ab-A1-128k | sm=2722 MHz load=5.14
+rc=0 captures=1 tracebacks=0 oom=0
+pass1 prompt 128000 prefill 4649 decode 117.3 hit 0.958 cov_faults 0 starved 0 psha 13b8815223 osha c3df00b2b9
+pass2 prompt 128000 prefill 4650 decode 120.2 hit 0.965 cov_faults 0 starved 0 psha efee123dd3 osha 4d4fdaa30b
+pass4_natural prompt 128000 prefill 4628 decode 87.2 hit 0.882 cov_faults 0 starved 0 psha fbd2c88ae1 osha 709122f106
+## reach-ab-A1-256k | sm=2715 MHz load=1.97
+rc=0 captures=1 tracebacks=0 oom=0
+pass1 prompt 256000 prefill 3205 decode 92.6 hit 0.937 cov_faults 0 starved 0 psha e1cd74b9b2 osha 06f64ca127
+pass2 prompt 256000 prefill 3205 decode 99.8 hit 0.963 cov_faults 0 starved 0 psha d007c9e427 osha 7e3d0193d1
+pass4_natural prompt 256000 prefill 3195 decode 65.2 hit 0.833 cov_faults 0 starved 0 psha b81412473e osha fe206f9482
+## reach-ab-A1-384k | sm=2722 MHz load=1.79
+rc=0 captures=1 tracebacks=0 oom=0
+pass1 prompt 384000 prefill 2448 decode 73.8 hit 0.919 cov_faults 0 starved 0 psha b1277029d1 osha 4d3171e231
+pass2 prompt 384000 prefill 2448 decode 84.6 hit 0.958 cov_faults 0 starved 0 psha 89bff18131 osha 8c1a3b4464
+pass4_natural prompt 384000 prefill 2441 decode 44.4 hit 0.776 cov_faults 0 starved 0 psha c6ad71de14 osha 2504971632
+## reach-ab-A2-128k | sm=2715 MHz load=1.42
+rc=0 captures=1 tracebacks=0 oom=0
+pass1 prompt 128000 prefill 4647 decode 117.3 hit 0.958 cov_faults 0 starved 0 psha 13b8815223 osha c3df00b2b9
+pass2 prompt 128000 prefill 4652 decode 120.3 hit 0.965 cov_faults 0 starved 0 psha efee123dd3 osha 4d4fdaa30b
+pass4_natural prompt 128000 prefill 4628 decode 87.2 hit 0.882 cov_faults 0 starved 0 psha fbd2c88ae1 osha 709122f106
+## reach-ab-A2-256k | sm=2722 MHz load=1.22
+rc=0 captures=1 tracebacks=0 oom=0
+pass1 prompt 256000 prefill 3206 decode 92.6 hit 0.937 cov_faults 0 starved 0 psha e1cd74b9b2 osha 06f64ca127
+pass2 prompt 256000 prefill 3208 decode 99.8 hit 0.963 cov_faults 0 starved 0 psha d007c9e427 osha 7e3d0193d1
+pass4_natural prompt 256000 prefill 3195 decode 66.0 hit 0.833 cov_faults 0 starved 0 psha b81412473e osha fe206f9482
+## reach-ab-A2-384k | sm=2722 MHz load=2.08
+rc=0 captures=1 tracebacks=0 oom=0
+pass1 prompt 384000 prefill 2449 decode 73.6 hit 0.919 cov_faults 0 starved 0 psha b1277029d1 osha 4d3171e231
+pass2 prompt 384000 prefill 2448 decode 84.6 hit 0.958 cov_faults 0 starved 0 psha 89bff18131 osha 8c1a3b4464
+pass4_natural prompt 384000 prefill 2440 decode 44.5 hit 0.776 cov_faults 0 starved 0 psha c6ad71de14 osha 2504971632
+## reach-ab-A3-128k | sm=2722 MHz load=1.71
+rc=0 captures=1 tracebacks=0 oom=0
+pass1 prompt 128000 prefill 4647 decode 117.3 hit 0.958 cov_faults 0 starved 0 psha 13b8815223 osha c3df00b2b9
+pass2 prompt 128000 prefill 4652 decode 119.8 hit 0.965 cov_faults 0 starved 0 psha efee123dd3 osha 4d4fdaa30b
+pass4_natural prompt 128000 prefill 4625 decode 87.3 hit 0.882 cov_faults 0 starved 0 psha fbd2c88ae1 osha 709122f106
+## reach-ab-A3-256k | sm=2715 MHz load=1.58
+rc=0 captures=1 tracebacks=0 oom=0
+pass1 prompt 256000 prefill 3206 decode 92.6 hit 0.937 cov_faults 0 starved 0 psha e1cd74b9b2 osha 06f64ca127
+pass2 prompt 256000 prefill 3203 decode 99.8 hit 0.963 cov_faults 0 starved 0 psha d007c9e427 osha 7e3d0193d1
+pass4_natural prompt 256000 prefill 3190 decode 65.9 hit 0.833 cov_faults 0 starved 0 psha b81412473e osha fe206f9482
+## reach-ab-A3-384k | sm=2715 MHz load=2.41
+rc=0 captures=1 tracebacks=0 oom=0
+pass1 prompt 384000 prefill 2444 decode 73.8 hit 0.919 cov_faults 0 starved 0 psha b1277029d1 osha 4d3171e231
+pass2 prompt 384000 prefill 2444 decode 84.7 hit 0.958 cov_faults 0 starved 0 psha 89bff18131 osha 8c1a3b4464
+pass4_natural prompt 384000 prefill 2437 decode 44.4 hit 0.776 cov_faults 0 starved 0 psha c6ad71de14 osha 2504971632
+## reach-ab-B-128k | sm=2722 MHz load=1.25
+rc=0 captures=1 tracebacks=0 oom=0
+pass1 prompt 128000 prefill 4649 decode 117.2 hit 0.958 cov_faults 0 starved 0 psha 13b8815223 osha c3df00b2b9
+pass2 prompt 128000 prefill 4645 decode 120.2 hit 0.965 cov_faults 0 starved 0 psha efee123dd3 osha 4d4fdaa30b
+pass4_natural prompt 128000 prefill 4630 decode 87.2 hit 0.882 cov_faults 0 starved 0 psha fbd2c88ae1 osha 709122f106
+## reach-ab-B-256k | sm=2715 MHz load=2.07
+rc=0 captures=1 tracebacks=0 oom=0
+pass1 prompt 256000 prefill 3208 decode 92.6 hit 0.937 cov_faults 0 starved 0 psha e1cd74b9b2 osha 06f64ca127
+pass2 prompt 256000 prefill 3206 decode 99.8 hit 0.963 cov_faults 0 starved 0 psha d007c9e427 osha 7e3d0193d1
+pass4_natural prompt 256000 prefill 3196 decode 65.9 hit 0.833 cov_faults 0 starved 0 psha b81412473e osha fe206f9482
+## reach-ab-B-384k | sm=2722 MHz load=1.62
+rc=0 captures=1 tracebacks=0 oom=0
+pass1 prompt 384000 prefill 2450 decode 73.8 hit 0.919 cov_faults 0 starved 0 psha b1277029d1 osha 4d3171e231
+pass2 prompt 384000 prefill 2449 decode 84.7 hit 0.958 cov_faults 0 starved 0 psha 89bff18131 osha 8c1a3b4464
+pass4_natural prompt 384000 prefill 2443 decode 44.5 hit 0.776 cov_faults 0 starved 0 psha c6ad71de14 osha 2504971632
+## reach-ab-C-128k | sm=225 MHz load=0.29
+rc=0 captures=1 tracebacks=0 oom=0
+pass1 prompt 128000 prefill 4651 decode 117.6 hit 0.958 cov_faults 0 starved 0 psha 13b8815223 osha c3df00b2b9
+pass2 prompt 128000 prefill 4651 decode 118.2 hit 0.965 cov_faults 0 starved 0 psha efee123dd3 osha 4d4fdaa30b
+pass4_natural prompt 128000 prefill 4629 decode 86.5 hit 0.882 cov_faults 0 starved 0 psha fbd2c88ae1 osha 709122f106
+## reach-ab-C-256k | sm=2722 MHz load=1.27
+rc=0 captures=1 tracebacks=0 oom=0
+pass1 prompt 256000 prefill 3209 decode 93.0 hit 0.938 cov_faults 0 starved 0 psha e1cd74b9b2 osha 06f64ca127
+pass2 prompt 256000 prefill 3205 decode 99.9 hit 0.963 cov_faults 0 starved 0 psha d007c9e427 osha 7e3d0193d1
+pass4_natural prompt 256000 prefill 3197 decode 65.8 hit 0.833 cov_faults 0 starved 0 psha b81412473e osha fe206f9482
+## reach-ab-C-384k | sm=2722 MHz load=1.35
+rc=0 captures=1 tracebacks=0 oom=0
+pass1 prompt 384000 prefill 2449 decode 75.0 hit 0.919 cov_faults 0 starved 0 psha b1277029d1 osha 4d3171e231
+pass2 prompt 384000 prefill 2447 decode 84.5 hit 0.957 cov_faults 0 starved 0 psha 89bff18131 osha 8c1a3b4464
+pass4_natural prompt 384000 prefill 2443 decode 43.0 hit 0.776 cov_faults 0 starved 0 psha c6ad71de14 osha 2504971632
+## reach-ledger-p11-q4-256k | sm=2722 MHz load=1.55
+rc=1 captures=1 tracebacks=1 oom=0
+[rank0]: RuntimeError: growable KV refused an unsafe VMM commit: need 1.47 GiB free, have 1.45 GiB (expert arena is at its coverage floor of 4960 slots for a 6050-row mirror; it released 0.21 GiB and has no more to give: raise --moe-mirror-host-rows, or serve a shorter context)
+## reach-ledger-p11-q8-256k | sm=2715 MHz load=1.96
+rc=1 captures=1 tracebacks=1 oom=0
+[rank0]: RuntimeError: growable KV refused an unsafe VMM commit: need 1.78 GiB free, have 1.78 GiB (expert arena is at its coverage floor of 4272 slots for a 6737-row mirror; it released 0.53 GiB and has no more to give: raise --moe-mirror-host-rows, or serve a shorter context)
+## reach-p11-q4-256k | sm=2722 MHz load=1.49
+rc=1 captures=1 tracebacks=1 oom=0
+[rank0]: RuntimeError: growable KV refused an unsafe VMM commit: need 1.47 GiB free, have 1.45 GiB (expert arena is at its coverage floor of 4960 slots for a 6050-row mirror; it released 0.21 GiB and has no more to give: raise --moe-mirror-host-rows, or serve a shorter context)
+## reach-p11-q4-256k-tmb | sm=2722 MHz load=1.27
+rc=0 captures=1 tracebacks=0 oom=0
+pass1 prompt 256000 prefill 909 decode 96.4 hit 0.947 cov_faults 0 starved 0 psha e1cd74b9b2 osha b7e10f03a8
+pass2 prompt 256000 prefill 909 decode 101.9 hit 0.967 cov_faults 0 starved 0 psha d007c9e427 osha abc3de1768
+pass4_natural prompt 256000 prefill 908 decode 78.7 hit 0.884 cov_faults 0 starved 0 psha b81412473e osha 56a37d7d10
+## reach-p11-q4-384k | sm=2722 MHz load=1.14
+rc=1 captures=1 tracebacks=1 oom=0
+[rank0]: RuntimeError: growable KV refused an unsafe VMM commit: need 1.47 GiB free, have 1.47 GiB (expert arena is at its coverage floor of 4536 slots for a 6479-row mirror; it released 0.22 GiB and has no more to give: raise --moe-mirror-host-rows, or serve a shorter context)
+pass2 prompt 384000 prefill 611 decode 86.5 hit 0.963 cov_faults 0 starved 0
+## reach-p11-q8-256k | sm=225 MHz load=0.27
+rc=1 captures=1 tracebacks=1 oom=0
+[rank0]: RuntimeError: growable KV refused an unsafe VMM commit: need 1.78 GiB free, have 1.78 GiB (expert arena is at its coverage floor of 4272 slots for a 6737-row mirror; it released 0.53 GiB and has no more to give: raise --moe-mirror-host-rows, or serve a shorter context)
+## reach-p11-q8-256k-tmb | sm=2722 MHz load=1.42
+rc=0 captures=1 tracebacks=0 oom=0
+pass1 prompt 256000 prefill 3184 decode 90.8 hit 0.931 cov_faults 0 starved 0 psha e1cd74b9b2 osha ac23a93b1c
+pass2 prompt 256000 prefill 3183 decode 100.3 hit 0.964 cov_faults 0 starved 0 psha d007c9e427 osha 48179f17fa
+pass4_natural prompt 256000 prefill 3173 decode 63.1 hit 0.85 cov_faults 0 starved 0 psha b81412473e osha 77d5bc9021
+## reach-p11-q8-384k | sm=2715 MHz load=1.24
+rc=0 captures=1 tracebacks=0 oom=0
+pass2 prompt 384000 prefill 2447 decode 84.6 hit 0.958 cov_faults 0 starved 0
+pass4_natural prompt 384000 prefill 2441 decode 44.5 hit 0.776 cov_faults 0 starved 0
+## reach-p12-q4-256k | sm=2715 MHz load=1.29
+rc=1 captures=1 tracebacks=1 oom=0
+[rank0]: RuntimeError: growable KV refused an unsafe VMM commit: need 1.47 GiB free, have 1.45 GiB (expert arena is at its coverage floor of 4960 slots for a 6050-row mirror; it released 0.21 GiB and has no more to give: raise --moe-mirror-host-rows, or serve a shorter context)
+## reach-p12-q8-256k | sm=2722 MHz load=1.20
+rc=1 captures=1 tracebacks=1 oom=0
+[rank0]: RuntimeError: growable KV refused an unsafe VMM commit: need 1.78 GiB free, have 1.78 GiB (expert arena is at its coverage floor of 4272 slots for a 6737-row mirror; it released 0.53 GiB and has no more to give: raise --moe-mirror-host-rows, or serve a shorter context)
+## reach-p13-q4-256k-start1 | sm=225 MHz load=1.07
+rc=1 captures=1 tracebacks=1 oom=0
+[rank0]: RuntimeError: mirror pool sized for a 1024 MiB prefill transient, but this start measured 1146 MiB: its coverage floor (4960 arena slots) leaves the KV ceiling plan (4960) less than 0.12 GiB for the allocator growth of a long request; it is recorded in /root/K/rec/p13.json, so starting agai
+## reach-p13-q4-256k-start2 | sm=2722 MHz load=2.54
+rc=143 captures=1 tracebacks=0 oom=0
+pass1 prompt 256000 prefill 909 decode 96.5 hit 0.947 cov_faults 0 starved 0 psha e1cd74b9b2 osha b7e10f03a8
+pass2 prompt 256000 prefill 910 decode 102.1 hit 0.967 cov_faults 0 starved 0 psha d007c9e427 osha abc3de1768
+## reach-p13-q4-384k | sm=2715 MHz load=2.54
+rc=0 captures=1 tracebacks=0 oom=0
+pass1 prompt 384000 prefill 609 decode 80.5 hit 0.936 cov_faults 0 starved 0 psha b1277029d1 osha 2003b9898d
+pass2 prompt 384000 prefill 610 decode 86.3 hit 0.961 cov_faults 0 starved 0 psha 89bff18131 osha 94db02042f
+pass4_natural prompt 384000 prefill 610 decode 61.0 hit 0.859 cov_faults 0 starved 0 psha c6ad71de14 osha 8bf67ef026
+## reach-p13-q8-256k-start1 | sm=2722 MHz load=1.33
+rc=1 captures=1 tracebacks=1 oom=0
+[rank0]: RuntimeError: mirror pool sized for a 1024 MiB prefill transient, but this start measured 1146 MiB: its coverage floor (4272 arena slots) leaves the KV ceiling plan (4280) less than 0.12 GiB for the allocator growth of a long request; it is recorded in /root/K/rec/p13.json, so starting agai
+## reach-p13-q8-256k-start2 | sm=2722 MHz load=2.38
+rc=0 captures=1 tracebacks=0 oom=0
+pass1 prompt 256000 prefill 3185 decode 90.9 hit 0.931 cov_faults 0 starved 0 psha e1cd74b9b2 osha ac23a93b1c
+pass2 prompt 256000 prefill 3185 decode 99.4 hit 0.964 cov_faults 0 starved 0 psha d007c9e427 osha 48179f17fa
+pass4_natural prompt 256000 prefill 3173 decode 62.8 hit 0.85 cov_faults 0 starved 0 psha b81412473e osha 77d5bc9021
+## reach-p14-q4-256k-first | sm=2722 MHz load=1.42
+rc=0 captures=1 tracebacks=0 oom=0
+pass1 prompt 256000 prefill 909 decode 96.1 hit 0.947 cov_faults 0 starved 0 psha e1cd74b9b2 osha b7e10f03a8
+pass2 prompt 256000 prefill 909 decode 101.6 hit 0.966 cov_faults 0 starved 0 psha d007c9e427 osha abc3de1768
+pass4_natural prompt 256000 prefill 909 decode 78.7 hit 0.884 cov_faults 0 starved 0 psha b81412473e osha 56a37d7d10
+## reach-p14-q8-256k-first | sm=2722 MHz load=1.34
+rc=0 captures=1 tracebacks=0 oom=0
+pass1 prompt 256000 prefill 3186 decode 90.8 hit 0.931 cov_faults 0 starved 0 psha e1cd74b9b2 osha ac23a93b1c
+pass2 prompt 256000 prefill 3184 decode 100.2 hit 0.964 cov_faults 0 starved 0 psha d007c9e427 osha 48179f17fa
+pass4_natural prompt 256000 prefill 3176 decode 62.9 hit 0.85 cov_faults 0 starved 0 psha b81412473e osha 77d5bc9021
+## reach-p14-q8-384k-first | sm=2715 MHz load=2.66
+rc=0 captures=1 tracebacks=0 oom=0
+pass1 prompt 384000 prefill 2444 decode 75.1 hit 0.919 cov_faults 0 starved 0 psha b1277029d1 osha 4d3171e231
+pass2 prompt 384000 prefill 2444 decode 84.5 hit 0.957 cov_faults 0 starved 0 psha 89bff18131 osha 8c1a3b4464
+pass4_natural prompt 384000 prefill 2436 decode 43.0 hit 0.776 cov_faults 0 starved 0 psha c6ad71de14 osha 2504971632
+## tests-p12-engine: 2 failed, 259 passed, 2 skipped in 4.80s
+## tests-p12-moe: 420 passed, 5 skipped, 2 warnings in 276.20s (0:04:36)
+## tests-p12-scheduler: 412 passed, 1 skipped, 2 subtests passed in 9.63s
+## tests-p13-engine: 268 passed, 2 skipped in 4.86s
+## tests-p13-moe: 420 passed, 5 skipped, 2 warnings in 276.15s (0:04:36)
+## tests-p13-scheduler: 412 passed, 1 skipped, 2 subtests passed in 9.93s
+## tests-p14-engine: 270 passed, 2 skipped in 5.07s
+## tests-p14-scheduler: 412 passed, 1 skipped, 2 subtests passed in 9.84s

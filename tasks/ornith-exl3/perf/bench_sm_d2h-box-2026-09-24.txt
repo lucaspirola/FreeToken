@@ -1,0 +1,26 @@
+# ft-dev Vast RTX 5080 box (docker, EPYC 7402P, PCIe gen4 x16), 2026-09-24
+DMA D2H: 22.9 GB/s
+SM D2H chunk    16 KiB/program ( 128 programs) default  w4:   2.1 GB/s ok
+SM D2H chunk    16 KiB/program ( 128 programs) default  w8:   2.2 GB/s ok
+SM D2H chunk    16 KiB/program ( 128 programs) .wt      w4:   2.2 GB/s ok
+SM D2H chunk    16 KiB/program ( 128 programs) .wt      w8:   2.1 GB/s ok
+SM D2H chunk    16 KiB/program ( 128 programs) .cs      w4:   2.1 GB/s ok
+SM D2H chunk    16 KiB/program ( 128 programs) .cs      w8:   2.2 GB/s ok
+SM D2H chunk    64 KiB/program (  32 programs) default  w4:   2.1 GB/s ok
+SM D2H chunk    64 KiB/program (  32 programs) default  w8:   2.1 GB/s ok
+SM D2H chunk    64 KiB/program (  32 programs) .wt      w4:   2.1 GB/s ok
+SM D2H chunk    64 KiB/program (  32 programs) .wt      w8:   2.1 GB/s ok
+SM D2H chunk    64 KiB/program (  32 programs) .cs      w4:   2.1 GB/s ok
+SM D2H chunk    64 KiB/program (  32 programs) .cs      w8:   2.1 GB/s ok
+SM D2H chunk   256 KiB/program (   8 programs) default  w4:   2.2 GB/s ok
+SM D2H chunk   256 KiB/program (   8 programs) default  w8:   2.2 GB/s ok
+SM D2H chunk   256 KiB/program (   8 programs) .wt      w4:   2.2 GB/s ok
+SM D2H chunk   256 KiB/program (   8 programs) .wt      w8:   2.2 GB/s ok
+SM D2H chunk   256 KiB/program (   8 programs) .cs      w4:   2.2 GB/s ok
+SM D2H chunk   256 KiB/program (   8 programs) .cs      w8:   2.2 GB/s ok
+SM D2H chunk  1024 KiB/program (   2 programs) default  w4:   3.8 GB/s ok
+SM D2H chunk  1024 KiB/program (   2 programs) default  w8:   3.5 GB/s ok
+SM D2H chunk  1024 KiB/program (   2 programs) .wt      w4:   3.7 GB/s ok
+SM D2H chunk  1024 KiB/program (   2 programs) .wt      w8:   3.4 GB/s ok
+SM D2H chunk  1024 KiB/program (   2 programs) .cs      w4:   3.7 GB/s ok
+SM D2H chunk  1024 KiB/program (   2 programs) .cs      w8:   3.4 GB/s ok

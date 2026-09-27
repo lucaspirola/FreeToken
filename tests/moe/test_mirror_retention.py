@@ -503,3 +503,169 @@ def test_free_eviction_rate_rises_with_the_band():
                 pool.close()
     print(f"free eviction rate: tie-break {rate[False]:.4f}, band {rate[True]:.4f}")
     assert rate[True] > rate[False], rate
+
+
+def test_default_policy_keeps_a_just_used_duplicate_over_a_colder_expert():
+    """Round 5 (2026-09-27): the band is off by default.
+
+    With LFU halving every 64 calls most counts are 0-2, so ``max(1, sqrt(min))``
+    spans nearly the whole candidate set, and the duplicates in it are mostly
+    experts an admission just retained (count >= 1). The band evicted exactly
+    those, which the next steps fetched again: on Ornith EXL3 at 8K it made
+    1.5-1.9x the swaps of the one-bucket tie-break (hit rate 0.954 vs 0.972,
+    whole model 0.982) and cost 6-7 points of decode
+    (tasks/exclusive-expert-ram/results/ck7-local/README.md).
+
+    Here expert 1 holds a pool row and was just used (count 1, usage 12);
+    expert 0 has no row and is colder (count 0, usage 10). The default must
+    evict expert 0 and pay the writeback; the band (opt-in) evicts expert 1.
+    """
+    import os
+
+    from freetoken.moe import offload_kernels as ok
+
+    if "FREETOKEN_MIRROR_DUP_BAND" not in os.environ:
+        assert ok.FREETOKEN_MIRROR_DUP_BAND is False
+
+    device = torch.device("cuda")
+
+    def victim(dup_band):
+        prev = ok.FREETOKEN_MIRROR_DUP_BAND
+        ok.FREETOKEN_MIRROR_DUP_BAND = dup_band
+        try:
+            cache = _direct_cache(num_layers=2, num_experts=4, cache_size=4, device=device)
+            _seat(
+                cache,
+                slot_of_expert={0: 0, 1: 1, 2: 2, 3: 3},
+                usage={0: 10, 1: 12, 2: 12, 3: 12},
+                frequency={0: 0, 1: 1, 2: 50, 3: 50},
+            )
+            _attach_fake_mirror(cache, [-1, 0, -1, -1, -1, -1, -1, -1])
+            cache.ensure_experts(1, torch.tensor([[0]], dtype=torch.int32, device=device))
+            torch.cuda.synchronize()
+            return int(cache.victim_ids[0].item())
+        finally:
+            ok.FREETOKEN_MIRROR_DUP_BAND = prev
+
+    assert victim(False) == 0
+    assert victim(True) == 1
+
+
+# --- Idle-time duplicate seeding (MirrorResidency.idle_seed) ----------------
+
+def _victim_order(cache):
+    """Residents in the LRU kernel's eviction order (LFU count, then last use)."""
+    ids = cache.id_of_slot.cpu().tolist()
+    usage = cache.usage.cpu().tolist()
+    freq = cache.expert_frequency.view(-1).cpu().tolist()
+    live = [s for s in range(len(ids)) if ids[s] >= 0]
+    return [ids[s] for s in sorted(live, key=lambda s: (freq[ids[s]], usage[s]))]
+
+
+def test_idle_seed_gives_the_next_victims_a_host_copy():
+    """After a decode run the coldest residents mostly have no pool row (the
+    kernel only duplicates what it just admitted). idle_seed must give them one,
+    holding their exact bytes, without touching coverage or the reserve, and
+    only ever at the expense of a strictly hotter duplicate."""
+    with tempfile.TemporaryDirectory() as root:
+        write_nvfp4_checkpoint(root, LAYERS, EXPERTS, H, ISZ)
+        golden = _golden(root)
+        cache, pool = _cache(root, _CAP_FULL)
+        try:
+            _decode(cache)
+            order = _victim_order(cache)
+            before = cache._mirror["pool_row_of_id"].cpu().tolist()
+            copyless = [f for f in order if before[f] < 0]
+            assert copyless, "the run left every resident duplicated: nothing to test"
+
+            got = cache.residency.idle_seed()
+            assert got["seeded"] > 0 and not got["stopped"], got
+
+            rows = cache._mirror["pool_row_of_id"].cpu().tolist()
+            inv = cache._mirror["id_of_pool_row"].cpu().tolist()
+            slots = cache.slot_for_id.view(-1).cpu().tolist()
+            # The coldest copy-less resident is the first to get a row.
+            assert rows[copyless[0]] >= 0
+            seeded = [f for f in order if before[f] < 0 <= rows[f]]
+            lost = [f for f in order if before[f] >= 0 > rows[f]]
+            assert len(seeded) == got["seeded"] and len(lost) == got["from_hot"]
+            if lost:
+                assert max(order.index(f) for f in seeded) < min(order.index(f) for f in lost), (
+                    "a duplicate was taken from a resident colder than the one it was given to"
+                )
+            for flat in range(TOTAL):
+                assert slots[flat] >= 0 or rows[flat] >= 0, f"expert {flat} lost coverage"
+                if rows[flat] >= 0:
+                    assert inv[rows[flat]] == flat
+                    for name, bank in pool.banks.items():
+                        _assert_same(bank[rows[flat]], golden[flat][name],
+                                     f"expert {flat} pool row {rows[flat]} bank {name}")
+            assert int(cache._mirror["free_count"].item()) >= pool.reserve_rows
+            # And decode goes on with nothing lost.
+            _decode(cache, seed=1)
+            st = cache.mirror_stats()
+            assert st["coverage_faults"] == 0 and st["starved_writebacks"] == 0
+            assert st["idle_seed_rows"] == got["seeded"]
+        finally:
+            pool.close()
+
+
+def test_idle_seed_stops_for_a_waiting_request():
+    """A waiting request stops it before the first chunk: nothing copied, maps unchanged."""
+    with tempfile.TemporaryDirectory() as root:
+        write_nvfp4_checkpoint(root, LAYERS, EXPERTS, H, ISZ)
+        cache, pool = _cache(root, _CAP_FULL)
+        try:
+            _decode(cache)
+            fwd = cache._mirror["pool_row_of_id"].clone()
+            got = cache.residency.idle_seed(should_stop=lambda: True)
+            assert got["stopped"] and got["seeded"] == 0, got
+            assert torch.equal(fwd, cache._mirror["pool_row_of_id"])
+        finally:
+            pool.close()
+
+
+def test_idle_seed_yields_between_chunks():
+    """A request arriving mid-seed stops it after the chunk in flight: rows seeded
+    so far are consistent (both maps agree, coverage and reserve hold)."""
+    with tempfile.TemporaryDirectory() as root:
+        write_nvfp4_checkpoint(root, LAYERS, EXPERTS, H, ISZ)
+        cache, pool = _cache(root, _CAP_FULL)
+        try:
+            _decode(cache)
+            checks = []
+            # check 1: before any work; check 2: before chunk 1; check 3: before chunk 2.
+            got = cache.residency.idle_seed(
+                should_stop=lambda: checks.append(1) or len(checks) > 2, chunk=2)
+            assert got["seeded"] <= 2 and (got["stopped"] or got["seeded"] < 2), got
+            fwd = cache._mirror["pool_row_of_id"].cpu().tolist()
+            inv = cache._mirror["id_of_pool_row"].cpu().tolist()
+            assert all(inv[r] == e for e, r in enumerate(fwd) if r >= 0)
+            assert all(fwd[e] == r for r, e in enumerate(inv) if e >= 0)
+            _decode(cache, steps=20, seed=1)
+            st = cache.mirror_stats()
+            assert st["coverage_faults"] == 0 and st["starved_writebacks"] == 0
+        finally:
+            pool.close()
+
+
+def test_idle_seed_cuts_the_next_decode_writebacks():
+    """The point of it: the same routed decode after an idle boundary pays fewer
+    writebacks when the idle boundary seeded the next victims."""
+    wb = {}
+    with tempfile.TemporaryDirectory() as root:
+        write_nvfp4_checkpoint(root, LAYERS, EXPERTS, H, ISZ)
+        for seed_idle in (False, True):
+            cache, pool = _cache(root, _CAP_FULL)
+            try:
+                _decode(cache)
+                if seed_idle:
+                    assert cache.residency.idle_seed()["seeded"] > 0
+                before = cache.mirror_stats()["writebacks"]
+                _decode(cache, steps=60, seed=1)
+                st = cache.mirror_stats()
+                assert st["coverage_faults"] == 0 and st["starved_writebacks"] == 0
+                wb[seed_idle] = st["writebacks"] - before
+            finally:
+                pool.close()
+    assert wb[True] < wb[False], wb

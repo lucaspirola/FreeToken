@@ -1,0 +1,51 @@
+[pol-1-whole] starting: model=Ornith-1.5-35B-A3B-exl3-5.0bpw-hq rows=0 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/round5@bf1a48e venv=/home/lucas/ai/FreeToken/.venv launcher=systemd
+Running as unit: ft-measure-pol-1-whole.service; invocation ID: 8202351955194005a58ee651488f69c5
+[pol-1-whole] ready after 108s
+Sep 27 00:20:39 TESSERACT serve-default.sh[3129120]: [2026-09-27|00:20:39|core|rank=0] INFO     Allocating 262144 tokens for KV cache, K + V = 2.66 GiB
+Sep 27 00:20:44 TESSERACT serve-default.sh[3129120]: [2026-09-27|00:20:44|core|rank=0] INFO     Prefill headroom: transient 1.10 GiB measured on a 8192-token chunk (empty prefix 1.10 GiB, after a 8192-token prefix 1.10 GiB, allocator peak 0.97 GiB); headroom 1.10 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 512 -> 4928 of 5623 slots, 1.24 GiB free (target 1.22 GiB), 695 slots below the ratio plan
+Sep 27 00:20:44 TESSERACT serve-default.sh[3129120]: [2026-09-27|00:20:44|core|rank=0] INFO     Startup geometry: memory ratio 1.00, runtime reserve 0.00 GiB; expert arena 4928 slots; KV 65536 tokens mapped of 262144 (0.74 GiB); 1.24 GiB free
+[pol-1-whole] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8009, "ttft_s": 0.4, "prefill_tok_s": 20033.0, "gen_tokens": 511, "decode_tok_s": 198.8, "decode_tok_s_wall": 198.8, "total_s": 3.0, "ttft_mono_s": 0.4, "prefill_tok_s_mono": 20033.0, "total_mono_s": 2.96, "t_start_wall": 1790454072.079, "gap1_ms": 51.6, "max_gap_ms": 141.6, "median_gap_ms": 4.9, "decode_tok_s_after_gap1": 202.5, "mirror_delta": {}, "decode_delta": {"layer_calls": 12280, "active": 98240, "missing": 1805, "fetched": 0, "prefill_hit_rows": 0, "prefill_rows": 0, "pageable_stage_calls": 0, "pageable_rows": 0}}
+{"target": 80000, "pass": 1, "prompt_tokens": 80023, "ttft_s": 15.27, "prefill_tok_s": 5241.0, "gen_tokens": 511, "decode_tok_s": 166.8, "decode_tok_s_wall": 166.8, "total_s": 18.3, "ttft_mono_s": 13.11, "prefill_tok_s_mono": 6104.0, "total_mono_s": 16.17, "t_start_wall": 1790454075.047, "gap1_ms": 68.8, "max_gap_ms": 68.8, "median_gap_ms": 5.8, "decode_tok_s_after_gap1": 170.3, "mirror_delta": {}, "decode_delta": {"layer_calls": 20720, "active": 165760, "missing": 2554, "fetched": 0, "prefill_hit_rows": 0, "prefill_rows": 0, "pageable_stage_calls": 0, "pageable_rows": 0}}
+{"target": 8000, "pass": 2, "prompt_tokens": 8011, "ttft_s": 0.94, "prefill_tok_s": 8546.0, "gen_tokens": 511, "decode_tok_s": 197.1, "decode_tok_s_wall": 197.1, "total_s": 3.5, "ttft_mono_s": 0.937, "prefill_tok_s_mono": 8546.0, "total_mono_s": 3.52, "t_start_wall": 1790454093.376, "gap1_ms": 54.6, "max_gap_ms": 54.6, "median_gap_ms": 4.9, "decode_tok_s_after_gap1": 201.0, "mirror_delta": {}, "decode_delta": {"layer_calls": 16200, "active": 129600, "missing": 2181, "fetched": 0, "prefill_hit_rows": 0, "prefill_rows": 0, "pageable_stage_calls": 0, "pageable_rows": 0}}
+{"target": 80000, "pass": 2, "prompt_tokens": 80025, "ttft_s": 13.16, "prefill_tok_s": 6079.0, "gen_tokens": 511, "decode_tok_s": 166.8, "decode_tok_s_wall": 166.8, "total_s": 16.2, "ttft_mono_s": 13.163, "prefill_tok_s_mono": 6079.0, "total_mono_s": 16.22, "t_start_wall": 1790454096.904, "gap1_ms": 64.2, "max_gap_ms": 64.2, "median_gap_ms": 5.8, "decode_tok_s_after_gap1": 170.1, "mirror_delta": {}, "decode_delta": {"layer_calls": 24720, "active": 197760, "missing": 2841, "fetched": 0, "prefill_hit_rows": 0, "prefill_rows": 0, "pageable_stage_calls": 0, "pageable_rows": 0}}
+{
+  "arm": "pol-1-whole",
+  "model": "Ornith-1.5-35B-A3B-exl3-5.0bpw-hq",
+  "rows": "0",
+  "commit": "bf1a48e-dirty",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 21.93,
+  "rss_ready_gib": 22.94,
+  "devzero_gib": 18.98,
+  "ram_after_80k_gib": 23.71,
+  "rss_gib": 22.89,
+  "locked_gib": 0.0,
+  "anon_gib": 3.09,
+  "file_gib": 21.67,
+  "unevict_gib": 0.0,
+  "shmem_gib": 18.98,
+  "current_gib": 24.88,
+  "peak_current_gib": 27.12,
+  "gpu_mib": "14402",
+  "decode_8k_p1": 198.8,
+  "ttft_8k_p1": 0.4,
+  "total_8k_p1": 3.0,
+  "ttft_mono_8k_p1": 0.4,
+  "decode_80k_p1": 166.8,
+  "ttft_80k_p1": 15.27,
+  "total_80k_p1": 18.3,
+  "ttft_mono_80k_p1": 13.11,
+  "decode_8k": 197.1,
+  "ttft_8k": 0.94,
+  "total_8k": 3.5,
+  "ttft_mono_8k": 0.94,
+  "decode_80k": 166.8,
+  "ttft_80k": 13.16,
+  "total_80k": 16.2,
+  "ttft_mono_80k": 13.16
+}
+74 arms -> /home/lucas/ai/FreeToken-wt/round5/tasks/exclusive-expert-ram/results/sweep.tsv
+[pol-1-whole] stopping

@@ -1,0 +1,61 @@
+[db0tb0] starting: model=Ornith-1.5-35B-A3B-exl3-5.0bpw-hq rows=-1 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/round5@bf1a48e venv=/home/lucas/ai/FreeToken/.venv launcher=systemd
+Running as unit: ft-measure-db0tb0.service; invocation ID: 83c577ef594b4154be67d17c5d73b6e4
+[db0tb0] ready after 75s
+Sep 27 00:12:26 TESSERACT serve-default.sh[3113388]: [2026-09-27|00:12:26|core|rank=0] INFO     Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode graphs enabled, prefill overlap on (layers assembled from resident slots + pool rows, no disk)
+Sep 27 00:12:26 TESSERACT serve-default.sh[3113388]: [2026-09-27|00:12:26|core|rank=0] INFO     Mirror pool: reserve resolved to 768 rows (default: 3 * num_experts)
+Sep 27 00:12:38 TESSERACT serve-default.sh[3113388]: [2026-09-27|00:12:38|core|rank=0] INFO     Mirror pool: 7290 rows pinned (13.45 GiB), 4617 cover the complement of 5623 GPU residents, 768 reserved, up to 1905 duplicates (a duplicate makes its expert's next eviction free of any host traffic)
+Sep 27 00:12:38 TESSERACT serve-default.sh[3113388]: [2026-09-27|00:12:38|core|rank=0] INFO     Mirror pool: the coverage floor is 3720 of 5623 arena slots, leaving 1903 slots (3.51 GiB) the growable KV may still take
+Sep 27 00:12:38 TESSERACT serve-default.sh[3113388]: [2026-09-27|00:12:38|core|rank=0] INFO     Allocating 262144 tokens for KV cache, K + V = 2.66 GiB
+Sep 27 00:13:29 TESSERACT serve-default.sh[3113388]: [2026-09-27|00:13:29|core|rank=0] INFO     Prefill headroom: transient 1.10 GiB measured on a 8192-token chunk (empty prefix 1.10 GiB, after a 8192-token prefix 1.10 GiB, allocator peak 0.97 GiB); headroom 1.10 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 3720 -> 4864 of 5623 slots, 1.24 GiB free (target 1.22 GiB), 759 slots below the ratio plan
+Sep 27 00:13:29 TESSERACT serve-default.sh[3113388]: [2026-09-27|00:13:29|core|rank=0] INFO     Startup geometry: memory ratio 1.00, runtime reserve 0.00 GiB; expert arena 4864 slots; KV 65536 tokens mapped of 262144 (0.74 GiB); 1.24 GiB free
+[db0tb0] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8009, "ttft_s": 2.43, "prefill_tok_s": 3293.0, "gen_tokens": 511, "decode_tok_s": 184.6, "decode_tok_s_wall": 184.6, "total_s": 5.2, "ttft_mono_s": 0.347, "prefill_tok_s_mono": 23086.0, "total_mono_s": 3.11, "t_start_wall": 1790453638.065, "gap1_ms": 53.1, "max_gap_ms": 156.6, "median_gap_ms": 5.2, "decode_tok_s_after_gap1": 187.8, "mirror_delta": {"swaps": 2296, "free_evictions": 1112, "writebacks": 1184, "coverage_faults": 0, "starved_writebacks": 0, "buffer_free_evictions": 512, "retained_rows": 1112, "staged_writebacks": 1184, "stage_redirects": 1, "ring_full_fallbacks": 0, "wb_stage_rows": 0, "dma_writebacks": 1176, "wb_peak_pending": 0}, "decode_delta": {}}
+{"target": 80000, "pass": 1, "prompt_tokens": 80023, "ttft_s": 13.05, "prefill_tok_s": 6132.0, "gen_tokens": 511, "decode_tok_s": 164.4, "decode_tok_s_wall": 164.4, "total_s": 16.2, "ttft_mono_s": 13.051, "prefill_tok_s_mono": 6132.0, "total_mono_s": 16.15, "t_start_wall": 1790453643.265, "gap1_ms": 67.6, "max_gap_ms": 67.6, "median_gap_ms": 5.9, "decode_tok_s_after_gap1": 167.7, "mirror_delta": {"swaps": 3202, "free_evictions": 1311, "writebacks": 1891, "coverage_faults": 0, "starved_writebacks": 0, "buffer_free_evictions": 512, "retained_rows": 1311, "staged_writebacks": 1891, "stage_redirects": 7, "ring_full_fallbacks": 0, "wb_stage_rows": 0, "dma_writebacks": 1899, "wb_peak_pending": 0}, "decode_delta": {}}
+{"target": 8000, "pass": 2, "prompt_tokens": 8011, "ttft_s": 0.94, "prefill_tok_s": 8489.0, "gen_tokens": 511, "decode_tok_s": 186.8, "decode_tok_s_wall": 186.8, "total_s": 3.7, "ttft_mono_s": 0.944, "prefill_tok_s_mono": 8489.0, "total_mono_s": 3.67, "t_start_wall": 1790453659.422, "gap1_ms": 51.4, "max_gap_ms": 51.4, "median_gap_ms": 5.2, "decode_tok_s_after_gap1": 190.0, "mirror_delta": {"swaps": 2297, "free_evictions": 1284, "writebacks": 1013, "coverage_faults": 0, "starved_writebacks": 0, "buffer_free_evictions": 512, "retained_rows": 1284, "staged_writebacks": 1013, "stage_redirects": 5, "ring_full_fallbacks": 0, "wb_stage_rows": 0, "dma_writebacks": 1006, "wb_peak_pending": 0}, "decode_delta": {}}
+{"target": 80000, "pass": 2, "prompt_tokens": 80025, "ttft_s": 15.83, "prefill_tok_s": 5055.0, "gen_tokens": 511, "decode_tok_s": 161.3, "decode_tok_s_wall": 161.3, "total_s": 19.0, "ttft_mono_s": 13.535, "prefill_tok_s_mono": 5912.0, "total_mono_s": 16.7, "t_start_wall": 1790453663.101, "gap1_ms": 57.5, "max_gap_ms": 57.5, "median_gap_ms": 6.0, "decode_tok_s_after_gap1": 163.9, "mirror_delta": {"swaps": 3204, "free_evictions": 1504, "writebacks": 1700, "coverage_faults": 0, "starved_writebacks": 0, "buffer_free_evictions": 512, "retained_rows": 1490, "staged_writebacks": 1700, "stage_redirects": 13, "ring_full_fallbacks": 0, "wb_stage_rows": 0, "dma_writebacks": 1705, "wb_peak_pending": 0}, "decode_delta": {}}
+{
+  "arm": "db0tb0",
+  "model": "Ornith-1.5-35B-A3B-exl3-5.0bpw-hq",
+  "rows": "-1",
+  "commit": "bf1a48e",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 16.65,
+  "rss_ready_gib": 17.64,
+  "devzero_gib": 0.08,
+  "ram_after_80k_gib": 16.73,
+  "rss_gib": 17.77,
+  "locked_gib": 0.0,
+  "anon_gib": 16.61,
+  "file_gib": 0.15,
+  "unevict_gib": 0.0,
+  "shmem_gib": 0.08,
+  "current_gib": 16.8,
+  "peak_current_gib": 17.35,
+  "gpu_mib": "14398",
+  "decode_8k_p1": 184.6,
+  "ttft_8k_p1": 2.43,
+  "total_8k_p1": 5.2,
+  "ttft_mono_8k_p1": 0.35,
+  "decode_80k_p1": 164.4,
+  "ttft_80k_p1": 13.05,
+  "total_80k_p1": 16.2,
+  "ttft_mono_80k_p1": 13.05,
+  "decode_8k": 186.8,
+  "ttft_8k": 0.94,
+  "total_8k": 3.7,
+  "ttft_mono_8k": 0.94,
+  "decode_80k": 161.3,
+  "ttft_80k": 15.83,
+  "total_80k": 19.0,
+  "ttft_mono_80k": 13.54,
+  "coverage_faults": 0,
+  "starved": 0,
+  "swaps": 14965,
+  "retained_rows": 8242,
+  "free_evict_rate": 0.572,
+  "buffer_free_evictions": 2560
+}
+74 arms -> /home/lucas/ai/FreeToken-wt/round5/tasks/exclusive-expert-ram/results/sweep.tsv
+[db0tb0] stopping

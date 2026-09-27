@@ -1,0 +1,161 @@
+##### target 83000
+  tri   prompt 114112 gen 1023 sha1 46b94d87b3 reps agree: True; quoted facts correct [True, True, True]
+  fi    prompt 114112 gen 1023 sha1 6c0331b6f1 reps agree: True; quoted facts correct [True, True, True]
+  tile  prompt 114112 gen 1023 sha1 c4eba21006 reps agree: True; quoted facts correct [True, True, True]
+  tri vs fi: first divergent token 5 of 1023 / 1023
+     tri   ..'Here are the exact records' || ' you requested:\n\n- **Record 741:** Bruno left a quill in Tromso on day 42.\n- **Record 2594:** Elif left a'
+     fi    ..'Here are the exact records' || ':\n\n- **Record 741:** Bruno left a quill in Tromso on day 42.\n- **Record 2594:** Elif left a anchor in'
+  tri vs tile: first divergent token 83 of 1023 / 1023
+     tri   ..' in Oaxaca on day 220.\n\n' || "The three cities, in order, are: **Tromso**, **Cusco**, and **Oaxaca**.\n\n---\n\n# The Cartographer's Long Road\n\n## Part I — Trom"
+     tile  ..' in Oaxaca on day 220.\n\n' || "---\n\n# The Cartographer's Pilgrimage\n\n## Porto\n\nThe first city on my journey was **Porto**, where the Douro River carved its ancient path through the red-brick heart"
+
+first divergence per prompt (None = identical):
+  tri vs fi: [5]
+  tri vs tile: [83]
+
+--- full texts (rep0) ---
+##### 83000 tri
+[/think]Here are the exact records you requested:
+
+- **Record 741:** Bruno left a quill in Tromso on day 42.
+- **Record 2594:** Elif left a anchor in Cusco on day 348.
+- **Record 5185:** Farid left a atlas in Oaxaca on day 220.
+
+The three cities, in order, are: **Tromso**, **Cusco**, and **Oaxaca**.
+
+---
+
+# The Cartographer's Long Road
+
+## Part I — Tromsø
+
+The salt wind came off the Arctic Sea at four in the morning, and Bruno stood on the frozen boardwalk of Tromsø with a single quill pressed into his coat pocket. He had come here chasing a rumor his grandfather had whispered on his deathbed: that the true north was not a place you found on a map, but a place you earned by leaving something behind.
+
+Bruno was a writer of sorts—a maker of lists, an archivist of small departures. Every morning for forty days he had walked the same stretch of shoreline, past the great Arctic Cathedral whose white sails caught the pale light, past the fishermen mending nets that glowed faintly with bioluminescence. On the forty-second day, he took the quill—fashioned from a goose feather, inked with the last of his father's calligraphy ink—and he wrote a single sentence on the inside of his own wrist, so that the words would fade with the blood and be gone forever. Then he dropped the quill into the black water and watched it sink.
+
+*"I leave here,"* he had written, *"not because I am finished, but because I am only beginning."*
+
+The quill fell like a small dark promise to the ocean floor. And somewhere in the deep, a fish swallowed it, and carried Bruno's sentence south, south, all the way down the long Atlantic coast of Europe, past the fjords and the fishing towns, into the warm belly of a journey that would not end for many months.
+
+Bruno turned his collar up against the wind and began the long walk back to the mainland. He had a name to follow. **Cusco.**
+
+## Part II — Cusco
+
+The name arrived in Bruno's mouth like a prayer he did not know how to say. *Cusco.* He traced it on the fogged window of the bus as it climbed, climbed, climbed, out of the lowlands and up into the thin, thin air of the Andes. The road wound through cloud forest where orchids hung like living lanterns, and the driver never once slowed, though the cliffs fell away on his left into a green that seemed to go on forever.
+
+By the time the bus reached the city, Bruno's ears had popped three times and his lungs ached with the altitude. Cusco sat in its valley like a crown of stone, the old Inca walls still standing beneath the colonial churches, the two civilizations layered on top of one another like pages in a book no one had finished reading.
+
+He checked into a small hospice near the Plaza de Armas, where a woman named Abuela Solia served him coca tea and asked him, in broken Spanish, what he was looking for.
+
+"I'm looking for a person," Bruno said. "A woman. She left something here. An anchor."
+
+Solia's face changed. She set down her teacup. "Ah," she said. "The woman who came three years ago. She said she was an anchor by trade—an ironworker, she claimed, though I have never seen such delicate hands. She worked for a shipyard in a city I cannot name, and one day she came here and asked me to keep a secret."
+
+She led Bruno to the back room, where a small iron object sat on a wooden shelf, wrapped in an old shawl. She unwrapped it. It was an anchor, no larger than a hand, its iron green with a patina of age, its flukes worn smooth.
+
+"She said," Solia went on, "that she had dropped a true anchor into the sea off Tromsø, and that the sea had given it back to her here, in this high place where the sky is close. She said the anchor was a promise: that she would return. Then she left. She left before dawn, and she left a note."
+
+The note, written on the back of a map, read: *"I have kept my promise to the north. Now I keep it to the east. Follow the road to Oaxaca."*
+
+Bruno held the little anchor in both hands. It was heavier than it looked, and warm, as though someone had just been holding it. He understood, then, that his journey was not his own. He had been sent—by his grandfather's rumor, by the
+
+##### 83000 fi
+[/think]Here are the exact records:
+
+- **Record 741:** Bruno left a quill in Tromso on day 42.
+- **Record 2594:** Elif left a anchor in Cusco on day 348.
+- **Record 5185:** Farid left a atlas in Oaxaca on day 220.
+
+The three cities, in order, are: **Tromso**, **Cusco**, and **Oaxaca**.
+
+---
+
+# The Cartographer's Long Road
+
+## Part I — Tromsø
+
+The salt wind came off the Norwegian Sea like a blade, and Ingrid pulled her scarf tighter as she stepped off the last ferry into Tromsø. The town clung to its hillsides, red and yellow houses spilling down toward the harbor where the fishing boats rocked against the ice line. It was late, and the winter dark had already fallen, a deep indigo that made the harbor lamps look like the first stars of the evening.
+
+She had come for the quill.
+
+It was an absurd thing to travel so far for—a single writing quill, goose feather, silver-ferruled, left behind by a man named Bruno who had long since moved on to wherever it was that people went when they left objects behind in northern ports. But Ingrid was a collector of abandonments, a gatherer of the things people shed like skins. And this quill, she had been told, was special. It had written a letter that changed a border. It had signed a treaty between two fishing families that had held for a hundred years. It had, in its small and feathered way, shaped the shape of a place.
+
+She found the shop at the end of a lane that narrowed as it climbed. The bell above the door chimed a note that seemed too bright for the gloom outside. Inside, the old woman behind the counter did not look up from her mending.
+
+"Bruno's quill," Ingrid said.
+
+The woman's hands stopped. She set the garment down. "That one," she said, "you do not take it to write with. You take it to remember with."
+
+"I only want to hold it," Ingrid said.
+
+Then she did, and it was colder than she expected, and it hummed faintly in her palm as though it carried the memory of being used, of the hand that had gripped it, the pressure, the slant of the writer's elbow, the way a person leans into the thing they are trying to make last.
+
+Outside, the aurora began to unfurl—a green ribbon unspooling across the black sky, then a vein of violet, then a slow and silent applause of light. Ingrid stood in it with the quill in her fist, and she thought: *this is enough. this is a whole journey.*
+
+But it was not enough. It never was. She had two more places to go.
+
+## Part II — Cusco
+
+The plane to Peru was long, and when Ingrid arrived in Cusco she was so high above sea level that her chest ached and her thoughts came at her slowly, as though wading through honey. The city rose around her in terraces of stone and memory, the Inca walls beneath the Spanish baroque, gold and plaster and the smell of roasting corn and burning incense from some chapel she could not name.
+
+She came to Cusco for the anchor.
+
+It had been left by a woman named Elif, and it was small—an anchor the size of a hand, forged in some shipyard long ago, then given away, then lost, then left here on a windowsill where the afternoon light caught its rust and turned it to copper. Ingrid had spent a year tracking it. She had followed a paper trail through three countries and a great deal of patience, and now she stood before a secondhand shop in the district of San Blas, staring at that little anchor through the glass.
+
+The shopkeeper, a broad-shouldered man with kind eyes, watched her looking. "You want the anchor," he said. It was not a question.
+
+"How did you—"
+
+"My grandmother left it. She was a sailor's daughter. She said an anchor is not a thing that binds you down." He picked it up and turned it over in his hands. "She said it is a thing that lets you be free and still know where you belong."
+
+Ingrid took it home to the pension in the old quarter, and that night she set the little anchor on her windowsill beside the quill, and she looked out over the terraced city where the modern lights spilled down toward the valley, and she thought about belonging, and about how far she had come, and about the man who had left the atlas.
+
+She still had one place left.
+
+## Part III — Oaxaca
+
+
+
+##### 83000 tile
+[/think]Here are the exact records you requested:
+
+- **Record 741:** Bruno left a quill in Tromso on day 42.
+- **Record 2594:** Elif left a anchor in Cusco on day 348.
+- **Record 5185:** Farid left a atlas in Oaxaca on day 220.
+
+---
+
+# The Cartographer's Pilgrimage
+
+## Porto
+
+The first city on my journey was **Porto**, where the Douro River carved its ancient path through the red-brick heart of Portugal. I arrived on a morning still soft with sea mist, my boots echoing against the cobblestones of the Ribeira district. Somewhere in this city, Bruno had once left a quill—a slender instrument for writing, for recording—for reasons only he knew.
+
+I wandered across the Dom Luís I Bridge, its iron arch soaring above me like the ribcage of some great sleeping beast. Below, the rabelo boats that once carried port wine downriver rested at their moorings. I found a small workshop near the Clérigos Tower, its window displaying fountain pens and ink bottles that caught the light like scattered jewels. The shopkeeper, an old man with ink-stained fingers, told me of a quill he'd found years ago tucked inside a leather-bound book of poems. "It was left here by a traveler," he said, his eyes crinkling. "He said the act of leaving something behind was how you made a place part of your story."
+
+I stayed in Porto for three days, learning to hold a quill properly, to let ink flow from the feather like water from a spring. When I finally dipped it into the inkwell and wrote my own name on a scrap of parchment, I understood Bruno's impulse. To leave a mark was to say: *I was here. This mattered to me.*
+
+## Tromsø
+
+From Porto I traveled north, far north, to **Tromsø**, where the Arctic Circle split the land like a seam in a great coat. Bruno had left his quill here on day 42, and I came in the depth of winter, when the sun barely rose at all.
+
+The city clung to the hillsides beneath the Bridge of the Arctic Sun, its curved white span glowing in the perpetual twilight. I stood on the frozen harbor, my breath freezing instantly, and watched the Northern Dance—the aurora—unfurl across the sky in ribbons of green and violet. The Sami people, the original inhabitants of this land, called it *guhtten*, the song of the spirits.
+
+In a small café near the cathedral, I met a woman who had come from everywhere and nowhere. She told me she'd left a quill in Tromsø years ago, writing a letter she never sent. "The cold makes you want to leave things," she said. "It makes you realize how temporary everything is. The ice melts. The light returns. But the things we leave behind—they stay."
+
+I walked out to the frozen fjord, where children learned to skate, and I wrote a letter to someone I'd lost. The ink froze on the page, but the words remained. I left the quill on the ice, a small silver marker against the white, and watched it gleam like a fallen star.
+
+## Cusco
+
+The quill led me south, across the Atlantic, to **Cusco**, the navel of the ancient Inca world. Elif had left her anchor here on day 348, and I came seeking the weight of stone, the permanence of a civilization that built mountains.
+
+Cusco stunned me. The Inca had built their empire here, their capital a mosaic of grey granite blocks so precisely cut that not even a knife blade could slip between them. At Sacsahuamán, the great fortress above the city, I ran my hands over walls that had survived earthquakes and empires. The anchor Elif had left felt appropriate here—a thing meant to hold fast, to refuse to drift.
+
+I climbed to the Plaza de Armas, where the Cathedral of Cusco rose above the colonial buildings that had been built atop Inca foundations. In the shadow of the cathedral, a merchant sold anchors made of bronze, tiny souvenirs for travelers who wanted a piece of permanence. I bought one, small enough to fit in my pocket, and held it until my fingers ached.
+
+That night, in a courtyard strung with lanterns, I thought about Elif. Why leave an anchor? Perhaps because she, like me, had felt the pull of too many roads, the danger of drifting without anything to hold her. I pressed the little anchor to my chest and promised myself I would never lose my way.
+
+## Oaxaca
+
+The final city on my pilgrimage was **Oaxaca**, where the mountains of Mexico cradled
+

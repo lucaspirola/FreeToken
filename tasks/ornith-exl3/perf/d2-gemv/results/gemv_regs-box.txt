@@ -1,0 +1,10 @@
+# gemv_regs.py on ft-dev (ptxas 13.0, sm_120a). Lines 1-6: D2 kernel (FT-exl3p3). Lines 7-9: the pre-D2 kernel (FT-exl3p5, P2b head), no cap.
+maxnreg None {}: 0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads | Used 80 registers, used 1 barriers
+maxnreg None {'REDUCE': False}: 0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads | Used 80 registers, used 0 barriers
+maxnreg None {'PRE_ROT': True, 'KB': 2, 'HAS_EXPERT': True}: 0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads | Used 80 registers, used 1 barriers
+maxnreg 64 {}: 0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads | Used 64 registers, used 1 barriers
+maxnreg 64 {'REDUCE': False}: 0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads | Used 64 registers, used 0 barriers
+maxnreg 64 {'PRE_ROT': True, 'KB': 2, 'HAS_EXPERT': True}: 0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads | Used 64 registers, used 1 barriers
+maxnreg None {}: 1448 bytes stack frame, 1432 bytes spill stores, 1432 bytes spill loads | Used 168 registers, used 1 barriers, 1448 bytes cumulative stack size
+maxnreg None {'REDUCE': False}: 1792 bytes stack frame, 1780 bytes spill stores, 1780 bytes spill loads | Used 80 registers, used 1 barriers, 1792 bytes cumulative stack size
+maxnreg None {'PRE_ROT': True, 'KB': 2, 'HAS_EXPERT': True}: 1456 bytes stack frame, 1436 bytes spill stores, 1436 bytes spill loads | Used 168 registers, used 1 barriers, 1456 bytes cumulative stack size

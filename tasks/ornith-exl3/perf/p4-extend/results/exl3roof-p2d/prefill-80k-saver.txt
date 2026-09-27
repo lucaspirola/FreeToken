@@ -1,0 +1,171 @@
+prefill 80000 tokens: wall 19.15 s (4178 tok/s), 10 chunks
+whole prefill: GPU 24123.4 ms
+  attention                        9264.2 ms   38.4%
+  moe routing/sort                 7821.4 ms   32.4%
+  exl3 gemm                        2460.4 ms   10.2%
+  other                            1668.6 ms    6.9%
+  norm/act/elementwise             1393.3 ms    5.8%
+  gdn / fla                         794.8 ms    3.3%
+  hadamard                          691.8 ms    2.9%
+  memcpy DtoD                        13.8 ms    0.1%
+  gemm (cublas/dense bf16)            8.9 ms    0.0%
+  exl3 gemv (decode path)             4.7 ms    0.0%
+  memcpy DtoH                         1.0 ms    0.0%
+  memcpy HtoD                         0.5 ms    0.0%
+chunk 0 (span 1174.1 ms): GPU 1775.3 ms
+  moe routing/sort                  903.4 ms   50.9%
+  exl3 gemm                         278.0 ms   15.7%
+  other                             181.2 ms   10.2%
+  norm/act/elementwise              154.9 ms    8.7%
+  gdn / fla                          89.3 ms    5.0%
+  attention                          89.1 ms    5.0%
+  hadamard                           76.3 ms    4.3%
+  memcpy DtoD                         1.6 ms    0.1%
+  gemm (cublas/dense bf16)            1.0 ms    0.1%
+  exl3 gemv (decode path)             0.5 ms    0.0%
+  memcpy DtoH                         0.1 ms    0.0%
+  memcpy HtoD                         0.1 ms    0.0%
+chunk 1 (span 1235.1 ms): GPU 1764.7 ms
+  moe routing/sort                  786.8 ms   44.6%
+  attention                         262.1 ms   14.9%
+  exl3 gemm                         251.7 ms   14.3%
+  other                             167.1 ms    9.5%
+  norm/act/elementwise              142.3 ms    8.1%
+  gdn / fla                          81.3 ms    4.6%
+  hadamard                           70.4 ms    4.0%
+  memcpy DtoD                         1.4 ms    0.1%
+  gemm (cublas/dense bf16)            0.9 ms    0.1%
+  exl3 gemv (decode path)             0.5 ms    0.0%
+  memcpy DtoH                         0.1 ms    0.0%
+  memcpy HtoD                         0.0 ms    0.0%
+chunk 2 (span 1405.6 ms): GPU 1936.2 ms
+  moe routing/sort                  787.8 ms   40.7%
+  attention                         433.5 ms   22.4%
+  exl3 gemm                         251.2 ms   13.0%
+  other                             167.5 ms    8.7%
+  norm/act/elementwise              141.3 ms    7.3%
+  gdn / fla                          81.1 ms    4.2%
+  hadamard                           70.7 ms    3.7%
+  memcpy DtoD                         1.4 ms    0.1%
+  gemm (cublas/dense bf16)            0.9 ms    0.0%
+  exl3 gemv (decode path)             0.5 ms    0.0%
+  memcpy DtoH                         0.1 ms    0.0%
+  memcpy HtoD                         0.0 ms    0.0%
+chunk 3 (span 1585.5 ms): GPU 2115.4 ms
+  moe routing/sort                  787.4 ms   37.2%
+  attention                         612.9 ms   29.0%
+  exl3 gemm                         250.3 ms   11.8%
+  other                             167.6 ms    7.9%
+  norm/act/elementwise              142.0 ms    6.7%
+  gdn / fla                          81.5 ms    3.9%
+  hadamard                           70.7 ms    3.3%
+  memcpy DtoD                         1.4 ms    0.1%
+  gemm (cublas/dense bf16)            0.9 ms    0.0%
+  exl3 gemv (decode path)             0.5 ms    0.0%
+  memcpy DtoH                         0.1 ms    0.0%
+  memcpy HtoD                         0.0 ms    0.0%
+chunk 4 (span 1749.5 ms): GPU 2279.4 ms
+  moe routing/sort                  786.8 ms   34.5%
+  attention                         778.4 ms   34.2%
+  exl3 gemm                         250.6 ms   11.0%
+  other                             167.6 ms    7.4%
+  norm/act/elementwise              141.2 ms    6.2%
+  gdn / fla                          81.0 ms    3.6%
+  hadamard                           70.8 ms    3.1%
+  memcpy DtoD                         1.4 ms    0.1%
+  gemm (cublas/dense bf16)            0.9 ms    0.0%
+  exl3 gemv (decode path)             0.5 ms    0.0%
+  memcpy DtoH                         0.1 ms    0.0%
+  memcpy HtoD                         0.0 ms    0.0%
+chunk 5 (span 1927.8 ms): GPU 2458.4 ms
+  attention                         955.8 ms   38.9%
+  moe routing/sort                  787.8 ms   32.0%
+  exl3 gemm                         250.5 ms   10.2%
+  other                             167.7 ms    6.8%
+  norm/act/elementwise              141.7 ms    5.8%
+  gdn / fla                          81.2 ms    3.3%
+  hadamard                           70.8 ms    2.9%
+  memcpy DtoD                         1.4 ms    0.1%
+  gemm (cublas/dense bf16)            0.9 ms    0.0%
+  exl3 gemv (decode path)             0.5 ms    0.0%
+  memcpy DtoH                         0.1 ms    0.0%
+  memcpy HtoD                         0.0 ms    0.0%
+chunk 6 (span 2119.2 ms): GPU 2649.0 ms
+  attention                        1146.4 ms   43.3%
+  moe routing/sort                  786.8 ms   29.7%
+  exl3 gemm                         250.8 ms    9.5%
+  other                             167.7 ms    6.3%
+  norm/act/elementwise              142.0 ms    5.4%
+  gdn / fla                          81.4 ms    3.1%
+  hadamard                           70.8 ms    2.7%
+  memcpy DtoD                         1.4 ms    0.1%
+  gemm (cublas/dense bf16)            0.9 ms    0.0%
+  exl3 gemv (decode path)             0.5 ms    0.0%
+  memcpy DtoH                         0.1 ms    0.0%
+  memcpy HtoD                         0.0 ms    0.0%
+chunk 7 (span 2576.7 ms): GPU 3075.3 ms
+  attention                        1573.6 ms   51.2%
+  moe routing/sort                  786.7 ms   25.6%
+  exl3 gemm                         250.9 ms    8.2%
+  other                             167.6 ms    5.5%
+  norm/act/elementwise              141.0 ms    4.6%
+  gdn / fla                          81.6 ms    2.7%
+  hadamard                           70.9 ms    2.3%
+  memcpy DtoD                         1.4 ms    0.0%
+  gemm (cublas/dense bf16)            0.9 ms    0.0%
+  exl3 gemv (decode path)             0.5 ms    0.0%
+  memcpy DtoH                         0.1 ms    0.0%
+  memcpy HtoD                         0.0 ms    0.0%
+chunk 8 (span 2841.8 ms): GPU 3362.2 ms
+  attention                        1873.2 ms   55.7%
+  moe routing/sort                  782.7 ms   23.3%
+  exl3 gemm                         247.3 ms    7.4%
+  other                             167.7 ms    5.0%
+  norm/act/elementwise              139.4 ms    4.1%
+  gdn / fla                          79.8 ms    2.4%
+  hadamard                           69.1 ms    2.1%
+  memcpy DtoD                         1.4 ms    0.0%
+  gemm (cublas/dense bf16)            0.9 ms    0.0%
+  exl3 gemv (decode path)             0.5 ms    0.0%
+  memcpy DtoH                         0.1 ms    0.0%
+  memcpy HtoD                         0.0 ms    0.0%
+chunk 9 (span 2322.2 ms): GPU 2707.5 ms
+  attention                        1539.2 ms   56.8%
+  moe routing/sort                  625.1 ms   23.1%
+  exl3 gemm                         178.9 ms    6.6%
+  other                             146.9 ms    5.4%
+  norm/act/elementwise              107.5 ms    4.0%
+  gdn / fla                          56.5 ms    2.1%
+  hadamard                           51.4 ms    1.9%
+  gemm (cublas/dense bf16)            0.7 ms    0.0%
+  memcpy DtoD                         0.7 ms    0.0%
+  exl3 gemv (decode path)             0.5 ms    0.0%
+  memcpy DtoH                         0.1 ms    0.0%
+  memcpy HtoD                         0.0 ms    0.0%
+
+top kernels, last chunk:
+      1539.2 ms      10x [attention] _extend_attention_split_kernel
+       443.6 ms     105x [moe routing/sort] void fast_index_copy_multi<int, 1024ul, 8ul>(MultiIndexCopyParams)
+       178.9 ms     592x [exl3 gemm] _exl3_gemm_kernel
+       156.0 ms     235x [moe routing/sort] void cutlass::Kernel2<cutlass_80_tensorop_f16_s16816gemm_relu_f16_128x64_64x3_nn_align8>(cutlass_80_tensorop_f16_s16816gemm_relu_f16_128x64_
+       100.4 ms     592x [other] _reconstruct_experts_kernel
+        51.7 ms     198x [norm/act/elementwise] void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&):
+        51.4 ms      75x [hadamard] _had_rows_kernel
+        25.1 ms     318x [other] _reconstruct_folded_kernel
+        21.7 ms     207x [norm/act/elementwise] void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambd
+        18.2 ms      37x [other] _splitk_combine_kernel
+        17.3 ms      83x [moe routing/sort] void cutlass::Kernel2<cutlass_80_tensorop_f16_s16816gemm_relu_f16_64x64_32x6_nn_align8>(cutlass_80_tensorop_f16_s16816gemm_relu_f16_64x64_32
+        10.8 ms      27x [gdn / fla] chunk_gated_delta_rule_fwd_kernel_h_blockdim64
+        10.7 ms     147x [norm/act/elementwise] void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const:
+         8.7 ms      27x [gdn / fla] chunk_fwd_kernel_o
+         8.6 ms      27x [gdn / fla] void causal_conv1d_fwd_kernel<Causal_conv1d_fwd_kernel_traits<128, 4, false, c10::BFloat16, c10::BFloat16> >(ConvParamsBase)
+         7.2 ms      27x [gdn / fla] recompute_w_u_fwd_kernel
+         5.3 ms     111x [norm/act/elementwise] void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const:
+         5.1 ms      64x [moe routing/sort] void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x6
+         5.0 ms      27x [norm/act/elementwise] _layer_norm_fwd_1pass_kernel
+         4.9 ms      37x [gdn / fla] void flashinfer::activation::act_and_mul_kernel<__half, &(silu(float const&))>(__half*, __half const*, int)
+         4.5 ms      74x [gdn / fla] kernel_cutlass_kernel_flashinfernormkernelsfused_add_rmsnormFusedAddRMSNormKernel_object_at__tensorptrbf16gmemalign128oi64204820481_tensorpt
+         3.8 ms      54x [gdn / fla] l2norm_fwd_kernel
+         3.2 ms      27x [gdn / fla] chunk_gated_delta_rule_fwd_kkt_solve_kernel
+         2.4 ms      37x [norm/act/elementwise] _shared_expert_add_kernel
+         2.4 ms      54x [norm/act/elementwise] void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul> >(int, at::native::FillFunc

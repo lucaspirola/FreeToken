@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Round 5 local gate (label CK_LABEL, default ck7o; results in CK_OUT, default ck7-local/gate) on Ornith EXL3 5.0bpw at 262144 tokens (model max), q8_0 KV:
+# exp/reorg-round5 = round 4 c436be9 + exp/exl3-longctx 0b708ae + the DUP_BAND default fix (e472d20).
+# Same arms as ck6o (ck6-local/chain-ornith.sh) minus its step 6 (the 843f62d speed-up).
+# Saver = mirror residency, auto pool (FT_ROWS=-1), the pool's default reserve (3E: Nemotron's
+# FT_RESERVE=256 is below Ornith's 2E minimum of 512); whole = whole model in RAM (pin budget 20 GiB
+# >= the 19.28 GiB of expert banks). Steps:
+#   0. warm-up: whole 8K (does the whole model fit in host RAM?), saver 8K (records the prefill transient)
+#   1. 8K/80K whole vs saver alternated x3 (recheck-local.sh)
+#   2. 256K whole with needles/recall (the same-commit reference)
+#   3. quiet host (1-min load < 3, MemAvailable >= 23 GiB, every 3 min, up to 60 min), 256K saver
+#   4. natural text, whole / saver alternated x2
+#   5. /clear replay (tasks/prefix-reuse captures)
+# The cgroup sampler, a host snapshot every 60 s and load/SM clock every 5 s run throughout.
+set -u
+WT=/home/lucas/ai/FreeToken-wt/round5; X=$WT/tasks/exclusive-expert-ram; R=$X/results; C=${CK_OUT:-$R/ck7-local/gate}
+L=${CK_LABEL:-ck7o}
+NG=/home/lucas/ai/FreeToken-wt/harvest/tasks/harvest/belady/natural_gen.py
+H=$C/hostload.txt; ST=$C/chain-status.txt
+export GPU_IDLE_MIB=32 FT_VENV=/home/lucas/ai/FreeToken/.venv FT_RATIO=1.00
+export FT_MODEL=$HOME/ai/models/Ornith-1.5-35B-A3B-exl3-5.0bpw-hq FT_NAME=ornith
+export FT_EXTRA="--text-model-only --num-tokens 262144 --max-seq-len-override 262144 --served-model-name ornith --reasoning-parser qwen3"
+export FT_ENVS="FREETOKEN_PIN_BUDGET_GB=20"
+mkdir -p $C; rm -f $C/cg.tsv.stop
+st() { echo "$* $(date -Is)" >> $ST; }
+gpu() { nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1 | tr -d ' '; }
+snap() {
+  { echo "--- $(date -Is) $1"; uptime; grep -E "MemAvailable|^Cached" /proc/meminfo
+    nvidia-smi --query-gpu=memory.used,clocks.sm,utilization.gpu,temperature.gpu --format=csv,noheader
+    echo "top CPU:"; ps -eo pcpu,pid,comm --sort=-pcpu | sed -n 2,7p
+    echo "top RSS (KiB):"; ps -eo rss,pid,comm --sort=-rss | sed -n 2,7p; } >> $H
+}
+quiet() { awk -v a="$(awk '/MemAvailable/{print $2/1048576}' /proc/meminfo)" '{exit !($1 < 3.0 && a >= 23)}' /proc/loadavg; }
+waitu() { sleep 20; while systemctl --user is-active --quiet "$1"; do sleep 30; done; sleep 20; }
+( while [ ! -e $C/cg.tsv.stop ]; do snap tick; sleep 60; done ) &
+( while [ ! -e $C/cg.tsv.stop ]; do echo "$(date +%T) $(cut -d' ' -f1-3 /proc/loadavg) $(nvidia-smi --query-gpu=clocks.sm,utilization.gpu --format=csv,noheader)" >> $C/load5s.txt; sleep 5; done ) &
+systemctl --user reset-failed ft-cgsample-r5o ft-r5o-8k 2>/dev/null
+systemd-run --user --unit=ft-cgsample-r5o --setenv=PATH="$PATH" --setenv=CG_OUT=$C/cg.tsv "--setenv=CG_RESULTS=$R $C" $X/cgroup-sampler.sh
+st "chain start $(git -C $WT log --oneline -1 | cut -c1-60)"
+
+NEEDLES() { echo "NEEDLES_THINK_MAX_TOKENS=65536 NEEDLES_OUT=$C/$1-needles.json python3 $X/needles.py 21000 120000; python3 $X/recall.py 21000 120000 240000"; }
+
+exec 9>/home/lucas/.cache/freetoken/gpu-host.lock
+one() {  # worktree name rows sizes outdir [measure env words...]
+  local wt=$1 name=$2 rows=$3 sizes=$4 out=$5; shift 5
+  flock 9
+  until [ "$(gpu)" -le $GPU_IDLE_MIB ]; do sleep 5; done
+  until [ "$(awk '/MemAvailable/ {printf "%d", $2/1048576}' /proc/meminfo)" -ge 23 ]; do sleep 20; done
+  snap "$name start"
+  echo "$name start $(date +%T) $(cut -d' ' -f1-3 /proc/loadavg) gpu=$(gpu) MiB avail=$(awk '/MemAvailable/{printf "%.1f", $2/1048576}' /proc/meminfo) code=$(git -C $wt log --oneline -1 | cut -c1-8)" >> $ST
+  ( cd $wt && env FT_ROWS=$rows FT_SIZES="$sizes" "$@" \
+      $wt/tasks/exclusive-expert-ram/measure.sh $name > $out/$name-measure.log 2>&1 ) || st "$name measure exit $?"
+  journalctl --user -u ft-measure-$name -o cat --no-pager | sed 's/\x1b\[[0-9;]*m//g' > $out/$name-journal.txt || true
+  mv $wt/tasks/exclusive-expert-ram/results/$name-* $out/ 2>/dev/null || true
+  git -C $wt checkout -q -- tasks/exclusive-expert-ram/results/sweep.tsv 2>/dev/null
+  FREETOKEN_LOG=$out/$name-journal.txt bash $WT/benchmarks/switchyard_soak/checks/acceptance.sh R3 > $out/$name-acceptance-R3.txt 2>&1
+  flock -u 9
+  st "$name done: $(tail -1 $out/$name-acceptance-R3.txt)"; sleep 30
+}
+
+# 0. warm-up; stop if the whole model does not come up
+one $WT $L-warm-whole 0 "8000" $C
+if [ ! -s $C/$L-warm-whole-probe.jsonl ]; then st "WHOLE WARM-UP FAILED: see $L-warm-whole-journal.txt"; touch $C/cg.tsv.stop; exit 1; fi
+one $WT $L-warm-mirror -1 "8000" $C
+[ -s $C/$L-warm-mirror-probe.jsonl ] || { st "saver warm-up failed, once more (the transient record is written on a start)"; one $WT $L-warm-mirror2 -1 "8000" $C; }
+
+# 1. 8K/80K whole vs saver alternated x3
+systemd-run --user --unit=ft-r5o-8k --setenv=PATH="$PATH" --setenv=GPU_IDLE_MIB=32 --setenv=RC_OUT=$C --setenv=RC_LABEL=$L \
+  --setenv=RC_PARTS=8k "--setenv=RC_SIZE=8000 80000" --setenv=RC_RESERVE= --setenv=FT_MODEL=$FT_MODEL --setenv=FT_NAME=ornith \
+  "--setenv=FT_EXTRA=$FT_EXTRA" "--setenv=FT_ENVS=$FT_ENVS" /bin/bash -c "$X/recheck-local.sh > $C/recheck-8k.log 2>&1"
+waitu ft-r5o-8k; st "8k/80k done"
+
+# 2. 256K whole, the same-commit needles/recall reference
+one $WT $L-whole-256k 0 "8000 256000" $C FT_POST_TIMEOUT=10800 "FT_POST=$(NEEDLES $L-whole-256k)"
+
+# 3. quiet host for the RAM reading, then 256K saver
+for i in $(seq 0 20); do
+  snap "quiet poll $i"
+  if quiet; then st "QUIET at poll $i"; break; fi
+  [ $i = 20 ] && { st "NEVER QUIET in 60 min: running anyway"; break; }
+  sleep 180
+done
+one $WT $L-mirror-256k -1 "8000 256000" $C FT_POST_TIMEOUT=10800 "FT_POST=$(NEEDLES $L-mirror-256k)"
+python3 $X/compare_needles.py $C $L-whole-256k $L-mirror-256k > $C/$L-needles-compare.txt 2>&1
+python3 $R/ck6-local/ck6cmp.py $C $L-whole-256k $L-mirror-256k > $C/$L-256k-compare.txt 2>&1
+st "256k compared: $(tail -1 $C/$L-needles-compare.txt); $(tail -1 $C/$L-256k-compare.txt)"
+
+# 4. natural text, whole / saver alternated x2
+for k in 1 2; do
+  for a in whole:0 mirror:-1; do
+    n=$L-nat-${a%%:*}-$k
+    one $WT $n ${a##*:} 8000 $C FT_GEN=128 FT_POST_TIMEOUT=5400 \
+      "FT_POST=python3 $NG --doc $WT/docs/nemotron.md --doc $WT/docs/cli.md --max-tokens 3500 --out $C/$n-natural.json --texts $C/$n"
+  done
+done
+
+# 5. /clear replay (same captures and replay.py as ck6o; compared with ck6-local/ornith/ck6o-replay.json)
+one $WT $L-replay 0 8000 $C FT_POST_TIMEOUT=1200 "FT_POST=REPLAY_OUT=$C/$L-replay.json python3 $WT/tasks/prefix-reuse/replay.py"
+
+touch $C/cg.tsv.stop
+st "CHAINDONE"

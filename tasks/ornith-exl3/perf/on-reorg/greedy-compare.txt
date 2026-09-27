@@ -1,0 +1,137 @@
+##### target 83000
+  p9    prompt 114112 gen 1023 sha1 a43622edc2 reps agree: True; quoted facts correct [True, True, True]
+  p10   prompt 114112 gen 1023 sha1 a43622edc2 reps agree: True; quoted facts correct [True, True, True]
+  p11   prompt 114112 gen 925 sha1 7b01f7c887 reps agree: False; quoted facts correct [True, True, True]
+  p9 vs p10: first divergent token None of 1023 / 1023
+  p9 vs p11: first divergent token 28 of 1023 / 923
+     p9    ..' a quill in Tromso on day 42.' || '\n**Record 2594:** Elif left a anchor in Cusco on day 348.\n**Record 5185:** Farid left a atlas in O'
+     p11   ..' a quill in Tromso on day 42.' || '\n\n**Record 2594:** Elif left a anchor in Cusco on day 348.\n\n**Record 5185:** Farid left a atlas in O'
+
+first divergence per prompt (None = identical):
+  p9 vs p10: [None]
+  p9 vs p11: [28]
+
+--- full texts (rep0) ---
+##### 83000 p9
+[/think]Here are the exact records:
+
+**Record 741:** Bruno left a quill in Tromso on day 42.
+**Record 2594:** Elif left a anchor in Cusco on day 348.
+**Record 5185:** Farid left a atlas in Oaxaca on day 220.
+
+***
+
+# The Cartographer's Three Threads
+
+## Tromsø
+
+The rain in Tromsø never fell so much as it hovered, a perpetual silver mist that clung to the fjord and turned the northern lights into smudges of green glass. Bruno stood on the wooden pier at eleven at night in the depth of winter, when the sun had not risen in weeks, and felt the cold find every gap in his coat. He was a man who collected departures. He had left a thousand things in a thousand cities—a coat here, a book there, a promise in one place and a lie in another—but this quill was different.
+
+He had bought it in a shop that sold only writing instruments, the kind that existed in no other city. The old woman behind the counter had told him it was made from the feather of a bird that flew only above the Arctic circle, that it could write in temperatures that would break ordinary pens. "It will not run dry," she had said. "As long as you keep moving."
+
+Bruno dipped it. On a scrap of the shop's brown paper, he wrote the name of the last person he had ever loved, and then, because he could not bear to keep the word to himself, he left the paper on the pier where the mist would eventually take it. He walked away without looking back, and he did not look back for the rest of his life.
+
+The quill, he discovered, was heavier than it looked. It carried the weight of every unfinished sentence.
+
+## Cusco
+
+Three thousand miles south, at the roof of the world, Elif knelt in the dirt behind a church whose stones had been cut so precisely that no knife could slip between them. The Inca had built Cusco on top of the empire that came before it, and that empire on top of something older still, and Elif felt the layers like strata in her own chest.
+
+She had come looking for an anchor—not the metal kind, but the thing that holds a ship when the storm comes. Her family had scattered across seven countries. Her father had gone to Germany and never returned. Her mother had gone inward, into a silence that no one could penetrate. Elif had spent her whole life unmoored, drifting from relative to relative, from school to school, learning to pack light because she never expected to stay anywhere long.
+
+But Cusco had caught her. She had arrived in the dry season, when the sky was so blue it hurt, and she had walked the Sacred Valley for four days without speaking to a single soul. On the fifth day, she found a stone by the roadside, grey and unremarkable, and she picked it up, and something in her chest gave a lurch like a ship's hull meeting its mooring.
+
+She bought a real anchor, iron and heavy, and had it shipped to a friend in Lima. But the stone she kept in her pocket, and when she felt herself drifting—when the old restlessness rose in her like tide—she closed her hand around it and remembered that some places want you to stay, and if you do not stay, they remember you.
+
+She left the anchor at the base of Machu Picchu at dawn, when the first light struck the terraces and turned them to gold. She did not bury it. She simply set it down among the stones, where it would belong, and she whispered to the mountain that she was leaving, and that she would come back, and that if she did not come back, she wanted her weight to remain.
+
+## Oaxaca
+
+Farid arrived in Oaxaca during the season of the dead, when the whole city smelled of copal and marigolds and something beneath both, something like memory itself. He had been carrying an atlas for eleven years. It was enormous, bound in leather that had once been the color of blood and had faded to the color of a bruise, and every page was a map of a place he had never been.
+
+He did not know how he had come by it. He did not know why he carried it. He only knew that on the nights when he could not sleep, he would open it and trace the lines with his finger, and the places would seem to lean toward his touch, warm as skin.
+
+The market of Oaxaca was a labyrinth of color. His grandmother's people had come from here, though he had never known her, though the whole of his childhood had been spent in cities whose names he could barely pronounce. He wandered the stalls, and the woman selling
+
+##### 83000 p10
+[/think]Here are the exact records:
+
+**Record 741:** Bruno left a quill in Tromso on day 42.
+**Record 2594:** Elif left a anchor in Cusco on day 348.
+**Record 5185:** Farid left a atlas in Oaxaca on day 220.
+
+***
+
+# The Cartographer's Three Threads
+
+## Tromsø
+
+The rain in Tromsø never fell so much as it hovered, a perpetual silver mist that clung to the fjord and turned the northern lights into smudges of green glass. Bruno stood on the wooden pier at eleven at night in the depth of winter, when the sun had not risen in weeks, and felt the cold find every gap in his coat. He was a man who collected departures. He had left a thousand things in a thousand cities—a coat here, a book there, a promise in one place and a lie in another—but this quill was different.
+
+He had bought it in a shop that sold only writing instruments, the kind that existed in no other city. The old woman behind the counter had told him it was made from the feather of a bird that flew only above the Arctic circle, that it could write in temperatures that would break ordinary pens. "It will not run dry," she had said. "As long as you keep moving."
+
+Bruno dipped it. On a scrap of the shop's brown paper, he wrote the name of the last person he had ever loved, and then, because he could not bear to keep the word to himself, he left the paper on the pier where the mist would eventually take it. He walked away without looking back, and he did not look back for the rest of his life.
+
+The quill, he discovered, was heavier than it looked. It carried the weight of every unfinished sentence.
+
+## Cusco
+
+Three thousand miles south, at the roof of the world, Elif knelt in the dirt behind a church whose stones had been cut so precisely that no knife could slip between them. The Inca had built Cusco on top of the empire that came before it, and that empire on top of something older still, and Elif felt the layers like strata in her own chest.
+
+She had come looking for an anchor—not the metal kind, but the thing that holds a ship when the storm comes. Her family had scattered across seven countries. Her father had gone to Germany and never returned. Her mother had gone inward, into a silence that no one could penetrate. Elif had spent her whole life unmoored, drifting from relative to relative, from school to school, learning to pack light because she never expected to stay anywhere long.
+
+But Cusco had caught her. She had arrived in the dry season, when the sky was so blue it hurt, and she had walked the Sacred Valley for four days without speaking to a single soul. On the fifth day, she found a stone by the roadside, grey and unremarkable, and she picked it up, and something in her chest gave a lurch like a ship's hull meeting its mooring.
+
+She bought a real anchor, iron and heavy, and had it shipped to a friend in Lima. But the stone she kept in her pocket, and when she felt herself drifting—when the old restlessness rose in her like tide—she closed her hand around it and remembered that some places want you to stay, and if you do not stay, they remember you.
+
+She left the anchor at the base of Machu Picchu at dawn, when the first light struck the terraces and turned them to gold. She did not bury it. She simply set it down among the stones, where it would belong, and she whispered to the mountain that she was leaving, and that she would come back, and that if she did not come back, she wanted her weight to remain.
+
+## Oaxaca
+
+Farid arrived in Oaxaca during the season of the dead, when the whole city smelled of copal and marigolds and something beneath both, something like memory itself. He had been carrying an atlas for eleven years. It was enormous, bound in leather that had once been the color of blood and had faded to the color of a bruise, and every page was a map of a place he had never been.
+
+He did not know how he had come by it. He did not know why he carried it. He only knew that on the nights when he could not sleep, he would open it and trace the lines with his finger, and the places would seem to lean toward his touch, warm as skin.
+
+The market of Oaxaca was a labyrinth of color. His grandmother's people had come from here, though he had never known her, though the whole of his childhood had been spent in cities whose names he could barely pronounce. He wandered the stalls, and the woman selling
+
+##### 83000 p11
+[/think]Here are the exact records:
+
+**Record 741:** Bruno left a quill in Tromso on day 42.
+
+**Record 2594:** Elif left a anchor in Cusco on day 348.
+
+**Record 5185:** Farid left a atlas in Oaxaca on day 220.
+
+***
+
+# The Cartographer's Three Threads
+
+## Tromsø
+
+The rain in Tromsø never fell so much as it hovered, a perpetual silver mist that clung to the fjord and turned the midnight sun into a pale coin behind clouds. Bruno stood on the wooden pier at the edge of the town, his breath pluming despite the mildness of the season, and felt the quill in his coat pocket like a small, dry promise.
+
+He had come north to chase the aurora, as so many did, but the aurora had kept its secrets. What he had found instead was this quill—a fowl's feather, impossibly white, left behind by some traveler on a bench near the Bryggen-style harbor houses. He had picked it up on the forty-second day of his wandering, and something about it had stopped him. The feather was too perfect, too deliberate. When he held it to the grey light, the barbs aligned into faint lines, as though the quill were already inscribed with a language he could not yet read.
+
+Bruno decided to follow it.
+
+## Cusco
+
+The high thin air of Cusco arrived like a revelation after the wet cold of the north. At three thousand six hundred meters, the city of stone seemed to have grown directly from the mountain, its walls built without mortar, each block fitted so precisely that a knife blade could not slip between them. Bruno walked the Plaza de Armas, and the white quill in his pocket seemed to grow warm.
+
+He came to Cusco seeking the anchor he had heard mentioned in a traveler's tale—a great rusted anchor dragged up from the sea and planted in the plaza of some coastal town, a monument to ships that had never arrived. But Cusco was landlocked, high in the Andes, and here the anchor was not iron but metaphor. In the temple district, he found a stone anchor-shaped plinth, a foundation stone carved in the form of the ship's anchor, and he understood that the thing he was chasing was not an object but a *place where things are held fast*.
+
+The quill grew warm against his ribs. It wanted him to go west, to the sea, to the place where the anchor truly belonged.
+
+## Oaxaca
+
+The desert heat of Oaxaca was a different kind of warmth than the Andean cold. Bruno descended through zones of climate like layers of a geologic cake—pine forest, then oak savanna, then the dry golden plains—until the city of the three temples spread before him under a sky so blue it hurt.
+
+In Oaxaca he found the atlas. It was not a book of maps but a *place*—the great cave systems beneath the Sierra Norte, where the ancient people had drawn the world on the cave walls, mapping rivers that no longer ran and mountains that had since eroded. Bruno lit a lantern and walked the tunnels, and there, in the flickering dark, the walls were covered in maps. Every route he had ever taken—the fjords of the north, the heights of Cusco—was drawn there in ochre and charcoal, leading, always, to this one chamber.
+
+At the center of the chamber sat a leather-bound atlas, open to a single page. On it was drawn three cities: Tromsø, Cusco, Oaxaca. And below them, a fourth line, waiting to be written.
+
+Bruno understood now. The quill, the anchor, the atlas were not treasures to be hoarded but waypoints in a conversation spanning centuries—travelers leaving small tokens for the next wanderer, a chain of left-behind things that formed a map of the world's hidden grammar. He took the quill from his pocket, dipped it in the ink of the cave walls, and wrote the next line.
+
+Then he walked out into the Oaxacan afternoon, the atlas under his arm, and began the long journey home to tell the story—and to leave, for whoever came next, a lantern in Porto, where the sea met the land and the whole circle began again.
+

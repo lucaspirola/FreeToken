@@ -1,0 +1,3 @@
+      4556 KiB anon       4556 KiB rss  [anon-unnamed]
+      1152 KiB anon      16400 KiB rss  /home/lucas/.local/bin/uv
+--- largest single mappings by Anonymous

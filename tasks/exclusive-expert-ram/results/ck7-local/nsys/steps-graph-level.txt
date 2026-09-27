@@ -1,0 +1,36 @@
+===== ck7-local/nsys/whole-graph.sqlite
+-- pass 1: 487 steps, period mean 4918.5 us median 4880.4 us (=203.3 tok/s); graph GPU 4742.4 us; GPU busy 4775.7 us, idle 142.9 us per step
+   kernel index_elementwise_kernel                                      4.00/step      7.0 us/step streams [13, 25]
+   kernel reduce_kernel                                                 1.00/step      4.5 us/step streams [13]
+   kernel unrolled_elementwise_kernel                                   2.00/step      1.8 us/step streams [13, 25]
+   kernel elementwise_kernel_with_index                                 2.00/step      0.9 us/step streams [25]
+   kernel vectorized_elementwise_kernel                                 1.00/step      0.5 us/step streams [25]
+   memcpy H2D    9.00/step     11.1 us/step     0.00 MB/step streams [25]
+   memcpy D2D   10.00/step      6.7 us/step     0.29 MB/step streams [13, 25]
+   memcpy D2H    1.00/step      0.7 us/step     0.00 MB/step streams [13]
+   api    cudaEventSynchronize_v3020                          1.00/step   3886.7 us/step
+   api    cudaMemcpyAsync_v3020                              20.00/step    155.4 us/step
+   api    cudaGraphLaunch_v10000                              1.00/step     84.0 us/step
+   api    cudaLaunchKernel_v7000                             10.00/step     66.6 us/step
+   api    cudaEventQuery_v3020                               20.00/step     11.7 us/step
+   api    cudaEventRecordWithFlags_v11010                    14.00/step     11.1 us/step
+   api    cudaMemsetAsync_v3020                               1.00/step      9.7 us/step
+   api    cudaStreamIsCapturing_v10000                       28.00/step      5.1 us/step
+===== ck7-local/nsys/saver-graph.sqlite
+-- pass 1: 377 steps, period mean 5605.9 us median 5543.5 us (=178.4 tok/s); graph GPU 5397.2 us; GPU busy 5440.0 us, idle 165.8 us per step
+   kernel index_elementwise_kernel                                      4.00/step      7.0 us/step streams [13, 33]
+   kernel reduce_kernel                                                 1.00/step      4.5 us/step streams [13]
+   kernel unrolled_elementwise_kernel                                   2.52/step      2.6 us/step streams [13, 21, 33]
+   kernel elementwise_kernel_with_index                                 2.00/step      0.9 us/step streams [33]
+   kernel vectorized_elementwise_kernel                                 1.00/step      0.5 us/step streams [33]
+   memcpy D2H    8.97/step     55.7 us/step     1.97 MB/step streams [13, 17, 21, 33]
+   memcpy H2D    9.00/step     11.9 us/step     0.00 MB/step streams [33]
+   memcpy D2D   10.00/step      6.7 us/step     0.29 MB/step streams [13, 33]
+   api    cudaEventSynchronize_v3020                          1.00/step   4469.0 us/step
+   api    cudaMemcpyAsync_v3020                              28.16/step    188.7 us/step
+   api    cudaGraphLaunch_v10000                              1.00/step    124.0 us/step
+   api    cudaLaunchKernel_v7000                             10.54/step     68.2 us/step
+   api    cudaEventQuery_v3020                               22.98/step     12.5 us/step
+   api    cudaMemsetAsync_v3020                               1.00/step     11.3 us/step
+   api    cudaEventRecordWithFlags_v11010                    16.00/step     10.3 us/step
+   api    cudaStreamIsCapturing_v10000                       39.71/step      7.0 us/step

@@ -1,0 +1,10 @@
+== short new vs old (forced)
+positions 30  vocab 248320
+max|dlogit| 2.1602  mean|dlogit| 0.13753  max|dlogit|/max|logit| 8.68e-02
+top-1 agreement 1.000 (30/30)  first disagreement None
+top-5 overlap 0.953  KL(exl3||ft) max 3.79e-02 mean 5.93e-03
+== long new vs old (forced)
+positions 30  vocab 248320
+max|dlogit| 2.7344  mean|dlogit| 0.18706  max|dlogit|/max|logit| 1.11e-01
+top-1 agreement 0.967 (29/30)  first disagreement 11
+top-5 overlap 0.967  KL(exl3||ft) max 2.29e-02 mean 3.26e-03

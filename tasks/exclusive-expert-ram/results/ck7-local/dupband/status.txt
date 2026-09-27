@@ -1,0 +1,9 @@
+base start 00:06:54 load=2.34 6.35 6.97 gpu=0MiB avail=31.3 sm=277 MHz code=bf1a48e 
+base done 00:09:32 load=1.11 4.30 6.11: captures=1 kv_grows=2 tracebacks=0
+db0 start 00:09:32 load=1.11 4.30 6.11 gpu=0MiB avail=31.4 sm=277 MHz code=bf1a48e 
+db0 done 00:12:12 load=0.96 3.01 5.35: captures=1 kv_grows=2 tracebacks=0
+db0tb0 start 00:12:12 load=0.96 3.01 5.35 gpu=0MiB avail=31.4 sm=277 MHz code=bf1a48e 
+db0tb0 done 00:14:48 load=0.83 2.16 4.69: captures=1 kv_grows=2 tracebacks=0
+whole start 00:14:48 load=0.83 2.16 4.69 gpu=0MiB avail=31.4 sm=277 MHz code=bf1a48e 
+whole done 00:16:53 load=2.13 2.57 4.56: captures=1 kv_grows=2 tracebacks=0
+ABDONE

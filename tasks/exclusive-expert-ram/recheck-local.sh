@@ -12,6 +12,8 @@
 #   RC_LABEL  arm prefix (default rc); RC_OUT results dir (default results/recheck-local)
 #   RC_PARTS  "8k ram" (default both)
 #   RC_SIZE   prompt size(s) of the alternated part (default 8000; "8000 80000" runs both per arm)
+#   RC_RESERVE mirror reserve rows (default 256 = Nemotron's 2E; set empty for the pool's own
+#             default, 3E, e.g. on a 256-expert model where 256 is below the 2E minimum)
 # Waits for MemAvailable >= 23 GiB and 0 MiB on the GPU before each arm [agent practice].
 # Run as a systemd transient user unit (--setenv=PATH), never from an agent shell.
 set -uo pipefail
@@ -31,7 +33,7 @@ one() {  # name, then env assignments for measure.sh
   quiet
   flock 9
   used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1 | tr -d ' ')
-  if [ "$used" != 0 ]; then echo "GPU holds $used MiB, skipping $name"; flock -u 9; return; fi
+  if [ "$used" -gt "${GPU_IDLE_MIB:-0}" ]; then echo "GPU holds $used MiB, skipping $name"; flock -u 9; return; fi
   env "$@" "$HERE/measure.sh" "$name" || echo "$name measure exit $?"
   journalctl --user -u "ft-measure-$name" -o cat --no-pager | sed 's/\x1b\[[0-9;]*m//g' > "$OUT/$name-journal.txt" || true
   mv "$HERE"/results/$name-* "$OUT/" 2>/dev/null || true
@@ -43,7 +45,7 @@ for part in ${RC_PARTS:-8k ram}; do
     8k)
       for i in 1 2 3; do
         one "$L-whole-$i"  FT_ROWS=0 FT_SIZES="${RC_SIZE:-8000}" FT_GEN=512
-        one "$L-mirror-$i" FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="${RC_SIZE:-8000}" FT_GEN=512
+        one "$L-mirror-$i" FT_ROWS=-1 FT_RESERVE="${RC_RESERVE-256}" FT_SIZES="${RC_SIZE:-8000}" FT_GEN=512
       done ;;
     ram)
       {
@@ -54,7 +56,7 @@ for part in ${RC_PARTS:-8k ram}; do
         echo "--- user units active"
         systemctl --user list-units --state=active --no-legend --type=service | cut -c1-100
       } > "$OUT/$L-host-before.txt"
-      one "$L-mirror-1m" FT_ROWS=-1 FT_RESERVE=256 FT_SIZES="8000 1000000" ;;
+      one "$L-mirror-1m" FT_ROWS=-1 FT_RESERVE="${RC_RESERVE-256}" FT_SIZES="8000 1000000" ;;
   esac
 done
 python3 "$HERE/compare_recheck.py" "$OUT" "$L" "${RC_SIZE:-8000}" > "$OUT/$L-compare.txt" 2>&1 || true

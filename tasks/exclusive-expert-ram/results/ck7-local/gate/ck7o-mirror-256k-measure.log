@@ -1,0 +1,68 @@
+[ck7o-mirror-256k] starting: model=Ornith-1.5-35B-A3B-exl3-5.0bpw-hq rows=-1 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/round5@9593a1a venv=/home/lucas/ai/FreeToken/.venv launcher=systemd
+Running as unit: ft-measure-ck7o-mirror-256k.service; invocation ID: a9b9e22078c243ec8cc01c487e2adb91
+[ck7o-mirror-256k] ready after 77s
+Sep 27 02:24:08 TESSERACT serve-default.sh[3384982]: [2026-09-27|02:24:08|core|rank=0] INFO     Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode graphs enabled, prefill overlap on (layers assembled from resident slots + pool rows, no disk)
+Sep 27 02:24:08 TESSERACT serve-default.sh[3384982]: [2026-09-27|02:24:08|core|rank=0] INFO     Mirror pool: reserve resolved to 768 rows (default: 3 * num_experts)
+Sep 27 02:24:21 TESSERACT serve-default.sh[3384982]: [2026-09-27|02:24:21|core|rank=0] INFO     Mirror pool: 7290 rows pinned (13.45 GiB), 4617 cover the complement of 5623 GPU residents, 768 reserved, up to 1905 duplicates (a duplicate makes its expert's next eviction free of any host traffic)
+Sep 27 02:24:21 TESSERACT serve-default.sh[3384982]: [2026-09-27|02:24:21|core|rank=0] INFO     Mirror pool: the coverage floor is 3720 of 5623 arena slots, leaving 1903 slots (3.51 GiB) the growable KV may still take
+Sep 27 02:24:22 TESSERACT serve-default.sh[3384982]: [2026-09-27|02:24:22|core|rank=0] INFO     Allocating 262144 tokens for KV cache, K + V = 2.66 GiB
+Sep 27 02:25:13 TESSERACT serve-default.sh[3384982]: [2026-09-27|02:25:13|core|rank=0] INFO     Prefill headroom: transient 1.10 GiB measured on a 8192-token chunk (empty prefix 1.10 GiB, after a 8192-token prefix 1.10 GiB, allocator peak 0.97 GiB); headroom 1.10 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 3720 -> 4864 of 5623 slots, 1.24 GiB free (target 1.22 GiB), 759 slots below the ratio plan
+Sep 27 02:25:13 TESSERACT serve-default.sh[3384982]: [2026-09-27|02:25:13|core|rank=0] INFO     Startup geometry: memory ratio 1.00, runtime reserve 0.00 GiB; expert arena 4864 slots; KV 65536 tokens mapped of 262144 (0.74 GiB); 1.24 GiB free
+[ck7o-mirror-256k] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8009, "ttft_s": 0.34, "prefill_tok_s": 23290.0, "gen_tokens": 127, "decode_tok_s": 167.2, "decode_tok_s_wall": 167.2, "total_s": 1.1, "ttft_mono_s": 0.344, "prefill_tok_s_mono": 23290.0, "total_mono_s": 1.1, "t_start_wall": 1790461541.757, "gap1_ms": 39.5, "max_gap_ms": 39.5, "median_gap_ms": 5.6, "decode_tok_s_after_gap1": 175.1}
+{"target": 256000, "pass": 1, "prompt_tokens": 256020, "ttft_s": 78.76, "prefill_tok_s": 3250.0, "gen_tokens": 127, "decode_tok_s": 106.5, "decode_tok_s_wall": 106.5, "total_s": 79.9, "ttft_mono_s": 73.146, "prefill_tok_s_mono": 3500.0, "total_mono_s": 74.33, "t_start_wall": 1790461542.857, "gap1_ms": 63.8, "max_gap_ms": 63.8, "median_gap_ms": 8.7, "decode_tok_s_after_gap1": 111.7}
+{"target": 8000, "pass": 2, "prompt_tokens": 8011, "ttft_s": 1.04, "prefill_tok_s": 7730.0, "gen_tokens": 127, "decode_tok_s": 179.1, "decode_tok_s_wall": 179.1, "total_s": 1.7, "ttft_mono_s": 1.036, "prefill_tok_s_mono": 7730.0, "total_mono_s": 1.74, "t_start_wall": 1790461622.804, "gap1_ms": 44.6, "max_gap_ms": 44.6, "median_gap_ms": 5.2, "decode_tok_s_after_gap1": 189.7}
+{"target": 256000, "pass": 2, "prompt_tokens": 256022, "ttft_s": 78.28, "prefill_tok_s": 3271.0, "gen_tokens": 127, "decode_tok_s": 112.6, "decode_tok_s_wall": 112.6, "total_s": 79.4, "ttft_mono_s": 72.689, "prefill_tok_s_mono": 3522.0, "total_mono_s": 73.81, "t_start_wall": 1790461624.547, "gap1_ms": 57.4, "max_gap_ms": 57.4, "median_gap_ms": 8.2, "decode_tok_s_after_gap1": 117.8}
+[ck7o-mirror-256k] post: NEEDLES_THINK_MAX_TOKENS=65536 NEEDLES_OUT=/home/lucas/ai/FreeToken-wt/round5/tasks/exclusive-expert-ram/results/ck7-local/gate/ck7o-mirror-256k-needles.json python3 /home/lucas/ai/FreeToken-wt/round5/tasks/exclusive-expert-ram/needles.py 21000 120000; python3 /home/lucas/ai/FreeToken-wt/round5/tasks/exclusive-expert-ram/recall.py 21000 120000 240000
+[21000 -> 17647 tok] 6/7  codes=ok multihop=ok counting=ok ordering=TRUNC contradiction=ok arithmetic=ok negative=ok
+[120000 -> 99207 tok] 6/7  codes=ok multihop=ok counting=ok ordering=TRUNC contradiction=ok arithmetic=ok negative=ok
+wrote /home/lucas/ai/FreeToken-wt/round5/tasks/exclusive-expert-ram/results/ck7-local/gate/ck7o-mirror-256k-needles.json
+{"target": 21000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 17394, "completion_tokens": 25, "seconds": 2.5, "planted": ["ZULU-2188", "ROMEO-6864", "KILO-3647"], "recalled": ["ZULU-2188", "ROMEO-6864", "KILO-3647"], "all_three": true, "answer": "ZULU-2188, ROMEO-6864, KILO-3647"}
+{"target": 120000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 98935, "completion_tokens": 25, "seconds": 17.9, "planted": ["ROMEO-1813", "TANGO-6789", "ZULU-5364"], "recalled": ["ROMEO-1813", "TANGO-6789", "ZULU-5364"], "all_three": true, "answer": "ROMEO-1813\nTANGO-6789\nZULU-5364"}
+{"target": 240000, "thinking": false, "finish_reason": "stop", "prompt_tokens": 197993, "completion_tokens": 26, "seconds": 48.9, "planted": ["SIERRA-6523", "SIERRA-1067", "ROMEO-9011"], "recalled": ["SIERRA-6523", "SIERRA-1067", "ROMEO-9011"], "all_three": true, "answer": "SIERRA-6523, SIERRA-1067, ROMEO-9011"}
+{
+  "arm": "ck7o-mirror-256k",
+  "model": "Ornith-1.5-35B-A3B-exl3-5.0bpw-hq",
+  "rows": "-1",
+  "commit": "9593a1a",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 16.64,
+  "rss_ready_gib": 17.59,
+  "devzero_gib": 0.08,
+  "ram_after_80k_gib": 17.17,
+  "rss_gib": 17.95,
+  "locked_gib": 0.0,
+  "anon_gib": 16.84,
+  "file_gib": 1.91,
+  "unevict_gib": 0.0,
+  "shmem_gib": 0.08,
+  "current_gib": 18.8,
+  "peak_current_gib": 20.29,
+  "gpu_mib": "13978",
+  "decode_8k_p1": 167.2,
+  "ttft_8k_p1": 0.34,
+  "total_8k_p1": 1.1,
+  "ttft_mono_8k_p1": 0.34,
+  "decode_256k_p1": 106.5,
+  "ttft_256k_p1": 78.76,
+  "total_256k_p1": 79.9,
+  "ttft_mono_256k_p1": 73.15,
+  "decode_8k": 179.1,
+  "ttft_8k": 1.04,
+  "total_8k": 1.7,
+  "ttft_mono_8k": 1.04,
+  "decode_256k": 112.6,
+  "ttft_256k": 78.28,
+  "total_256k": 79.4,
+  "ttft_mono_256k": 72.69,
+  "coverage_faults": 0,
+  "starved": 0,
+  "swaps": 3166159,
+  "retained_rows": 2310465,
+  "free_evict_rate": 0.73,
+  "buffer_free_evictions": 9937
+}
+74 arms -> /home/lucas/ai/FreeToken-wt/round5/tasks/exclusive-expert-ram/results/sweep.tsv
+[ck7o-mirror-256k] stopping

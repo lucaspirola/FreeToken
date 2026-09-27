@@ -1,0 +1,16 @@
+claude-code cold {"ttft_s": 2.529, "total_s": 2.76, "usage": {"input_tokens": 19572, "output_tokens": 31, "cache_read_input_tokens": 0}, "tokens": {"prompt": 19572, "cached": 0}}
+claude-code A {"ttft_s": 5.632, "total_s": 5.864, "usage": {"input_tokens": 39611, "output_tokens": 31, "cache_read_input_tokens": 8128}, "tokens": {"prompt": 47739, "cached": 8128}}
+claude-code clear {"ttft_s": 1.548, "total_s": 1.755, "usage": {"input_tokens": 11398, "output_tokens": 31, "cache_read_input_tokens": 8128}, "tokens": {"prompt": 19526, "cached": 8128}}
+claude-code repeat {"ttft_s": 0.407, "total_s": 0.623, "usage": {"input_tokens": 6, "output_tokens": 31, "cache_read_input_tokens": 19520}, "tokens": {"prompt": 19526, "cached": 19520}}
+claude-code next {"ttft_s": 0.425, "total_s": 0.631, "usage": {"input_tokens": 65, "output_tokens": 31, "cache_read_input_tokens": 19520}, "tokens": {"prompt": 19585, "cached": 19520}}
+omp cold {"ttft_s": 1.326, "total_s": 1.538, "usage": {"prompt_tokens": 8279, "completion_tokens": 31, "total_tokens": 8310, "prompt_tokens_details": {"cached_tokens": 0}, "completion_tokens_details": {"reasoning_tokens": 31}}, "tokens": {"prompt": 8279, "cached": 0}}
+omp A {"ttft_s": 4.903, "total_s": 5.129, "usage": {"prompt_tokens": 36402, "completion_tokens": 31, "total_tokens": 36433, "prompt_tokens_details": {"cached_tokens": 0}, "completion_tokens_details": {"reasoning_tokens": 31}}, "tokens": {"prompt": 36402, "cached": 0}}
+omp clear {"ttft_s": 1.232, "total_s": 1.421, "usage": {"prompt_tokens": 8249, "completion_tokens": 31, "total_tokens": 8280, "prompt_tokens_details": {"cached_tokens": 8128}, "completion_tokens_details": {"reasoning_tokens": 31}}, "tokens": {"prompt": 8249, "cached": 8128}}
+omp repeat {"ttft_s": 0.416, "total_s": 0.603, "usage": {"prompt_tokens": 8249, "completion_tokens": 31, "total_tokens": 8280, "prompt_tokens_details": {"cached_tokens": 8192}, "completion_tokens_details": {"reasoning_tokens": 31}}, "tokens": {"prompt": 8249, "cached": 8192}}
+omp next {"ttft_s": 0.416, "total_s": 0.609, "usage": {"prompt_tokens": 8277, "completion_tokens": 31, "total_tokens": 8308, "prompt_tokens_details": {"cached_tokens": 8192}, "completion_tokens_details": {"reasoning_tokens": 31}}, "tokens": {"prompt": 8277, "cached": 8192}}
+codex cold {"ttft_s": 1.306, "total_s": 1.502, "usage": null, "tokens": null}
+codex A {"ttft_s": 4.889, "total_s": 5.112, "usage": null, "tokens": null}
+codex clear {"ttft_s": 0.438, "total_s": 0.636, "usage": null, "tokens": null}
+codex repeat {"ttft_s": 0.404, "total_s": 0.598, "usage": null, "tokens": null}
+codex next {"ttft_s": 0.418, "total_s": 0.624, "usage": null, "tokens": null}
+replay done

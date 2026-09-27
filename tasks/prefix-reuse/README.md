@@ -31,3 +31,29 @@ of 772 tokens in place, 0 hoisted.
 
 ft-dev: tests/moe engine scheduler kernels kvcache server tokenizer, 3017 passed,
 25 skipped (`ftdev-tests-99630d9.txt`). Local CPU: scheduler+kvcache+server+tokenizer 1811 passed.
+
+## Captures (recaptured 2026-09-25, round 4)
+
+The original captures lived in a /tmp scratchpad and were lost when WSL restarted. They are now
+committed here, together with the harness that makes them:
+
+* `capture.sh WORKDIR`: Claude Code 2.1.282, omp 18.3.0 and Codex 0.155.1 in a private tmux
+  (`-L probe`) against `stub.py` on 127.0.0.1:18080. Each is redirected with environment
+  variables only: a throwaway HOME / CODEX_HOME under WORKDIR and a dummy key, so ~/.claude*,
+  ~/.omp and ~/.codex are only read and auth.json is never copied. The conversation is the six
+  turns of `turns.txt` (turn 2 pastes `client_sessions.py`), then /clear, then two short turns.
+  Codex gets its turns as a bracketed paste: typed fast, it folds them into one message.
+* `redact.py WORKDIR/raw`: auth headers become `<dummy>`; the value of Claude Code's billing
+  block is removed (its `x-anthropic-billing-header:` prefix stays, because the server strips
+  the block by that prefix); UUIDs and hex ids get consistent pseudonyms, so session and
+  prompt_cache_key sharing is kept. The script fails if anything key-shaped survives.
+* `claude-code.jsonl` (16 requests), `omp.jsonl` (33), `codex.jsonl` (16): the redacted captures.
+  `replay.py` now picks its requests by structure rather than by row number (main calls =
+  the full tool list; /clear = where the conversation length drops). Its filler is this
+  tree's `python/freetoken/server/*.py`.
+* `arm.sh WT ARM OUTDIR [ROWS]`: one :1920 arm with `replay.py` as FT_POST, under the host
+  lock.
+
+Because the conversation before /clear is longer and the client prompts are newer, these
+captures do not reproduce the absolute counts in the table above. Compare arms replayed from
+the same captures.

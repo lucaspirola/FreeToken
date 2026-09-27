@@ -1,0 +1,14 @@
+server pid 133576 kv=q8_0 ratio=0.90 slots=default
+ready after 80s
+chat1 rc=0
+chat2 rc=0
+probe rc=1
+DONE
+ratio 0.90 failed, falling back
+server pid 135682 kv=q8_0 ratio=0.85 slots=default
+ready after 80s
+chat1 rc=0
+chat2 rc=0
+probe rc=0
+DONE
+ALLDONE

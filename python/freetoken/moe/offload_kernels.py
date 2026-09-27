@@ -44,8 +44,18 @@ FREETOKEN_MIRROR_TIEBREAK = os.getenv("FREETOKEN_MIRROR_TIEBREAK", "1").strip() 
 # Duplicate-aware eviction (mirror-attached LFU only; see DUP_BAND in
 # _ensure_experts_sized_kernel_v2): the victim is the coldest candidate that
 # has a pool row among those whose LFU count is within the count's own noise
-# of the coldest one. 0 restores the one-bucket tie-break above.
-FREETOKEN_MIRROR_DUP_BAND = os.getenv("FREETOKEN_MIRROR_DUP_BAND", "1").strip() == "1"
+# of the coldest one. Off by default since round 5 (2026-09-27): with LFU
+# halving every 64 calls (FREETOKEN_LFU_HALVE_STEPS) most counts are 0-2, so
+# the band's minimum width of one count covers nearly every candidate, and its
+# duplicates are mostly experts an admission just retained -- the ones the next
+# steps route to again. On Ornith EXL3 (8K/80K probe) it made 1.5-1.9x the
+# swaps of the one-bucket tie-break (decode hit rate 0.954 vs 0.972; whole
+# model 0.982) and cost the saver 6-7 points of decode; on natural text it
+# moved nothing (92.2% vs 91.9% of the whole model). It was chosen (e70849e) at
+# a halving period of 256, where it cost 0.13 points of hit rate on Nemotron.
+# Results: tasks/exclusive-expert-ram/results/ck7-local/README.md.
+# 1 restores the band.
+FREETOKEN_MIRROR_DUP_BAND = os.getenv("FREETOKEN_MIRROR_DUP_BAND", "0").strip() == "1"
 
 # LFU aging: a layer's expert counts are halved every this many calls of that layer
 # (decode steps). 64 since the live natural-text A/B (tasks/harvest/README.md §d):

@@ -185,6 +185,9 @@ class _DenseReader:
         return lines
 
     def _emit(self, target: str, parts: list[dict[str, torch.Tensor]], stored: QuantScheme | None):
+        fused = self.quant.fuse_parts(target, stored, parts) if stored is not None else None
+        if fused is not None:
+            return [(f"{target}.{role}", value) for role, value in fused.items()]
         if stored is not None:
             parts = [self._check(target, stored, part) for part in parts]
             if self.scheme(target) is None:
@@ -439,6 +442,17 @@ def nvfp4_expert_spec(model_path: str, config) -> Nvfp4ExpertSourceSpec:
     )
 
 
+def exl3_expert_spec(config):
+    """The per-expert EXL3 tensor names (``models.exl3_banks``); every layer is MoE."""
+    from freetoken.models.exl3_banks import Exl3ExpertSpec
+
+    return Exl3ExpertSpec(
+        key_template="model.language_model.layers.{layer}.mlp.experts.{expert}.{proj}.{kind}",
+        first_layer=config.num_layers - config.num_moe_layers,
+        desc="Qwen3.5 EXL3 experts",
+    )
+
+
 # Public handle for consumers that must read expert rows straight from the
 # checkpoint without knowing this model's key layout (the bounded host mirror in
 # moe/mirror_pool.py). ``models.nvfp4_banks.expert_source_spec`` resolves it from
@@ -461,5 +475,6 @@ __all__ = [
     "iter_weights_parallel",
     "iter_expert_pieces",
     "nvfp4_expert_spec",
+    "exl3_expert_spec",
     "NVFP4_EXPERT_SOURCE_SPEC",
 ]

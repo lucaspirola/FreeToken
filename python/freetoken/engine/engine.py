@@ -248,16 +248,105 @@ def _log_prediction_vs_measurement(what: str, predicted: int, measured: int) -> 
 _PREFILL_TRANSIENT_EST_BYTES_PER_TOKEN = 128 * 1024
 
 
-def _prefill_transient_estimate(config) -> int:
+def _prefill_transient_estimate(config, prediction=None) -> int:
     """Pre-measurement estimate of one ``--max-prefill-length`` chunk's transient VRAM.
 
     ``FREETOKEN_PREFILL_TRANSIENT_MB`` overrides it (e.g. with the value a previous
-    start logged as "Prefill headroom: ... transient"); otherwise it scales with the
-    chunk length, which is what the transient scales with."""
+    start logged as "Prefill headroom: ... transient"). Otherwise the largest of: the
+    per-token estimate (it scales with the chunk length, which is what the transient
+    scales with); the startup prediction's upper bound (``prediction``, a
+    ``TransientPrediction``: the largest measurement it accepts without a WARN,
+    ``memory_prediction.transient_upper_bound``); and what an earlier start of the same
+    setup measured (``_prefill_transient_recorded``)."""
     raw = os.environ.get("FREETOKEN_PREFILL_TRANSIENT_MB", "").strip()
     if raw:
         return int(float(raw) * 1024 * 1024)
-    return int(config.max_extend_tokens) * _PREFILL_TRANSIENT_EST_BYTES_PER_TOKEN
+    from freetoken.engine.memory_prediction import transient_upper_bound
+
+    estimate = int(config.max_extend_tokens) * _PREFILL_TRANSIENT_EST_BYTES_PER_TOKEN
+    bound = None
+    if prediction is not None and int(prediction.chunk_tokens) == int(config.max_extend_tokens):
+        bound = transient_upper_bound(prediction)
+    return max(estimate, bound or 0, _prefill_transient_recorded(config) or 0)
+
+
+# The per-token estimate can price a model's transient low: Ornith EXL3 measured
+# 1146 MiB on an 8192-token chunk against the 1024 MiB estimate, so its bounded
+# mirror pool was sized for an arena 65 slots larger than the one it got, and the
+# last growable-KV commit at a 262144-token ceiling was refused mid-request (ft-dev,
+# tasks/ornith-exl3/perf/longctx-reach). Each start therefore records what it
+# measured, and the next start of the same setup sizes the pool for at least that.
+_PREFILL_TRANSIENT_RECORD_ENV = "FREETOKEN_PREFILL_TRANSIENT_RECORD"
+
+
+def _prefill_transient_record_path() -> "str | None":
+    """``FREETOKEN_PREFILL_TRANSIENT_RECORD``: a JSON file path, or 0/off to neither
+    read nor write a record; default ``~/.cache/freetoken/prefill-transient.json``."""
+    raw = os.environ.get(_PREFILL_TRANSIENT_RECORD_ENV, "").strip()
+    if raw.lower() in ("0", "false", "no", "off"):
+        return None
+    return raw or os.path.join(
+        os.path.expanduser("~"), ".cache", "freetoken", "prefill-transient.json"
+    )
+
+
+def _prefill_transient_key(config) -> str:
+    """What one chunk's transient depends on: the model, the chunk length, the
+    attention backend, the KV formats, the expert residency, TP and the GPU."""
+    gpu = torch.cuda.get_device_name() if torch.cuda.is_available() else "cpu"
+    return "|".join(
+        str(x)
+        for x in (
+            os.path.realpath(config.model_path),
+            int(config.max_extend_tokens),
+            config.attention_backend,
+            config.kv_cache_dtype_k or config.kv_cache_dtype,
+            config.kv_cache_dtype_v or config.kv_cache_dtype,
+            getattr(config, "expert_residency", None),
+            config.tp_info.size,
+            gpu,
+        )
+    )
+
+
+def _read_prefill_transient_records(path: str) -> dict:
+    import json
+
+    try:
+        with open(path) as f:
+            records = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return records if isinstance(records, dict) else {}
+
+
+def _prefill_transient_recorded(config) -> "int | None":
+    """The transient an earlier start of this setup measured, or None."""
+    path = _prefill_transient_record_path()
+    if path is None:
+        return None
+    value = _read_prefill_transient_records(path).get(_prefill_transient_key(config))
+    return int(value) if isinstance(value, int) and value > 0 else None
+
+
+def _record_prefill_transient(config, transient: int) -> None:
+    """Store this start's measured transient for the next start (atomic replace;
+    best effort: a read-only home only loses the record)."""
+    import json
+
+    path = _prefill_transient_record_path()
+    if path is None:
+        return
+    try:
+        records = _read_prefill_transient_records(path)
+        records[_prefill_transient_key(config)] = int(transient)
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(records, f, indent=1, sort_keys=True)
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.warning("Could not record the prefill transient in %s: %s", path, exc)
 
 
 def _prefill_transient_measure_enabled() -> bool:
@@ -710,7 +799,12 @@ class Engine:
         # One prefill chunk's transient VRAM: the planning estimate until
         # _measure_prefill_transient replaces it (the mirror pool is sized from it
         # inside _init_offload_moe_cache, before a forward can run).
-        self.prefill_transient_bytes = _prefill_transient_estimate(config)
+        self.prefill_transient_bytes = _prefill_transient_estimate(
+            config, getattr(getattr(self, "startup_prediction", None), "transient", None)
+        )
+        # What the bounded mirror pool is priced with (_validate_growable_ceiling
+        # compares it with the measurement).
+        self.prefill_transient_sized = self.prefill_transient_bytes
         self.prefill_transient_measured = False
         self._growable_live_budget = None
         self._arena_parked_bytes = 0
@@ -2031,6 +2125,8 @@ class Engine:
         if measured is not None:
             self.prefill_transient_bytes = measured["transient"]
             self.prefill_transient_measured = True
+            if config.tp_info.rank == 0:
+                _record_prefill_transient(config, self.prefill_transient_bytes)
         headroom = growable_headroom_bytes(self.prefill_transient_bytes)
         arena_note = ""
         if growable:
@@ -2150,10 +2246,14 @@ class Engine:
         final_moe, final_kv_bytes = self.growable_kv._plan_growable_kv(self.num_pages)
         logger.info_rank0(
             "Growable-KV ceiling validated: %d tokens, %s physical, planned final "
-            "MoE cache %d slots",
+            "MoE cache %d slots (coverage floor %d; pool priced for a %d MiB "
+            "transient, measured %d MiB)",
             self.num_pages * config.page_size,
             mem_GB(final_kv_bytes),
             final_moe,
+            self.moe_offload_cache.residency.min_gpu_slots(),
+            self.prefill_transient_sized >> 20,
+            self.prefill_transient_bytes >> 20,
         )
         # A bounded mirror pool was sized (before the cache existed) for
         # an estimated final arena; the plan above is the real one. If
@@ -2167,6 +2267,41 @@ class Engine:
         if _need and getattr(_moe, "class_arena_layouts", None) is None:
             _step = _moe.arena_layout[1]
             _need = -(-_need // _step) * _step
+        # The plan above is priced from this start's live free VRAM; a long request
+        # then grows the caching allocator's footprint by allocations the startup
+        # never made (+24 MiB reserved, +2 MiB outside it, over the first 256K request
+        # of Ornith EXL3 on ft-dev). A floor closer to the plan than that dies on the
+        # request's last KV commit (Ornith, pool priced for a 1024 MiB estimate against
+        # a 1146 MiB measurement: 8 slots = 15 MiB left at q8_0, 0 at q4_0). Require
+        # the runtime shrink's margin above the floor, and fail the load instead.
+        if _need and self.prefill_transient_measured:
+            safe_moe, _ = self.growable_kv._plan_growable_kv(
+                self.num_pages, extra_vmm_reserve_bytes=PREFILL_HEADROOM_MARGIN_BYTES
+            )
+            if _need > safe_moe:
+                if self.prefill_transient_sized < self.prefill_transient_bytes:
+                    record = _prefill_transient_record_path()
+                    fix = (
+                        f"the measurement is recorded in {record}, so starting again "
+                        f"sizes the pool for it"
+                        if record is not None
+                        else f"FREETOKEN_PREFILL_TRANSIENT_MB="
+                        f"{-(-self.prefill_transient_bytes >> 20)} sizes the pool for it"
+                    )
+                else:
+                    fix = (
+                        f"raise --moe-mirror-host-rows to at least "
+                        f"{_moe.residency.pool.capacity + _need - safe_moe} (now "
+                        f"{_moe.residency.pool.capacity}) or lower --num-tokens"
+                    )
+                raise RuntimeError(
+                    f"mirror pool priced for a {self.prefill_transient_sized >> 20} MiB "
+                    f"prefill transient (this start measured "
+                    f"{self.prefill_transient_bytes >> 20} MiB): its coverage floor "
+                    f"({_need} arena slots) leaves the KV ceiling plan ({final_moe}) "
+                    f"less than {mem_GB(PREFILL_HEADROOM_MARGIN_BYTES)} for the "
+                    f"allocator growth of a long request; {fix}"
+                )
         if _need > final_moe:
             _pool = _moe.residency.pool
             hint = ""

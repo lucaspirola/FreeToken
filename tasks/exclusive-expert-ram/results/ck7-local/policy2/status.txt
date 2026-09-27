@@ -1,0 +1,21 @@
+pol2-1-tb1 start 00:55:51 load=3.20 3.88 4.42 gpu=0MiB avail=27.8 sm=277 MHz code=bf1a48e +dirty
+pol2-1-tb1 done 00:58:26 load=3.48 4.04 4.42: captures=1 kv_grows=2 tracebacks=0
+pol2-2-band2 start 00:58:26 load=3.48 4.04 4.42 gpu=0MiB avail=31.4 sm=277 MHz code=bf1a48e +dirty
+pol2-2-band2 done 01:00:58 load=1.88 3.15 4.03: captures=1 kv_grows=2 tracebacks=0
+pol2-3-band2 start 01:00:58 load=1.88 3.15 4.03 gpu=0MiB avail=31.0 sm=277 MHz code=bf1a48e +dirty
+pol2-3-band2 done 01:03:28 load=6.51 4.76 4.51: captures=1 kv_grows=2 tracebacks=0
+pol2-4-tb1 start 01:03:28 load=6.51 4.76 4.51 gpu=0MiB avail=31.3 sm=277 MHz code=bf1a48e +dirty
+pol2-4-tb1 done 01:06:07 load=6.18 5.28 4.76: captures=1 kv_grows=2 tracebacks=0
+pol2-nat1-whole start 01:06:07 load=6.18 5.28 4.76 gpu=0MiB avail=31.3 sm=277 MHz code=bf1a48e +dirty
+pol2-nat1-whole done 01:09:59 load=5.24 7.40 5.93: captures=1 kv_grows=0 tracebacks=0
+pol2-nat2-tb1 start 01:09:59 load=5.24 7.40 5.93 gpu=0MiB avail=31.1 sm=277 MHz code=bf1a48e +dirty
+pol2-nat2-tb1 done 01:13:47 load=1.44 4.72 5.18: captures=1 kv_grows=0 tracebacks=0
+pol2-nat3-band2 start 01:13:47 load=1.44 4.72 5.18 gpu=0MiB avail=31.5 sm=277 MHz code=bf1a48e +dirty
+pol2-nat3-band2 done 01:17:35 load=1.79 3.03 4.39: captures=1 kv_grows=0 tracebacks=0
+pol2-nat4-band2 start 01:17:35 load=1.79 3.03 4.39 gpu=0MiB avail=31.5 sm=277 MHz code=bf1a48e +dirty
+pol2-nat4-band2 done 01:21:25 load=1.24 2.07 3.71: captures=1 kv_grows=0 tracebacks=0
+pol2-nat5-tb1 start 01:21:25 load=1.24 2.07 3.71 gpu=0MiB avail=31.4 sm=277 MHz code=bf1a48e +dirty
+pol2-nat5-tb1 done 01:25:07 load=1.85 1.93 3.32: captures=1 kv_grows=0 tracebacks=0
+pol2-nat6-whole start 01:25:07 load=1.85 1.93 3.32 gpu=0MiB avail=28.9 sm=270 MHz code=bf1a48e +dirty
+pol2-nat6-whole done 01:28:07 load=2.20 2.25 3.24: captures=1 kv_grows=0 tracebacks=0
+POL2DONE

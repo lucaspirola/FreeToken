@@ -1,0 +1,29 @@
+sd-1-whole start 03:16:28 load=1.45 3.02 3.85 gpu=0MiB avail=30.8 sm=277 MHz code=9593a1a 
+sd-1-whole done 03:19:53 load=5.25 5.87 4.94: captures=1 kv_grows=2 tracebacks=0
+sd-2-tb1 start 03:19:53 load=5.25 5.87 4.94 gpu=0MiB avail=31.2 sm=277 MHz code=9593a1a 
+sd-2-tb1 done 03:22:24 load=6.81 5.46 4.87: captures=1 kv_grows=2 tracebacks=0
+sd-3-seed start 03:22:24 load=6.81 5.46 4.87 gpu=0MiB avail=31.4 sm=277 MHz code=fc66bf1 
+sd-3-seed done 03:25:17 load=4.87 5.78 5.11: captures=1 kv_grows=2 tracebacks=0
+sd-4-seed0 start 03:25:17 load=4.87 5.78 5.11 gpu=0MiB avail=31.6 sm=270 MHz code=fc66bf1 
+sd-4-seed0 done 03:27:47 load=6.65 5.34 4.99: captures=1 kv_grows=2 tracebacks=0
+sd-5-seed0 start 03:27:47 load=6.65 5.34 4.99 gpu=0MiB avail=31.4 sm=277 MHz code=fc66bf1 
+sd-5-seed0 done 03:30:21 load=6.66 6.07 5.32: captures=1 kv_grows=2 tracebacks=0
+sd-6-seed start 03:30:21 load=6.66 6.07 5.32 gpu=0MiB avail=31.5 sm=277 MHz code=fc66bf1 
+sd-6-seed done 03:32:50 load=1.40 4.13 4.70: captures=1 kv_grows=2 tracebacks=0
+sd-7-tb1 start 03:32:51 load=1.40 4.13 4.70 gpu=0MiB avail=31.5 sm=277 MHz code=9593a1a 
+sd-7-tb1 done 03:35:20 load=0.86 2.89 4.15: captures=1 kv_grows=2 tracebacks=0
+sd-8-whole start 03:35:20 load=0.86 2.89 4.15 gpu=0MiB avail=31.5 sm=277 MHz code=9593a1a 
+sd-8-whole done 03:37:20 load=1.71 2.81 3.99: captures=1 kv_grows=2 tracebacks=0
+sd-nat-whole start 03:37:20 load=1.71 2.81 3.99 gpu=0MiB avail=31.5 sm=277 MHz code=9593a1a 
+sd-nat-whole done 03:40:24 load=1.93 2.80 3.82: captures=1 kv_grows=0 tracebacks=0
+sd-nat-tb1 start 03:40:24 load=1.93 2.80 3.82 gpu=0MiB avail=31.5 sm=277 MHz code=9593a1a 
+sd-nat-tb1 done 03:44:12 load=2.61 2.83 3.61: captures=1 kv_grows=0 tracebacks=0
+sd-nat-seed start 03:44:12 load=2.61 2.83 3.61 gpu=0MiB avail=31.5 sm=277 MHz code=fc66bf1 
+sd-nat-seed done 03:47:51 load=2.37 2.44 3.28: captures=1 kv_grows=0 tracebacks=0
+sd-nat-seed0 start 03:47:51 load=2.37 2.44 3.28 gpu=0MiB avail=31.4 sm=277 MHz code=fc66bf1 
+sd-nat-seed0 done 03:51:37 load=2.50 3.42 3.58: captures=1 kv_grows=0 tracebacks=0
+sd-256k-whole start 03:51:37 load=2.50 3.42 3.58 gpu=0MiB avail=30.4 sm=277 MHz code=9593a1a 
+sd-256k-whole done 03:55:52 load=6.55 4.67 4.06: captures=1 kv_grows=6 tracebacks=0
+sd-256k-seed start 03:55:52 load=6.55 4.67 4.06 gpu=0MiB avail=31.5 sm=277 MHz code=fc66bf1 
+sd-256k-seed done 04:00:22 load=8.07 5.99 4.70: captures=1 kv_grows=6 tracebacks=0
+SEEDDONE
