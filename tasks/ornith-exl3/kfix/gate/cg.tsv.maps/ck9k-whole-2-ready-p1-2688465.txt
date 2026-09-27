@@ -1,0 +1,18 @@
+   1286936 KiB anon    1286936 KiB rss  [heap]
+    197360 KiB anon     197360 KiB rss  [anon-unnamed]
+      4276 KiB anon     122264 KiB rss  /home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/_mlir_libs/_cutlass_ir.cu13.cpython-312-x86_64-linux-gnu.so
+      1948 KiB anon      12436 KiB rss  /home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/llvmlite/binding/libllvmlite.so
+      1120 KiB anon       6012 KiB rss  /usr/bin/python3.12
+--- largest single mappings by Anonymous
+   1286936 KiB  2893e000-835ce000 [heap]
+     29684 KiB  7890b40f4000-7890b5df4000 
+     17148 KiB  7890ac300000-7890ad400000 
+     15424 KiB  7895a94fc000-7895ab2fc000 
+     13312 KiB  7895853e4000-7895860e4000 
+     12272 KiB  7895a0000000-7895a0c00000 
+     11856 KiB  7895a1718000-7895a2618000 
+     10640 KiB  7897d4f55000-7897d7000000 
+      9072 KiB  7895849ff000-7895852ff000 
+      8592 KiB  7895a2e00000-7895a3800000 
+      8192 KiB  78957e900000-78957f100000 
+      6108 KiB  7897d9600000-7897daa00000 

@@ -177,8 +177,31 @@ Each is the first request of that size in a fresh server, and each appears in on
 * The 1-min host load was 9–11 (other processes), so the stall was outside the GPU work.
 * The second new arm decoded at 192 tok/s.
 
-## Step 6: suite and gate
-_pending_ (`gate-chain.sh`: the ck8o setup on this tree, label ck9k, then the 8-dir suite).
+## Step 6: gate ck9k and suite (`gate-chain.sh` = ck8o's `chain-r5.sh` on this tree, `gate/`)
+Code 4fe9bc3; e90ac87 differs from it only in tasks/ files. Ornith EXL3 5.0bpw at 262144, q8_0,
+ratio 1.00. Saver = mirror with the pool's default reserve; whole = pin budget 20 GiB.
+
+| item | result | verdict |
+|---|---|---|
+| 8K/80K alternated x3, bar 91% (`ck9k-compare.txt`) | 8K p1 **94.3%**, 8K p2 **91.1%** (93.7 / 91.1 / 90.8), 80K p1 95.9%, 80K p2 101.2% | PASS (8K p2 thin, see below) |
+| 256K same commit (`ck9k-256k-compare.txt`) | 8K p1 97.1%, 8K p2 96.5%, 256K p1 96.9% (112.1 vs 115.7), 256K p2 97.6% | PASS |
+| needles/recall 256K (`ck9k-needles-compare.txt`) | 0 differences | PASS |
+| coverage faults / starved / captures | 0 / 0 in every saver arm; captures=1, 0 tracebacks in all 15 arms (`*-acceptance-R3.txt`) | PASS |
+| natural text x2 (`ck9k-nat-compare.txt`) | whole 167.6 / 168.1, saver 154.6 / 154.4 = 92.2% / 92.1%; md5 5/5 in every arm, also 5/5 against ck8o's whole arm | PASS |
+| /clear replay (`ck9k-replay-compare.txt`) | cached counts identical to ck8o for all 15 requests. The 2 "cold" lines differ by one prompt token, as ck8o vs ck7o did | PASS |
+| RAM (256K arm) | whole ram_gib 21.74 (RSS 22.51); saver ram_gib 14.36, RSS 17.59, anon 16.82 GiB (ck8o: 18.69 / 17.58 / 16.77) | recorded |
+| suite, 8 dirs, model unloaded (`suite/`) | see below | |
+
+**8K p2 at 91.1%.** The saver side is lower than in ck8o: mirror 185.1 / 184.8 / 187.4 tok/s vs
+195.0 / 192.4 / 192.9. Whole is about the same, 197.5–206.3 vs 202.5–204.7.
+* This does not come from this branch: the decode kernels are unchanged, and outputs are byte-equal.
+* The same-day e2e A/B measured the saver's 8K p2 decode at 185.2 on b967140 vs 185.4 on this tree.
+* Two differences from ck8o's setup:
+  * ck8o ran on the round5 worktree with the 09-25 builds of `_pinned_tensor` / `_pageable_stage` /
+    `_cpu_moe`;
+  * this gate, and both e2e trees, ran with the 09-06 builds copied from the main tree (see the suite).
+* Same-day control: `control-8k.sh`, the identical recheck on b967140 and on this tree, back to back
+  (`gate-control/`).
 
 ## Files
 * `ncu_decode.py`, `ncu-decode.sh`, `ncu_moe_m.py`, `ncu-m.sh`: ncu drivers.

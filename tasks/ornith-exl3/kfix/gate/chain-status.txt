@@ -1,0 +1,24 @@
+chain start 4fe9bc3 EXL3 MoE prefill: keep the 256-token decoded switch; 2026-09-27T17:33:57+04:00
+ck9k-warm-whole start 17:33:57 2.75 4.67 5.48 gpu=0 MiB avail=30.9 code=4fe9bc3 
+ck9k-warm-whole done: captures=1 kv_grows=0 tracebacks=0 2026-09-27T17:36:07+04:00
+ck9k-warm-mirror start 17:36:39 4.84 6.00 5.94 gpu=0 MiB avail=31.1 code=e90ac87 
+ck9k-warm-mirror done: captures=1 kv_grows=0 tracebacks=0 2026-09-27T17:38:28+04:00
+8k/80k done 2026-09-27T17:57:37+04:00
+ck9k-whole-256k start 17:57:38 1.11 3.58 4.94 gpu=0 MiB avail=31.2 code=e90ac87 
+ck9k-whole-256k done: captures=1 kv_grows=21 tracebacks=0 2026-09-27T18:27:36+04:00
+QUIET at poll 2 2026-09-27T18:34:29+04:00
+ck9k-mirror-256k start 18:34:29 1.78 4.29 6.20 gpu=0 MiB avail=29.6 code=e90ac87 
+ck9k-mirror-256k done: captures=1 kv_grows=21 tracebacks=0 2026-09-27T19:06:42+04:00
+256k compared: 0 difference(s); 0 point(s) outside the band 2026-09-27T19:07:15+04:00
+ck9k-nat-whole-1 start 19:07:15 1.15 2.77 3.23 gpu=0 MiB avail=31.2 code=e90ac87 
+ck9k-nat-whole-1 done: captures=1 kv_grows=0 tracebacks=0 2026-09-27T19:10:35+04:00
+ck9k-nat-mirror-1 start 19:11:05 2.30 3.07 3.31 gpu=0 MiB avail=29.3 code=e90ac87 
+ck9k-nat-mirror-1 done: captures=1 kv_grows=0 tracebacks=0 2026-09-27T19:14:55+04:00
+ck9k-nat-whole-2 start 19:15:27 8.32 4.91 3.95 gpu=0 MiB avail=31.1 code=e90ac87 
+ck9k-nat-whole-2 done: captures=1 kv_grows=0 tracebacks=0 2026-09-27T19:20:10+04:00
+ck9k-nat-mirror-2 start 19:20:42 6.31 8.29 5.99 gpu=0 MiB avail=31.2 code=e90ac87 
+ck9k-nat-mirror-2 done: captures=1 kv_grows=0 tracebacks=0 2026-09-27T19:24:31+04:00
+ck9k-replay start 19:25:03 2.23 5.69 5.54 gpu=0 MiB avail=31.2 code=e90ac87 
+ck9k-replay done: captures=1 kv_grows=1 tracebacks=0 2026-09-27T19:26:57+04:00
+GATEDONE 2026-09-27T19:27:29+04:00
+ALLDONE 2026-09-27T19:35:54+04:00

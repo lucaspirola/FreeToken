@@ -1,0 +1,3 @@
+suite start 2026-09-27T19:27:29+04:00 gpu=0  19:27:29 up 1 day,  8:01,  1 user,  load average: 1.38, 4.51, 5.15
+tree e90ac87 kfix: short-extend e2e A/B on 4fe9bc3 (saver 64/150-token TTFT -33/-40%, outputs identical), README, test/hash l
+suite rc=1 1 failed, 3441 passed, 27 skipped, 3 warnings, 2 subtests passed in 473.65s (0:07:53) | illegal: 0 | failed-lines: 1

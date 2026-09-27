@@ -1,0 +1,58 @@
+[ck9k-replay] starting: model=Ornith-1.5-35B-A3B-exl3-5.0bpw-hq rows=0 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/kfix@e90ac87 venv=/home/lucas/ai/FreeToken/.venv launcher=systemd
+Running as unit: ft-measure-ck9k-replay.service; invocation ID: c9443b56f67f484fb3a929a3c08d0351
+[ck9k-replay] ready after 38s
+Sep 27 19:25:39 TESSERACT serve-default.sh[2929747]: [2026-09-27|19:25:39|core|rank=0] INFO     Allocating 262144 tokens for KV cache, K + V = 2.66 GiB
+Sep 27 19:25:44 TESSERACT serve-default.sh[2929747]: [2026-09-27|19:25:44|core|rank=0] INFO     Prefill headroom: transient 1.10 GiB measured on a 8192-token chunk (empty prefix 1.10 GiB, after a 8192-token prefix 1.10 GiB, allocator peak 0.97 GiB); headroom 1.10 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 512 -> 4928 of 5623 slots, 1.24 GiB free (target 1.22 GiB), 695 slots below the ratio plan
+Sep 27 19:25:44 TESSERACT serve-default.sh[2929747]: [2026-09-27|19:25:44|core|rank=0] INFO     Startup geometry: memory ratio 1.00, runtime reserve 0.00 GiB; expert arena 4928 slots; KV 65536 tokens mapped of 262144 (0.74 GiB); 1.24 GiB free
+[ck9k-replay] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8009, "ttft_s": 0.39, "prefill_tok_s": 20471.0, "gen_tokens": 127, "decode_tok_s": 201.2, "decode_tok_s_wall": 201.2, "total_s": 1.0, "ttft_mono_s": 0.391, "prefill_tok_s_mono": 20471.0, "total_mono_s": 1.02, "t_start_wall": 1790522771.688, "out_sha1": "7c7bbef7104024cf84e16afc868a7dfeec84af54", "gap1_ms": 38.2, "max_gap_ms": 38.2, "median_gap_ms": 4.6, "decode_tok_s_after_gap1": 212.6}
+{"target": 8000, "pass": 2, "prompt_tokens": 8011, "ttft_s": 0.89, "prefill_tok_s": 9048.0, "gen_tokens": 127, "decode_tok_s": 190.1, "decode_tok_s_wall": 190.1, "total_s": 1.5, "ttft_mono_s": 0.885, "prefill_tok_s_mono": 9048.0, "total_mono_s": 1.55, "t_start_wall": 1790522772.706, "out_sha1": "04aaba34dd9eb36497fad2e1977370001365b701", "gap1_ms": 66.4, "max_gap_ms": 66.4, "median_gap_ms": 4.7, "decode_tok_s_after_gap1": 209.6}
+[ck9k-replay] post: REPLAY_OUT=/home/lucas/ai/FreeToken-wt/kfix/tasks/ornith-exl3/kfix/gate/ck9k-replay.json python3 /home/lucas/ai/FreeToken-wt/kfix/tasks/prefix-reuse/replay.py
+claude-code cold {"ttft_s": 2.397, "total_s": 2.631, "usage": {"input_tokens": 19573, "output_tokens": 31, "cache_read_input_tokens": 0}, "tokens": {"prompt": 19573, "cached": 0}}
+claude-code A {"ttft_s": 5.8, "total_s": 6.043, "usage": {"input_tokens": 39611, "output_tokens": 31, "cache_read_input_tokens": 8128}, "tokens": {"prompt": 47739, "cached": 8128}}
+claude-code clear {"ttft_s": 1.604, "total_s": 1.822, "usage": {"input_tokens": 11398, "output_tokens": 31, "cache_read_input_tokens": 8128}, "tokens": {"prompt": 19526, "cached": 8128}}
+claude-code repeat {"ttft_s": 1.051, "total_s": 1.254, "usage": {"input_tokens": 6, "output_tokens": 31, "cache_read_input_tokens": 19520}, "tokens": {"prompt": 19526, "cached": 19520}}
+claude-code next {"ttft_s": 0.421, "total_s": 0.62, "usage": {"input_tokens": 65, "output_tokens": 31, "cache_read_input_tokens": 19520}, "tokens": {"prompt": 19585, "cached": 19520}}
+omp cold {"ttft_s": 1.353, "total_s": 1.577, "usage": {"prompt_tokens": 8280, "completion_tokens": 31, "total_tokens": 8311, "prompt_tokens_details": {"cached_tokens": 0}, "completion_tokens_details": {"reasoning_tokens": 31}}, "tokens": {"prompt": 8280, "cached": 0}}
+omp A {"ttft_s": 5.146, "total_s": 5.38, "usage": {"prompt_tokens": 36402, "completion_tokens": 31, "total_tokens": 36433, "prompt_tokens_details": {"cached_tokens": 0}, "completion_tokens_details": {"reasoning_tokens": 31}}, "tokens": {"prompt": 36402, "cached": 0}}
+omp clear {"ttft_s": 4.502, "total_s": 4.707, "usage": {"prompt_tokens": 8249, "completion_tokens": 31, "total_tokens": 8280, "prompt_tokens_details": {"cached_tokens": 8128}, "completion_tokens_details": {"reasoning_tokens": 31}}, "tokens": {"prompt": 8249, "cached": 8128}}
+omp repeat {"ttft_s": 0.421, "total_s": 0.611, "usage": {"prompt_tokens": 8249, "completion_tokens": 31, "total_tokens": 8280, "prompt_tokens_details": {"cached_tokens": 8192}, "completion_tokens_details": {"reasoning_tokens": 31}}, "tokens": {"prompt": 8249, "cached": 8192}}
+omp next {"ttft_s": 0.408, "total_s": 0.617, "usage": {"prompt_tokens": 8277, "completion_tokens": 31, "total_tokens": 8308, "prompt_tokens_details": {"cached_tokens": 8192}, "completion_tokens_details": {"reasoning_tokens": 31}}, "tokens": {"prompt": 8277, "cached": 8192}}
+codex cold {"ttft_s": 1.326, "total_s": 1.529, "usage": null, "tokens": null}
+codex A {"ttft_s": 4.828, "total_s": 5.048, "usage": null, "tokens": null}
+codex clear {"ttft_s": 0.433, "total_s": 0.624, "usage": null, "tokens": null}
+codex repeat {"ttft_s": 0.381, "total_s": 0.568, "usage": null, "tokens": null}
+codex next {"ttft_s": 0.391, "total_s": 0.585, "usage": null, "tokens": null}
+replay done
+{
+  "arm": "ck9k-replay",
+  "model": "Ornith-1.5-35B-A3B-exl3-5.0bpw-hq",
+  "rows": "0",
+  "commit": "e90ac87",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 22.04,
+  "rss_ready_gib": 22.79,
+  "devzero_gib": 18.98,
+  "ram_after_80k_gib": 22.99,
+  "rss_gib": 23.83,
+  "locked_gib": 0.0,
+  "anon_gib": 4.01,
+  "file_gib": 22.64,
+  "unevict_gib": 0.0,
+  "shmem_gib": 18.98,
+  "current_gib": 26.78,
+  "peak_current_gib": 26.82,
+  "gpu_mib": "15078",
+  "decode_8k_p1": 201.2,
+  "ttft_8k_p1": 0.39,
+  "total_8k_p1": 1.0,
+  "ttft_mono_8k_p1": 0.39,
+  "decode_8k": 190.1,
+  "ttft_8k": 0.89,
+  "total_8k": 1.5,
+  "ttft_mono_8k": 0.89
+}
+74 arms -> /home/lucas/ai/FreeToken-wt/kfix/tasks/exclusive-expert-ram/results/sweep.tsv
+[ck9k-replay] stopping
