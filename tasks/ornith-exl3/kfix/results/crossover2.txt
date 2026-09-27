@@ -1,0 +1,13 @@
+# new tree, shipped block_m
+M  768 inline   3.0837  decoded   4.4957 EQ  decoded+fold      nan EQ
+M 1024 inline   4.1523  decoded   4.7278 EQ  decoded+fold      nan EQ
+M 1280 inline   5.3872  decoded   4.9072 EQ  decoded+fold      nan EQ
+M 1536 inline   5.7584  decoded   5.0914 EQ  decoded+fold      nan EQ
+M 1792 inline   6.2612  decoded   5.2550 EQ  decoded+fold      nan EQ
+M 2048 inline  16.7307  decoded   5.4694 EQ  decoded+fold      nan EQ
+# new tree, inline block_m capped at 32
+M 1024 inline   4.1706  decoded   4.6684 EQ  decoded+fold      nan EQ
+M 1536 inline   5.6841  decoded   5.0523 EQ  decoded+fold      nan EQ
+M 2048 inline   7.1067  decoded   5.4013 EQ  decoded+fold      nan EQ
+M 3072 inline   9.8986  decoded   6.2414 EQ  decoded+fold      nan EQ
+SWEEPDONE

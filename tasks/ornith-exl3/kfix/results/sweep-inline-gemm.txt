@@ -1,0 +1,77 @@
+# 2026-09-27T15:00:18+04:00 sm 277 MHz load 4.08 6.94 7.66
+M9 shipped (bk32 w4 s2): 2.8789
+M9 bk16 w4 s1: 0.8921 EQ
+M9 bk16 w4 s2: 2.4892 EQ
+M9 bk16 w4 s3: 2.0343 EQ
+M9 bk16 w8 s1: 0.9849 EQ
+M9 bk16 w8 s2: 2.5995 EQ
+M9 bk16 w8 s3: 2.6270 EQ
+M9 bk32 w4 s1: 1.0542 EQ
+M9 bk32 w4 s2: 2.8606 EQ
+M9 bk32 w4 s3: 3.1488 EQ
+M9 bk32 w8 s1: 0.9172 EQ
+M9 bk32 w8 s2: 2.7317 EQ
+M9 bk32 w8 s3: 2.7315 EQ
+M9 bk64 w4 s1: 1.2892 EQ
+M9 bk64 w4 s2: 6.3118 EQ
+M9 bk64 w4 s3: ERR OutOfResources out of resource: shared memory, Required: 151552, Hardware limit: 101376. Reduci
+M9 bk64 w8 s1: 4.5039 EQ
+M9 bk64 w8 s2: 9.9644 EQ
+M9 bk64 w8 s3: ERR OutOfResources out of resource: shared memory, Required: 151552, Hardware limit: 101376. Reduci
+M9 bk128 w4 s1: 1.3231 EQ
+M9 bk128 w4 s2: ERR OutOfResources out of resource: shared memory, Required: 167936, Hardware limit: 101376. Reduci
+M9 bk128 w4 s3: ERR OutOfResources out of resource: shared memory, Required: 303104, Hardware limit: 101376. Reduci
+M9 bk128 w8 s1: 9.1812 EQ
+M9 bk128 w8 s2: ERR OutOfResources out of resource: shared memory, Required: 167936, Hardware limit: 101376. Reduci
+M9 bk128 w8 s3: ERR OutOfResources out of resource: shared memory, Required: 303104, Hardware limit: 101376. Reduci
+M64 shipped (bk32 w4 s2): 8.8357
+M64 bk16 w4 s1: 2.5714 EQ
+M64 bk16 w4 s2: 6.9259 EQ
+M64 bk16 w4 s3: 6.1948 EQ
+M64 bk16 w8 s1: 2.7211 EQ
+M64 bk16 w8 s2: 7.9823 EQ
+M64 bk16 w8 s3: 7.9701 EQ
+M64 bk32 w4 s1: 2.8683 EQ
+M64 bk32 w4 s2: 8.8381 EQ
+M64 bk32 w4 s3: 9.8294 EQ
+M64 bk32 w8 s1: 2.5859 EQ
+M64 bk32 w8 s2: 8.4743 EQ
+M64 bk32 w8 s3: 8.0651 EQ
+M64 bk64 w4 s1: 3.3243 EQ
+M64 bk64 w4 s2: 14.1643 EQ
+M64 bk64 w4 s3: ERR OutOfResources out of resource: shared memory, Required: 151552, Hardware limit: 101376. Reduci
+M64 bk64 w8 s1: 3.8646 EQ
+M64 bk64 w8 s2: 13.9503 EQ
+M64 bk64 w8 s3: ERR OutOfResources out of resource: shared memory, Required: 151552, Hardware limit: 101376. Reduci
+M64 bk128 w4 s1: 3.6649 EQ
+M64 bk128 w4 s2: ERR OutOfResources out of resource: shared memory, Required: 167936, Hardware limit: 101376. Reduci
+M64 bk128 w4 s3: ERR OutOfResources out of resource: shared memory, Required: 303104, Hardware limit: 101376. Reduci
+M64 bk128 w8 s1: 3.9500 EQ
+M64 bk128 w8 s2: ERR OutOfResources out of resource: shared memory, Required: 167936, Hardware limit: 101376. Reduci
+M64 bk128 w8 s3: ERR OutOfResources out of resource: shared memory, Required: 303104, Hardware limit: 101376. Reduci
+M200 shipped (bk32 w4 s2): 10.1818
+M200 bk16 w4 s1: 3.4004 EQ
+M200 bk16 w4 s2: 8.2403 EQ
+M200 bk16 w4 s3: 7.0290 EQ
+M200 bk16 w8 s1: 3.1527 EQ
+M200 bk16 w8 s2: 9.1428 EQ
+M200 bk16 w8 s3: 9.1728 EQ
+M200 bk32 w4 s1: 3.3339 EQ
+M200 bk32 w4 s2: 10.0752 EQ
+M200 bk32 w4 s3: 11.2098 EQ
+M200 bk32 w8 s1: 2.9578 EQ
+M200 bk32 w8 s2: 9.7135 EQ
+M200 bk32 w8 s3: 9.3118 EQ
+M200 bk64 w4 s1: 3.8913 EQ
+M200 bk64 w4 s2: 16.0594 EQ
+M200 bk64 w4 s3: ERR OutOfResources out of resource: shared memory, Required: 151552, Hardware limit: 101376. Reduci
+M200 bk64 w8 s1: 4.4370 EQ
+M200 bk64 w8 s2: 15.7021 EQ
+M200 bk64 w8 s3: ERR OutOfResources out of resource: shared memory, Required: 151552, Hardware limit: 101376. Reduci
+M200 bk128 w4 s1: 4.1647 EQ
+M200 bk128 w4 s2: ERR OutOfResources out of resource: shared memory, Required: 167936, Hardware limit: 101376. Reduci
+M200 bk128 w4 s3: ERR OutOfResources out of resource: shared memory, Required: 303104, Hardware limit: 101376. Reduci
+M200 bk128 w8 s1: 4.2212 EQ
+M200 bk128 w8 s2: ERR OutOfResources out of resource: shared memory, Required: 167936, Hardware limit: 101376. Reduci
+M200 bk128 w8 s3: ERR OutOfResources out of resource: shared memory, Required: 303104, Hardware limit: 101376. Reduci
+SWEEPDONE
