@@ -1,0 +1,289 @@
+The user wants me to read this engineering design document about serving NVIDIA Nemotron models with FreeToken, then summarize its main design decisions, critique them (which look fragile, what measurements are missing, what I'd change first).
+
+Let me carefully work through this document to extract the actual design decisions, then critique them rigorously.
+
+Let me first understand what this document is. It's serving notes for the `NemotronHForCausalLM` family — a hybrid Mamba-2 / full-attention / latent-MoE architecture. FreeToken is the serving engine. There are two checkpoints:
+1. Nemotron 3 Super (120B-A12B, NVFP4, ~60 GiB host RAM, 10.3 GiB GPU weights, single session only)
+2. Nemotron 3.5 Lightning (30B-A3B, NVFP4, 52 layers: 23 Mamba-2, 23 MoE, 6 full-attention)
+
+Let me extract the main design decisions:
+
+**Architecture/serve model:**
+- Hybrid Mamba-2 (SSD) + full-attention + latent MoE. Mamba-2 recurrent state is fp32 (required by kernels), ~47 MiB/seq on Lightning, ~160 MiB/seq on Super.
+- Super is `single_stream_only` (bs=1 decode graph, --max-running-requests 1).
+- Lightning is NOT single_stream_only: up to 16 concurrent.
+
+**MoE offload strategy:**
+- `--moe-backend offload` is the recommendation. Experts live in host RAM (NVFP4 banks), fetched over PCIe on demand.
+- NVFP4 expert banks: 15.4 GiB on Lightning.
+- `--moe-pageable-gpu` for WSL pin-budget overflow.
+- `FREETOKEN_PIN_BUDGET_GB=17` pins every layer, keeps CUDA graphs.
+
+**NVFP4 expert GEMM backend:**
+- `triton` is the default and recommended. b12x (tensor-core) is wrong on this geometry. flashinfer can combine with kv-grow-step. marlin rejected at config time.
+- Chosen once at bank-load time because it pins the on-GPU weight layout.
+
+**KV cache:**
+- `q8_0` quantized KV chosen over fp8_e4m3 (fp8 flipped first tokens on cached-prefix reuse).
+- Growable KV via `--kv-grow-step-tokens` funds KV from expert cache.
+- Context ceiling: tokenizer model_max_length 262144 (though max_position_embeddings is 1M).
+
+**Concurrency / state pool:**
+- `--linear-state-slots` sizing for Mamba-2 ping-pong state. `4·mr + 1` for hybrid_radix.
+- Fixed 16-lane launch sizes GDN state pool for max-running-requests up front.
+
+**Expert cache policy:**
+- LFU above ~15% miss rate, LRU below. At bs=16, LRU degenerates to 99.6% miss, LFU halves to 51%, worth 1.80× throughput.
+
+**CUDA graphs:**
+- Dense decode graph ladder [1..16] for offload-MoE (padded rows route their own experts, so sparse is slower).
+- Decode CUDA graphs disabled with pageable-gpu.
+
+**Prefill:**
+- `--max-prefill-length 8192`. Chunk size not a throughput lever.
+- MoE prefill GEMM optimizations: per-block scale loading (1.73x), native FP4 decode, deinterleaved A operand.
+
+**Speculative decoding:**
+- `--speculative ngram`, off by default, greedy/single-stream only.
+- `--spec-ngram-n 8`, `--spec-draft-len 8`, `--no-spec-adaptive`.
+- Extend-path MoE fix (`--moe-extend-cache-tokens 64`) was the blocker.
+- Long context regresses.
+
+**1M single-session profile:**
+- Session spill to RAM then NVMe.
+- Look-ahead promotion, partial-prefix restore, prefill-time state capture.
+- One resident session, others queue.
+
+**Memory prediction:**
+- `--memory-ratio 1.00` default, predicted from config, measured at startup.
+
+Now let me critique. Let me think about what's fragile, what measurements are missing, what I'd change first.
+
+Let me think hard about the actual engineering and where the design is fragile.
+
+**Fragile decisions:**
+
+1. **NVFP4 backend chosen once at bank-load time, pinned by weight layout.** This is a hard coupling — you can't use b12x for prefill and Triton for decode. This is actually a reasonable constraint given the layout pinning, but it means the whole model's decode is locked to whatever's best at bank load. The document notes b12x wins the widest prefill chunk. So there's a genuine tension: the layout is fixed, but the optimal kernel differs by workload shape. This is somewhat fragile because it's a global decision with no per-workload adaptation.
+
+Actually wait — the document says the backend is chosen once at bank-load time because it pins the on-GPU weight layout. That's a real constraint. But it means if your workload is prefill-heavy, you're stuck with Triton which loses the widest chunk. This is a real fragility but maybe unavoidable.
+
+2. **LFU vs LRU decision rule based on a 15% miss-rate threshold.** This is a heuristic. The document says "Rule of thumb: LFU above a ~15% miss rate, LRU below it — read the rate off the scheduler's idle MoE decode miss stats line." This is fragile because:
+   - It's a single scalar heuristic that may not generalize across workloads.
+   - The miss rate is measured at idle, which may not reflect the actual working set under load.
+   - LFU's benefit (1.80×) depends on the specific expert-access distribution. Under different traffic (e.g., more uniform), LFU could be worse.
+   - LFU has its own failure modes: it can pin cold-but-frequently-used experts, and it's sensitive to the observation window. The document doesn't discuss LFU's downside (cache pollution from transient bursts).
+
+3. **The `--kv-grow-step-tokens` decision.** The document has a nuanced view: it's good for multi-agent session serving where KV is genuinely idle between turns, but bad for prefix-reuse-heavy batch work (replay, eval, teacher forcing) because it tears down the whole prefix cache. This is a genuinely fragile knob — the same flag is a win or a loss depending on workload class, and the default behavior arms `_growable_shrink_pending` on every finished request. The measurement shows 89% pure loss. This is a design smell: a flag that's correct for one class of workload and catastrophic for another, with the catastrophic behavior being the default-armed one.
+
+Actually, let me re-read. The default profile (2026-09-17) does NOT use `--kv-grow-step-tokens` — it uses fixed KV. P2 (historical) used it. The 1M profile uses it. So the default is fixed KV. Good. But the point stands that it's a fragile knob.
+
+4. **Speculative decoding gating.** Spec is off by default and silently takes the decode path for many request types (temperature > 0, multi-request, multimodal, hidden-state probe, SWA, naive cache). "The flag never refuses a request, it just does not speculate on it." This silent behavior is fragile — a user enabling `--speculative ngram` may not realize it's not actually speculating on their workload. There's no signal that speculation was skipped. This is a correctness/transparency fragility.
+
+5. **The 1M session spill / residency policy.** This is complex:
+   - No spill while queue empty (on-demand).
+   - Retention by capacity + age.
+   - Survive restart with fingerprint matching.
+   - Look-ahead promotion on a background thread.
+   - Partial-prefix restore with state capture.
+   - The residency policy is intricate and has many interacting parts. The "on demand, not on idle timer" spill means the resident session's KV stays in VRAM until another session needs the slot. This is fragile because it depends on precise admission-failure-point reclamation logic.
+
+6. **Mamba-2 state is fp32 and required.** `FREETOKEN_MAMBA_SSM_DTYPE=bfloat16` is rejected at config time. This is a hard constraint from the kernels. Fragile in the sense that it's a fixed cost (~47 MiB/seq on Lightning, ~160 MiB/seq on Super) that can't be reduced.
+
+7. **The decode CUDA graph ladder.** Dense [1..16] for offload-MoE. This is well-measured (1.074×). But it's a geometry-specific decision. The document notes padding a row routes its own experts, so sparse is slower. This is correct but means the graph set is workload-dependent.
+
+8. **Memory ratio 1.00.** The document argues 1.00 is correct on the 5080 because the extra slots only pay off as higher expert hit rate on varied real traffic, which the probe doesn't measure. This is a somewhat hand-wavy justification — "the extra slots only pay off as a higher expert hit rate on varied real traffic, which is not what the probe measures." So they chose 1.00 partly because the measurement tool can't distinguish. That's a fragile justification.
+
+**Measurements missing:**
+
+1. **End-to-end latency under realistic mixed workloads.** Most measurements are synthetic needle prompts. The document repeatedly notes "the copy-class lottery" and that real traffic differs. There's no measurement of the system under realistic, varied agent traffic with mixed prompt lengths, mixed concurrency, and real prefix reuse. The 16-way passthrough soak "passes with zero errors" but "one 10-minute pair cannot separate [p95/p99 tail] from variance."
+
+2. **The expert hit rate under real traffic.** The whole MoE residency / LFU argument rests on expert access patterns. The measurements are synthetic. Real agent workloads (copy-heavy vs code vs prose) have very different expert access distributions. The speculative decoding section shows copy traffic behaves completely differently from code/prose. There's no measurement of expert cache hit rate across these workload classes.
+
+3. **Long-context speculation cost.** The document acknowledges long context regresses (12× at 131K) but says "still open: a cheaper long-context verify step." This is a known gap.
+
+4. **Cross-GPU generalization.** All measurements are on the RTX 5080 (sm_120). The document mentions WSL, different GPUs (5090, 3060 Ti in the CLI example). The launch configs, graph ladders, kernel choices are all 5080-specific. There's no measurement on other hardware. The `triton` vs b12x decision is geometry-specific (sm_120).
+
+5. **Sustained throughput / thermal / long-run behavior.** The soak runs are short (10 minutes). No long-run thermal throttling, no sustained throughput degradation.
+
+6. **The 1M restore correctness at scale.** The restart restore is measured at 1M (2.681 s) but this is a single sample. The partial-prefix restore, look-ahead promotion, and state capture have many failure modes that aren't measured under adversarial conditions.
+
+7. **Prefill chunk size sensitivity.** The document claims chunk size is not a throughput lever, but this is measured on synthetic needle. Real prompts may have different chunk-size sensitivity.
+
+8. **The memory prediction accuracy.** The document says the engine predicts VRAM and WARNs outside ±25%. But it doesn't report how often it's actually outside ±25% in practice, or what happens when it is.
+
+9. **NVFP4 backend robustness.** The b12x vs triton decision is measured on microbenchmarks and some end-to-end. But there's no measurement of numerical correctness across the full range, or of the dequant path under different conditions.
+
+**What I'd change first:**
+
+Let me think about what's highest-leverage and most fragile.
+
+1. **The speculative decoding silent-skip behavior.** This is a transparency bug. A user sets `--speculative ngram` expecting speedup and gets none, with no signal. I'd add a clear signal (stats/log line) when speculation is skipped and why. This is low-cost and high-value.
+
+Actually, let me reconsider. The document is very measurement-driven and sophisticated. Let me think about what a sharp engineer would actually flag.
+
+Let me reconsider the biggest fragilities:
+
+**A. The single global NVFP4 backend decision.** The layout pinning means the whole model is locked to one kernel. This is a real architectural constraint, but the document itself shows b12x wins the widest prefill chunk. For a prefill-heavy deployment, this is a 10-13% prefill penalty baked in permanently. The "fix" would be a layout that supports both, or a runtime that can remap. But given the constraint, maybe it's unavoidable. Still, worth flagging as a fragility: the design has no escape hatch from a suboptimal-for-some-workloads kernel.
+
+**B. The LFU/LRU 15% threshold heuristic.** This is the most fragile operational decision. It's a single scalar rule that determines a major performance outcome (1.80× at 16-way). It's measured on synthetic traffic. It's read off an "idle" stat line. It doesn't account for:
+   - LFU cache pollution (transient bursts pin cold experts).
+   - The fact that the miss rate at idle ≠ miss rate under load.
+   - Workload drift over time (a session that starts copy-heavy becomes prose-heavy).
+   - The cost of switching policies at runtime.
+   
+   I'd want a measurement of the policy's behavior under realistic, drifting workloads, and probably a more robust policy (e.g., adaptive, or per-layer, or one that bounds LFU's pollution).
+
+**C. The `--kv-grow-step-tokens` default-armed teardown.** Even though the default profile doesn't use it, the mechanism arms teardown on every finished request when it's set, and the teardown is 89% pure loss on prefix-reuse workloads. This is a design smell: a mechanism whose failure mode (tearing down the whole prefix cache before knowing a shrink is achievable) is worse than not having it. The fix suggested ("before it knows a shrink is achievable") is a clear improvement — gate the eviction on actual achievability. I'd change this first because it's a clear correctness/perf bug with a clear fix.
+
+Actually, re-reading: "Setting it arms `_growable_shrink_pending` on every finished request... and `_maybe_shrink_growable_kv` then runs at the next idle moment and calls `evict_all_unlocked_prefixes()` — throwing away the entire prefix cache — before it knows a shrink is achievable. When it is not, the eviction is pure loss." This is a clear bug: evict before knowing it's needed. I'd fix this — gate the eviction on a real shrink being achievable.
+
+**D. The 1M residency complexity.** The spill/restore/look-ahead/partial-prefix/state-capture system is extremely intricate. Each of these is a potential failure point. The document measures the happy path (byte-identical restore) but the adversarial paths (partial prefix, look-ahead race, state capture race) are less measured. This complexity is fragile. I'd consider whether some of it can be simplified.
+
+Let me also think about:
+
+**E. The reliance on synthetic needle prompts for correctness.** The document repeatedly uses "needle recalled" as the correctness signal. But the cross-engine oracle section shows
+<<content>>
+The user wants me to read this engineering design document about serving NVIDIA Nemotron models with FreeToken, then summarize its main design decisions, critique them (which look fragile, what measurements are missing, what I'd change first).
+
+Let me carefully work through this document to extract the actual design decisions, then critique them rigorously.
+
+Let me first understand what this document is. It's serving notes for the `NemotronHForCausalLM` family — a hybrid Mamba-2 / full-attention / latent-MoE architecture. FreeToken is the serving engine. There are two checkpoints:
+1. Nemotron 3 Super (120B-A12B, NVFP4, ~60 GiB host RAM, 10.3 GiB GPU weights, single session only)
+2. Nemotron 3.5 Lightning (30B-A3B, NVFP4, 52 layers: 23 Mamba-2, 23 MoE, 6 full-attention)
+
+Let me extract the main design decisions:
+
+**Architecture/serve model:**
+- Hybrid Mamba-2 (SSD) + full-attention + latent MoE. Mamba-2 recurrent state is fp32 (required by kernels), ~47 MiB/seq on Lightning, ~160 MiB/seq on Super.
+- Super is `single_stream_only` (bs=1 decode graph, --max-running-requests 1).
+- Lightning is NOT single_stream_only: up to 16 concurrent.
+
+**MoE offload strategy:**
+- `--moe-backend offload` is the recommendation. Experts live in host RAM (NVFP4 banks), fetched over PCIe on demand.
+- NVFP4 expert banks: 15.4 GiB on Lightning.
+- `--moe-pageable-gpu` for WSL pin-budget overflow.
+- `FREETOKEN_PIN_BUDGET_GB=17` pins every layer, keeps CUDA graphs.
+
+**NVFP4 expert GEMM backend:**
+- `triton` is the default and recommended. b12x (tensor-core) is wrong on this geometry. flashinfer can combine with kv-grow-step. marlin rejected at config time.
+- Chosen once at bank-load time because it pins the on-GPU weight layout.
+
+**KV cache:**
+- `q8_0` quantized KV chosen over fp8_e4m3 (fp8 flipped first tokens on cached-prefix reuse).
+- Growable KV via `--kv-grow-step-tokens` funds KV from expert cache.
+- Context ceiling: tokenizer model_max_length 262144 (though max_position_embeddings is 1M).
+
+**Concurrency / state pool:**
+- `--linear-state-slots` sizing for Mamba-2 ping-pong state. `4·mr + 1` for hybrid_radix.
+- Fixed 16-lane launch sizes GDN state pool for max-running-requests up front.
+
+**Expert cache policy:**
+- LFU above ~15% miss rate, LRU below. At bs=16, LRU degenerates to 99.6% miss, LFU halves to 51%, worth 1.80× throughput.
+
+**CUDA graphs:**
+- Dense decode graph ladder [1..16] for offload-MoE (padded rows route their own experts, so sparse is slower).
+- Decode CUDA graphs disabled with pageable-gpu.
+
+**Prefill:**
+- `--max-prefill-length 8192`. Chunk size not a throughput lever.
+- MoE prefill GEMM optimizations: per-block scale loading (1.73x), native FP4 decode, deinterleaved A operand.
+
+**Speculative decoding:**
+- `--speculative ngram`, off by default, greedy/single-stream only.
+- `--spec-ngram-n 8`, `--spec-draft-len 8`, `--no-spec-adaptive`.
+- Extend-path MoE fix (`--moe-extend-cache-tokens 64`) was the blocker.
+- Long context regresses.
+
+**1M single-session profile:**
+- Session spill to RAM then NVMe.
+- Look-ahead promotion, partial-prefix restore, prefill-time state capture.
+- One resident session, others queue.
+
+**Memory prediction:**
+- `--memory-ratio 1.00` default, predicted from config, measured at startup.
+
+Now let me critique. Let me think about what's fragile, what measurements are missing, what I'd change first.
+
+Let me think hard about the actual engineering and where the design is fragile.
+
+**Fragile decisions:**
+
+1. **NVFP4 backend chosen once at bank-load time, pinned by weight layout.** This is a hard coupling — you can't use b12x for prefill and Triton for decode. This is actually a reasonable constraint given the layout pinning, but it means the whole model's decode is locked to whatever's best at bank load. The document notes b12x wins the widest prefill chunk. So there's a genuine tension: the layout is fixed, but the optimal kernel differs by workload shape. This is somewhat fragile because it's a global decision with no per-workload adaptation.
+
+Actually wait — the document says the backend is chosen once at bank-load time because it pins the on-GPU weight layout. That's a real constraint. But it means if your workload is prefill-heavy, you're stuck with Triton which loses the widest chunk. This is a real fragility but maybe unavoidable.
+
+2. **LFU vs LRU decision rule based on a 15% miss-rate threshold.** This is a heuristic. The document says "Rule of thumb: LFU above a ~15% miss rate, LRU below it — read the rate off the scheduler's idle MoE decode miss stats line." This is fragile because:
+   - It's a single scalar heuristic that may not generalize across workloads.
+   - The miss rate is measured at idle, which may not reflect the actual working set under load.
+   - LFU's benefit (1.80×) depends on the specific expert-access distribution. Under different traffic (e.g., more uniform), LFU could be worse.
+   - LFU has its own failure modes: it can pin cold-but-frequently-used experts, and it's sensitive to the observation window. The document doesn't discuss LFU's downside (cache pollution from transient bursts).
+
+3. **The `--kv-grow-step-tokens` decision.** The document has a nuanced view: it's good for multi-agent session serving where KV is genuinely idle between turns, but bad for prefix-reuse-heavy batch work (replay, eval, teacher forcing) because it tears down the whole prefix cache. This is a genuinely fragile knob — the same flag is a win or a loss depending on workload class, and the default behavior arms `_growable_shrink_pending` on every finished request. The measurement shows 89% pure loss. This is a design smell: a flag that's correct for one class of workload and catastrophic for another, with the catastrophic behavior being the default-armed one.
+
+Actually, let me re-read. The default profile (2026-09-17) does NOT use `--kv-grow-step-tokens` — it uses fixed KV. P2 (historical) used it. The 1M profile uses it. So the default is fixed KV. Good. But the point stands that it's a fragile knob.
+
+4. **Speculative decoding gating.** Spec is off by default and silently takes the decode path for many request types (temperature > 0, multi-request, multimodal, hidden-state probe, SWA, naive cache). "The flag never refuses a request, it just does not speculate on it." This silent behavior is fragile — a user enabling `--speculative ngram` may not realize it's not actually speculating on their workload. There's no signal that speculation was skipped. This is a correctness/transparency fragility.
+
+5. **The 1M session spill / residency policy.** This is complex:
+   - No spill while queue empty (on-demand).
+   - Retention by capacity + age.
+   - Survive restart with fingerprint matching.
+   - Look-ahead promotion on a background thread.
+   - Partial-prefix restore with state capture.
+   - The residency policy is intricate and has many interacting parts. The "on demand, not on idle timer" spill means the resident session's KV stays in VRAM until another session needs the slot. This is fragile because it depends on precise admission-failure-point reclamation logic.
+
+6. **Mamba-2 state is fp32 and required.** `FREETOKEN_MAMBA_SSM_DTYPE=bfloat16` is rejected at config time. This is a hard constraint from the kernels. Fragile in the sense that it's a fixed cost (~47 MiB/seq on Lightning, ~160 MiB/seq on Super) that can't be reduced.
+
+7. **The decode CUDA graph ladder.** Dense [1..16] for offload-MoE. This is well-measured (1.074×). But it's a geometry-specific decision. The document notes padding a row routes its own experts, so sparse is slower. This is correct but means the graph set is workload-dependent.
+
+8. **Memory ratio 1.00.** The document argues 1.00 is correct on the 5080 because the extra slots only pay off as higher expert hit rate on varied real traffic, which the probe doesn't measure. This is a somewhat hand-wavy justification — "the extra slots only pay off as a higher expert hit rate on varied real traffic, which is not what the probe measures." So they chose 1.00 partly because the measurement tool can't distinguish. That's a fragile justification.
+
+**Measurements missing:**
+
+1. **End-to-end latency under realistic mixed workloads.** Most measurements are synthetic needle prompts. The document repeatedly notes "the copy-class lottery" and that real traffic differs. There's no measurement of the system under realistic, varied agent traffic with mixed prompt lengths, mixed concurrency, and real prefix reuse. The 16-way passthrough soak "passes with zero errors" but "one 10-minute pair cannot separate [p95/p99 tail] from variance."
+
+2. **The expert hit rate under real traffic.** The whole MoE residency / LFU argument rests on expert access patterns. The measurements are synthetic. Real agent workloads (copy-heavy vs code vs prose) have very different expert access distributions. The speculative decoding section shows copy traffic behaves completely differently from code/prose. There's no measurement of expert cache hit rate across these workload classes.
+
+3. **Long-context speculation cost.** The document acknowledges long context regresses (12× at 131K) but says "still open: a cheaper long-context verify step." This is a known gap.
+
+4. **Cross-GPU generalization.** All measurements are on the RTX 5080 (sm_120). The document mentions WSL, different GPUs (5090, 3060 Ti in the CLI example). The launch configs, graph ladders, kernel choices are all 5080-specific. There's no measurement on other hardware. The `triton` vs b12x decision is geometry-specific (sm_120).
+
+5. **Sustained throughput / thermal / long-run behavior.** The soak runs are short (10 minutes). No long-run thermal throttling, no sustained throughput degradation.
+
+6. **The 1M restore correctness at scale.** The restart restore is measured at 1M (2.681 s) but this is a single sample. The partial-prefix restore, look-ahead promotion, and state capture have many failure modes that aren't measured under adversarial conditions.
+
+7. **Prefill chunk size sensitivity.** The document claims chunk size is not a throughput lever, but this is measured on synthetic needle. Real prompts may have different chunk-size sensitivity.
+
+8. **The memory prediction accuracy.** The document says the engine predicts VRAM and WARNs outside ±25%. But it doesn't report how often it's actually outside ±25% in practice, or what happens when it is.
+
+9. **NVFP4 backend robustness.** The b12x vs triton decision is measured on microbenchmarks and some end-to-end. But there's no measurement of numerical correctness across the full range, or of the dequant path under different conditions.
+
+**What I'd change first:**
+
+Let me think about what's highest-leverage and most fragile.
+
+1. **The speculative decoding silent-skip behavior.** This is a transparency bug. A user sets `--speculative ngram` expecting speedup and gets none, with no signal. I'd add a clear signal (stats/log line) when speculation is skipped and why. This is low-cost and high-value.
+
+Actually, let me reconsider. The document is very measurement-driven and sophisticated. Let me think about what a sharp engineer would actually flag.
+
+Let me reconsider the biggest fragilities:
+
+**A. The single global NVFP4 backend decision.** The layout pinning means the whole model is locked to one kernel. This is a real architectural constraint, but the document itself shows b12x wins the widest prefill chunk. For a prefill-heavy deployment, this is a 10-13% prefill penalty baked in permanently. The "fix" would be a layout that supports both, or a runtime that can remap. But given the constraint, maybe it's unavoidable. Still, worth flagging as a fragility: the design has no escape hatch from a suboptimal-for-some-workloads kernel.
+
+**B. The LFU/LRU 15% threshold heuristic.** This is the most fragile operational decision. It's a single scalar rule that determines a major performance outcome (1.80× at 16-way). It's measured on synthetic traffic. It's read off an "idle" stat line. It doesn't account for:
+   - LFU cache pollution (transient bursts pin cold experts).
+   - The fact that the miss rate at idle ≠ miss rate under load.
+   - Workload drift over time (a session that starts copy-heavy becomes prose-heavy).
+   - The cost of switching policies at runtime.
+   
+   I'd want a measurement of the policy's behavior under realistic, drifting workloads, and probably a more robust policy (e.g., adaptive, or per-layer, or one that bounds LFU's pollution).
+
+**C. The `--kv-grow-step-tokens` default-armed teardown.** Even though the default profile doesn't use it, the mechanism arms teardown on every finished request when it's set, and the teardown is 89% pure loss on prefix-reuse workloads. This is a design smell: a mechanism whose failure mode (tearing down the whole prefix cache before knowing a shrink is achievable) is worse than not having it. The fix suggested ("before it knows a shrink is achievable") is a clear improvement — gate the eviction on actual achievability. I'd change this first because it's a clear correctness/perf bug with a clear fix.
+
+Actually, re-reading: "Setting it arms `_growable_shrink_pending` on every finished request... and `_maybe_shrink_growable_kv` then runs at the next idle moment and calls `evict_all_unlocked_prefixes()` — throwing away the entire prefix cache — before it knows a shrink is achievable. When it is not, the eviction is pure loss." This is a clear bug: evict before knowing it's needed. I'd fix this — gate the eviction on a real shrink being achievable.
+
+**D. The 1M residency complexity.** The spill/restore/look-ahead/partial-prefix/state-capture system is extremely intricate. Each of these is a potential failure point. The document measures the happy path (byte-identical restore) but the adversarial paths (partial prefix, look-ahead race, state capture race) are less measured. This complexity is fragile. I'd consider whether some of it can be simplified.
+
+Let me also think about:
+
+**E. The reliance on synthetic needle prompts for correctness.** The document repeatedly uses "needle recalled" as the correctness signal. But the cross-engine oracle section shows

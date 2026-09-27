@@ -1,0 +1,617 @@
+The user wants a complete, well-documented Python module that implements:
+1. A thread-safe LRU cache with per-entry time-to-live (TTL)
+2. Size-based eviction
+3. Hit/miss statistics
+4. A decorator for memoizing functions
+5. Type hints
+6. A set of unittest test cases
+
+Let me design this carefully.
+
+## Design
+
+### Core Data Structure
+I'll use `collections.OrderedDict` for the LRU ordering, combined with a `threading.Lock` for thread safety.
+
+For TTL, I'll store the expiry timestamp with each entry.
+
+### Class: `LRUCache`
+
+Attributes:
+- `maxsize`: maximum number of entries
+- `default_ttl`: default time-to-live for entries (in seconds)
+- `_cache`: OrderedDict mapping key -> (value, expiry_time)
+- `_lock`: threading.Lock
+- `_hits`, `_misses`: counters for statistics
+- `_lock` for thread safety
+
+Methods:
+- `__init__(self, maxsize=512, default_ttl=None)`: constructor
+- `get(self, key, default=None)`: retrieve a value, checking TTL
+- `set(self, key, value, ttl=None)`: store a value with optional TTL override
+- `__getitem__`, `__setitem__`, `__contains__`, `__len__`, `__delitem__`, `__iter__`, `__repr__`: dunder methods for dict-like access
+- `pop(self, key, default=None)`: remove an entry
+- `clear(self)`: clear the cache
+- `evict_expired(self)`: remove expired entries
+- `stats(self)`: return hit/miss statistics
+- `hit_rate(self)`: return hit rate
+- `info(self)`: return detailed info
+
+### Thread Safety
+Use `threading.RLock` (reentrant lock) so that methods that call each other don't deadlock. Actually, let me think about this. If I use a regular `Lock`, and a method acquires the lock and then calls another method that also tries to acquire the lock, it will deadlock. Using `RLock` avoids this. But I need to be careful about the design.
+
+Actually, let me use `RLock` to be safe, since dunder methods like `__getitem__` might call `get`, etc.
+
+Wait, but there's a subtlety. If I use RLock and have methods call each other, I need to make sure the statistics are updated correctly. Let me be careful.
+
+Let me design so that the core operations acquire the lock, and the public methods that need stats update handle it.
+
+Actually, let me think about the cleanest design:
+
+- `_get_locked(key, default)`: internal, assumes lock is held, does the actual lookup and stats update
+- `get(key, default)`: acquires lock, calls `_get_locked`
+- `__getitem__`: calls `get`
+
+Hmm, but if `get` updates stats and `__getitem__` calls `get`, that's fine.
+
+Let me reconsider. The stats update (hit/miss) should happen on every lookup. Let me put the stats logic in the core method.
+
+Let me write:
+
+```python
+def get(self, key, default=None):
+    with self._lock:
+        if key in self._cache:
+            value, expiry = self._cache[key]
+            if self._is_expired(expiry):
+                # treat as miss
+                del self._cache[key]
+                self._misses += 1
+                return default
+            # move to end (most recently used)
+            self._cache.move_to_end(key)
+            self._hits += 1
+            return value
+        else:
+            self._misses += 1
+            return default
+```
+
+Wait, but there's a subtlety with TTL and "touching". When we get a hit, should we refresh the TTL? Typically no — LRU caches with TTL don't refresh TTL on access (that would be more like a "sliding expiration" which is a different policy). I'll keep TTL fixed at insertion time (absolute expiration). This is the standard behavior. I'll document this.
+
+Actually, let me reconsider. There are two common policies:
+1. Absolute expiration: TTL is measured from insertion.
+2. Sliding expiration: TTL is reset on each access.
+
+I'll implement absolute expiration as the default, which is more common and predictable. I'll document it clearly.
+
+### Size-based eviction
+When setting a new entry and the cache is full, evict the least recently used entry. I should also evict expired entries first (optional optimization), but the standard approach is to just evict LRU. Let me evict expired entries opportunistically during set to keep things clean, but the primary eviction is LRU.
+
+Actually, let me keep it simple: on `set`, if the size exceeds maxsize, pop the first (oldest) item. I'll also check for expired items during eviction.
+
+Let me write `set`:
+
+```python
+def set(self, key, value, ttl=None):
+    expiry = time.monotonic() + (ttl if ttl is not None else self.default_ttl)
+    with self._lock:
+        if key in self._cache:
+            self._cache[key] = (value, expiry)
+            self._cache.move_to_end(key)
+        else:
+            self._cache[key] = (value, expiry)
+            # evict if necessary
+            while len(self._cache) > self.maxsize:
+                self._cache.popitem(last=False)  # remove LRU
+```
+
+Hmm, but I should evict expired entries preferentially. Let me add a helper that evicts expired entries. Actually, let me keep the eviction logic clean: when over capacity, first try to remove expired entries, then remove LRU.
+
+Let me think about whether to make maxsize enforceable. If maxsize is 0, the cache should never store anything. Let me handle that edge case.
+
+### TTL handling
+`default_ttl` can be None (meaning no expiration) or a number (seconds). Each entry's expiry is computed as `now + ttl`. If ttl is None, expiry is None (never expires).
+
+`_is_expired(expiry)`:
+```python
+def _is_expired(self, expiry):
+    if expiry is None:
+        return False
+    return time.monotonic() >= expiry
+```
+
+I'll use `time.monotonic()` for measuring elapsed time (immune to system clock changes). But for the decorator, users might want to use wall-clock... Actually monotonic is better for TTL. Let me use monotonic.
+
+Hmm, but for testing, I might want to inject a clock. Let me add a `_now` parameter or a way to override the time function for testing. Actually, I can make the time function injectable via a parameter to the constructor, defaulting to `time.monotonic`. That makes testing deterministic.
+
+Let me add `_time_func` parameter. Actually, let me keep it simpler but still testable. I'll allow passing a `clock` function.
+
+Let me design the constructor:
+```python
+def __init__(self, maxsize=512, default_ttl=None, *, clock=time.monotonic):
+```
+
+Then use `self._clock()` to get current time.
+
+### Statistics
+- `_hits`: int
+- `_misses`: int
+- `stats()`: returns dict with hits, misses, total, hit_rate
+- `hit_rate()`: hits / (hits + misses), or 0 if no lookups
+
+### Decorator: `cached` / `memoize`
+A decorator that wraps a function with the cache. It should:
+- Accept cache configuration (maxsize, ttl) or an existing cache instance
+- Use the function's arguments as the cache key
+- Handle unhashable arguments gracefully (fall back to calling the function directly, or raise)
+- Support cache clearing
+- Support stats access
+
+Let me design:
+
+```python
+def cached(maxsize=None, ttl=None, *, cache=None, key_func=None):
+    def decorator(func):
+        ...
+        return wrapper
+    return decorator
+```
+
+The wrapper needs to:
+- Build a key from the arguments
+- Check the cache
+- On miss, call the function and store the result
+- Return the result
+
+For key generation, I'll use a function that hashes the arguments. If arguments are unhashable, I'll fall back to computing the result directly (no caching) — this is a common approach (like functools.lru_cache raises TypeError for unhashable, but some implementations fall back). Let me think.
+
+Actually, `functools.lru_cache` raises `TypeError` for unhashable arguments. But that's often annoying. Let me provide a `key_func` parameter so users can customize. By default, I'll try to build a key from args and kwargs; if that fails, I'll fall back to calling the function directly (uncached). This is more user-friendly. I'll document this behavior.
+
+Hmm, but falling back silently might hide bugs. Let me make it configurable. Actually, let me follow a reasonable default: try to create a hashable key; if it fails, call the function directly without caching. I'll document this clearly.
+
+Let me build the key:
+```python
+def _make_key(args, kwargs):
+    key = args
+    if kwargs:
+        key += (sentinel, frozenset(kwargs.items()))
+    return key
+```
+
+Wait, kwargs items need to be hashable too. `frozenset(kwargs.items())` requires the items (key, value) tuples to be hashable, which requires values to be hashable. If not, this raises TypeError.
+
+Let me wrap in try/except and fall back.
+
+Actually, let me use a cleaner approach. I'll create a helper that tries to make a hashable key.
+
+Let me think about the wrapper signature. The decorated function can take `*args, **kwargs`. The wrapper:
+
+```python
+@wraps(func)
+def wrapper(*args, **kwargs):
+    key = _make_key(args, kwargs)
+    if key is None:
+        # unhashable, fall back
+        return func(*args, **kwargs)
+    if key in cache:
+        stats hits...
+        return cache.get(key)
+    result = func(*args, **kwargs)
+    cache.set(key, result, ttl=ttl)
+    return result
+```
+
+But wait, there's a subtlety with exceptions. If `func` raises, we shouldn't cache the exception. The above handles that correctly since we only cache after `func` returns.
+
+Also, for thread safety, the cache operations are thread-safe, but there's a TOCTOU issue: checking `key in cache` then `cache.get` then `cache.set`. Between these, another thread could modify. But since each individual operation is atomic (under lock), the worst case is a redundant computation, not incorrectness. This is acceptable for a cache. Actually, to be safe, I could add a `get_or_set` method that does the check-and-set atomically. Let me add that to avoid redundant computation under concurrency.
+
+Let me add `get_or_set` to the cache:
+```python
+def get_or_set(self, key, factory, ttl=None):
+    with self._lock:
+        if key in self._cache and not self._is_expired(self._cache[key][1]):
+            self._cache.move_to_end(key)
+            self._hits += 1
+            return self._cache[key][0]
+        self._misses += 1
+        value = factory()
+        self.set(key, value, ttl=ttl)
+        return value
+```
+
+Hmm, but `set` also acquires the lock (RLock, so it's fine). But `set` doesn't update stats. Good.
+
+Wait, but there's a subtle issue: `get_or_set` increments misses even if the factory is going to be called. That's correct — a miss means we didn't have a valid cached value.
+
+Actually, let me reconsider whether the decorator should use `get_or_set` or the simpler check-then-miss. Using `get_or_set` is cleaner and avoids redundant computation. But it calls the factory (the function) while... no, it calls factory outside the lock. Let me make sure factory is called outside the lock to avoid holding the lock during expensive computation. In my `get_or_set` above, `factory()` is called outside the `with self._lock` block. Good.
+
+But there's a race: two threads could both miss and both call factory. That's fine — it's a cache, redundant computation is acceptable, and the last writer wins. `get_or_set` reduces but doesn't eliminate this. To fully eliminate, I'd need to hold the lock during factory, which is bad for performance. So the current approach is a good balance.
+
+Let me use `get_or_set` in the decorator.
+
+Actually, let me reconsider. Let me make the decorator use the public API for clarity but provide `get_or_set` as an optimization. I'll use `get_or_set` in the decorator since it's cleaner.
+
+### Type hints
+I'll use `typing` module: `Dict`, `Optional`, `Callable`, `Any`, `Union`, `Generic`, `TypeVar`, etc.
+
+Let me use `Generic` for the value type? That might be overkill. Let me use `Any` for values and keys, or use type variables. Let me use type variables for a cleaner API:
+
+```python
+KT = TypeVar("KT")
+VT = TypeVar("VT")
+```
+
+Hmm, but keys and values can be anything. Let me use `Any` for simplicity but provide type variables where helpful. Actually, let me use type variables to be more precise.
+
+Let me write:
+```python
+from typing import Any, Callable, Dict, Hashable, Optional, Tuple, TypeVar, Union, overload
+
+K = TypeVar("K")
+V = TypeVar("V")
+```
+
+### Documentation
+I'll use docstrings with the Google or NumPy style. Let me use a clean style with Args/Returns/Raises sections. I'll also add a module docstring and a class docstring.
+
+### Tests
+I'll write `unittest` test cases covering:
+- Basic get/set
+- LRU eviction (size-based)
+- TTL expiration
+- default_ttl vs per-entry ttl
+- Hit/miss statistics
+- hit_rate
+- Thread safety (concurrent access)
+- clear
+- pop
+- __contains__, __len__, __iter__
+- Decorator: basic memoization
+- Decorator: cache invalidation (clear)
+- Decorator: stats
+- Decorator: unhashable args fallback
+- Decorator: ttl expiration
+- Decorator: key_func customization
+- Decorator: exception not cached
+
+Let me write comprehensive tests.
+
+For thread safety testing, I'll spawn multiple threads doing concurrent get/set and verify no exceptions and consistent state.
+
+For TTL testing, I'll use the injectable clock.
+
+Let me now write the code.
+
+Let me think about the clock injection more carefully. I'll use `time.monotonic` by default. For tests, I'll pass a fake clock that returns controllable values.
+
+```python
+class FakeClock:
+    def __init__(self, start=0.0):
+        self.now = start
+    def __call__(self):
+        return self.now
+    def advance(self, dt):
+        self.now += dt
+```
+
+This makes TTL tests deterministic.
+
+Now let me write the full module.
+
+Let me also think about `__repr__` for debugging.
+
+Let me also consider: should `get` with an expired entry count as a miss? Yes, I'll count it as a miss and remove the entry. This is the standard behavior.
+
+Should `set` on an existing key refresh its position to most-recently-used? Yes, updating a key should move it to the end (most recently used). This is standard.
+
+Let me also handle the case where `maxsize <= 0`. If maxsize is 0, the cache is effectively disabled
+<<content>>
+The user wants a complete, well-documented Python module that implements:
+1. A thread-safe LRU cache with per-entry time-to-live (TTL)
+2. Size-based eviction
+3. Hit/miss statistics
+4. A decorator for memoizing functions
+5. Type hints
+6. A set of unittest test cases
+
+Let me design this carefully.
+
+## Design
+
+### Core Data Structure
+I'll use `collections.OrderedDict` for the LRU ordering, combined with a `threading.Lock` for thread safety.
+
+For TTL, I'll store the expiry timestamp with each entry.
+
+### Class: `LRUCache`
+
+Attributes:
+- `maxsize`: maximum number of entries
+- `default_ttl`: default time-to-live for entries (in seconds)
+- `_cache`: OrderedDict mapping key -> (value, expiry_time)
+- `_lock`: threading.Lock
+- `_hits`, `_misses`: counters for statistics
+- `_lock` for thread safety
+
+Methods:
+- `__init__(self, maxsize=512, default_ttl=None)`: constructor
+- `get(self, key, default=None)`: retrieve a value, checking TTL
+- `set(self, key, value, ttl=None)`: store a value with optional TTL override
+- `__getitem__`, `__setitem__`, `__contains__`, `__len__`, `__delitem__`, `__iter__`, `__repr__`: dunder methods for dict-like access
+- `pop(self, key, default=None)`: remove an entry
+- `clear(self)`: clear the cache
+- `evict_expired(self)`: remove expired entries
+- `stats(self)`: return hit/miss statistics
+- `hit_rate(self)`: return hit rate
+- `info(self)`: return detailed info
+
+### Thread Safety
+Use `threading.RLock` (reentrant lock) so that methods that call each other don't deadlock. Actually, let me think about this. If I use a regular `Lock`, and a method acquires the lock and then calls another method that also tries to acquire the lock, it will deadlock. Using `RLock` avoids this. But I need to be careful about the design.
+
+Actually, let me use `RLock` to be safe, since dunder methods like `__getitem__` might call `get`, etc.
+
+Wait, but there's a subtlety. If I use RLock and have methods call each other, I need to make sure the statistics are updated correctly. Let me be careful.
+
+Let me design so that the core operations acquire the lock, and the public methods that need stats update handle it.
+
+Actually, let me think about the cleanest design:
+
+- `_get_locked(key, default)`: internal, assumes lock is held, does the actual lookup and stats update
+- `get(key, default)`: acquires lock, calls `_get_locked`
+- `__getitem__`: calls `get`
+
+Hmm, but if `get` updates stats and `__getitem__` calls `get`, that's fine.
+
+Let me reconsider. The stats update (hit/miss) should happen on every lookup. Let me put the stats logic in the core method.
+
+Let me write:
+
+```python
+def get(self, key, default=None):
+    with self._lock:
+        if key in self._cache:
+            value, expiry = self._cache[key]
+            if self._is_expired(expiry):
+                # treat as miss
+                del self._cache[key]
+                self._misses += 1
+                return default
+            # move to end (most recently used)
+            self._cache.move_to_end(key)
+            self._hits += 1
+            return value
+        else:
+            self._misses += 1
+            return default
+```
+
+Wait, but there's a subtlety with TTL and "touching". When we get a hit, should we refresh the TTL? Typically no — LRU caches with TTL don't refresh TTL on access (that would be more like a "sliding expiration" which is a different policy). I'll keep TTL fixed at insertion time (absolute expiration). This is the standard behavior. I'll document this.
+
+Actually, let me reconsider. There are two common policies:
+1. Absolute expiration: TTL is measured from insertion.
+2. Sliding expiration: TTL is reset on each access.
+
+I'll implement absolute expiration as the default, which is more common and predictable. I'll document it clearly.
+
+### Size-based eviction
+When setting a new entry and the cache is full, evict the least recently used entry. I should also evict expired entries first (optional optimization), but the standard approach is to just evict LRU. Let me evict expired entries opportunistically during set to keep things clean, but the primary eviction is LRU.
+
+Actually, let me keep it simple: on `set`, if the size exceeds maxsize, pop the first (oldest) item. I'll also check for expired items during eviction.
+
+Let me write `set`:
+
+```python
+def set(self, key, value, ttl=None):
+    expiry = time.monotonic() + (ttl if ttl is not None else self.default_ttl)
+    with self._lock:
+        if key in self._cache:
+            self._cache[key] = (value, expiry)
+            self._cache.move_to_end(key)
+        else:
+            self._cache[key] = (value, expiry)
+            # evict if necessary
+            while len(self._cache) > self.maxsize:
+                self._cache.popitem(last=False)  # remove LRU
+```
+
+Hmm, but I should evict expired entries preferentially. Let me add a helper that evicts expired entries. Actually, let me keep the eviction logic clean: when over capacity, first try to remove expired entries, then remove LRU.
+
+Let me think about whether to make maxsize enforceable. If maxsize is 0, the cache should never store anything. Let me handle that edge case.
+
+### TTL handling
+`default_ttl` can be None (meaning no expiration) or a number (seconds). Each entry's expiry is computed as `now + ttl`. If ttl is None, expiry is None (never expires).
+
+`_is_expired(expiry)`:
+```python
+def _is_expired(self, expiry):
+    if expiry is None:
+        return False
+    return time.monotonic() >= expiry
+```
+
+I'll use `time.monotonic()` for measuring elapsed time (immune to system clock changes). But for the decorator, users might want to use wall-clock... Actually monotonic is better for TTL. Let me use monotonic.
+
+Hmm, but for testing, I might want to inject a clock. Let me add a `_now` parameter or a way to override the time function for testing. Actually, I can make the time function injectable via a parameter to the constructor, defaulting to `time.monotonic`. That makes testing deterministic.
+
+Let me add `_time_func` parameter. Actually, let me keep it simpler but still testable. I'll allow passing a `clock` function.
+
+Let me design the constructor:
+```python
+def __init__(self, maxsize=512, default_ttl=None, *, clock=time.monotonic):
+```
+
+Then use `self._clock()` to get current time.
+
+### Statistics
+- `_hits`: int
+- `_misses`: int
+- `stats()`: returns dict with hits, misses, total, hit_rate
+- `hit_rate()`: hits / (hits + misses), or 0 if no lookups
+
+### Decorator: `cached` / `memoize`
+A decorator that wraps a function with the cache. It should:
+- Accept cache configuration (maxsize, ttl) or an existing cache instance
+- Use the function's arguments as the cache key
+- Handle unhashable arguments gracefully (fall back to calling the function directly, or raise)
+- Support cache clearing
+- Support stats access
+
+Let me design:
+
+```python
+def cached(maxsize=None, ttl=None, *, cache=None, key_func=None):
+    def decorator(func):
+        ...
+        return wrapper
+    return decorator
+```
+
+The wrapper needs to:
+- Build a key from the arguments
+- Check the cache
+- On miss, call the function and store the result
+- Return the result
+
+For key generation, I'll use a function that hashes the arguments. If arguments are unhashable, I'll fall back to computing the result directly (no caching) — this is a common approach (like functools.lru_cache raises TypeError for unhashable, but some implementations fall back). Let me think.
+
+Actually, `functools.lru_cache` raises `TypeError` for unhashable arguments. But that's often annoying. Let me provide a `key_func` parameter so users can customize. By default, I'll try to build a key from args and kwargs; if that fails, I'll fall back to calling the function directly (uncached). This is more user-friendly. I'll document this behavior.
+
+Hmm, but falling back silently might hide bugs. Let me make it configurable. Actually, let me follow a reasonable default: try to create a hashable key; if it fails, call the function directly without caching. I'll document this clearly.
+
+Let me build the key:
+```python
+def _make_key(args, kwargs):
+    key = args
+    if kwargs:
+        key += (sentinel, frozenset(kwargs.items()))
+    return key
+```
+
+Wait, kwargs items need to be hashable too. `frozenset(kwargs.items())` requires the items (key, value) tuples to be hashable, which requires values to be hashable. If not, this raises TypeError.
+
+Let me wrap in try/except and fall back.
+
+Actually, let me use a cleaner approach. I'll create a helper that tries to make a hashable key.
+
+Let me think about the wrapper signature. The decorated function can take `*args, **kwargs`. The wrapper:
+
+```python
+@wraps(func)
+def wrapper(*args, **kwargs):
+    key = _make_key(args, kwargs)
+    if key is None:
+        # unhashable, fall back
+        return func(*args, **kwargs)
+    if key in cache:
+        stats hits...
+        return cache.get(key)
+    result = func(*args, **kwargs)
+    cache.set(key, result, ttl=ttl)
+    return result
+```
+
+But wait, there's a subtlety with exceptions. If `func` raises, we shouldn't cache the exception. The above handles that correctly since we only cache after `func` returns.
+
+Also, for thread safety, the cache operations are thread-safe, but there's a TOCTOU issue: checking `key in cache` then `cache.get` then `cache.set`. Between these, another thread could modify. But since each individual operation is atomic (under lock), the worst case is a redundant computation, not incorrectness. This is acceptable for a cache. Actually, to be safe, I could add a `get_or_set` method that does the check-and-set atomically. Let me add that to avoid redundant computation under concurrency.
+
+Let me add `get_or_set` to the cache:
+```python
+def get_or_set(self, key, factory, ttl=None):
+    with self._lock:
+        if key in self._cache and not self._is_expired(self._cache[key][1]):
+            self._cache.move_to_end(key)
+            self._hits += 1
+            return self._cache[key][0]
+        self._misses += 1
+        value = factory()
+        self.set(key, value, ttl=ttl)
+        return value
+```
+
+Hmm, but `set` also acquires the lock (RLock, so it's fine). But `set` doesn't update stats. Good.
+
+Wait, but there's a subtle issue: `get_or_set` increments misses even if the factory is going to be called. That's correct — a miss means we didn't have a valid cached value.
+
+Actually, let me reconsider whether the decorator should use `get_or_set` or the simpler check-then-miss. Using `get_or_set` is cleaner and avoids redundant computation. But it calls the factory (the function) while... no, it calls factory outside the lock. Let me make sure factory is called outside the lock to avoid holding the lock during expensive computation. In my `get_or_set` above, `factory()` is called outside the `with self._lock` block. Good.
+
+But there's a race: two threads could both miss and both call factory. That's fine — it's a cache, redundant computation is acceptable, and the last writer wins. `get_or_set` reduces but doesn't eliminate this. To fully eliminate, I'd need to hold the lock during factory, which is bad for performance. So the current approach is a good balance.
+
+Let me use `get_or_set` in the decorator.
+
+Actually, let me reconsider. Let me make the decorator use the public API for clarity but provide `get_or_set` as an optimization. I'll use `get_or_set` in the decorator since it's cleaner.
+
+### Type hints
+I'll use `typing` module: `Dict`, `Optional`, `Callable`, `Any`, `Union`, `Generic`, `TypeVar`, etc.
+
+Let me use `Generic` for the value type? That might be overkill. Let me use `Any` for values and keys, or use type variables. Let me use type variables for a cleaner API:
+
+```python
+KT = TypeVar("KT")
+VT = TypeVar("VT")
+```
+
+Hmm, but keys and values can be anything. Let me use `Any` for simplicity but provide type variables where helpful. Actually, let me use type variables to be more precise.
+
+Let me write:
+```python
+from typing import Any, Callable, Dict, Hashable, Optional, Tuple, TypeVar, Union, overload
+
+K = TypeVar("K")
+V = TypeVar("V")
+```
+
+### Documentation
+I'll use docstrings with the Google or NumPy style. Let me use a clean style with Args/Returns/Raises sections. I'll also add a module docstring and a class docstring.
+
+### Tests
+I'll write `unittest` test cases covering:
+- Basic get/set
+- LRU eviction (size-based)
+- TTL expiration
+- default_ttl vs per-entry ttl
+- Hit/miss statistics
+- hit_rate
+- Thread safety (concurrent access)
+- clear
+- pop
+- __contains__, __len__, __iter__
+- Decorator: basic memoization
+- Decorator: cache invalidation (clear)
+- Decorator: stats
+- Decorator: unhashable args fallback
+- Decorator: ttl expiration
+- Decorator: key_func customization
+- Decorator: exception not cached
+
+Let me write comprehensive tests.
+
+For thread safety testing, I'll spawn multiple threads doing concurrent get/set and verify no exceptions and consistent state.
+
+For TTL testing, I'll use the injectable clock.
+
+Let me now write the code.
+
+Let me think about the clock injection more carefully. I'll use `time.monotonic` by default. For tests, I'll pass a fake clock that returns controllable values.
+
+```python
+class FakeClock:
+    def __init__(self, start=0.0):
+        self.now = start
+    def __call__(self):
+        return self.now
+    def advance(self, dt):
+        self.now += dt
+```
+
+This makes TTL tests deterministic.
+
+Now let me write the full module.
+
+Let me also think about `__repr__` for debugging.
+
+Let me also consider: should `get` with an expired entry count as a miss? Yes, I'll count it as a miss and remove the entry. This is the standard behavior.
+
+Should `set` on an existing key refresh its position to most-recently-used? Yes, updating a key should move it to the end (most recently used). This is standard.
+
+Let me also handle the case where `maxsize <= 0`. If maxsize is 0, the cache is effectively disabled

@@ -1,0 +1,2 @@
+date	host	gpu	model	ratio	result	ready_s	captures	free_after_capture	decode	transient_pred	transient_meas	prediction_warns	note
+2026-09-27T13:17:00+04:00	TESSERACT	NVIDIA GeForce RTX 5080	Ornith-1.5-35B-A3B-exl3-5.0bpw-hq	1.00	PASS	81	1	3.35 GiB	147.9/145.1/109.2	0.88 GiB	1.10 GiB	0	

@@ -1,0 +1,411 @@
+Let me carefully work through this problem.
+
+We have:
+- Pipe A fills the tank in 6 hours, so rate = 1/6 per hour.
+- Pipe B fills the tank in 9 hours, so rate = 1/9 per hour.
+- Drain empties the tank in 12 hours, so rate = -1/12 per hour.
+
+Timeline:
+- 8:00: A and drain opened.
+- 9:30: B opened (A and drain still open).
+- 11:00: A closed (B and drain still open).
+- Question: When is the tank full?
+
+Let me compute the amount of water at each stage.
+
+Let me use hours as fractions. Let me set t = 0 at 8:00.
+
+Stage 1: 8:00 to 9:30 = 1.5 hours. Only A and drain open.
+Rate = 1/6 - 1/12 = 2/12 - 1/12 = 1/12 per hour.
+Amount after 1.5 hours = 1.5 × 1/12 = 1.5/12 = 1/8.
+
+Stage 2: 9:30 to 11:00 = 1.5 hours. A, B, and drain open.
+Rate = 1/6 + 1/9 - 1/12.
+Let me compute: common denominator 36.
+1/6 = 6/36, 1/9 = 4/36, 1/12 = 3/36.
+Rate = 6/36 + 4/36 - 3/36 = 7/36 per hour.
+Amount added in 1.5 hours = 1.5 × 7/36 = 10.5/36 = 21/72 = 7/24.
+
+Total after stage 2 (at 11:00) = 1/8 + 7/24.
+1/8 = 3/24. So total = 3/24 + 7/24 = 10/24 = 5/12.
+
+Stage 3: after 11:00, only B and drain open.
+Rate = 1/9 - 1/12.
+Common denominator 36: 4/36 - 3/36 = 1/36 per hour.
+Remaining to fill = 1 - 5/12 = 7/12.
+Time needed = (7/12) / (1/36) = (7/12) × 36 = 7 × 3 = 21 hours.
+
+So the tank fills 21 hours after 11:00.
+
+21 hours after 11:00 = 11:00 + 21:00 = 8:00 next day.
+
+Wait, let me double check. 11:00 + 21 hours. 11:00 + 13 hours = 24:00 = midnight. Then + 8 hours = 8:00. So 8:00 the next day.
+
+Hmm, that's a long time. Let me double-check the rate in stage 3.
+
+After 11:00, B and drain open. B fills at 1/9, drain empties at 1/12. Net = 1/9 - 1/12 = 4/36 - 3/36 = 1/36 per hour. Yes, that's very slow.
+
+Remaining = 7/12. Time = (7/12)/(1/36) = 7/12 × 36 = 252/12 = 21 hours. Yes.
+
+So the tank is full at 8:00 the next day.
+
+Let me verify the total water added.
+
+Actually, let me reconsider. Let me recompute the total.
+
+At 8:00, start empty.
+
+From 8:00 to 9:30 (1.5 hr): A + drain.
+Net rate = 1/6 - 1/12 = 1/12.
+Water = 1.5/12 = 0.125 = 1/8. ✓
+
+From 9:30 to 11:00 (1.5 hr): A + B + drain.
+Net rate = 1/6 + 1/9 - 1/12 = 7/36 ≈ 0.1944.
+Water added = 1.5 × 7/36 = 10.5/36 = 0.29167 = 7/24. ✓
+
+Total at 11:00 = 1/8 + 7/24 = 3/24 + 7/24 = 10/24 = 5/12 ≈ 0.4167. ✓
+
+From 11:00 onward: B + drain.
+Net rate = 1/9 - 1/12 = 1/36 ≈ 0.02778.
+Remaining = 1 - 5/12 = 7/12 ≈ 0.5833.
+Time = 0.5833 / 0.02778 = 21 hours. ✓
+
+So full at 11:00 + 21:00 = 8:00 next day.
+
+Great.
+
+Now, the problem asks to "generalise the method and prove that it always gives the right answer."
+
+Let me think about the general method.
+
+General method:
+- We have a set of "inflow" pipes with rates $a_i > 0$ and "outflow" (drain) with rate $d > 0$.
+- Each pipe is opened/closed at certain times.
+- Between consecutive event times, the set of open pipes is constant, so the net rate is constant.
+- The water level is a piecewise linear (continuous) function of time.
+- We compute the cumulative water at each event time, and find the interval where the water level crosses 1 (full).
+- Within that interval, since the rate is constant, we solve a linear equation.
+
+The key insight for the general method: Because the water level is continuous and piecewise linear with known slopes, and it's monotonically... well, not necessarily monotonic, but we can track it.
+
+Actually, let me think about what "generalise the method" means. I think it means:
+
+1. Represent each pipe's contribution as rate × time.
+2. The total water = sum over all pipes of (rate × time open).
+3. Set this equal to 1 (full tank) and solve for the unknown time.
+
+Actually, the cleanest general method: The total volume added by all pipes up to time $t$ must equal 1 (one full tank). Each pipe contributes its rate times the duration it was open. So we write an equation.
+
+Let me formalize.
+
+Let the full tank volume be 1 (unit). Pipe $i$ has rate $r_i$ (positive for inflow, negative for outflow). Pipe $i$ is open during a set of time intervals. Let $T_i(t)$ be the total time pipe $i$ has been open by time $t$. Then the water level at time $t$ is $V(t) = \sum_i r_i T_i(t)$.
+
+We want to find $t$ such that $V(t) = 1$.
+
+Since $V$ is piecewise linear and continuous, and we know the rates in each piece, we can compute $V$ at each breakpoint and interpolate.
+
+Let me think about the proof.
+
+Proof that the method works:
+
+The method relies on the principle of superposition / additivity of flows. The rate of change of water volume is the sum of the rates of all open pipes. This is because flows are additive (assuming incompressible fluid, no interaction between pipes, etc.).
+
+Formally, let $V(t)$ be the volume of water at time $t$. Then
+$$V'(t) = \sum_{i \in \text{open}(t)} r_i$$
+where $\text{open}(t)$ is the set of pipes open at time $t$.
+
+Between consecutive event times $t_k$ and $t_{k+1}$, the set of open pipes is constant, so $V'(t) = R_k$ (constant), and thus $V$ is linear on $[t_k, t_{k+1}]$ with slope $R_k$.
+
+By continuity of $V$ (water volume can't jump), $V(t_{k+1}) = V(t_k) + R_k (t_{k+1} - t_k)$.
+
+So we can compute $V$ at all breakpoints by summing up contributions.
+
+To find when $V(t) = 1$: find the interval $[t_k, t_{k+1}]$ where $V(t_k) \le 1 \le V(t_{k+1})$ (assuming $V$ is increasing through 1 in that interval). Then within that interval, $V(t) = V(t_k) + R_k (t - t_k)$, so
+$$1 = V(t_k) + R_k(t - t_k) \implies t = t_k + \frac{1 - V(t_k)}{R_k}.$$
+
+This gives the exact time.
+
+The method "always gives the right answer" because:
+1. The physical model (additivity of flows) gives a piecewise linear continuous $V$.
+2. The method exactly reconstructs this $V$ and solves the linear equation.
+
+But wait, there's a subtlety: what if the tank overflows or empties before reaching the intended state? In this problem, we assume the tank fills to exactly 1 and we find that time. Also, we should check that $V$ doesn't exceed 1 before the intended time (it shouldn't, given the piecewise linear structure and that we find the first crossing).
+
+Also, we need $R_k > 0$ in the final interval for the tank to fill. In our problem, $R_3 = 1/36 > 0$. Good.
+
+Let me also address: what if the tank never fills (net rate becomes non-positive and $V < 1$)? Then there's no solution. The method would reveal this.
+
+Let me also think about whether the problem wants a more "algebraic" generalization.
+
+Actually, I think the cleanest generalization is the "work" method: total work (volume) = sum of (rate × time) for each pipe, set equal to 1.
+
+Let me write the general solution.
+
+Let me define:
+- $a$ = rate of pipe A = 1/6 per hour.
+- $b$ = rate of pipe B = 1/9 per hour.
+- $d$ = rate of drain = 1/12 per hour (outflow).
+
+Timeline with durations:
+- $t_1$ = duration A+drain only = 8:00 to 9:30 = 1.5 hr.
+- $t_2$ = duration A+B+drain = 9:30 to 11:00 = 1.5 hr.
+- $t_3$ = duration B+drain = 11:00 to full = ? hr.
+
+Total volume:
+$$a t_1 + (a + b - d) t_2 + (b - d) t_3 = 1.$$
+
+Solve for $t_3$:
+$$t_3 = \frac{1 - a t_1 - (a+b-d) t_2}{b - d}.$$
+
+Plug in:
+$a t_1 = (1/6)(1.5) = 0.25$.
+$(a+b-d) t_2 = (7/36)(1.5) = 10.5/36 = 0.29167$.
+Numerator = 1 - 0.25 - 0.29167 = 0.45833.
+$b - d = 1/9 - 1/12 = 1/36 = 0.027778$.
+$t_3 = 0.45833 / 0.027778 = 16.5$??
+
+Wait, that doesn't match. Let me recompute.
+
+Hmm, 0.45833 / 0.027778 = 16.5. But earlier I got 21. Let me recheck.
+
+Oh wait, I think I made an arithmetic error. Let me recompute.
+
+Numerator: 1 - 0.25 - 0.29167 = 1 - 0.54167 = 0.45833.
+
+Hmm, but earlier I computed total at 11:00 as 5/12 ≈ 0.4167, so remaining = 7/12 ≈ 0.5833.
+
+There's a discrepancy. Let me recheck.
+
+$a t_1 = (1/6)(1.5)$. 1.5/6 = 0.25. ✓
+$(a+b-d)t_2 = (7/36)(1.5)$. 7/36 = 0.19444. × 1.5 = 0.29167. ✓
+
+Total at 11:00 = 0.25 + 0.29167 = 0.54167.
+
+But earlier I said total at 11:00 = 5/12 = 0.4167. Contradiction!
+
+Let me recheck. Earlier:
+Stage 1: 1/8 = 0.125.
+Stage 2: 7/24 = 0.29167.
+Total = 0.125 + 0.29167 = 0.41667 = 5/12.
+
+But now $a t_1 = 0.25$, not 0.125!
+
+Let me recompute $a t_1$. $a = 1/6$, $t_1 = 1.5$. $a t_1 = 1.5/6 = 0.25$.
+
+But earlier I computed stage 1 rate as 1/12 (A minus drain), and water = 1.5 × 1/12 = 0.125.
+
+Ah, I see the issue. In the "total volume" equation, $a t_1$ should be the NET rate times time, not just A's rate. Because the drain is also open during stage 1!
+
+So the equation should account for the drain being open during all stages.
+
+Let me redo. The total volume equation:
+$$\sum_i r_i \times (\text{total time pipe } i \text{ open}) = 1.$$
+
+Pipe A is open from 8:00 to 11:00 = 3 hours. So A contributes $a \times 3 = (1/6)(3) = 0.5$.
+Pipe B is open from 9:30 to full. Let $t_3$ = time from 11
+<<content>>
+Let me carefully work through this problem.
+
+We have:
+- Pipe A fills the tank in 6 hours, so rate = 1/6 per hour.
+- Pipe B fills the tank in 9 hours, so rate = 1/9 per hour.
+- Drain empties the tank in 12 hours, so rate = -1/12 per hour.
+
+Timeline:
+- 8:00: A and drain opened.
+- 9:30: B opened (A and drain still open).
+- 11:00: A closed (B and drain still open).
+- Question: When is the tank full?
+
+Let me compute the amount of water at each stage.
+
+Let me use hours as fractions. Let me set t = 0 at 8:00.
+
+Stage 1: 8:00 to 9:30 = 1.5 hours. Only A and drain open.
+Rate = 1/6 - 1/12 = 2/12 - 1/12 = 1/12 per hour.
+Amount after 1.5 hours = 1.5 × 1/12 = 1.5/12 = 1/8.
+
+Stage 2: 9:30 to 11:00 = 1.5 hours. A, B, and drain open.
+Rate = 1/6 + 1/9 - 1/12.
+Let me compute: common denominator 36.
+1/6 = 6/36, 1/9 = 4/36, 1/12 = 3/36.
+Rate = 6/36 + 4/36 - 3/36 = 7/36 per hour.
+Amount added in 1.5 hours = 1.5 × 7/36 = 10.5/36 = 21/72 = 7/24.
+
+Total after stage 2 (at 11:00) = 1/8 + 7/24.
+1/8 = 3/24. So total = 3/24 + 7/24 = 10/24 = 5/12.
+
+Stage 3: after 11:00, only B and drain open.
+Rate = 1/9 - 1/12.
+Common denominator 36: 4/36 - 3/36 = 1/36 per hour.
+Remaining to fill = 1 - 5/12 = 7/12.
+Time needed = (7/12) / (1/36) = (7/12) × 36 = 7 × 3 = 21 hours.
+
+So the tank fills 21 hours after 11:00.
+
+21 hours after 11:00 = 11:00 + 21:00 = 8:00 next day.
+
+Wait, let me double check. 11:00 + 21 hours. 11:00 + 13 hours = 24:00 = midnight. Then + 8 hours = 8:00. So 8:00 the next day.
+
+Hmm, that's a long time. Let me double-check the rate in stage 3.
+
+After 11:00, B and drain open. B fills at 1/9, drain empties at 1/12. Net = 1/9 - 1/12 = 4/36 - 3/36 = 1/36 per hour. Yes, that's very slow.
+
+Remaining = 7/12. Time = (7/12)/(1/36) = 7/12 × 36 = 252/12 = 21 hours. Yes.
+
+So the tank is full at 8:00 the next day.
+
+Let me verify the total water added.
+
+Actually, let me reconsider. Let me recompute the total.
+
+At 8:00, start empty.
+
+From 8:00 to 9:30 (1.5 hr): A + drain.
+Net rate = 1/6 - 1/12 = 1/12.
+Water = 1.5/12 = 0.125 = 1/8. ✓
+
+From 9:30 to 11:00 (1.5 hr): A + B + drain.
+Net rate = 1/6 + 1/9 - 1/12 = 7/36 ≈ 0.1944.
+Water added = 1.5 × 7/36 = 10.5/36 = 0.29167 = 7/24. ✓
+
+Total at 11:00 = 1/8 + 7/24 = 3/24 + 7/24 = 10/24 = 5/12 ≈ 0.4167. ✓
+
+From 11:00 onward: B + drain.
+Net rate = 1/9 - 1/12 = 1/36 ≈ 0.02778.
+Remaining = 1 - 5/12 = 7/12 ≈ 0.5833.
+Time = 0.5833 / 0.02778 = 21 hours. ✓
+
+So full at 11:00 + 21:00 = 8:00 next day.
+
+Great.
+
+Now, the problem asks to "generalise the method and prove that it always gives the right answer."
+
+Let me think about the general method.
+
+General method:
+- We have a set of "inflow" pipes with rates $a_i > 0$ and "outflow" (drain) with rate $d > 0$.
+- Each pipe is opened/closed at certain times.
+- Between consecutive event times, the set of open pipes is constant, so the net rate is constant.
+- The water level is a piecewise linear (continuous) function of time.
+- We compute the cumulative water at each event time, and find the interval where the water level crosses 1 (full).
+- Within that interval, since the rate is constant, we solve a linear equation.
+
+The key insight for the general method: Because the water level is continuous and piecewise linear with known slopes, and it's monotonically... well, not necessarily monotonic, but we can track it.
+
+Actually, let me think about what "generalise the method" means. I think it means:
+
+1. Represent each pipe's contribution as rate × time.
+2. The total water = sum over all pipes of (rate × time open).
+3. Set this equal to 1 (full tank) and solve for the unknown time.
+
+Actually, the cleanest general method: The total volume added by all pipes up to time $t$ must equal 1 (one full tank). Each pipe contributes its rate times the duration it was open. So we write an equation.
+
+Let me formalize.
+
+Let the full tank volume be 1 (unit). Pipe $i$ has rate $r_i$ (positive for inflow, negative for outflow). Pipe $i$ is open during a set of time intervals. Let $T_i(t)$ be the total time pipe $i$ has been open by time $t$. Then the water level at time $t$ is $V(t) = \sum_i r_i T_i(t)$.
+
+We want to find $t$ such that $V(t) = 1$.
+
+Since $V$ is piecewise linear and continuous, and we know the rates in each piece, we can compute $V$ at each breakpoint and interpolate.
+
+Let me think about the proof.
+
+Proof that the method works:
+
+The method relies on the principle of superposition / additivity of flows. The rate of change of water volume is the sum of the rates of all open pipes. This is because flows are additive (assuming incompressible fluid, no interaction between pipes, etc.).
+
+Formally, let $V(t)$ be the volume of water at time $t$. Then
+$$V'(t) = \sum_{i \in \text{open}(t)} r_i$$
+where $\text{open}(t)$ is the set of pipes open at time $t$.
+
+Between consecutive event times $t_k$ and $t_{k+1}$, the set of open pipes is constant, so $V'(t) = R_k$ (constant), and thus $V$ is linear on $[t_k, t_{k+1}]$ with slope $R_k$.
+
+By continuity of $V$ (water volume can't jump), $V(t_{k+1}) = V(t_k) + R_k (t_{k+1} - t_k)$.
+
+So we can compute $V$ at all breakpoints by summing up contributions.
+
+To find when $V(t) = 1$: find the interval $[t_k, t_{k+1}]$ where $V(t_k) \le 1 \le V(t_{k+1})$ (assuming $V$ is increasing through 1 in that interval). Then within that interval, $V(t) = V(t_k) + R_k (t - t_k)$, so
+$$1 = V(t_k) + R_k(t - t_k) \implies t = t_k + \frac{1 - V(t_k)}{R_k}.$$
+
+This gives the exact time.
+
+The method "always gives the right answer" because:
+1. The physical model (additivity of flows) gives a piecewise linear continuous $V$.
+2. The method exactly reconstructs this $V$ and solves the linear equation.
+
+But wait, there's a subtlety: what if the tank overflows or empties before reaching the intended state? In this problem, we assume the tank fills to exactly 1 and we find that time. Also, we should check that $V$ doesn't exceed 1 before the intended time (it shouldn't, given the piecewise linear structure and that we find the first crossing).
+
+Also, we need $R_k > 0$ in the final interval for the tank to fill. In our problem, $R_3 = 1/36 > 0$. Good.
+
+Let me also address: what if the tank never fills (net rate becomes non-positive and $V < 1$)? Then there's no solution. The method would reveal this.
+
+Let me also think about whether the problem wants a more "algebraic" generalization.
+
+Actually, I think the cleanest generalization is the "work" method: total work (volume) = sum of (rate × time) for each pipe, set equal to 1.
+
+Let me write the general solution.
+
+Let me define:
+- $a$ = rate of pipe A = 1/6 per hour.
+- $b$ = rate of pipe B = 1/9 per hour.
+- $d$ = rate of drain = 1/12 per hour (outflow).
+
+Timeline with durations:
+- $t_1$ = duration A+drain only = 8:00 to 9:30 = 1.5 hr.
+- $t_2$ = duration A+B+drain = 9:30 to 11:00 = 1.5 hr.
+- $t_3$ = duration B+drain = 11:00 to full = ? hr.
+
+Total volume:
+$$a t_1 + (a + b - d) t_2 + (b - d) t_3 = 1.$$
+
+Solve for $t_3$:
+$$t_3 = \frac{1 - a t_1 - (a+b-d) t_2}{b - d}.$$
+
+Plug in:
+$a t_1 = (1/6)(1.5) = 0.25$.
+$(a+b-d) t_2 = (7/36)(1.5) = 10.5/36 = 0.29167$.
+Numerator = 1 - 0.25 - 0.29167 = 0.45833.
+$b - d = 1/9 - 1/12 = 1/36 = 0.027778$.
+$t_3 = 0.45833 / 0.027778 = 16.5$??
+
+Wait, that doesn't match. Let me recompute.
+
+Hmm, 0.45833 / 0.027778 = 16.5. But earlier I got 21. Let me recheck.
+
+Oh wait, I think I made an arithmetic error. Let me recompute.
+
+Numerator: 1 - 0.25 - 0.29167 = 1 - 0.54167 = 0.45833.
+
+Hmm, but earlier I computed total at 11:00 as 5/12 ≈ 0.4167, so remaining = 7/12 ≈ 0.5833.
+
+There's a discrepancy. Let me recheck.
+
+$a t_1 = (1/6)(1.5)$. 1.5/6 = 0.25. ✓
+$(a+b-d)t_2 = (7/36)(1.5)$. 7/36 = 0.19444. × 1.5 = 0.29167. ✓
+
+Total at 11:00 = 0.25 + 0.29167 = 0.54167.
+
+But earlier I said total at 11:00 = 5/12 = 0.4167. Contradiction!
+
+Let me recheck. Earlier:
+Stage 1: 1/8 = 0.125.
+Stage 2: 7/24 = 0.29167.
+Total = 0.125 + 0.29167 = 0.41667 = 5/12.
+
+But now $a t_1 = 0.25$, not 0.125!
+
+Let me recompute $a t_1$. $a = 1/6$, $t_1 = 1.5$. $a t_1 = 1.5/6 = 0.25$.
+
+But earlier I computed stage 1 rate as 1/12 (A minus drain), and water = 1.5 × 1/12 = 0.125.
+
+Ah, I see the issue. In the "total volume" equation, $a t_1$ should be the NET rate times time, not just A's rate. Because the drain is also open during stage 1!
+
+So the equation should account for the drain being open during all stages.
+
+Let me redo. The total volume equation:
+$$\sum_i r_i \times (\text{total time pipe } i \text{ open}) = 1.$$
+
+Pipe A is open from 8:00 to 11:00 = 3 hours. So A contributes $a \times 3 = (1/6)(3) = 0.5$.
+Pipe B is open from 9:30 to full. Let $t_3$ = time from 11

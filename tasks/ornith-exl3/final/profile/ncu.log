@@ -1,0 +1,14 @@
+ncu start 2026-09-27T13:12:13+04:00 load 1.94 5.49 5.59 Version 2026.1.1.0 (build 37634170) (public-release)
+==PROF== Connected to process 1383039 (/usr/bin/python3.12)
+==PROF== Profiling "_had_rows_kernel": 0%....50%....100% - 19 passes
+==PROF== Profiling "_reconstruct_experts_kernel": 0%....50%....100% - 19 passes
+==PROF== Profiling "_exl3_gemm_kernel": 0%....50%....100% - 19 passes
+==PROF== Profiling "_reconstruct_experts_kernel": 0%....50%....100% - 19 passes
+==PROF== Profiling "_exl3_gemm_kernel": 0%....50%....100% - 19 passes
+==PROF== Profiling "_reconstruct_experts_kernel": 0%....50%....100% - 19 passes
+==PROF== Profiling "_exl3_gemm_kernel": 0%....50%....100% - 19 passes
+==PROF== Profiling "_reconstruct_experts_kernel": 0%....50%....100% - 19 passes
+done
+==PROF== Disconnected from process 1383039
+==PROF== Report: /home/lucas/ai/FreeToken-wt/final/tasks/ornith-exl3/final/profile/ncu-moe.ncu-rep
+NCUDONE 2026-09-27T13:12:29+04:00

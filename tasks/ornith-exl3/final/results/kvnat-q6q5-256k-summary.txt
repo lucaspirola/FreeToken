@@ -1,0 +1,194 @@
+The user has shared a detailed engineering design document about serving NVIDIA Nemotron models on the FreeToken inference engine. They want me to:
+1. Summarize its main design decisions
+2. Critique them: which decisions look fragile, what measurements are missing, and what would I change first
+
+Let me carefully read through this document and extract the key design decisions, then provide a thoughtful critique.
+
+Let me organize the main design decisions first:
+
+**Architecture/Serving model:**
+1. FreeToken serves Nemotron 3 Super as single-stream only (one concurrent session) because Mamba-2 recurrent state is ~160 MiB per sequence, needing ~60 GiB host RAM for expert banks.
+2. Nemotron 3.5 Lightning (30B-A3B) is not single-stream — up to 16 concurrent requests because its 47 MiB state fits many slots.
+3. Hybrid Mamba-2 / full-attention / latent-MoE architecture.
+
+**MoE offload strategy:**
+- `offload` is the default and recommended MoE backend for Lightning.
+- NVFP4 expert banks live in host RAM (pinned), fetched over PCIe on demand.
+- `--moe-pageable-gpu` for WSL pin-budget overflow.
+- Expert cache policy: LFU above ~15% miss rate, LRU below.
+
+**NVFP4 expert GEMM backend:**
+- Triton is the default and recommended, NOT b12x (tensor core) or flashinfer.
+- This was a deliberate override because `auto` resolves to b12x which is wrong on this geometry.
+- Triton wins kernel microbenchmarks at every width except widest prefill chunk.
+
+**KV cache:**
+- `q8_0` quantized KV chosen over `fp8_e4m3` (fp8 flipped first tokens on cached-prefix reuse).
+- Growable KV via `--kv-grow-step-tokens` funds KV from expert cache.
+- `--memory-ratio 1.00` is now fixed by owner decision, not a tuning knob.
+
+**Context length:**
+- `max_position_embeddings` is 1M but tokenizer `model_max_length` is 262K; treat 262K as served ceiling.
+- 1M profile for long-lived agent sessions with spill to RAM/NVMe.
+
+**CUDA graphs:**
+- Dense decode graph ladder [1..16] for offload-MoE models (padded rows route their own experts, so exact graphs better).
+- Sparse [1,2,4,8,16] is worse by 7.4%.
+
+**Speculative decoding:**
+- ngram speculative decoding shipped, off by default.
+- `--spec-ngram-n 8`, `--spec-draft-len 8`, `--no-spec-adaptive`.
+- Greedy and single-stream only in v1.
+- Long context regresses (verify step extend attention reads KV history once per query token).
+- Draft length 16 not default because 131K non-copy case fails 2% criterion.
+
+**Session spill / residency:**
+- No spill while queue empty (on-demand, not idle timer).
+- Retention by capacity + age.
+- Survive restart (manifest JSON, fingerprint matching).
+- Look-ahead promotion (NVMe → RAM background thread).
+- Partial-prefix restore (recurrent state at several boundaries).
+- Prefill-time state capture.
+
+**Kernel optimizations:**
+- Decode launch config fixed (grid scales with GPU).
+- Prefill extend tile fixed (BLOCK_M register cap).
+- MoE prefill GEMM: per-block scale loaded at K/QBLOCK size and broadcast (1.73x), native FP4 decode (1.04x), A deinterleave (1.215x).
+- `--moe-extend-cache-tokens` default 64 for speculative decode extend path.
+
+**Reasoning/tool parsers:**
+- `--tool-call-parser auto` → qwen3_coder
+- `--reasoning-parser auto` → qwen3
+
+Now let me critique these. Let me think about what's fragile, what measurements are missing, and what I'd change first.
+
+**Fragile decisions:**
+
+1. **The `--memory-ratio 1.00` fixed by owner decision.** This is a "decision, not a tuning knob" claim. But the document itself shows the engine predicts memory and WARNs outside ±25%. Fixing it to 1.00 across all hosts (including different GPU sizes) seems risky. The 5080 (16GB) passed at 1.00, but what about other GPUs? The claim "Free VRAM is expert slots not used" — but this is measured on one card. On a 24GB or 48GB card, would 1.00 still be right? This is a generalization from a single data point.
+
+2. **Triton vs b12x backend chosen once at bank-load time.** The document acknowledges you can't take b12x for prefill and Triton for decode. This is a hard constraint. But the decision is based on microbenchmarks and one soak. The "auto resolves to b12x which is wrong" is a config-time heuristic that's geometry-specific. This is fragile because it's a special-case override baked into config resolution.
+
+3. **LFU vs LRU at 15% miss rate threshold.** This is a rule of thumb with a specific crossover. But it's measured on synthetic probe traffic. Real varied traffic might behave differently. The 99.6% miss rate with LRU at 16-way is dramatic but might be an artifact of the probe.
+
+4. **Speculative decoding draft length 8 default.** The 131K criterion is narrow. The copy-class lottery (1.04× to 1.67× spread) suggests measurement noise is significant. The "NO-GO" for 16 is based on a specific criterion that might be too narrow.
+
+5. **The 1M single-session profile with spill.** This is complex — look-ahead promotion, partial-prefix restore, prefill-time state capture, fingerprint matching. Lots of moving parts. The restore measured 2.681s after restart but this is one measurement.
+
+6. **`--moe-extend-cache-tokens 64` threshold.** The crossover is "between 64 and 80, exactly at the shipped default." This is uncomfortably close to the boundary. If real traffic differs, the default might be suboptimal.
+
+7. **The dense decode graph ladder.** Costs 80 MiB, but the 1.074x win is measured on one binary, one server. The padding argument (padded rows route their own experts) is sound but the exact magnitude depends on traffic.
+
+**Missing measurements:**
+
+1. **Cross-GPU validation.** Everything is measured on the RTX 5080 (16 GB). The design makes strong claims about 16 GB GPUs generally. No data on other card sizes or architectures (sm_90, sm_89, etc.). The NVFP4 path is sm_120 specific.
+
+2. **Real-world traffic vs synthetic probes.** Many benchmarks use synthetic needle prompts. The document acknowledges copy-class lottery and stream variance. Real agent traffic (the actual target workload) is under-measured.
+
+3. **Long-running soak stability.** The 16-way soak showed 0 errors but "one 10-minute pair cannot separate [p95/p99 tail] from variance." Longer stability data missing.
+
+4. **The memory prediction accuracy across configs.** The engine predicts and WARNs outside ±25%, but what's the actual prediction error distribution?
+
+5. **Prefill-time state capture cost.** ~376 MiB per resident turn — but the host overhead (async D2H, synchronization) isn't fully characterized.
+
+6. **Speculative decoding on actual agent workloads.** The copy/prose/code split is measured but real mixed traffic isn't.
+
+7. **Cold-start / restart frequency impact.** The spill/restore is designed for restarts but how often do restarts happen in practice, and what's the cumulative cost?
+
+8. **The A deinterleave prepass memory.** Rewriting A into even/odd planes — extra memory and the gemm2 case.
+
+**What I'd change first:**
+
+1. **Validate the memory-ratio=1.00 decision on a second GPU size.** This is the highest-leverage generalization risk. If it breaks on a 24GB card, it breaks the whole serving model.
+
+2. **Replace synthetic probes with realistic agent traffic benchmarks** for the key decisions (LFU/LRU, decode graph ladder, memory ratio, spec decode). The copy-class lottery shows synthetic measurement is noisy.
+
+3. **Re-measure the `--moe-extend-cache-tokens` threshold** with real speculative-decoding traffic, not just wall-time per extend. The 64 default sits on a knife-edge.
+
+Let me also think about architectural critiques:
+
+- The single-stream Super vs 16-way Lightning split is a clean architectural decision but creates two very different serving modes to maintain.
+
+- The "decision, not a tuning knob" framing for `--memory-ratio` is interesting — it's an attempt to reduce operator burden, but it also removes a safety valve. If the prediction is wrong (WARN outside ±25%), the operator can't fix it by tuning the ratio.
+
+- The config-time backend selection (triton vs b12x) being geometry-specific and requiring manual override is a maintainability smell — the `auto` path is actively wrong and needs special-casing.
+
+- The speculative decoding "silently takes ordinary decode path" for many conditions is a correctness-adjacent design — the flag never refuses, it just doesn't speculate. This could surprise users who expect speculation.
+
+Let me think about what's genuinely well-done too, to be balanced:
+- The document is remarkably honest about retractions (coherence caveat retracted, MTP projection corrected, burst-entry hysteresis correction).
+- The "general rule worth carrying to any other block-quantized kernel" abstractions show good engineering judgment.
+- The A/B methodology with single-binary comparisons and byte-identical verification is rigorous.
+- The self-checks (0.000e+00 bit-exactness) are good engineering practice.
+
+Let me structure my response:
+
+1. Summary of main design decisions (grouped)
+2. Critique: fragile decisions
+3. Critique: missing measurements
+4. What I'd change first
+
+I should be substantive and specific, referencing the document's own numbers and claims. I should also be honest about the strengths. Let me write this in a clear, organized way. I'll use headers and some structure but not overdo it.
+
+Let me think about the depth. This is a technical audience (the person shared an engineering design doc and wants a real critique). I should be rigorous and not patronizing. I should point out genuine tensions and risks.
+
+Let me draft.
+
+Actually, let me reconsider the framing. The person asked three specific things:
+1. Summarize main design decisions
+2. Critique: which look fragile
+3. What measurements are missing
+4. What would I change first
+
+I'll organize around these. Let me make sure I'm being genuinely useful and not just listing things.
+
+For the summary, I want to capture the *philosophy* not just enumerate flags. The key design tensions are:
+- Host-RAM-resident MoE banks over PCIe (offload) vs GPU-resident
+- Single fixed memory-ratio vs tuning knobs
+- Synthetic-probe-driven optimization vs real traffic
+- Config-time backend selection
+- On-demand spill residency vs timer-based
+
+Let me write this out properly.
+
+I want to be careful about length — this deserves a thorough answer but I shouldn't pad. Let me aim for a well-structured, dense response.
+
+One more thing to critique: the document repeatedly notes that many measurements are from "same server twice" or "one binary" — this is good rigor but also means the sample sizes are tiny (n=2 often). I should flag that.
+
+Also the "owner decision" framing on memory-ratio is interesting — it's a management/organizational decision baked into engineering, which is worth noting as a fragile process decision (what happens when the owner is wrong or the hardware changes?).
+
+Let me also note: the document says `--memory-ratio` is "an override, not a per-host tuning knob" and "1.00 by default in the engine and the launcher (since 2026-09-24, owner decision)". This means operators literally cannot tune it per host. That's a strong claim given the prediction is only accurate to ±25% and warns outside that. If prediction is off by more than 25% on some config, you're stuck.
+
+Let me write the response now.
+
+I'll structure:
+- Brief framing
+- Main design decisions (grouped into ~5-6 themes)
+- Fragile decisions
+- Missing measurements
+- What I'd change first
+
+Let me be specific and cite the doc's own numbers where relevant.
+<<content>>
+## Summary of the main design decisions
+
+The document describes serving two Nemcheckpoint families on FreeToken, and the design is held together by a few load-bearing choices:
+
+**1. MoE experts live in host RAM, fetched over PCIe on demand (`offload`).** The NVFP4 expert banks (15.4 GiB on Lightning) are pinned in system memory and copied to the GPU only when routed. This trades steady PCIe bandwidth for the ability to fit a 120B-A12B / 30B-A3B model on a 16 GB card. The whole serving model is built around this being movement-bound: 74% of a 16-lane decode step is PCIe expert misses.
+
+**2. The MoE GEMM backend is pinned to `triton`, overriding `auto`.** `auto` resolves to b12x (tensor-core) on this geometry, which the microbenchmarks and one soak show is slower end-to-end. Because the backend pins the on-GPU weight layout at bank-load time, you can't mix backends across prefill/decode, so this is a single global decision.
+
+**3. Memory is planned to 100% of free VRAM, by owner decision.** `--memory-ratio` is no longer a tuning knob — it's fixed at 1.00, and the engine predicts headroom from config, measures the prefill transient, and fills the arena so exactly that is left free. Operators cannot tune it per host.
+
+**4. Residency is on-demand, not timer-based.** Sessions spill to RAM/NVMe only when another request needs the slot; the resident session is never checkpointed while the queue is empty. Checkpoints survive restart via manifest + fingerprint matching, and a background look-ahead thread warms queued checkpoints from NVMe to RAM.
+
+**5. Two very different serving modes.** Nemotron 3 Super is `single_stream_only` (one session, ~160 MiB Mamba state each, ~60 GiB host RAM). Lightning is 16-way concurrent (47 MiB state each). The 1M long-context profile collapses back to one resident session with spill.
+
+**6. Speculative decoding (ngram) shipped, off by default**, greedy and single-stream in v1, with `--spec-ngram-n 8` / `--spec-draft-len 8`. Long context regresses, so the engine self-gates.
+
+**7. Kernel work is driven by single-binary A/B** with byte-identical verification (`0.000e+00`): decode graph ladder made dense [1..16], MoE prefill GEMM fixed (per-block scale broadcast, native FP4 decode, A deinterleave), extend tile register-capped, decode launch grid scaled to the GPU.
+
+The document is unusually honest about retractions and corrections, which is a strength I'll come back to.
+
+---
+
+## Which decisions

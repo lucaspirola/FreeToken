@@ -1,0 +1,55 @@
+{
+ "start_drain": {},
+ "tasks": [
+  {
+   "task": "code",
+   "prompt_tokens": 61,
+   "completion_tokens": 3499,
+   "finish": "length",
+   "s": 23.8,
+   "head": "The user wants a complete, well-documented Python module that implements:\n1. A thread-safe LRU cache with per-entry time-to-live (TTL)\n2. Size-based eviction\n3.",
+   "md5": "2276e6afebea7cdf9e3cd349682cac08",
+   "drain": {}
+  },
+  {
+   "task": "essay",
+   "prompt_tokens": 58,
+   "completion_tokens": 3499,
+   "finish": "length",
+   "s": 20.1,
+   "head": "# The French Revolution: Causes, Catalysts, and Consequences\n\n## Introduction\n\nFew events reshaped the modern world as decisively as the French Revolution. What",
+   "md5": "7019105f78e26e4b3debbab111743114",
+   "drain": {}
+  },
+  {
+   "task": "math",
+   "prompt_tokens": 113,
+   "completion_tokens": 3499,
+   "finish": "length",
+   "s": 23.27,
+   "head": "Let me carefully work through this problem.\n\nWe have:\n- Pipe A fills the tank in 6 hours, so rate = 1/6 per hour.\n- Pipe B fills the tank in 9 hours, so rate = ",
+   "md5": "fc19968b3bbafaba929cd932f8c0f250",
+   "drain": {}
+  },
+  {
+   "task": "translate",
+   "prompt_tokens": 81,
+   "completion_tokens": 1738,
+   "finish": "stop",
+   "s": 10.9,
+   "head": "## Translation\n\n\"Estava chovendo a c\u00e2ntaros, ent\u00e3o decidimos dar por encerrado o dia. Nosso gerente disse que ainda n\u00e3o est\u00e1vamos fora dos bosques, mas que o pr",
+   "md5": "5114b5ff9ebe45773c6d8bf13ee89763",
+   "drain": {}
+  },
+  {
+   "task": "summary",
+   "prompt_tokens": 20030,
+   "completion_tokens": 3499,
+   "finish": "length",
+   "s": 26.4,
+   "head": "The user wants me to summarize the main design decisions from this engineering design document, then critique them: which decisions look fragile, what measureme",
+   "md5": "b579f35e067a344e1d790690f1816a49",
+   "drain": {}
+  }
+ ]
+}

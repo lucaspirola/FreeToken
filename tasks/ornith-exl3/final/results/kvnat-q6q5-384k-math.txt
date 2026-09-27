@@ -1,0 +1,393 @@
+Let me carefully work through this problem.
+
+We have:
+- Pipe A fills the tank in 6 hours, so rate = 1/6 per hour.
+- Pipe B fills the tank in 9 hours, so rate = 1/9 per hour.
+- Drain empties the tank in 12 hours, so rate = -1/12 per hour.
+
+Timeline:
+- 8:00: A and drain opened.
+- 9:30: B opened (A and drain still open).
+- 11:00: A closed (B and drain still open).
+- Find when tank is full.
+
+Let me compute the amount of water at each stage.
+
+Let me use hours after 8:00 as the time variable, or just compute in hours.
+
+Stage 1: 8:00 to 9:30 (1.5 hours): A and drain open.
+Net rate = 1/6 - 1/12 = 2/12 - 1/12 = 1/12 per hour.
+Amount after 1.5 hours = 1.5 × 1/12 = 1.5/12 = 1/8.
+
+Stage 2: 9:30 to 11:00 (1.5 hours): A, B, and drain open.
+Net rate = 1/6 + 1/9 - 1/12.
+Let me compute: common denominator 36.
+1/6 = 6/36, 1/9 = 4/36, 1/12 = 3/36.
+Net rate = 6/36 + 4/36 - 3/36 = 7/36 per hour.
+Amount added in 1.5 hours = 1.5 × 7/36 = 10.5/36 = 21/72 = 7/24.
+
+Amount at 11:00 = 1/8 + 7/24 = 3/24 + 7/24 = 10/24 = 5/12.
+
+Stage 3: after 11:00: B and drain open (A closed).
+Net rate = 1/9 - 1/12.
+Common denominator 36: 4/36 - 3/36 = 1/36 per hour.
+Remaining to fill = 1 - 5/12 = 7/12.
+Time needed = (7/12) / (1/36) = (7/12) × 36 = 7 × 3 = 21 hours.
+
+So the tank fills 21 hours after 11:00.
+
+11:00 + 21 hours = 8:00 next day.
+
+Wait, let me double check. 11:00 + 21 hours. 11:00 + 13 hours = 24:00 (midnight). Then + 8 hours = 8:00. So 8:00 the next day.
+
+Hmm, that's a long time. Let me verify.
+
+Actually wait, let me reconsider. After 11:00, only B and drain are open. B fills at 1/9 per hour, drain empties at 1/12 per hour. Net = 1/9 - 1/12 = 4/36 - 3/36 = 1/36 per hour. That's very slow. So yes, it takes a long time.
+
+Remaining = 7/12. Time = (7/12)/(1/36) = 7/12 × 36 = 252/12 = 21 hours. Yes.
+
+So 11:00 + 21 hours = 8:00 next day.
+
+Let me double-check the whole thing.
+
+At 8:00, start empty.
+8:00-9:30: A (1/6) and drain (-1/12). Net = 1/12 per hour. Duration 1.5 hours. Fill = 1.5/12 = 0.125 = 1/8. ✓
+
+9:30-11:00: A (1/6), B (1/9), drain (-1/12). Net = 1/6 + 1/9 - 1/12.
+1/6 = 0.16667, 1/9 = 0.11111, 1/12 = 0.08333.
+Net = 0.16667 + 0.11111 - 0.08333 = 0.19444 per hour.
+7/36 = 0.19444. ✓
+Duration 1.5 hours. Fill = 1.5 × 0.19444 = 0.29167 = 7/24. ✓
+
+Total at 11:00 = 0.125 + 0.29167 = 0.41667 = 5/12. ✓
+
+After 11:00: B (1/9), drain (-1/12). Net = 0.11111 - 0.08333 = 0.02778 = 1/36 per hour.
+Remaining = 1 - 0.41667 = 0.58333 = 7/12.
+Time = 0.58333 / 0.02778 = 21 hours. ✓
+
+11:00 + 21:00 = 8:00 next day.
+
+So the tank is full at 8:00 AM the next day.
+
+Now, the second part: "generalise the method and prove that it always gives the right answer."
+
+Let me think about how to generalize.
+
+The general method: This is a piecewise-constant rate problem. The tank's fill level as a function of time is piecewise linear, with slopes equal to the net rate during each interval. The total fill is the sum of (rate × time) over intervals, and we want to find when the cumulative fill reaches 1 (full tank).
+
+Let me formalize.
+
+Setup:
+- Let there be a set of "inflow" pipes with rates $a_1, a_2, \ldots$ (positive) and "outflow" (drain) with rate $d$ (we treat drain as negative contribution).
+- Actually, let's define each source's rate as a fraction of tank per unit time.
+- We have a schedule: at various times, certain pipes open or close.
+- The net rate is constant on each interval between schedule events.
+
+Method:
+1. Determine the sequence of intervals based on the schedule (times when pipes open/close).
+2. For each interval, compute the net rate = sum of rates of open inflows minus sum of rates of open outflows.
+3. Compute cumulative fill at the end of each interval: $V_k = V_{k-1} + r_k \Delta t_k$.
+4. Find the interval where $V$ crosses 1. Within that interval, the fill increases linearly, so solve for the exact time.
+
+Proof of correctness:
+The key facts:
+- Each pipe contributes a constant rate while open (this is the physical assumption: pipes fill/empty at constant rate).
+- The total volume is additive: if multiple pipes are open, the rates add (superposition). This is because the volume contributed by each pipe is independent (they don't interfere).
+- The fill level is the integral of the net rate over time. Since the net rate is piecewise constant, the fill level is piecewise linear.
+- The tank is "full" when the cumulative fill equals 1 (one tank).
+
+Let me write this more rigorously.
+
+Let $f(t)$ = fraction of tank filled at time $t$. $f(0) = 0$ (starting empty).
+
+Each pipe $i$ has a rate $r_i$ (positive for inflow, negative for outflow). Pipe $i$ is open during a set of times $O_i \subseteq [0, \infty)$ (a union of intervals determined by the schedule).
+
+The rate of change of fill is:
+$$f'(t) = \sum_{i: t \in O_i} r_i.$$
+
+Since the schedule consists of finitely many events at times $0 = t_0 < t_1 < \cdots < t_n$, on each interval $(t_{k-1}, t_k)$ the set of open pipes is constant, so $f'(t) = r_k$ (constant) on that interval.
+
+Therefore $f$ is piecewise linear, and
+$$f(t) = \sum_{j=1}^{k-1} r_j (t_j - t_{j-1}) + r_k (t - t_{k-1}) \quad \text{for } t \in [t_{k-1}, t_k].$$
+
+Define cumulative fill at event times: $F_k = f(t_k) = \sum_{j=1}^{k} r_j (t_j - t_{j-1})$.
+
+To find when $f(t) = 1$:
+- Find the smallest $k$ such that $F_k \geq 1$ (assuming the tank eventually fills; we need $f$ to reach 1).
+
+Actually, we need to be careful: the fill might not be monotonic. But in this problem it is monotonic increasing throughout (all net rates positive). Let me note that.
+
+Actually, in general the fill might not be monotonic. But the method still works: we look for the first time $t$ where $f(t) = 1$.
+
+Hmm, but if $f$ is not monotonic, there could be multiple times. The "when is the tank full" typically means the first time it reaches full.
+
+Let me assume the net rate is positive in each interval (or at least the relevant final interval), so $f$ is increasing. Actually, let me be more careful in the generalization.
+
+For the general method and proof:
+
+Claim: The fill function $f$ is piecewise linear with the slopes and breakpoints as computed. The time when the tank first becomes full is found by:
+1. Computing $F_k$ for each $k$.
+2. Finding the interval $[t_{k-1}, t_k]$ where $F_{k-1} < 1 \leq F_k$ (first crossing).
+3. The exact time is $t = t_{k-1} + \frac{1 - F_{k-1}}{r_k}$.
+
+Proof: On $[t_{k-1}, t_k]$, $f(t) = F_{k-1} + r_k(t - t_{k-1})$. Setting $f(t) = 1$: $t = t_{k-1} + (1 - F_{k-1})/r_k$. This is valid (in the interval) iff $0 \leq (1-F_{k-1})/r_k \leq t_k - t_{k-1}$, i.e., $F_{k-1} \leq 1 \leq F_{k-1} + r_k(t_k - t_{k-1}) = F_k$. So we need $F_{k-1} \leq 1 \leq F_k$. Since $f$ is continuous and increasing (if $r_k > 0$), there's a unique such crossing.
+
+Let me make sure the proof covers the superposition principle clearly, since that's the crux.
+
+Actually, let me reconsider the problem statement. It says "generalise the method and prove that it always gives the right answer." So I should:
+1. Present the step-by-step solution.
+2. Describe the general method.
+3. Prove it's correct.
+
+Let me think about what "the method" is. The method is:
+- Compute net rates for each time interval.
+- Track cumulative volume.
+- Interpolate in the final interval.
+
+The proof relies on:
+- Linearity/additivity of flow rates (superposition).
+- The fundamental theorem of calculus (volume = integral of rate).
+- Piecewise linearity.
+
+Let me write this up.
+
+Actually, let me reconsider whether the problem wants me to prove it "always gives the right answer" in the sense of a general theorem. I think yes.
+
+Let me structure:
+
+**Part 1: Step-by-step solution.**
+
+Rates (tank per hour):
+- A: +1/6
+- B: +1/9
+- Drain: −1/12
+
+Intervals:
+1. 8:00–9:30 (1.5 h): A + drain. Net = 1/6 − 1/12 = 1/12.
+2. 9:30–11:00 (1.5 h): A + B + drain. Net = 1/6 + 1/9 − 1/12 = 7/36.
+3. 11:00 onward: B + drain. Net = 1/9 − 1/12 = 1/36.
+
+Cumulative:
+- End of interval 1: 1.5 × 1/12 = 1/8.
+- End of interval 2: 1/8 + 1.5 × 7/36 = 1/8 + 7/24 = 3/24 + 7/24 = 10/24 = 5/12.
+- Remaining after 11:00: 1 − 5/12 = 7/12.
+- Time in interval 3: (7/12)/(1/36) = 21 h.
+
+11:00 + 21 h = 8:00 next day.
+
+**Part 2: General method.**
+
+Given:
+- Pipes with rates $r_1, \ldots, r_m$ (signed: inflow positive, outflow negative).
+- A schedule specifying when each pipe is open, giving breakpoints $0 = t_0 < t_1 < \cdots < t_n$.
+- On each interval $(t_{k-1}, t_k)$, net rate $R_k$ = sum of rates of open pipes.
+
+Algorithm:
+1. Compute $R_k$ for each interval.
+2. Compute cumulative volume $V_k = \sum_{j=1}^k R_j (t_j - t_{j-1})$, with $V_0 = 0$.
+3. Find first $k$ with $V_k \geq 1$ (assuming it fills).
+4. Fill time $= t_{k-1} + (1 - V_{k-1})/R_k$.
+
+**Part 3: Proof.**
+
+The proof:
+- Model: Let $V(t)$ = volume fraction at time $t$. Each open pipe adds volume at its constant rate. By additivity (superposition), $V'(t) = \sum_{\text{open } i} r_i = R_k$ on interval $k$.
+- $V$ is continuous (volume can't jump) and piecewise linear.
+- $V(t) = V_{k-1} + R_k(t - t_{k-1})$ on $[t_{k-1
+<<content>>
+Let me carefully work through this problem.
+
+We have:
+- Pipe A fills the tank in 6 hours, so rate = 1/6 per hour.
+- Pipe B fills the tank in 9 hours, so rate = 1/9 per hour.
+- Drain empties the tank in 12 hours, so rate = -1/12 per hour.
+
+Timeline:
+- 8:00: A and drain opened.
+- 9:30: B opened (A and drain still open).
+- 11:00: A closed (B and drain still open).
+- Find when tank is full.
+
+Let me compute the amount of water at each stage.
+
+Let me use hours after 8:00 as the time variable, or just compute in hours.
+
+Stage 1: 8:00 to 9:30 (1.5 hours): A and drain open.
+Net rate = 1/6 - 1/12 = 2/12 - 1/12 = 1/12 per hour.
+Amount after 1.5 hours = 1.5 × 1/12 = 1.5/12 = 1/8.
+
+Stage 2: 9:30 to 11:00 (1.5 hours): A, B, and drain open.
+Net rate = 1/6 + 1/9 - 1/12.
+Let me compute: common denominator 36.
+1/6 = 6/36, 1/9 = 4/36, 1/12 = 3/36.
+Net rate = 6/36 + 4/36 - 3/36 = 7/36 per hour.
+Amount added in 1.5 hours = 1.5 × 7/36 = 10.5/36 = 21/72 = 7/24.
+
+Amount at 11:00 = 1/8 + 7/24 = 3/24 + 7/24 = 10/24 = 5/12.
+
+Stage 3: after 11:00: B and drain open (A closed).
+Net rate = 1/9 - 1/12.
+Common denominator 36: 4/36 - 3/36 = 1/36 per hour.
+Remaining to fill = 1 - 5/12 = 7/12.
+Time needed = (7/12) / (1/36) = (7/12) × 36 = 7 × 3 = 21 hours.
+
+So the tank fills 21 hours after 11:00.
+
+11:00 + 21 hours = 8:00 next day.
+
+Wait, let me double check. 11:00 + 21 hours. 11:00 + 13 hours = 24:00 (midnight). Then + 8 hours = 8:00. So 8:00 the next day.
+
+Hmm, that's a long time. Let me verify.
+
+Actually wait, let me reconsider. After 11:00, only B and drain are open. B fills at 1/9 per hour, drain empties at 1/12 per hour. Net = 1/9 - 1/12 = 4/36 - 3/36 = 1/36 per hour. That's very slow. So yes, it takes a long time.
+
+Remaining = 7/12. Time = (7/12)/(1/36) = 7/12 × 36 = 252/12 = 21 hours. Yes.
+
+So 11:00 + 21 hours = 8:00 next day.
+
+Let me double-check the whole thing.
+
+At 8:00, start empty.
+8:00-9:30: A (1/6) and drain (-1/12). Net = 1/12 per hour. Duration 1.5 hours. Fill = 1.5/12 = 0.125 = 1/8. ✓
+
+9:30-11:00: A (1/6), B (1/9), drain (-1/12). Net = 1/6 + 1/9 - 1/12.
+1/6 = 0.16667, 1/9 = 0.11111, 1/12 = 0.08333.
+Net = 0.16667 + 0.11111 - 0.08333 = 0.19444 per hour.
+7/36 = 0.19444. ✓
+Duration 1.5 hours. Fill = 1.5 × 0.19444 = 0.29167 = 7/24. ✓
+
+Total at 11:00 = 0.125 + 0.29167 = 0.41667 = 5/12. ✓
+
+After 11:00: B (1/9), drain (-1/12). Net = 0.11111 - 0.08333 = 0.02778 = 1/36 per hour.
+Remaining = 1 - 0.41667 = 0.58333 = 7/12.
+Time = 0.58333 / 0.02778 = 21 hours. ✓
+
+11:00 + 21:00 = 8:00 next day.
+
+So the tank is full at 8:00 AM the next day.
+
+Now, the second part: "generalise the method and prove that it always gives the right answer."
+
+Let me think about how to generalize.
+
+The general method: This is a piecewise-constant rate problem. The tank's fill level as a function of time is piecewise linear, with slopes equal to the net rate during each interval. The total fill is the sum of (rate × time) over intervals, and we want to find when the cumulative fill reaches 1 (full tank).
+
+Let me formalize.
+
+Setup:
+- Let there be a set of "inflow" pipes with rates $a_1, a_2, \ldots$ (positive) and "outflow" (drain) with rate $d$ (we treat drain as negative contribution).
+- Actually, let's define each source's rate as a fraction of tank per unit time.
+- We have a schedule: at various times, certain pipes open or close.
+- The net rate is constant on each interval between schedule events.
+
+Method:
+1. Determine the sequence of intervals based on the schedule (times when pipes open/close).
+2. For each interval, compute the net rate = sum of rates of open inflows minus sum of rates of open outflows.
+3. Compute cumulative fill at the end of each interval: $V_k = V_{k-1} + r_k \Delta t_k$.
+4. Find the interval where $V$ crosses 1. Within that interval, the fill increases linearly, so solve for the exact time.
+
+Proof of correctness:
+The key facts:
+- Each pipe contributes a constant rate while open (this is the physical assumption: pipes fill/empty at constant rate).
+- The total volume is additive: if multiple pipes are open, the rates add (superposition). This is because the volume contributed by each pipe is independent (they don't interfere).
+- The fill level is the integral of the net rate over time. Since the net rate is piecewise constant, the fill level is piecewise linear.
+- The tank is "full" when the cumulative fill equals 1 (one tank).
+
+Let me write this more rigorously.
+
+Let $f(t)$ = fraction of tank filled at time $t$. $f(0) = 0$ (starting empty).
+
+Each pipe $i$ has a rate $r_i$ (positive for inflow, negative for outflow). Pipe $i$ is open during a set of times $O_i \subseteq [0, \infty)$ (a union of intervals determined by the schedule).
+
+The rate of change of fill is:
+$$f'(t) = \sum_{i: t \in O_i} r_i.$$
+
+Since the schedule consists of finitely many events at times $0 = t_0 < t_1 < \cdots < t_n$, on each interval $(t_{k-1}, t_k)$ the set of open pipes is constant, so $f'(t) = r_k$ (constant) on that interval.
+
+Therefore $f$ is piecewise linear, and
+$$f(t) = \sum_{j=1}^{k-1} r_j (t_j - t_{j-1}) + r_k (t - t_{k-1}) \quad \text{for } t \in [t_{k-1}, t_k].$$
+
+Define cumulative fill at event times: $F_k = f(t_k) = \sum_{j=1}^{k} r_j (t_j - t_{j-1})$.
+
+To find when $f(t) = 1$:
+- Find the smallest $k$ such that $F_k \geq 1$ (assuming the tank eventually fills; we need $f$ to reach 1).
+
+Actually, we need to be careful: the fill might not be monotonic. But in this problem it is monotonic increasing throughout (all net rates positive). Let me note that.
+
+Actually, in general the fill might not be monotonic. But the method still works: we look for the first time $t$ where $f(t) = 1$.
+
+Hmm, but if $f$ is not monotonic, there could be multiple times. The "when is the tank full" typically means the first time it reaches full.
+
+Let me assume the net rate is positive in each interval (or at least the relevant final interval), so $f$ is increasing. Actually, let me be more careful in the generalization.
+
+For the general method and proof:
+
+Claim: The fill function $f$ is piecewise linear with the slopes and breakpoints as computed. The time when the tank first becomes full is found by:
+1. Computing $F_k$ for each $k$.
+2. Finding the interval $[t_{k-1}, t_k]$ where $F_{k-1} < 1 \leq F_k$ (first crossing).
+3. The exact time is $t = t_{k-1} + \frac{1 - F_{k-1}}{r_k}$.
+
+Proof: On $[t_{k-1}, t_k]$, $f(t) = F_{k-1} + r_k(t - t_{k-1})$. Setting $f(t) = 1$: $t = t_{k-1} + (1 - F_{k-1})/r_k$. This is valid (in the interval) iff $0 \leq (1-F_{k-1})/r_k \leq t_k - t_{k-1}$, i.e., $F_{k-1} \leq 1 \leq F_{k-1} + r_k(t_k - t_{k-1}) = F_k$. So we need $F_{k-1} \leq 1 \leq F_k$. Since $f$ is continuous and increasing (if $r_k > 0$), there's a unique such crossing.
+
+Let me make sure the proof covers the superposition principle clearly, since that's the crux.
+
+Actually, let me reconsider the problem statement. It says "generalise the method and prove that it always gives the right answer." So I should:
+1. Present the step-by-step solution.
+2. Describe the general method.
+3. Prove it's correct.
+
+Let me think about what "the method" is. The method is:
+- Compute net rates for each time interval.
+- Track cumulative volume.
+- Interpolate in the final interval.
+
+The proof relies on:
+- Linearity/additivity of flow rates (superposition).
+- The fundamental theorem of calculus (volume = integral of rate).
+- Piecewise linearity.
+
+Let me write this up.
+
+Actually, let me reconsider whether the problem wants me to prove it "always gives the right answer" in the sense of a general theorem. I think yes.
+
+Let me structure:
+
+**Part 1: Step-by-step solution.**
+
+Rates (tank per hour):
+- A: +1/6
+- B: +1/9
+- Drain: −1/12
+
+Intervals:
+1. 8:00–9:30 (1.5 h): A + drain. Net = 1/6 − 1/12 = 1/12.
+2. 9:30–11:00 (1.5 h): A + B + drain. Net = 1/6 + 1/9 − 1/12 = 7/36.
+3. 11:00 onward: B + drain. Net = 1/9 − 1/12 = 1/36.
+
+Cumulative:
+- End of interval 1: 1.5 × 1/12 = 1/8.
+- End of interval 2: 1/8 + 1.5 × 7/36 = 1/8 + 7/24 = 3/24 + 7/24 = 10/24 = 5/12.
+- Remaining after 11:00: 1 − 5/12 = 7/12.
+- Time in interval 3: (7/12)/(1/36) = 21 h.
+
+11:00 + 21 h = 8:00 next day.
+
+**Part 2: General method.**
+
+Given:
+- Pipes with rates $r_1, \ldots, r_m$ (signed: inflow positive, outflow negative).
+- A schedule specifying when each pipe is open, giving breakpoints $0 = t_0 < t_1 < \cdots < t_n$.
+- On each interval $(t_{k-1}, t_k)$, net rate $R_k$ = sum of rates of open pipes.
+
+Algorithm:
+1. Compute $R_k$ for each interval.
+2. Compute cumulative volume $V_k = \sum_{j=1}^k R_j (t_j - t_{j-1})$, with $V_0 = 0$.
+3. Find first $k$ with $V_k \geq 1$ (assuming it fills).
+4. Fill time $= t_{k-1} + (1 - V_{k-1})/R_k$.
+
+**Part 3: Proof.**
+
+The proof:
+- Model: Let $V(t)$ = volume fraction at time $t$. Each open pipe adds volume at its constant rate. By additivity (superposition), $V'(t) = \sum_{\text{open } i} r_i = R_k$ on interval $k$.
+- $V$ is continuous (volume can't jump) and piecewise linear.
+- $V(t) = V_{k-1} + R_k(t - t_{k-1})$ on $[t_{k-1

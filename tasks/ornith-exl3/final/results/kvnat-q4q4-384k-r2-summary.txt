@@ -1,0 +1,315 @@
+The user wants me to summarize the main design decisions from this engineering design document, then critique them: which decisions look fragile, what measurements are missing, and what I'd change first.
+
+Let me carefully read through this document to understand the key design decisions.
+
+This is a serving document for NVIDIA Nemotron models (Nemotron 3 Super and 3.5 Lightning) on the "FreeToken" serving engine. It's a dense technical document with a lot of benchmarking detail.
+
+Let me extract the main design decisions:
+
+**Architecture context:**
+- Nemotron models use hybrid Mamba-2 (SSD) / full-attention / latent-MoE architecture
+- NVFP4 quantized experts
+- FreeToken is the serving engine
+
+**Key design decisions:**
+
+1. **MoE offload strategy (`--moe-backend offload`)**: Experts live in host RAM, fetched over PCIe on demand. This is the core strategy. The expert banks are ~15.4 GiB (NVFP4). On WSL, `--moe-pageable-gpu` keeps overflow banks pageable.
+
+2. **Expert GEMM kernel choice — Triton over b12x**: For Nemotron 3.5 Lightning, Triton wins the microbenchmark at every width except widest prefill. The backend is chosen once at bank-load time because it pins the on-GPU weight layout. This is a critical decision — you can't mix backends.
+
+3. **Single-stream-only for Super, but not for Lightning**: Super forces `--max-running-requests 1` because its Mamba-2 state is ~160 MiB per sequence (too big). Lightning has 47 MiB state, fits many slots, up to 16 concurrent.
+
+4. **KV cache dtype — q8_0**: Chosen in Phase 1 A/B. fp8_e4m3 flipped first tokens on cached-prefix reuse.
+
+5. **MoE cache policy — LFU over LRU**: At bs=16, LRU degenerates to 99.6% miss rate; LFU halves it to 51% and is worth 1.80× aggregate throughput. Rule of thumb: LFU above ~15% miss rate, LRU below.
+
+6. **Context ceiling — 262K not 1M**: `max_position_embeddings` is 1M but tokenizer's `model_max_length` is 262K. Treat 262K as served ceiling.
+
+7. **Pin budget / WSL**: `FREETOKEN_PIN_BUDGET_GB=17` pins every layer, keeps CUDA graphs. CUDA host-registration budget is 0.4 × RAM on WSL.
+
+8. **Prefill chunk size — 8192**: Not a throughput lever. Total prefix work is ~N²/2 regardless. Raising above 8192 buys only ~106ms per chunk fixed overhead.
+
+9. **memory-ratio = 1.00**: Fixed by owner decision, not a tuning knob. The engine predicts free VRAM from config, measures prefill transient, fills growable arena.
+
+10. **Growable KV (`--kv-grow-step-tokens`)**: Grows KV in steps, funding from expert cache. BUT — this costs the whole prefix cache on prefix-reuse-heavy workloads (teardowns evict all prefixes). Retired for prefix-reuse work.
+
+11. **Decode CUDA graphs — dense to 16**: The graph set is dense (1..16) for offload-MoE models because padded rows route their own experts. Dense set costs 80 MiB, 1.074× speedup.
+
+12. **Speculative decoding — ngram, shipped 2026-09-05**: Off by default. Greedy and single-stream only. Draft len 8 default. Copy-heavy traffic benefits (1.61×), code/prose neutral, long context regresses.
+
+13. **1M single-session profile**: For long-lived agent sessions. One resident session, others queue/spill. Growable KV funds from expert cache. Session spill to RAM then NVMe.
+
+14. **Session spill / residency policy**: No spill while queue empty. Retention by capacity + age. Survive restart. Look-ahead promotion. Partial-prefix restore. Prefill-time state capture.
+
+15. **Mamba-2 state dtype — fp32 required**: `FREETOKEN_MAMBA_SSM_DTYPE=bfloat16` rejected at config time. SSD kernels require fp32 state pool.
+
+16. **Launch profiles**: Default (single lane), P1 (bring-up), P2 (16 concurrent, historical).
+
+17. **Cache type — hybrid_radix**: `cache_type='radix'` resolves to `hybrid_radix` because Mamba layers are `LinearGatedDeltaGroupConfig`.
+
+18. **Attention backend — triton for quantized KV**: Quantized KV requires `--attention-backend triton`.
+
+Now let me think about the critique.
+
+**Which decisions look fragile?**
+
+1. **The expert GEMM backend chosen once at bank-load time**: This is a big one. The decision pins the weight layout, so you can't mix. The doc notes that `auto` resolves to b12x on this geometry but that's "now wrong." This suggests the auto-resolution logic is fragile — it's geometry-dependent and the threshold logic (`moe_intermediate_size 1856 ≥ 1024`) produces the wrong answer. The whole thing hinges on a microbenchmark that's already been rewritten multiple times (2026-09-05 prefill-GEMM rewrite changed the b12x lead from 2.3× to 1.10×). So the "correct" backend is a moving target.
+
+2. **The pin budget / WSL pageable split**: On WSL, the CUDA host-registration budget is 0.4 × RAM. Below 15.4 GiB banks, overflow needs pageable (disables CUDA graphs). Raising pin budget to ≥17 keeps graphs. This is a knife-edge: you're either fully pinned (graphs on) or you lose graphs. The preflight script tells you which side you're on, but it's binary and fragile.
+
+3. **Growable KV destroying the prefix cache**: The doc itself documents that `--kv-grow-step-tokens` arms teardowns that evict the entire prefix cache (89% pure loss in one measurement). This is a known footgun. The decision to keep it for multi-agent but drop for prefix-reuse is a heuristic that could easily be wrong.
+
+4. **LFU/LRU miss-rate heuristic**: "LFU above ~15% miss rate, LRU below." This is a rule of thumb derived from one geometry. The 99.6% miss rate at bs=16 with LRU is dramatic but the crossover point (15%) is presumably geometry/workload-dependent.
+
+5. **Speculative decoding acceptance is workload-specific**: It's copy-heavy traffic that benefits. On code/prose it's neutral (0.99×), and on long context it regresses (~12×). The gate that stops drafting when uneconomic is described as "cannot refund the measurement" — pricing itself costs two verify steps. This is fragile: the gate's own cost is a fixed overhead that isn't refunded.
+
+6. **The 1M recall problem / addressing under interference**: The cross-engine oracle shows `key → code` collapses between 262K and 524K on BOTH FreeToken and llama.cpp. This is a model property (addressing under interference), not a serving defect. But it means the serving engine can't fix it — it's a fundamental limitation. The "practical reading" is basically "don't rely on quote-the-value at ≥524K." This is a real limitation that the design acknowledges but doesn't solve.
+
+7. **memory-ratio = 1.00 fixed**: The doc says it's "an override, not a per-host tuning knob" and "fixed by owner decision." But it also says the engine predicts free VRAM and WARNs outside ±25%. If the prediction is off by 25%, is 1.00 actually safe? The 5080 passed from the start at 1.00 with 0.00 GiB free after graph capture. That's cutting it close — no headroom.
+
+8. **The decode CUDA graph dense set**: 80 MiB, 11 extra graphs. The 1.074× is real but the doc notes padding a row on offload-MoE isn't free (routes its own experts). This is a subtle correctness/performance interaction.
+
+**What measurements are missing?**
+
+1. **End-to-end latency under real mixed workloads**: Most measurements are synthetic needle prompts, copy-heavy agent prompts, or replay runs. The doc is honest about "stream variance" and "copy-class lottery" but there's a lot of synthetic measurement. Real-world traffic patterns (variable prompt lengths, mixed code/prose/copy) aren't well characterized.
+
+2. **The 15% LFU/LRU crossover validation**: It's stated as a rule of thumb but I don't see a measurement sweep across miss rates to validate the crossover point.
+
+3. **Long-context speculation cost**: The verify step at 131K costs ~92ms vs ~7.6ms decode — ~12×. This is the fundamental blocker for speculation at long context. But there's no measurement of a fused multi-query kernel that could fix it (the doc says it's "still open").
+
+4. **Host RAM headroom under real load**: The preflight script checks MemAvailable/SwapFree but the actual serving under varied load isn't measured. The ~26.9 GiB free to launch figure is for one specific config.
+
+5. **PCIe saturation margin**: The decode is 74% PCIe expert misses at a measured 51-52 GB/s gather — "the PCIe roofline, so the copy kernel has no headroom." This is right at the roofline. Any variance could cause stalls. No margin measurement.
+
+6. **The pin-budget binary outcome**: What happens on hosts between 15.4 and 17 GiB? The doc treats it as binary (pinned or not) but there might be a gray zone.
+
+7. **Speculation gate calibration**: The gate measures its own verify/decode ratio and stops drafting. But the gate's measurement cost (two verify steps) is fixed and not refunded. No measurement of how often the gate fires or its calibration across workloads.
+
+8. **Recall/accuracy at scale**: The oracle study is the key accuracy measurement, and it shows a real limitation. But there's no systematic accuracy benchmark across context lengths for the serving engine's own decisions (quantized KV, etc.).
+
+**What would I change first?**
+
+Let me think about priorities. The most impactful and fragile decisions:
+
+1. **The expert GEMM backend auto-resolution**: This is the highest-leverage fix. The `auto` → b12x resolution is "now wrong on this geometry" and the whole thing is a moving target. I'd change the auto-resolution to be checkpoint-specific (read from a per-model config or a benchmark-derived table) rather than a heuristic threshold. Actually, the doc says the backend is chosen once at bank-load time and pins the layout — so getting it wrong is expensive (requires reload). Making this robust is priority one.
+
+2. **The prefix-cache destruction from growable KV**: This is a known footgun that silently degrades prefix-reuse workloads. I'd either make the teardown smarter (only evict when a shrink is actually achievable) or make the flag's interaction with prefix cache explicit/safe by default.
+
+3. **The long-context speculation blocker**: The verify step reading KV history once per query token is the fundamental issue. A fused multi-query kernel is the shape of the fix. But this is a research item, not an immediate change.
+
+Let me also think about the overall architecture critique:
+
+- The whole design is built around the tension between huge expert banks (15.4 GiB) that don't fit on a 16 GiB GPU and the need to fetch them over PCIe. This is the core constraint. Every decision (offload, LFU cache, pin budget, dense graphs) is in service of managing this PCIe bottleneck.
+
+- The Mamba-2 recurrent state is another constraint (47 MiB/slot on Lightning, 160 MiB/slot on Super). This drives the single-stream-only for Super.
+
+- The design is very measurement-driven (lots of benchmark files referenced), which is good, but some decisions are made on synthetic workloads that may not generalize.
+
+Let me also note the "latent MoE" vs "non-latent" distinction for Super vs Lightning. Super is latent-MoE, Lightning is non-latent with 128 routed experts at top-6.
+
+Now, let me think about what's genuinely fragile vs what's well-reasoned.
+
+The document is unusually self-critical and measurement-honest. It retracts claims ("Retracted 2026-09-04"), notes when measurements are wrong, and distinguishes synthetic from real. This is a strength. But the fragility is in the interactions and the moving-target nature of the kernel benchmarks.
+
+Let me structure my answer:
+
+1. Summary of main design decisions (grouped logically)
+2. Critique:
+   a. Which decisions look fragile
+   b. What measurements are missing
+   c. What I'd change first
+
+Let me be concrete and specific, referencing the actual numbers and decisions in the doc. I should be honest about what I'm inferring vs what's stated.
+
+Let me think about the format. This is a complex technical document and the user wants a substantive analysis. I should use headers to organize. Not too long, but thorough. Let me aim for a well-organized response that:
+- Summarizes the key decisions concisely
+- Critiques them thoughtfully
+- Prioritizes recommendations
+
+I'll use markdown headers and some structure. Let me not overdo the length — this should be a focused analysis, not a re-typing of the whole doc.
+
+Let me draft.
+
+Actually, let me reconsider the framing. The user is asking me to act like an engineer reviewing this design doc. So I should:
+1. Summarize the design decisions (show I understand it)
+2. Critique (show independent judgment)
+3. Prioritize (show I can think about impact)
+
+Let me make sure I capture the real architecture decisions, not just the flag-level tuning.
+
+Core architectural decisions:
+1. **MoE offload over PCIe** — experts in host RAM, fetched on demand. This is THE central decision. Everything else manages its cost.
+2. **NVFP4 quantization** — 4-bit experts, drives the kernel choices.
+3. **Single Triton expert GEMM backend** — chosen once, pins layout.
+4. **Mamba-2 fp32 state** — required by kernels, drives single-stream for Super.
+5. **hybrid_radix cache** — Mamba-aware prefix cache.
+6. **LFU expert cache** — for the 16-way profile.
+7. **Growable KV funded from expert cache** — memory management.
+8. **Session spill/restore** — for 1M sessions.
+9. **Speculative decoding (ngram)** — copy-heavy only.
+10. **memory-ratio = 1.00 fixed** — no headroom by design.
+
+Let me write this up.
+
+For the critique, I want to be genuinely useful, not just list things. Let me think about what's actually fragile at the system level:
+
+**Fragility 1: The backend is chosen once and pins layout, but the choice is a moving target.**
+The expert GEMM backend is decided at bank-load time because it pins the on-GPU weight layout. You can't use b12x for prefill and Triton for decode. And the benchmark that decides it has already changed the answer twice
+<<content>>
+The user wants me to summarize the main design decisions from this engineering design document, then critique them: which decisions look fragile, what measurements are missing, and what I'd change first.
+
+Let me carefully read through this document to understand the key design decisions.
+
+This is a serving document for NVIDIA Nemotron models (Nemotron 3 Super and 3.5 Lightning) on the "FreeToken" serving engine. It's a dense technical document with a lot of benchmarking detail.
+
+Let me extract the main design decisions:
+
+**Architecture context:**
+- Nemotron models use hybrid Mamba-2 (SSD) / full-attention / latent-MoE architecture
+- NVFP4 quantized experts
+- FreeToken is the serving engine
+
+**Key design decisions:**
+
+1. **MoE offload strategy (`--moe-backend offload`)**: Experts live in host RAM, fetched over PCIe on demand. This is the core strategy. The expert banks are ~15.4 GiB (NVFP4). On WSL, `--moe-pageable-gpu` keeps overflow banks pageable.
+
+2. **Expert GEMM kernel choice — Triton over b12x**: For Nemotron 3.5 Lightning, Triton wins the microbenchmark at every width except widest prefill. The backend is chosen once at bank-load time because it pins the on-GPU weight layout. This is a critical decision — you can't mix backends.
+
+3. **Single-stream-only for Super, but not for Lightning**: Super forces `--max-running-requests 1` because its Mamba-2 state is ~160 MiB per sequence (too big). Lightning has 47 MiB state, fits many slots, up to 16 concurrent.
+
+4. **KV cache dtype — q8_0**: Chosen in Phase 1 A/B. fp8_e4m3 flipped first tokens on cached-prefix reuse.
+
+5. **MoE cache policy — LFU over LRU**: At bs=16, LRU degenerates to 99.6% miss rate; LFU halves it to 51% and is worth 1.80× aggregate throughput. Rule of thumb: LFU above ~15% miss rate, LRU below.
+
+6. **Context ceiling — 262K not 1M**: `max_position_embeddings` is 1M but tokenizer's `model_max_length` is 262K. Treat 262K as served ceiling.
+
+7. **Pin budget / WSL**: `FREETOKEN_PIN_BUDGET_GB=17` pins every layer, keeps CUDA graphs. CUDA host-registration budget is 0.4 × RAM on WSL.
+
+8. **Prefill chunk size — 8192**: Not a throughput lever. Total prefix work is ~N²/2 regardless. Raising above 8192 buys only ~106ms per chunk fixed overhead.
+
+9. **memory-ratio = 1.00**: Fixed by owner decision, not a tuning knob. The engine predicts free VRAM from config, measures prefill transient, fills growable arena.
+
+10. **Growable KV (`--kv-grow-step-tokens`)**: Grows KV in steps, funding from expert cache. BUT — this costs the whole prefix cache on prefix-reuse-heavy workloads (teardowns evict all prefixes). Retired for prefix-reuse work.
+
+11. **Decode CUDA graphs — dense to 16**: The graph set is dense (1..16) for offload-MoE models because padded rows route their own experts. Dense set costs 80 MiB, 1.074× speedup.
+
+12. **Speculative decoding — ngram, shipped 2026-09-05**: Off by default. Greedy and single-stream only. Draft len 8 default. Copy-heavy traffic benefits (1.61×), code/prose neutral, long context regresses.
+
+13. **1M single-session profile**: For long-lived agent sessions. One resident session, others queue/spill. Growable KV funds from expert cache. Session spill to RAM then NVMe.
+
+14. **Session spill / residency policy**: No spill while queue empty. Retention by capacity + age. Survive restart. Look-ahead promotion. Partial-prefix restore. Prefill-time state capture.
+
+15. **Mamba-2 state dtype — fp32 required**: `FREETOKEN_MAMBA_SSM_DTYPE=bfloat16` rejected at config time. SSD kernels require fp32 state pool.
+
+16. **Launch profiles**: Default (single lane), P1 (bring-up), P2 (16 concurrent, historical).
+
+17. **Cache type — hybrid_radix**: `cache_type='radix'` resolves to `hybrid_radix` because Mamba layers are `LinearGatedDeltaGroupConfig`.
+
+18. **Attention backend — triton for quantized KV**: Quantized KV requires `--attention-backend triton`.
+
+Now let me think about the critique.
+
+**Which decisions look fragile?**
+
+1. **The expert GEMM backend chosen once at bank-load time**: This is a big one. The decision pins the weight layout, so you can't mix. The doc notes that `auto` resolves to b12x on this geometry but that's "now wrong." This suggests the auto-resolution logic is fragile — it's geometry-dependent and the threshold logic (`moe_intermediate_size 1856 ≥ 1024`) produces the wrong answer. The whole thing hinges on a microbenchmark that's already been rewritten multiple times (2026-09-05 prefill-GEMM rewrite changed the b12x lead from 2.3× to 1.10×). So the "correct" backend is a moving target.
+
+2. **The pin budget / WSL pageable split**: On WSL, the CUDA host-registration budget is 0.4 × RAM. Below 15.4 GiB banks, overflow needs pageable (disables CUDA graphs). Raising pin budget to ≥17 keeps graphs. This is a knife-edge: you're either fully pinned (graphs on) or you lose graphs. The preflight script tells you which side you're on, but it's binary and fragile.
+
+3. **Growable KV destroying the prefix cache**: The doc itself documents that `--kv-grow-step-tokens` arms teardowns that evict the entire prefix cache (89% pure loss in one measurement). This is a known footgun. The decision to keep it for multi-agent but drop for prefix-reuse is a heuristic that could easily be wrong.
+
+4. **LFU/LRU miss-rate heuristic**: "LFU above ~15% miss rate, LRU below." This is a rule of thumb derived from one geometry. The 99.6% miss rate at bs=16 with LRU is dramatic but the crossover point (15%) is presumably geometry/workload-dependent.
+
+5. **Speculative decoding acceptance is workload-specific**: It's copy-heavy traffic that benefits. On code/prose it's neutral (0.99×), and on long context it regresses (~12×). The gate that stops drafting when uneconomic is described as "cannot refund the measurement" — pricing itself costs two verify steps. This is fragile: the gate's own cost is a fixed overhead that isn't refunded.
+
+6. **The 1M recall problem / addressing under interference**: The cross-engine oracle shows `key → code` collapses between 262K and 524K on BOTH FreeToken and llama.cpp. This is a model property (addressing under interference), not a serving defect. But it means the serving engine can't fix it — it's a fundamental limitation. The "practical reading" is basically "don't rely on quote-the-value at ≥524K." This is a real limitation that the design acknowledges but doesn't solve.
+
+7. **memory-ratio = 1.00 fixed**: The doc says it's "an override, not a per-host tuning knob" and "fixed by owner decision." But it also says the engine predicts free VRAM and WARNs outside ±25%. If the prediction is off by 25%, is 1.00 actually safe? The 5080 passed from the start at 1.00 with 0.00 GiB free after graph capture. That's cutting it close — no headroom.
+
+8. **The decode CUDA graph dense set**: 80 MiB, 11 extra graphs. The 1.074× is real but the doc notes padding a row on offload-MoE isn't free (routes its own experts). This is a subtle correctness/performance interaction.
+
+**What measurements are missing?**
+
+1. **End-to-end latency under real mixed workloads**: Most measurements are synthetic needle prompts, copy-heavy agent prompts, or replay runs. The doc is honest about "stream variance" and "copy-class lottery" but there's a lot of synthetic measurement. Real-world traffic patterns (variable prompt lengths, mixed code/prose/copy) aren't well characterized.
+
+2. **The 15% LFU/LRU crossover validation**: It's stated as a rule of thumb but I don't see a measurement sweep across miss rates to validate the crossover point.
+
+3. **Long-context speculation cost**: The verify step at 131K costs ~92ms vs ~7.6ms decode — ~12×. This is the fundamental blocker for speculation at long context. But there's no measurement of a fused multi-query kernel that could fix it (the doc says it's "still open").
+
+4. **Host RAM headroom under real load**: The preflight script checks MemAvailable/SwapFree but the actual serving under varied load isn't measured. The ~26.9 GiB free to launch figure is for one specific config.
+
+5. **PCIe saturation margin**: The decode is 74% PCIe expert misses at a measured 51-52 GB/s gather — "the PCIe roofline, so the copy kernel has no headroom." This is right at the roofline. Any variance could cause stalls. No margin measurement.
+
+6. **The pin-budget binary outcome**: What happens on hosts between 15.4 and 17 GiB? The doc treats it as binary (pinned or not) but there might be a gray zone.
+
+7. **Speculation gate calibration**: The gate measures its own verify/decode ratio and stops drafting. But the gate's measurement cost (two verify steps) is fixed and not refunded. No measurement of how often the gate fires or its calibration across workloads.
+
+8. **Recall/accuracy at scale**: The oracle study is the key accuracy measurement, and it shows a real limitation. But there's no systematic accuracy benchmark across context lengths for the serving engine's own decisions (quantized KV, etc.).
+
+**What would I change first?**
+
+Let me think about priorities. The most impactful and fragile decisions:
+
+1. **The expert GEMM backend auto-resolution**: This is the highest-leverage fix. The `auto` → b12x resolution is "now wrong on this geometry" and the whole thing is a moving target. I'd change the auto-resolution to be checkpoint-specific (read from a per-model config or a benchmark-derived table) rather than a heuristic threshold. Actually, the doc says the backend is chosen once at bank-load time and pins the layout — so getting it wrong is expensive (requires reload). Making this robust is priority one.
+
+2. **The prefix-cache destruction from growable KV**: This is a known footgun that silently degrades prefix-reuse workloads. I'd either make the teardown smarter (only evict when a shrink is actually achievable) or make the flag's interaction with prefix cache explicit/safe by default.
+
+3. **The long-context speculation blocker**: The verify step reading KV history once per query token is the fundamental issue. A fused multi-query kernel is the shape of the fix. But this is a research item, not an immediate change.
+
+Let me also think about the overall architecture critique:
+
+- The whole design is built around the tension between huge expert banks (15.4 GiB) that don't fit on a 16 GiB GPU and the need to fetch them over PCIe. This is the core constraint. Every decision (offload, LFU cache, pin budget, dense graphs) is in service of managing this PCIe bottleneck.
+
+- The Mamba-2 recurrent state is another constraint (47 MiB/slot on Lightning, 160 MiB/slot on Super). This drives the single-stream-only for Super.
+
+- The design is very measurement-driven (lots of benchmark files referenced), which is good, but some decisions are made on synthetic workloads that may not generalize.
+
+Let me also note the "latent MoE" vs "non-latent" distinction for Super vs Lightning. Super is latent-MoE, Lightning is non-latent with 128 routed experts at top-6.
+
+Now, let me think about what's genuinely fragile vs what's well-reasoned.
+
+The document is unusually self-critical and measurement-honest. It retracts claims ("Retracted 2026-09-04"), notes when measurements are wrong, and distinguishes synthetic from real. This is a strength. But the fragility is in the interactions and the moving-target nature of the kernel benchmarks.
+
+Let me structure my answer:
+
+1. Summary of main design decisions (grouped logically)
+2. Critique:
+   a. Which decisions look fragile
+   b. What measurements are missing
+   c. What I'd change first
+
+Let me be concrete and specific, referencing the actual numbers and decisions in the doc. I should be honest about what I'm inferring vs what's stated.
+
+Let me think about the format. This is a complex technical document and the user wants a substantive analysis. I should use headers to organize. Not too long, but thorough. Let me aim for a well-organized response that:
+- Summarizes the key decisions concisely
+- Critiques them thoughtfully
+- Prioritizes recommendations
+
+I'll use markdown headers and some structure. Let me not overdo the length — this should be a focused analysis, not a re-typing of the whole doc.
+
+Let me draft.
+
+Actually, let me reconsider the framing. The user is asking me to act like an engineer reviewing this design doc. So I should:
+1. Summarize the design decisions (show I understand it)
+2. Critique (show independent judgment)
+3. Prioritize (show I can think about impact)
+
+Let me make sure I capture the real architecture decisions, not just the flag-level tuning.
+
+Core architectural decisions:
+1. **MoE offload over PCIe** — experts in host RAM, fetched on demand. This is THE central decision. Everything else manages its cost.
+2. **NVFP4 quantization** — 4-bit experts, drives the kernel choices.
+3. **Single Triton expert GEMM backend** — chosen once, pins layout.
+4. **Mamba-2 fp32 state** — required by kernels, drives single-stream for Super.
+5. **hybrid_radix cache** — Mamba-aware prefix cache.
+6. **LFU expert cache** — for the 16-way profile.
+7. **Growable KV funded from expert cache** — memory management.
+8. **Session spill/restore** — for 1M sessions.
+9. **Speculative decoding (ngram)** — copy-heavy only.
+10. **memory-ratio = 1.00 fixed** — no headroom by design.
+
+Let me write this up.
+
+For the critique, I want to be genuinely useful, not just list things. Let me think about what's actually fragile at the system level:
+
+**Fragility 1: The backend is chosen once and pins layout, but the choice is a moving target.**
+The expert GEMM backend is decided at bank-load time because it pins the on-GPU weight layout. You can't use b12x for prefill and Triton for decode. And the benchmark that decides it has already changed the answer twice

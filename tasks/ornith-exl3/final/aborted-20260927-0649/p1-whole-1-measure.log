@@ -1,0 +1,33 @@
+[p1-whole-1] starting: model=Ornith-1.5-35B-A3B-exl3-5.0bpw-hq rows=0 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/final@1dfad58 venv=/home/lucas/ai/FreeToken/.venv launcher=systemd
+Running as unit: ft-measure-p1-whole-1.service; invocation ID: 944fa7e1a5bd441cb5a0c6a3aa92357c
+[p1-whole-1] ready after 110s
+Sep 27 06:47:57 TESSERACT serve-default.sh[4154499]: [2026-09-27|06:47:57|core|rank=0] INFO     Allocating 262144 tokens for KV cache, K + V = 2.66 GiB
+Sep 27 06:48:48 TESSERACT serve-default.sh[4154499]: [2026-09-27|06:48:48|core|rank=0] INFO     Prefill headroom: transient 1.10 GiB measured on a 8192-token chunk (empty prefix 1.10 GiB, after a 8192-token prefix 1.10 GiB, allocator peak 0.97 GiB); headroom 1.10 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 512 -> 4928 of 5623 slots, 1.24 GiB free (target 1.22 GiB), 695 slots below the ratio plan
+Sep 27 06:48:48 TESSERACT serve-default.sh[4154499]: [2026-09-27|06:48:48|core|rank=0] INFO     Startup geometry: memory ratio 1.00, runtime reserve 0.00 GiB; expert arena 4928 slots; KV 65536 tokens mapped of 262144 (0.74 GiB); 1.24 GiB free
+[p1-whole-1] measuring
+/home/lucas/ai/FreeToken-wt/final/tasks/exclusive-expert-ram/measure.sh: line 272: /home/lucas/ai/FreeToken-wt/final/scripts/probe_decode.py: Permission denied
+[p1-whole-1] probe failed; recording the arm anyway
+{
+  "arm": "p1-whole-1",
+  "model": "Ornith-1.5-35B-A3B-exl3-5.0bpw-hq",
+  "rows": "0",
+  "commit": "1dfad58",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 21.63,
+  "rss_ready_gib": 22.51,
+  "devzero_gib": 18.98,
+  "ram_after_80k_gib": 21.71,
+  "rss_gib": 22.59,
+  "locked_gib": 0.0,
+  "anon_gib": 2.89,
+  "file_gib": 21.36,
+  "unevict_gib": 0.0,
+  "shmem_gib": 18.98,
+  "current_gib": 24.41,
+  "peak_current_gib": 25.37,
+  "gpu_mib": "13998"
+}
+74 arms -> /home/lucas/ai/FreeToken-wt/final/tasks/exclusive-expert-ram/results/sweep.tsv
+[p1-whole-1] stopping

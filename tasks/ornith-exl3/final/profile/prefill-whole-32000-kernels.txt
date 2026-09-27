@@ -1,0 +1,35 @@
+span 4572.6 ms, GPU busy 4372.8 ms, idle 199.8 ms, kernels 17742, memcpys 1853
+kernel time 4289.4 ms
+     1008.8 ms  23.5%    2560x  _exl3_gemm_kernel
+      816.9 ms  19.0%    1680x  Kernel2
+      771.0 ms  18.0%      80x  SinglePrefillWithKVCacheKernel
+      422.0 ms   9.8%    2560x  _reconstruct_experts_kernel
+      335.6 ms   7.8%    2280x  elementwise_kernel
+      273.1 ms   6.4%     324x  _had_rows_kernel
+      100.9 ms   2.4%     160x  _splitk_combine_kernel
+       88.2 ms   2.1%    1400x  _reconstruct_folded_kernel
+       76.8 ms   1.8%    1532x  unrolled_elementwise_kernel
+       60.3 ms   1.4%     120x  chunk_gated_delta_rule_fwd_kernel_h_blockdim64
+       51.0 ms   1.2%     120x  chunk_fwd_kernel_o
+       42.2 ms   1.0%     120x  causal_conv1d_fwd_kernel
+       41.7 ms   1.0%     120x  recompute_w_u_fwd_kernel
+       31.6 ms   0.7%     320x  kernel_cutlass_kernel_flashinfernormkernelsfused_add_rmsnormFusedAddRMSNormKernel_object_a
+       30.1 ms   0.7%     320x  act_and_mul_kernel
+       27.8 ms   0.6%     120x  _layer_norm_fwd_1pass_kernel
+       26.5 ms   0.6%    1206x  vectorized_elementwise_kernel
+       16.9 ms   0.4%     240x  l2norm_fwd_kernel
+       15.2 ms   0.4%     160x  _shared_expert_add_kernel
+       13.9 ms   0.3%     120x  chunk_gated_delta_rule_fwd_kkt_solve_kernel
+        8.0 ms   0.2%      40x  MergeStateInPlaceKernel
+        7.3 ms   0.2%      40x  BatchQKApplyRotaryPosIdsCosSinCacheKernel
+        6.6 ms   0.2%      80x  kernel_cutlass_kernel_flashinfernormkernelsrmsnormRMSNormKernel_object_at__tensorptrbf16gm
+        2.1 ms   0.0%     120x  kernel
+        2.0 ms   0.0%     160x  _router_triton_kernel
+        1.9 ms   0.0%     160x  moe_align_block_size_kernel
+        1.9 ms   0.0%      80x  _gather_dequant_kernel
+        1.8 ms   0.0%     474x  index_elementwise_kernel
+        1.8 ms   0.0%       4x  _exl3_gemv_kernel
+        1.5 ms   0.0%     160x  count_and_sort_expert_tokens_kernel
+  memcpy H2D: 1442.0 ms, 1336x, 77401 MiB
+  memcpy D2H: 1.2 ms, 190x, 0 MiB
+  memcpy D2D: 5.3 ms, 327x, 5009 MiB

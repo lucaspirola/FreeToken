@@ -1,0 +1,315 @@
+The user has shared a detailed engineering design document about serving NVIDIA Nemotron models on the FreeToken inference engine. They want me to:
+1. Summarize its main design decisions
+2. Critique them: which decisions look fragile, what measurements are missing, and what would I change first
+
+Let me carefully read through this document and extract the key design decisions, then provide a thoughtful critique.
+
+Let me organize the main design decisions first:
+
+**Architecture/Serving model:**
+1. Nemotron 3 Super is `single_stream_only` (one concurrent session) due to ~160 MiB Mamba-2 state per sequence — forces bs=1 decode graph
+2. Nemotron 3.5 Lightning (30B-A3B) is NOT single_stream_only — up to 16 concurrent requests because its 47 MiB state fits many slots
+3. NVFP4 quantization with ~60 GiB host RAM for expert banks, 10.3 GiB Super / 2.3 GiB Lightning resident weights
+4. MoE offload backend (experts on host RAM, fetched over PCIe)
+5. `--moe-pageable-gpu` for WSL pin-budget overflow
+6. `--moe-cache-policy lfu` for 16-way, `lru` for single-stream
+
+**KV cache:**
+1. `q8_0` KV dtype chosen over `fp8_e4m3` (fp8 flipped first tokens on cached-prefix reuse)
+2. Growable KV (`--kv-grow-step-tokens`) funded from expert cache
+3. `--memory-ratio 1.00` default (fixed, not a tuning knob)
+4. `--linear-state-slots` sizing for Mamba-2 recurrent state
+
+**Kernels:**
+1. Triton expert GEMM over b12x (tensor-core) for Lightning — despite `auto` resolving to b12x
+2. MoE prefill GEMM fix: per-block scale loaded at K/QBLOCK size and broadcast (1.73x)
+3. A operand deinterleave (1.215x)
+4. Decode launch config fix (head-shape branch)
+5. Extend BLOCK_M cap by register budget
+6. Dense CUDA graph ladder to 16 for offload-MoE
+
+**Speculative decoding:**
+1. `--speculative ngram` with n=8, draft-len=8, no adaptive
+2. Greedy and single-stream only in v1
+3. `--moe-extend-cache-tokens` default 64
+4. Long context regresses — online gate
+
+**1M single-session profile:**
+1. One resident session, others queue/spill
+2. Session spill to RAM then NVMe
+3. Look-ahead promotion, partial-prefix restore, prefill-time state capture
+4. Residency policy: no spill while queue empty, retention by capacity+age, survive restart
+
+**Config resolution:**
+1. `cache_type='radix'` resolves to `hybrid_radix` because Mamba layers are LinearGatedDeltaGroupConfig
+2. Tool-call parser auto → qwen3_coder, reasoning-parser auto → qwen3
+
+Now let me critique these. Let me think about what's fragile, what measurements are missing, and what I'd change first.
+
+**Fragile decisions:**
+
+1. **The `--moe-extend-cache-tokens` threshold of 64** — this is a magic number derived from a specific model geometry (128 experts, top-6, PCIe 5.0 x16). It's a crossover point that depends heavily on: number of experts, top-k, expert size, PCIe bandwidth, and the `D(m) ≈ 6.2·m^0.75` curve. On a different model (more experts, or top-8), this crossover moves. The document even notes the hard servable width ceiling of m ≤ 170 due to Triton's numel limit — that's a fragile implementation detail leaking into a design constraint.
+
+2. **The `auto` → b12x resolution being "wrong" on this geometry** — the auto backend selection has a threshold (`moe_intermediate_size 1856 ≥ 1024`) that picks b12x, but Triton wins here. This is a config-time decision that pins the weight layout. The fragility: the threshold is geometry-specific and the "auto" heuristic is now known to be wrong for this family. Also, the backend is chosen once at bank-load time and can't differ between prefill and decode — this is a real constraint.
+
+3. **The 16-lane decode being 74% PCIe expert misses** — this is fundamentally movement-bound. The design "accepts" this as movement-bound and says the fix is expert cache policy (LFU), not decode-path. But this means the 16-way profile is fundamentally PCIe-limited. The aggregate throughput at 16-way lfu (168.2 tok/s) is barely above single-stream (143.2 tok/s) — wait, actually it's higher. But per-stream it's 10.5 tok/s. So you get 16x more concurrent sessions but each is very slow. Is that actually useful? This is a key question.
+
+4. **`--memory-ratio 1.00` as fixed** — the document argues it passed from the start on the 5080. But this is host/GPU specific. The memory prediction is config-based and measured at startup. The fragility: it's a prediction that WARNs outside ±25%, suggesting the prediction isn't always accurate.
+
+5. **The CUDA graph dense ladder** — costs 80 MiB, depends on padding rows routing their own experts. This is specific to offload-MoE. On a dense model it's not applied. Fragile because it's a special-case.
+
+6. **Speculative decoding's online gate** — "There is deliberately no context-length threshold." The gate measures verify/decode ratio and stops drafting. But the gate itself costs two verify steps, which on short generations at 131K is the whole -11%. This is a self-measuring mechanism that can't refund its own measurement cost.
+
+7. **The `--kv-grow-step-tokens` prefix cache destruction** — the document itself flags this as a problem (89% pure loss teardowns). They dropped it for prefix-reuse-heavy work but keep it for multi-agent. This is a known wart.
+
+**Measurements missing:**
+
+1. **Real-world mixed workload performance** — most benchmarks are synthetic needles, copy-heavy agent prompts, code/prose. What about realistic mixed traffic? The 16-way soak is "16 clients, 0 errors" but that's error rate, not quality of service under varied load.
+
+2. **The 16-way profile's actual usefulness** — 16 concurrent sessions at 10.5 tok/s each. Is this a good tradeoff? The document doesn't clearly answer whether 16-way or single-stream is better for typical workloads. The default is now single-stream, but the reasoning is somewhat circular.
+
+3. **Long-context recall quality at scale** — the oracle cross-engine test shows addressing under interference. But this is a model property. Still, the serving config (KV dtype, cache policy) could interact with this. No measurement of whether q8_0 vs fp8 affects the addressing quality beyond the first-token flip.
+
+4. **WSL-specific measurements** — the `--moe-pageable-gpu` path disables CUDA graphs. The document mentions it but the performance numbers are mostly on the pinned path. How much does pageable cost?
+
+5. **Power/thermal** — nothing about power draw, thermal throttling on the 5080.
+
+6. **Cold-start / model-load time** — mentioned (0.8s of startup for graphs) but not a focus.
+
+7. **The memory prediction accuracy** — it WARNs outside ±25%, so 25% of the time (or more) the prediction is off. What's the actual distribution?
+
+8. **Interleaved Mamba/attention/MoE routing patterns** — the MoE work is 79% of the flat prefill term, but this varies with prompt content.
+
+9. **Speculative decoding on real (non-synthetic) copy workloads** — the copy-class lottery spans 1.04× to 1.67×. The projections are on "fixed transcripts."
+
+10. **Sustained load / memory leaks / fragmentation** — long-running sessions, VMM arena behavior over hours.
+
+**What I'd change first:**
+
+Let me think about what's highest-leverage and most fragile.
+
+1. **The `--moe-extend-cache-tokens` magic threshold and the m ≤ 170 Triton numel ceiling** — this is the most fragile. A hard ceiling of m ≤ 170 due to Triton's 1M-element tensor limit, with a 22-minute JIT compile at m=128, is a landmine. The crossover at 64 is geometry-specific. I'd want to make this adaptive or at least remove the hard ceiling. Actually, the fact that `--moe-extend-cache-tokens 256` used to kill the engine mid-forward is a serious bug/fragility.
+
+2. **The auto backend selection** — the fact that `auto` picks the wrong kernel (b12x) for this whole model family, and the choice is pinned at bank-load time and can't be per-phase, is a design smell. I'd want a better auto heuristic or a per-checkpoint default that's tested.
+
+3. **The 16-way vs single-stream question** — the document keeps going back and forth (P2 was 16-way, default is now single-stream). The fundamental issue is that 16-way is PCIe-bound and each session is very slow. I'd want a clearer decision framework or an adaptive approach.
+
+Actually, let me reconsider. The document is quite sophisticated and self-critical — it flags many of its own issues (the kv-grow-step-tokens problem, the copy-class lottery, the long-context regression). So my critique should add value beyond what the document already acknowledges.
+
+Let me think about what's genuinely under-measured or unaddressed:
+
+1. **The single-stream default's opportunity cost** — the document moved to single-stream as default. But this means 15 lanes of potential concurrency are unused. For a serving system, this is a big deal. The justification is that 16-way is PCIe-bound and slow. But is that the right metric? If you have 16 users each wanting a session, single-stream serializes them (18.6s p95 passthrough) while 16-way gives them all a slow-but-concurrent session. The "soak: 16 clients, 0 errors, passthrough p95 18.6 s vs 179 s" — wait, single-stream has BETTER passthrough (18.6s vs 179s)? That's because it checkpoints and swaps. So single-stream gives better latency per request but serializes. This is a real tradeoff the document should frame more explicitly.
+
+2. **The MoE offload PCIe bottleneck is fundamental** — 74% of decode is PCIe expert misses. This is the elephant in the room. The whole design is fighting PCIe bandwidth. Alternatives (mirror host rows, different quantization, keeping more experts resident) aren't explored much.
+
+3. **q8_0 KV and long-context quality** — the oracle test shows addressing degrades at 524K. Is this purely a model property, or does q8_0 KV contribute? The document says it's a model property (addressing under interference, byte-identical across engines). But q8_0 vs bf16 KV could still matter. No ablation of KV dtype on the needle/oracle quality beyond the first-token flip.
+
+4. **The memory prediction** — config-based prediction that warns ±25%. This is a guess that's wrong 25%+ of the time. For a serving system that must not OOM, this is concerning. The "measure the prefill transient at startup" partially addresses it, but the prediction is still the primary mechanism.
+
+5. **Speculative decoding's narrow applicability** — it only helps copy-heavy traffic, regresses long context, and is greedy/single-stream only. The projections show 1.61× on copy but 0.99× on code/prose and a regression on 131K. So it's a niche feature. Is the complexity worth it? The document seems to think so for agent workloads.
+
+Let me also think about operational fragility:
+
+- The `~/.cache/torch_extensions` locks and stray workers check in preflight — build artifacts.
+- The systemd unit with `LimitMEMLOCK=infinity` — needs root, specific to Linux.
+- WSL pin quota — 0.4 × RAM, geometry-dependent.
+- The int32 VMM tensor fix — a workaround for b12x banks.
+
+Let me also note the document's own retractions and corrections — it's quite honest about retracting the coherence caveat, correcting the MTP projection, etc. This is a sign of a healthy engineering culture but also that the design is still evolving.
+
+Now, let me structure my response:
+
+1. **Summary of main design decisions** — organized by theme
+2. **Critique: fragile decisions** — the ones most likely to break or be wrong
+3. **Critique: missing measurements** — what's under-measured
+4. **What I'd change first** — prioritized
+
+Let me be concrete and use the specific numbers from the document. I should be critical but fair, and acknowledge where the design is sound.
+
+Let me think about the most important critiques:
+
+**Most fragile:**
+1. The `--moe-extend-cache-tokens` crossover (64) + m ≤ 170 Triton ceiling — geometry-specific magic number, hard crash ceiling, 22-min JIT. This is a landmine.
+2. The auto backend selection being systematically wrong for this family, pinned at bank-load, not per-phase.
+3. The 16-way profile being fundamentally PCIe-bound (74% misses) — is it even useful?
+4. The online speculative gate that can't refund its own measurement cost.
+
+**Missing measurements:**
+1. Real mixed-workload QoS (not just error rate)
+2. 16-way vs single-stream decision framework / real workload fit
+3. KV dtype (q8_0) impact on long-context addressing quality (not just first-token flip)
+4. WSL pageable path performance
+5. Memory prediction accuracy distribution
+6. Sustained/long-run stability (VMM fragmentation, leaks)
+7. Speculative decoding on real (non-synthetic) workloads beyond the copy-class lottery
+
+**Change first:**
+I'd prioritize based on blast radius and likelihood of being wrong. 
+
+The `--moe-extend-cache-tokens` m ≤ 170 ceiling is a hard crash that kills the engine mid-forward — that's a reliability landmine. But it's gated behind a flag that's off by default and the doc says don't raise it on a live server. So blast radius is limited to users who opt in.
+
+The auto backend being wrong has higher blast radius — it's the default and affects every Lightning serve. But it's documented and the recommendation is explicit (use triton). Still, "auto resolves to the wrong thing" is a design smell.
+
+Hmm, let me think about what I'd actually change first. I think the strongest candidate is:
+
+**Make the MoE backend selection not a single pinned choice, or at least make the auto heuristic checkpoint-aware rather than threshold-based.** Because: (a) it's wrong for this whole family, (b) it's pinned at bank-load and can't differ prefill/decode, (c) the threshold is geometry-specific. This affects every Lightning deployment.
+
+Actually, wait — the document says you can't take b12x
+<<content>>
+The user has shared a detailed engineering design document about serving NVIDIA Nemotron models on the FreeToken inference engine. They want me to:
+1. Summarize its main design decisions
+2. Critique them: which decisions look fragile, what measurements are missing, and what would I change first
+
+Let me carefully read through this document and extract the key design decisions, then provide a thoughtful critique.
+
+Let me organize the main design decisions first:
+
+**Architecture/Serving model:**
+1. Nemotron 3 Super is `single_stream_only` (one concurrent session) due to ~160 MiB Mamba-2 state per sequence — forces bs=1 decode graph
+2. Nemotron 3.5 Lightning (30B-A3B) is NOT single_stream_only — up to 16 concurrent requests because its 47 MiB state fits many slots
+3. NVFP4 quantization with ~60 GiB host RAM for expert banks, 10.3 GiB Super / 2.3 GiB Lightning resident weights
+4. MoE offload backend (experts on host RAM, fetched over PCIe)
+5. `--moe-pageable-gpu` for WSL pin-budget overflow
+6. `--moe-cache-policy lfu` for 16-way, `lru` for single-stream
+
+**KV cache:**
+1. `q8_0` KV dtype chosen over `fp8_e4m3` (fp8 flipped first tokens on cached-prefix reuse)
+2. Growable KV (`--kv-grow-step-tokens`) funded from expert cache
+3. `--memory-ratio 1.00` default (fixed, not a tuning knob)
+4. `--linear-state-slots` sizing for Mamba-2 recurrent state
+
+**Kernels:**
+1. Triton expert GEMM over b12x (tensor-core) for Lightning — despite `auto` resolving to b12x
+2. MoE prefill GEMM fix: per-block scale loaded at K/QBLOCK size and broadcast (1.73x)
+3. A operand deinterleave (1.215x)
+4. Decode launch config fix (head-shape branch)
+5. Extend BLOCK_M cap by register budget
+6. Dense CUDA graph ladder to 16 for offload-MoE
+
+**Speculative decoding:**
+1. `--speculative ngram` with n=8, draft-len=8, no adaptive
+2. Greedy and single-stream only in v1
+3. `--moe-extend-cache-tokens` default 64
+4. Long context regresses — online gate
+
+**1M single-session profile:**
+1. One resident session, others queue/spill
+2. Session spill to RAM then NVMe
+3. Look-ahead promotion, partial-prefix restore, prefill-time state capture
+4. Residency policy: no spill while queue empty, retention by capacity+age, survive restart
+
+**Config resolution:**
+1. `cache_type='radix'` resolves to `hybrid_radix` because Mamba layers are LinearGatedDeltaGroupConfig
+2. Tool-call parser auto → qwen3_coder, reasoning-parser auto → qwen3
+
+Now let me critique these. Let me think about what's fragile, what measurements are missing, and what I'd change first.
+
+**Fragile decisions:**
+
+1. **The `--moe-extend-cache-tokens` threshold of 64** — this is a magic number derived from a specific model geometry (128 experts, top-6, PCIe 5.0 x16). It's a crossover point that depends heavily on: number of experts, top-k, expert size, PCIe bandwidth, and the `D(m) ≈ 6.2·m^0.75` curve. On a different model (more experts, or top-8), this crossover moves. The document even notes the hard servable width ceiling of m ≤ 170 due to Triton's numel limit — that's a fragile implementation detail leaking into a design constraint.
+
+2. **The `auto` → b12x resolution being "wrong" on this geometry** — the auto backend selection has a threshold (`moe_intermediate_size 1856 ≥ 1024`) that picks b12x, but Triton wins here. This is a config-time decision that pins the weight layout. The fragility: the threshold is geometry-specific and the "auto" heuristic is now known to be wrong for this family. Also, the backend is chosen once at bank-load time and can't differ between prefill and decode — this is a real constraint.
+
+3. **The 16-lane decode being 74% PCIe expert misses** — this is fundamentally movement-bound. The design "accepts" this as movement-bound and says the fix is expert cache policy (LFU), not decode-path. But this means the 16-way profile is fundamentally PCIe-limited. The aggregate throughput at 16-way lfu (168.2 tok/s) is barely above single-stream (143.2 tok/s) — wait, actually it's higher. But per-stream it's 10.5 tok/s. So you get 16x more concurrent sessions but each is very slow. Is that actually useful? This is a key question.
+
+4. **`--memory-ratio 1.00` as fixed** — the document argues it passed from the start on the 5080. But this is host/GPU specific. The memory prediction is config-based and measured at startup. The fragility: it's a prediction that WARNs outside ±25%, suggesting the prediction isn't always accurate.
+
+5. **The CUDA graph dense ladder** — costs 80 MiB, depends on padding rows routing their own experts. This is specific to offload-MoE. On a dense model it's not applied. Fragile because it's a special-case.
+
+6. **Speculative decoding's online gate** — "There is deliberately no context-length threshold." The gate measures verify/decode ratio and stops drafting. But the gate itself costs two verify steps, which on short generations at 131K is the whole -11%. This is a self-measuring mechanism that can't refund its own measurement cost.
+
+7. **The `--kv-grow-step-tokens` prefix cache destruction** — the document itself flags this as a problem (89% pure loss teardowns). They dropped it for prefix-reuse-heavy work but keep it for multi-agent. This is a known wart.
+
+**Measurements missing:**
+
+1. **Real-world mixed workload performance** — most benchmarks are synthetic needles, copy-heavy agent prompts, code/prose. What about realistic mixed traffic? The 16-way soak is "16 clients, 0 errors" but that's error rate, not quality of service under varied load.
+
+2. **The 16-way profile's actual usefulness** — 16 concurrent sessions at 10.5 tok/s each. Is this a good tradeoff? The document doesn't clearly answer whether 16-way or single-stream is better for typical workloads. The default is now single-stream, but the reasoning is somewhat circular.
+
+3. **Long-context recall quality at scale** — the oracle cross-engine test shows addressing under interference. But this is a model property. Still, the serving config (KV dtype, cache policy) could interact with this. No measurement of whether q8_0 vs fp8 affects the addressing quality beyond the first-token flip.
+
+4. **WSL-specific measurements** — the `--moe-pageable-gpu` path disables CUDA graphs. The document mentions it but the performance numbers are mostly on the pinned path. How much does pageable cost?
+
+5. **Power/thermal** — nothing about power draw, thermal throttling on the 5080.
+
+6. **Cold-start / model-load time** — mentioned (0.8s of startup for graphs) but not a focus.
+
+7. **The memory prediction accuracy** — it WARNs outside ±25%, so 25% of the time (or more) the prediction is off. What's the actual distribution?
+
+8. **Interleaved Mamba/attention/MoE routing patterns** — the MoE work is 79% of the flat prefill term, but this varies with prompt content.
+
+9. **Speculative decoding on real (non-synthetic) copy workloads** — the copy-class lottery spans 1.04× to 1.67×. The projections are on "fixed transcripts."
+
+10. **Sustained load / memory leaks / fragmentation** — long-running sessions, VMM arena behavior over hours.
+
+**What I'd change first:**
+
+Let me think about what's highest-leverage and most fragile.
+
+1. **The `--moe-extend-cache-tokens` magic threshold and the m ≤ 170 Triton numel ceiling** — this is the most fragile. A hard ceiling of m ≤ 170 due to Triton's 1M-element tensor limit, with a 22-minute JIT compile at m=128, is a landmine. The crossover at 64 is geometry-specific. I'd want to make this adaptive or at least remove the hard ceiling. Actually, the fact that `--moe-extend-cache-tokens 256` used to kill the engine mid-forward is a serious bug/fragility.
+
+2. **The auto backend selection** — the fact that `auto` picks the wrong kernel (b12x) for this whole model family, and the choice is pinned at bank-load time and can't be per-phase, is a design smell. I'd want a better auto heuristic or a per-checkpoint default that's tested.
+
+3. **The 16-way vs single-stream question** — the document keeps going back and forth (P2 was 16-way, default is now single-stream). The fundamental issue is that 16-way is PCIe-bound and each session is very slow. I'd want a clearer decision framework or an adaptive approach.
+
+Actually, let me reconsider. The document is quite sophisticated and self-critical — it flags many of its own issues (the kv-grow-step-tokens problem, the copy-class lottery, the long-context regression). So my critique should add value beyond what the document already acknowledges.
+
+Let me think about what's genuinely under-measured or unaddressed:
+
+1. **The single-stream default's opportunity cost** — the document moved to single-stream as default. But this means 15 lanes of potential concurrency are unused. For a serving system, this is a big deal. The justification is that 16-way is PCIe-bound and slow. But is that the right metric? If you have 16 users each wanting a session, single-stream serializes them (18.6s p95 passthrough) while 16-way gives them all a slow-but-concurrent session. The "soak: 16 clients, 0 errors, passthrough p95 18.6 s vs 179 s" — wait, single-stream has BETTER passthrough (18.6s vs 179s)? That's because it checkpoints and swaps. So single-stream gives better latency per request but serializes. This is a real tradeoff the document should frame more explicitly.
+
+2. **The MoE offload PCIe bottleneck is fundamental** — 74% of decode is PCIe expert misses. This is the elephant in the room. The whole design is fighting PCIe bandwidth. Alternatives (mirror host rows, different quantization, keeping more experts resident) aren't explored much.
+
+3. **q8_0 KV and long-context quality** — the oracle test shows addressing degrades at 524K. Is this purely a model property, or does q8_0 KV contribute? The document says it's a model property (addressing under interference, byte-identical across engines). But q8_0 vs bf16 KV could still matter. No ablation of KV dtype on the needle/oracle quality beyond the first-token flip.
+
+4. **The memory prediction** — config-based prediction that warns ±25%. This is a guess that's wrong 25%+ of the time. For a serving system that must not OOM, this is concerning. The "measure the prefill transient at startup" partially addresses it, but the prediction is still the primary mechanism.
+
+5. **Speculative decoding's narrow applicability** — it only helps copy-heavy traffic, regresses long context, and is greedy/single-stream only. The projections show 1.61× on copy but 0.99× on code/prose and a regression on 131K. So it's a niche feature. Is the complexity worth it? The document seems to think so for agent workloads.
+
+Let me also think about operational fragility:
+
+- The `~/.cache/torch_extensions` locks and stray workers check in preflight — build artifacts.
+- The systemd unit with `LimitMEMLOCK=infinity` — needs root, specific to Linux.
+- WSL pin quota — 0.4 × RAM, geometry-dependent.
+- The int32 VMM tensor fix — a workaround for b12x banks.
+
+Let me also note the document's own retractions and corrections — it's quite honest about retracting the coherence caveat, correcting the MTP projection, etc. This is a sign of a healthy engineering culture but also that the design is still evolving.
+
+Now, let me structure my response:
+
+1. **Summary of main design decisions** — organized by theme
+2. **Critique: fragile decisions** — the ones most likely to break or be wrong
+3. **Critique: missing measurements** — what's under-measured
+4. **What I'd change first** — prioritized
+
+Let me be concrete and use the specific numbers from the document. I should be critical but fair, and acknowledge where the design is sound.
+
+Let me think about the most important critiques:
+
+**Most fragile:**
+1. The `--moe-extend-cache-tokens` crossover (64) + m ≤ 170 Triton ceiling — geometry-specific magic number, hard crash ceiling, 22-min JIT. This is a landmine.
+2. The auto backend selection being systematically wrong for this family, pinned at bank-load, not per-phase.
+3. The 16-way profile being fundamentally PCIe-bound (74% misses) — is it even useful?
+4. The online speculative gate that can't refund its own measurement cost.
+
+**Missing measurements:**
+1. Real mixed-workload QoS (not just error rate)
+2. 16-way vs single-stream decision framework / real workload fit
+3. KV dtype (q8_0) impact on long-context addressing quality (not just first-token flip)
+4. WSL pageable path performance
+5. Memory prediction accuracy distribution
+6. Sustained/long-run stability (VMM fragmentation, leaks)
+7. Speculative decoding on real (non-synthetic) workloads beyond the copy-class lottery
+
+**Change first:**
+I'd prioritize based on blast radius and likelihood of being wrong. 
+
+The `--moe-extend-cache-tokens` m ≤ 170 ceiling is a hard crash that kills the engine mid-forward — that's a reliability landmine. But it's gated behind a flag that's off by default and the doc says don't raise it on a live server. So blast radius is limited to users who opt in.
+
+The auto backend being wrong has higher blast radius — it's the default and affects every Lightning serve. But it's documented and the recommendation is explicit (use triton). Still, "auto resolves to the wrong thing" is a design smell.
+
+Hmm, let me think about what I'd actually change first. I think the strongest candidate is:
+
+**Make the MoE backend selection not a single pinned choice, or at least make the auto heuristic checkpoint-aware rather than threshold-based.** Because: (a) it's wrong for this whole family, (b) it's pinned at bank-load and can't differ prefill/decode, (c) the threshold is geometry-specific. This affects every Lightning deployment.
+
+Actually, wait — the document says you can't take b12x

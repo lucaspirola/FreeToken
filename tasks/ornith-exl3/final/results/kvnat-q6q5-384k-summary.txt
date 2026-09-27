@@ -1,0 +1,393 @@
+The user has shared a detailed engineering design document about serving NVIDIA Nemotron models on FreeToken. They want me to:
+1. Summarize the main design decisions
+2. Critique them: which decisions look fragile, what measurements are missing, and what would I change first
+
+Let me carefully read through this document and extract the key design decisions, then provide a thoughtful critique.
+
+Let me organize the main design decisions:
+
+**Architecture/Serving model:**
+- Nemotron 3 Super is `single_stream_only` (one concurrent session) because its Mamba-2 recurrent state is ~160 MiB per sequence, forcing bs=1 decode graph
+- Nemotron 3.5 Lightning (30B-A3B) is NOT single_stream_only: up to 16 concurrent requests because its state is only 47 MiB per slot
+- Hybrid Mamba-2 / full-attention / latent-MoE architecture
+- NVFP4 release needs ~60 GiB host RAM for expert banks + 10.3 GiB GPU weights (Super)
+
+**MoE offload strategy:**
+- `--moe-backend offload` is the recommendation for Lightning
+- CPU MoE executor handles ungated ReLU² NVFP4 banks on AVX2+VNNI
+- `offload` beats `hybrid` 3.6× (118.1 vs 32.9 tok/s)
+- Expert banks are 15.4 GiB (NVFP4), pinned to host RAM with `FREETOKEN_PIN_BUDGET_GB=17`
+
+**Expert cache policy:**
+- LFU over LRU at high concurrency (16-way): LFU halves miss rate (99.6% → 51%) and gives 1.80× throughput
+- Rule of thumb: LFU above ~15% miss rate, LRU below
+- Fixed-capacity VMM arena for expert cache
+
+**KV cache:**
+- `q8_0` quantized KV chosen over fp8_e4m3 (fp8 flipped first tokens on cached-prefix reuse)
+- Growable KV via `--kv-grow-step-tokens` (but this has a documented problem — it costs the whole prefix cache)
+- KV dtype triton attention backend required for quantized KV
+
+**CUDA graphs:**
+- Dense decode graph ladder `[1..16]` for offload-MoE models (padded rows route their own experts, so exact graphs matter)
+- Sparse graphs waste because padding routes experts
+- Graph set made dense to 16
+
+**Launch profiles:**
+- Default profile: single lane, `--max-running-requests 1 --linear-state-slots 13`
+- 1M profile: one resident session, others queue/spill
+- Session spill to RAM then NVMe
+
+**Prefill:**
+- `--max-prefill-length 8192` — chunk size is NOT a throughput lever
+- Triton expert GEMM over b12x/marlin/flashinfer
+- MoE prefill GEMM optimizations (per-block scale loading, A operand deinterleaving)
+
+**Speculative decoding:**
+- ngram spec, shipped 2026-09-05
+- `--spec-ngram-n 8`, `--spec-draft-len 8` default
+- Greedy and single-stream only in v1
+- Long context regresses
+
+**Context handling:**
+- Tokenizer `model_max_length` 262144 vs `max_position_embeddings` 1048576 — treat 262K as ceiling
+- Launch config fixes for decode/prefill attention
+
+**Memory prediction:**
+- `--memory-ratio 1.00` fixed (not a tuning knob)
+- Engine predicts headroom from config, measures prefill transient
+
+Now let me think about the critique — what's fragile, what measurements are missing, what would I change first.
+
+**Fragile decisions:**
+
+1. **The `--kv-grow-step-tokens` prefix-cache destruction.** This is a big one. The doc itself documents that it costs the whole prefix cache (89% pure loss, 565 teardowns vs 67 successful releases). Yet it's recommended for the 1M profile. This is a fundamental tension — the doc acknowledges it but still uses it for long sessions where KV is "genuinely idle between turns." But the mechanism (`_maybe_shrink_growable_kv` calling `evict_all_unlocked_prefixes()` before knowing a shrink is achievable) is described as pure loss when not achievable. This is fragile because it's a known footgun that's still shipped.
+
+2. **LFU/LRU rule of thumb at 15% miss rate.** This is a heuristic derived from a specific workload. The doc says "read the rate off the scheduler's idle MoE decode miss stats line." But the 99.6% miss rate at 16-way LRU is extreme — it suggests the expert working set (~1417 slots) vastly exceeds the pool (976 slots at capacity 16). This is a capacity problem, not just a policy problem. LFU helps but doesn't solve the fundamental oversubscription.
+
+3. **Single-stream-only for Super.** 160 MiB state per sequence means only one Super session. This is a hard architectural constraint. It means Super can't serve concurrent users at all — it's a throughput ceiling. This is fragile in the sense that it's a fundamental limitation that can't be worked around without reducing state or batching.
+
+4. **The 1M session profile relies on spill/restore.** The whole model runs one resident session, others queue. This is fragile because:
+   - Restore is ~1-2.5s per session (NVMe)
+   - The residency policy is complex (no spill while queue empty, retention by capacity+age, look-ahead promotion, partial-prefix restore)
+   - It's a lot of moving parts that could interact badly
+
+5. **Speculative decoding is greedy and single-stream only.** The doc is honest that it silently takes the ordinary decode path for many request types. This is fragile because:
+   - It's not token-identical to non-speculative greedy
+   - Long context regresses ~12×
+   - The gate can't refund the measurement cost
+   - It's off by default and only worth it on copy-heavy traffic
+
+6. **The A-operand deinterleave and MoE prefill GEMM.** These are kernel-level optimizations that are "exact" (bit-identical). But they're fragile in the sense that they're tightly coupled to specific tile configurations and the "general rule" about per-block scales. If the geometry changes, these need re-tuning.
+
+7. **`--memory-ratio 1.00` fixed.** The doc says it's "an override, not a per-host tuning knob" and the engine predicts headroom. But this is fragile because the prediction is "measured at startup" and WARNs outside ±25%. If the prediction is wrong, you get either OOM or wasted VRAM.
+
+8. **The decode CUDA graph ladder.** Dense to 16 for offload-MoE. This is fragile because it's model-specific (only offload-MoE), and the "dense set costs 80 MiB and under a second per resize." But padding a row routes its own experts, so the graph capture is expensive.
+
+**Missing measurements:**
+
+1. **Long-context speculation.** The doc says speculation regresses at 131K. But there's no measurement of what happens at 64K, 32K, etc. — the crossover point. The doc says "There is deliberately no context-length threshold" but that's because the ratio depends on many factors. A measurement of the crossover would be valuable.
+
+2. **The 1M profile under real multi-session load.** Most measurements are single-session or synthetic needle. The doc mentions "16 clients, 0 errors" for the soak but that's passthrough. Real agent workloads with tool calls, reasoning, etc. are not measured.
+
+3. **Expert cache policy under varied traffic.** The LFU/LRU decision is based on a specific workload. Different traffic patterns (bursty, sequential, etc.) might favor different policies.
+
+4. **The interaction between growable KV and session spill.** Both are about managing KV. How do they interact? The doc uses growable KV in the 1M profile but also session spill. Are they redundant? Conflicting?
+
+5. **Prefill chunk size across different prompt distributions.** The doc says chunk size is not a throughput lever, but this is measured on synthetic needle. Real prompts (code, prose, tool output) might behave differently.
+
+6. **The decode attention split at batch 16.** The doc says 64 splits is optimal, but this is measured on one GPU (5080). Different GPUs might need different splits.
+
+7. **Memory prediction accuracy across host configurations.** The doc says the engine predicts headroom and WARNs outside ±25%. But what's the actual error rate? On what hosts?
+
+8. **The MoE backend choice (offload vs hybrid vs cpu) under different PCIe speeds.** The doc measures 66.9 GB/s CPU vs 52.9 GB/s PCIe gather. But different hosts have different PCIe speeds. The 2× hybrid threshold might not hold everywhere.
+
+**What I'd change first:**
+
+1. **Fix the `--kv-grow-step-tokens` prefix-cache destruction.** This is the most concrete, measurable problem. The doc itself documents 89% pure loss. The fix would be to make `_maybe_shrink_growable_kv` actually check if a shrink is achievable before evicting, or to decouple growable KV from prefix cache eviction. This is a clear win.
+
+Actually, wait — the doc says they dropped `--kv-grow-step-tokens` for prefix-reuse-heavy work and kept it for multi-agent session serving. So it's a deliberate tradeoff. But the mechanism is still fragile.
+
+2. **Add a context-length threshold to speculation.** The doc says there's deliberately no threshold, but that's a design choice that leaves performance on the table for the common case (short context, where speculation helps). A measured threshold would be a clear win.
+
+Actually, the doc says the gate measures its own verify/decode ratio online and stops drafting when it can't pay. So there IS an online mechanism. But it's not a context-length threshold per se.
+
+3. **Resolve the growable KV vs session spill tension.** Both are about KV management. Using both in the 1M profile might be redundant or conflicting.
+
+Let me think about what's most impactful.
+
+Actually, let me reconsider. The document is quite sophisticated and the authors have clearly done a lot of measurement. My critique should be constructive and specific, not generic.
+
+Let me think about the most fragile decisions:
+
+1. **The 1M session profile is a house of cards.** It relies on:
+   - Growable KV funding from expert cache
+   - Session spill to RAM then NVMe
+   - Look-ahead promotion on a background thread
+   - Partial-prefix restore with state capture
+   - Complex residency policy (no spill while queue empty, retention by capacity+age)
+   - The nemotron_v3 reasoning parser fix (dropping stray think tags)
+   
+   Each of these is a separate moving part with its own failure mode. The interaction between them is not well-tested. The doc mentions "16 clients, 0 errors" but that's a passthrough soak, not a real workload.
+
+2. **The expert cache oversubscription at 16-way.** The working set (~1417 slots) exceeds the pool (976 slots). This is a fundamental capacity problem. LFU helps but the doc admits the miss rate is still 51% even with LFU. This means half of every decode step is PCIe traffic (74% of the 16-lane step). This is the bottleneck, and it can't be fixed by cache policy alone — it needs more expert slots or a different MoE strategy.
+
+3. **The `--kv-grow-step-tokens` footgun.** Even though it's a deliberate tradeoff, the mechanism is fragile: it evicts the whole prefix cache before knowing if a shrink is achievable. This is 89% pure loss.
+
+4. **Speculative decoding's narrow applicability.** It only helps copy-heavy traffic, regresses at long context, and is not token-identical. The default (draft-len 8) is a measured choice, but the whole feature is fragile because it's so workload-specific.
+
+Let me also think about what's genuinely well-done:
+- The honesty about retractions (coherence caveat retracted, elastic flag retired)
+- The detailed measurements with before/after
+- The "general rule" for block-quantized kernels
+- The online gate for speculation
+- The bit-exactness verification
+
+Now let me structure my response:
+
+1. **Summary of main design decisions** (grouped by theme)
+2. **Critique:**
+   - Fragile decisions
+   - Missing measurements
+   - What I'd change first
+
+Let me be specific and concrete, referencing the doc's own measurements where relevant.
+
+I should be careful not to be generic. Let me anchor every point in the document.
+
+Let me draft the response.
+
+---
+
+**Summary of main design decisions**
+
+I'll group these:
+
+A. **Concurrency is geometry-determined, not a knob.** Super's 160 MiB Mamba-2 state forces single_stream_only (one session, bs=1). Lightning's 47 MiB state allows 16 lanes. This is a hard architectural constraint, not a tuning choice.
+
+B. **MoE offload to host RAM, pinned.** 15.4 GiB expert banks pinned via FREETOKEN_PIN_BUDGET_GB=17 (≥ CUDA host-registration budget on WSL). offload beats hybrid 3.6×. The backend is chosen once at bank-load time because it pins the weight layout.
+
+C. **Triton over b12x/marlin/flashinfer for NVFP4 expert GEMM.** Triton wins the microbenchmark at every width except the widest prefill. The auto-resolution (b12x) is now wrong on this geometry, so Lightning must pin triton.
+
+D. **LFU expert cache at high concurrency.** At 16-way, LRU degenerates to 99.6% miss; LFU halves it and gives 1.80× throughput. Rule of thumb: LFU above ~15% miss, LRU below.
+
+E. **q8_0 KV, triton attention.** fp8_e4m3 flipped first tokens on cached-prefix reuse. Quantized KV requires triton backend.
+
+F. **Dense decode CUDA graphs [1..16] for offload-MoE.** Padding a row routes its own experts, so exact graphs (7.4% faster) beat padded graphs (6.7% slower than eager).
+
+G. **Fixed --memory-ratio 1.00.** Predicted from config, measured at startup, WARN outside ±25%. Not a tuning knob.
+
+H. **Chunked prefill at 8192, not a throughput lever.** Total prefix work is ~N²/2 regardless.
+
+I. **1M profile: one resident session, others queue/spill.** Growable KV + session spill + look-ahead promotion + partial-prefix restore. Complex residency policy.
+
+J. **Speculative ngram decoding, greedy+single-stream only.** draft-len 8 default, only worth it on copy-heavy traffic, regresses at long context.
+
+K. **Treat 262K as served ceiling** (tokenizer model_max_length), not 1M (max_position_embeddings).
+
+**Critique**
+
+Let me think about the most important points.
+
+Fragile:
+
+1. **The 1M session profile is a house of cards.** I'll detail the interacting parts and the lack of real-workload testing.
+
+2. **Expert cache oversubscription is a capacity problem, not a policy problem.** At 16-way
+<<content>>
+The user has shared a detailed engineering design document about serving NVIDIA Nemotron models on FreeToken. They want me to:
+1. Summarize the main design decisions
+2. Critique them: which decisions look fragile, what measurements are missing, and what would I change first
+
+Let me carefully read through this document and extract the key design decisions, then provide a thoughtful critique.
+
+Let me organize the main design decisions:
+
+**Architecture/Serving model:**
+- Nemotron 3 Super is `single_stream_only` (one concurrent session) because its Mamba-2 recurrent state is ~160 MiB per sequence, forcing bs=1 decode graph
+- Nemotron 3.5 Lightning (30B-A3B) is NOT single_stream_only: up to 16 concurrent requests because its state is only 47 MiB per slot
+- Hybrid Mamba-2 / full-attention / latent-MoE architecture
+- NVFP4 release needs ~60 GiB host RAM for expert banks + 10.3 GiB GPU weights (Super)
+
+**MoE offload strategy:**
+- `--moe-backend offload` is the recommendation for Lightning
+- CPU MoE executor handles ungated ReLU² NVFP4 banks on AVX2+VNNI
+- `offload` beats `hybrid` 3.6× (118.1 vs 32.9 tok/s)
+- Expert banks are 15.4 GiB (NVFP4), pinned to host RAM with `FREETOKEN_PIN_BUDGET_GB=17`
+
+**Expert cache policy:**
+- LFU over LRU at high concurrency (16-way): LFU halves miss rate (99.6% → 51%) and gives 1.80× throughput
+- Rule of thumb: LFU above ~15% miss rate, LRU below
+- Fixed-capacity VMM arena for expert cache
+
+**KV cache:**
+- `q8_0` quantized KV chosen over fp8_e4m3 (fp8 flipped first tokens on cached-prefix reuse)
+- Growable KV via `--kv-grow-step-tokens` (but this has a documented problem — it costs the whole prefix cache)
+- KV dtype triton attention backend required for quantized KV
+
+**CUDA graphs:**
+- Dense decode graph ladder `[1..16]` for offload-MoE models (padded rows route their own experts, so exact graphs matter)
+- Sparse graphs waste because padding routes experts
+- Graph set made dense to 16
+
+**Launch profiles:**
+- Default profile: single lane, `--max-running-requests 1 --linear-state-slots 13`
+- 1M profile: one resident session, others queue/spill
+- Session spill to RAM then NVMe
+
+**Prefill:**
+- `--max-prefill-length 8192` — chunk size is NOT a throughput lever
+- Triton expert GEMM over b12x/marlin/flashinfer
+- MoE prefill GEMM optimizations (per-block scale loading, A operand deinterleaving)
+
+**Speculative decoding:**
+- ngram spec, shipped 2026-09-05
+- `--spec-ngram-n 8`, `--spec-draft-len 8` default
+- Greedy and single-stream only in v1
+- Long context regresses
+
+**Context handling:**
+- Tokenizer `model_max_length` 262144 vs `max_position_embeddings` 1048576 — treat 262K as ceiling
+- Launch config fixes for decode/prefill attention
+
+**Memory prediction:**
+- `--memory-ratio 1.00` fixed (not a tuning knob)
+- Engine predicts headroom from config, measures prefill transient
+
+Now let me think about the critique — what's fragile, what measurements are missing, what would I change first.
+
+**Fragile decisions:**
+
+1. **The `--kv-grow-step-tokens` prefix-cache destruction.** This is a big one. The doc itself documents that it costs the whole prefix cache (89% pure loss, 565 teardowns vs 67 successful releases). Yet it's recommended for the 1M profile. This is a fundamental tension — the doc acknowledges it but still uses it for long sessions where KV is "genuinely idle between turns." But the mechanism (`_maybe_shrink_growable_kv` calling `evict_all_unlocked_prefixes()` before knowing a shrink is achievable) is described as pure loss when not achievable. This is fragile because it's a known footgun that's still shipped.
+
+2. **LFU/LRU rule of thumb at 15% miss rate.** This is a heuristic derived from a specific workload. The doc says "read the rate off the scheduler's idle MoE decode miss stats line." But the 99.6% miss rate at 16-way LRU is extreme — it suggests the expert working set (~1417 slots) vastly exceeds the pool (976 slots at capacity 16). This is a capacity problem, not just a policy problem. LFU helps but doesn't solve the fundamental oversubscription.
+
+3. **Single-stream-only for Super.** 160 MiB state per sequence means only one Super session. This is a hard architectural constraint. It means Super can't serve concurrent users at all — it's a throughput ceiling. This is fragile in the sense that it's a fundamental limitation that can't be worked around without reducing state or batching.
+
+4. **The 1M session profile relies on spill/restore.** The whole model runs one resident session, others queue. This is fragile because:
+   - Restore is ~1-2.5s per session (NVMe)
+   - The residency policy is complex (no spill while queue empty, retention by capacity+age, look-ahead promotion, partial-prefix restore)
+   - It's a lot of moving parts that could interact badly
+
+5. **Speculative decoding is greedy and single-stream only.** The doc is honest that it silently takes the ordinary decode path for many request types. This is fragile because:
+   - It's not token-identical to non-speculative greedy
+   - Long context regresses ~12×
+   - The gate can't refund the measurement cost
+   - It's off by default and only worth it on copy-heavy traffic
+
+6. **The A-operand deinterleave and MoE prefill GEMM.** These are kernel-level optimizations that are "exact" (bit-identical). But they're fragile in the sense that they're tightly coupled to specific tile configurations and the "general rule" about per-block scales. If the geometry changes, these need re-tuning.
+
+7. **`--memory-ratio 1.00` fixed.** The doc says it's "an override, not a per-host tuning knob" and the engine predicts headroom. But this is fragile because the prediction is "measured at startup" and WARNs outside ±25%. If the prediction is wrong, you get either OOM or wasted VRAM.
+
+8. **The decode CUDA graph ladder.** Dense to 16 for offload-MoE. This is fragile because it's model-specific (only offload-MoE), and the "dense set costs 80 MiB and under a second per resize." But padding a row routes its own experts, so the graph capture is expensive.
+
+**Missing measurements:**
+
+1. **Long-context speculation.** The doc says speculation regresses at 131K. But there's no measurement of what happens at 64K, 32K, etc. — the crossover point. The doc says "There is deliberately no context-length threshold" but that's because the ratio depends on many factors. A measurement of the crossover would be valuable.
+
+2. **The 1M profile under real multi-session load.** Most measurements are single-session or synthetic needle. The doc mentions "16 clients, 0 errors" for the soak but that's passthrough. Real agent workloads with tool calls, reasoning, etc. are not measured.
+
+3. **Expert cache policy under varied traffic.** The LFU/LRU decision is based on a specific workload. Different traffic patterns (bursty, sequential, etc.) might favor different policies.
+
+4. **The interaction between growable KV and session spill.** Both are about managing KV. How do they interact? The doc uses growable KV in the 1M profile but also session spill. Are they redundant? Conflicting?
+
+5. **Prefill chunk size across different prompt distributions.** The doc says chunk size is not a throughput lever, but this is measured on synthetic needle. Real prompts (code, prose, tool output) might behave differently.
+
+6. **The decode attention split at batch 16.** The doc says 64 splits is optimal, but this is measured on one GPU (5080). Different GPUs might need different splits.
+
+7. **Memory prediction accuracy across host configurations.** The doc says the engine predicts headroom and WARNs outside ±25%. But what's the actual error rate? On what hosts?
+
+8. **The MoE backend choice (offload vs hybrid vs cpu) under different PCIe speeds.** The doc measures 66.9 GB/s CPU vs 52.9 GB/s PCIe gather. But different hosts have different PCIe speeds. The 2× hybrid threshold might not hold everywhere.
+
+**What I'd change first:**
+
+1. **Fix the `--kv-grow-step-tokens` prefix-cache destruction.** This is the most concrete, measurable problem. The doc itself documents 89% pure loss. The fix would be to make `_maybe_shrink_growable_kv` actually check if a shrink is achievable before evicting, or to decouple growable KV from prefix cache eviction. This is a clear win.
+
+Actually, wait — the doc says they dropped `--kv-grow-step-tokens` for prefix-reuse-heavy work and kept it for multi-agent session serving. So it's a deliberate tradeoff. But the mechanism is still fragile.
+
+2. **Add a context-length threshold to speculation.** The doc says there's deliberately no threshold, but that's a design choice that leaves performance on the table for the common case (short context, where speculation helps). A measured threshold would be a clear win.
+
+Actually, the doc says the gate measures its own verify/decode ratio online and stops drafting when it can't pay. So there IS an online mechanism. But it's not a context-length threshold per se.
+
+3. **Resolve the growable KV vs session spill tension.** Both are about KV management. Using both in the 1M profile might be redundant or conflicting.
+
+Let me think about what's most impactful.
+
+Actually, let me reconsider. The document is quite sophisticated and the authors have clearly done a lot of measurement. My critique should be constructive and specific, not generic.
+
+Let me think about the most fragile decisions:
+
+1. **The 1M session profile is a house of cards.** It relies on:
+   - Growable KV funding from expert cache
+   - Session spill to RAM then NVMe
+   - Look-ahead promotion on a background thread
+   - Partial-prefix restore with state capture
+   - Complex residency policy (no spill while queue empty, retention by capacity+age)
+   - The nemotron_v3 reasoning parser fix (dropping stray think tags)
+   
+   Each of these is a separate moving part with its own failure mode. The interaction between them is not well-tested. The doc mentions "16 clients, 0 errors" but that's a passthrough soak, not a real workload.
+
+2. **The expert cache oversubscription at 16-way.** The working set (~1417 slots) exceeds the pool (976 slots). This is a fundamental capacity problem. LFU helps but the doc admits the miss rate is still 51% even with LFU. This means half of every decode step is PCIe traffic (74% of the 16-lane step). This is the bottleneck, and it can't be fixed by cache policy alone — it needs more expert slots or a different MoE strategy.
+
+3. **The `--kv-grow-step-tokens` footgun.** Even though it's a deliberate tradeoff, the mechanism is fragile: it evicts the whole prefix cache before knowing if a shrink is achievable. This is 89% pure loss.
+
+4. **Speculative decoding's narrow applicability.** It only helps copy-heavy traffic, regresses at long context, and is not token-identical. The default (draft-len 8) is a measured choice, but the whole feature is fragile because it's so workload-specific.
+
+Let me also think about what's genuinely well-done:
+- The honesty about retractions (coherence caveat retracted, elastic flag retired)
+- The detailed measurements with before/after
+- The "general rule" for block-quantized kernels
+- The online gate for speculation
+- The bit-exactness verification
+
+Now let me structure my response:
+
+1. **Summary of main design decisions** (grouped by theme)
+2. **Critique:**
+   - Fragile decisions
+   - Missing measurements
+   - What I'd change first
+
+Let me be specific and concrete, referencing the doc's own measurements where relevant.
+
+I should be careful not to be generic. Let me anchor every point in the document.
+
+Let me draft the response.
+
+---
+
+**Summary of main design decisions**
+
+I'll group these:
+
+A. **Concurrency is geometry-determined, not a knob.** Super's 160 MiB Mamba-2 state forces single_stream_only (one session, bs=1). Lightning's 47 MiB state allows 16 lanes. This is a hard architectural constraint, not a tuning choice.
+
+B. **MoE offload to host RAM, pinned.** 15.4 GiB expert banks pinned via FREETOKEN_PIN_BUDGET_GB=17 (≥ CUDA host-registration budget on WSL). offload beats hybrid 3.6×. The backend is chosen once at bank-load time because it pins the weight layout.
+
+C. **Triton over b12x/marlin/flashinfer for NVFP4 expert GEMM.** Triton wins the microbenchmark at every width except the widest prefill. The auto-resolution (b12x) is now wrong on this geometry, so Lightning must pin triton.
+
+D. **LFU expert cache at high concurrency.** At 16-way, LRU degenerates to 99.6% miss; LFU halves it and gives 1.80× throughput. Rule of thumb: LFU above ~15% miss, LRU below.
+
+E. **q8_0 KV, triton attention.** fp8_e4m3 flipped first tokens on cached-prefix reuse. Quantized KV requires triton backend.
+
+F. **Dense decode CUDA graphs [1..16] for offload-MoE.** Padding a row routes its own experts, so exact graphs (7.4% faster) beat padded graphs (6.7% slower than eager).
+
+G. **Fixed --memory-ratio 1.00.** Predicted from config, measured at startup, WARN outside ±25%. Not a tuning knob.
+
+H. **Chunked prefill at 8192, not a throughput lever.** Total prefix work is ~N²/2 regardless.
+
+I. **1M profile: one resident session, others queue/spill.** Growable KV + session spill + look-ahead promotion + partial-prefix restore. Complex residency policy.
+
+J. **Speculative ngram decoding, greedy+single-stream only.** draft-len 8 default, only worth it on copy-heavy traffic, regresses at long context.
+
+K. **Treat 262K as served ceiling** (tokenizer model_max_length), not 1M (max_position_embeddings).
+
+**Critique**
+
+Let me think about the most important points.
+
+Fragile:
+
+1. **The 1M session profile is a house of cards.** I'll detail the interacting parts and the lack of real-workload testing.
+
+2. **Expert cache oversubscription is a capacity problem, not a policy problem.** At 16-way
