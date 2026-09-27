@@ -987,10 +987,18 @@ def _reconstruct_kernel(tr_ptr, out_ptr, n_tiles, N, BITS: tl.constexpr, CB: tl.
 @triton.jit
 def _decode_tile_rows(tr_ptr, tile0, BITS: tl.constexpr, CB: tl.constexpr):
     """W_hat of 8 horizontally adjacent 16x16 tiles (``tile0`` + [0, 8) tile words apart) as a
-    [16, 128] fp16 block, decoded in bitstream order: code ``t = 32 cl + i`` of a tile is
-    W_hat[r, c] with ``r = 8 i1 + 4 i4 + 2 i3 + i0`` and ``c = 8 i2 + cl`` (bits ``i_j`` of ``i``), so
-    every word offset and shift is a function of ``i`` (and ``cl``) only; the (r, c) order is a
-    register permute. Same values as ``_exl3_decode`` (tests/kernels/test_exl3_bitexact.py)."""
+    [16, 128] fp16 block, decoded in bitstream order (``_decode_bands`` with one band)."""
+    return _decode_bands(tr_ptr, tile0, 0, 1, BITS, CB)
+
+
+@triton.jit
+def _decode_bands(tr_ptr, tile0, row_tiles, NB: tl.constexpr, BITS: tl.constexpr, CB: tl.constexpr):
+    """W_hat of NB 16-row bands (``row_tiles`` tiles apart) of 8 horizontally adjacent 16x16 tiles
+    (from tile ``tile0``) as an [NB * 16, 128] fp16 block, decoded in bitstream order: code
+    ``t = 32 cl + i`` of a tile is W_hat[r, c] with ``r = 8 i1 + 4 i4 + 2 i3 + i0`` and ``c = 8 i2 + cl``
+    (bits ``i_j`` of ``i``), so every word offset and shift is a function of ``i`` (and ``cl``) only;
+    the (r, c) order is a register permute. Same values as ``_exl3_decode``
+    (tests/kernels/test_exl3_bitexact.py)."""
     WORDS: tl.constexpr = 8 * BITS
     OFF0: tl.constexpr = 257 * BITS - 16  # bit of code 0's window: (BITS - 16 + 256 * BITS)
     i = tl.arange(0, 32)
@@ -1001,13 +1009,14 @@ def _decode_tile_rows(tr_ptr, tile0, BITS: tl.constexpr, CB: tl.constexpr):
     cl = tl.arange(0, 8)
     wa = (BITS * cl[:, None] + OFF0 // 32 + j0[None, :]) % WORDS
     wb = (BITS * cl[:, None] + OFF0 // 32 + j1[None, :]) % WORDS
-    base = tr_ptr + (tile0 + tl.arange(0, 8)).to(tl.int64) * WORDS
-    a = tl.load(base[:, None, None] + wa[None, :, :]).to(tl.uint32, bitcast=True)
-    b = tl.load(base[:, None, None] + wb[None, :, :]).to(tl.uint32, bitcast=True)
-    v = _decode_words(a, b, sh[None, None, :], CB)  # [tile, cl, i]
-    v = tl.reshape(v, (8, 8, 2, 2, 2, 2, 2))  # tile, cl, i4, i3, i2, i1, i0
-    v = tl.permute(v, (5, 2, 3, 6, 0, 4, 1))  # i1 i4 i3 i0 | tile i2 cl
-    return tl.reshape(v, (16, 128))
+    tiles = tile0 + tl.arange(0, NB)[:, None] * row_tiles + tl.arange(0, 8)[None, :]
+    base = tr_ptr + tiles.to(tl.int64) * WORDS
+    a = tl.load(base[:, :, None, None] + wa[None, None, :, :]).to(tl.uint32, bitcast=True)
+    b = tl.load(base[:, :, None, None] + wb[None, None, :, :]).to(tl.uint32, bitcast=True)
+    v = _decode_words(a, b, sh[None, None, None, :], CB)  # [band, tile, cl, i]
+    v = tl.reshape(v, (NB, 8, 8, 2, 2, 2, 2, 2))  # band, tile, cl, i4, i3, i2, i1, i0
+    v = tl.permute(v, (0, 6, 3, 4, 7, 1, 5, 2))  # band i1 i4 i3 i0 | tile i2 cl
+    return tl.reshape(v, (NB * 16, 128))
 
 
 @triton.jit
@@ -1076,7 +1085,8 @@ def _reconstruct_folded_kernel(
     n_local = pid_n * 128 - tl.load(nstart_ptr + part) + idx
     tr = tr_ptr + e * tr_expert_stride + tl.load(word_off_ptr + part)
     kk = pid_k * 128 + idx
-    w = _exl3_decode(tr, kk[:, None], n_local[None, :], n_tiles, BITS, CB)
+    # bitstream-order decode of the 8 x 8 tiles (same values as _exl3_decode, fewer instructions)
+    w = _decode_bands(tr, (pid_k * 8) * n_tiles + (pid_n * 128 - tl.load(nstart_ptr + part)) // 16, n_tiles, 8, BITS, CB)
     h = tl.load(had_ptr + idx[:, None] * 128 + idx[None, :])
     a = tl.dot(h, w)  # H W: 128 exact +-w terms per entry, fp32
     s = tl.load(suh_ptr + e * suh_expert_stride + part * suh_part_stride + kk).to(tl.float32)
@@ -1178,6 +1188,60 @@ def gemm_f16acc(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor | None = Non
     _gemm_f16acc_kernel[grid](a, a.stride(0), b, b.stride(0), out, out.stride(0), m, n, k,
                               BM=c["BM"], BN=c["BN"], BK=c["BK"], GROUP=c["GROUP"],
                               num_warps=c["num_warps"], num_stages=c["num_stages"])
+    return out
+
+
+@triton.jit
+def _gemm_cast_kernel(
+    a_ptr, stride_am, b_ptr, stride_bk, c_ptr, stride_cm, M, N, K,
+    BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr, GROUP: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    n_m = tl.cdiv(M, BM)
+    n_n = tl.cdiv(N, BN)
+    per_group = GROUP * n_n
+    first_m = (pid // per_group) * GROUP
+    group_m = tl.minimum(n_m - first_m, GROUP)
+    pid_m = first_m + (pid % per_group) % group_m
+    pid_n = (pid % per_group) // group_m
+    rm = pid_m * BM + tl.arange(0, BM)
+    rn = pid_n * BN + tl.arange(0, BN)
+    rk = tl.arange(0, BK)
+    a = a_ptr + rm[:, None].to(tl.int64) * stride_am + rk[None, :]
+    b = b_ptr + rk[:, None].to(tl.int64) * stride_bk + rn[None, :]
+    acc = tl.zeros([BM, BN], dtype=tl.float32)
+    for k0 in range(0, K, BK):
+        x = tl.load(a, mask=rm[:, None] < M, other=0.0).to(tl.float16)  # the host's .to(fp16), fused
+        w = tl.load(b, mask=rn[None, :] < N, other=0.0)
+        acc = tl.dot(x, w, acc)
+        a += BK
+        b += BK * stride_bk
+    # fp16 first (torch.mm's fp16 result), then the destination dtype (the host copy's cast), fused
+    y = acc.to(tl.float16).to(c_ptr.dtype.element_ty)
+    tl.store(c_ptr + rm[:, None].to(tl.int64) * stride_cm + rn[None, :], y, mask=(rm[:, None] < M) & (rn[None, :] < N))
+
+
+# tiles of gemm_cast: RTX 5080 sweep over the Ornith folded shapes (K 2048 -> 2048/1024, 4096 -> 2048,
+# 512 -> 2048) at 1152..8192 rows put BM64/BN64/BK64/3 stages/4 warps within 1-8% of each shape's
+# best (tasks/ornith-exl3/popt-exl3/results/sweep-mm.log); every tile gives the same bits
+GEMM_CAST_CFG = dict(BM=64, BN=64, BK=64, GROUP=8, num_warps=4, num_stages=3)
+
+
+def gemm_cast(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor, **cfg) -> torch.Tensor:
+    """``out = a.to(fp16) @ b`` rounded to fp16, then to ``out.dtype``, in one kernel: the same bits as
+    ``torch.mm(a.to(torch.float16), b).to(out.dtype)`` wherever cuBLAS runs its k loop in one pass
+    (fp32 accumulation over sequential 16-wide mma k steps; a split-K cuBLAS kernel rounds
+    differently). ``a`` fp16/bf16 ``[M, K]``, ``b`` fp16 ``[K, N]``; ``out`` may be a column slice."""
+    m, k = a.shape
+    n = b.shape[1]
+    assert a.dtype in (torch.float16, torch.bfloat16) and b.dtype == torch.float16
+    assert a.stride(1) == 1 and b.stride(1) == 1 and out.stride(1) == 1 and out.shape == (m, n)
+    c = {**GEMM_CAST_CFG, **cfg}
+    assert k % c["BK"] == 0
+    grid = (triton.cdiv(m, c["BM"]) * triton.cdiv(n, c["BN"]),)
+    _gemm_cast_kernel[grid](a, a.stride(0), b, b.stride(0), out, out.stride(0), m, n, k,
+                            BM=c["BM"], BN=c["BN"], BK=c["BK"], GROUP=c["GROUP"],
+                            num_warps=c["num_warps"], num_stages=c["num_stages"])
     return out
 
 

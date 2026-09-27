@@ -177,3 +177,40 @@ def test_ranged_l2_groups_equal_plain_launches(monkeypatch, skew):
     for frac in (0.5, 1e-9, 0.001):  # L2-sized groups; a tiny budget falls back to PREFILL_DECODE_GROUP
         monkeypatch.setattr(fe, "PREFILL_DECODE_L2_FRACTION", frac)
         assert torch.equal(run().view(torch.int16), ref.view(torch.int16)), frac
+
+
+@cuda
+@pytest.mark.parametrize("m,k,n", [(1152, 2048, 2048), (1808, 2048, 1024), (2048, 512, 2048), (3001, 4096, 2048), (8192, 2048, 2048)])
+def test_gemm_cast_equals_cast_cublas_cast(m, k, n):
+    """gemm_cast: fused bf16->fp16 input cast, fp32 accumulation, fp16 rounding, bf16 output cast --
+    bitwise the host cast + torch.mm + copy-cast it replaces (these shapes keep cuBLAS in one k pass)."""
+    from freetoken.kernel.triton.exl3 import gemm_cast
+
+    g = torch.Generator().manual_seed(m + k + n)
+    x = torch.randn(m, k, generator=g).to(torch.bfloat16).cuda()
+    w = (torch.randn(k, n + 256, generator=g) * 0.03).half().cuda()[:, 128 : 128 + n]  # strided slab
+    w = w.contiguous()
+    ref = torch.mm(x.to(torch.float16), w).to(torch.bfloat16)
+    wide = torch.zeros(m, n + 384, dtype=torch.bfloat16, device="cuda")
+    out = gemm_cast(x, w, wide[:, 256 : 256 + n])  # a column slice, as the folded path writes
+    assert torch.equal(out.view(torch.int16), ref.view(torch.int16))
+    assert not wide[:, :256].any() and not wide[:, 256 + n :].any()
+    for cfg in (dict(BM=128, BN=128, BK=32), dict(BM=64, BN=256, BK=64, num_warps=8)):
+        assert torch.equal(gemm_cast(x, w, torch.empty_like(ref), **cfg).view(torch.int16), ref.view(torch.int16)), cfg
+
+
+@cuda
+@pytest.mark.parametrize("rows", (1152, 2000))
+def test_folded_fused_cast_path_equals_cublas_path(monkeypatch, rows):
+    import freetoken.layers.quantization.linear.exl3 as lin
+
+    g = torch.Generator().manual_seed(rows)
+    parts = Exl3Parts.build(2048, (2048, 1024, 512), 5, "mul1", "cuda")
+    tr = torch.randint(-(1 << 15), 1 << 15, (parts.words * 2,), generator=g, dtype=torch.int32).to(torch.int16).cuda()
+    suh = (torch.randn(3 * 2048, generator=g) * 0.5).half().cuda()
+    svh = (torch.randn(parts.n, generator=g) * 0.05).half().cuda()
+    x = torch.randn(rows, 2048, generator=g).to(torch.bfloat16).cuda()
+    fused = lin.exl3_forward(x, tr, suh, svh, parts, torch.bfloat16)
+    monkeypatch.setattr(lin, "FUSED_CAST_MIN_ROWS", 1 << 30)
+    cublas = lin.exl3_forward(x, tr, suh, svh, parts, torch.bfloat16)
+    assert torch.equal(fused.view(torch.int16), cublas.view(torch.int16))

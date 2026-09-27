@@ -1,0 +1,14 @@
+start 2026-09-27T23:51:56+04:00 load 3.01 4.67 4.56 tree /home/lucas/ai/FreeToken-wt/popt-exl3 bc23b40 popt-exl3: MoE prefill: bitstream-order re
+........................................................................ [ 20%]
+........................................................................ [ 40%]
+........................................................................ [ 60%]
+........................................................................ [ 80%]
+......................................................................   [100%]
+=============================== warnings summary ===============================
+tests/kernels/test_exl3_bitexact.py::test_ranged_l2_groups_equal_plain_launches[False]
+  /home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/flashinfer/cute_dsl/utils.py:86: DeprecationWarning: Arch from arch.py is deprecated. Use Arch from enums.py instead.
+    from cutlass.base_dsl.arch import Arch
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+358 passed, 1 warning in 117.34s (0:01:57)
+rc=0 end 2026-09-27T23:54:02+04:00
