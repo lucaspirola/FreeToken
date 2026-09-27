@@ -1,0 +1,19 @@
+== 2026-09-27T22:05:07+04:00 load 1.02 1.92 2.39 code 757caee
+sm bpb8                        5.170 ms    51.7 GB/s
+sm bpb16                       5.169 ms    51.7 GB/s
+sm bpb32                       5.177 ms    51.7 GB/s
+sm bpb64                       5.175 ms    51.7 GB/s
+dma batch                      4.882 ms    54.8 GB/s
+beside sm bpb8              3 GEMMs   27.92 ms, copy   5.164 ms
+beside dma batch            3 GEMMs   28.06 ms, copy   4.894 ms
+3 GEMMs alone 27.94 ms
+{"n_miss": 135, "bytes": 267494400, "sm bpb8": {"ms": 5.17, "GBps": 51.7}, "sm bpb16": {"ms": 5.169, "GBps": 51.7}, "sm bpb32": {"ms": 5.177, "GBps": 51.7}, "sm bpb64": {"ms": 5.175, "GBps": 51.7}, "dma batch": {"ms": 4.882, "GBps": 54.8}, "beside sm bpb8": {"gemm3_ms": 27.92, "copy_ms": 5.164}, "beside dma batch": {"gemm3_ms": 28.06, "copy_ms": 4.894}, "gemm3_alone_ms": 27.94}
+sm bpb8                        9.699 ms    52.3 GB/s
+sm bpb16                       9.791 ms    51.8 GB/s
+sm bpb32                       9.788 ms    51.8 GB/s
+sm bpb64                       9.808 ms    51.7 GB/s
+dma batch                      9.262 ms    54.8 GB/s
+beside sm bpb8              3 GEMMs   28.66 ms, copy   9.679 ms
+beside dma batch            3 GEMMs   28.31 ms, copy   9.263 ms
+3 GEMMs alone 27.96 ms
+{"n_miss": 256, "bytes": 507248640, "sm bpb8": {"ms": 9.699, "GBps": 52.3}, "sm bpb16": {"ms": 9.791, "GBps": 51.8}, "sm bpb32": {"ms": 9.788, "GBps": 51.8}, "sm bpb64": {"ms": 9.808, "GBps": 51.7}, "dma batch": {"ms": 9.262, "GBps": 54.8}, "beside sm bpb8": {"gemm3_ms": 28.66, "copy_ms": 9.679}, "beside dma batch": {"gemm3_ms": 28.31, "copy_ms": 9.263}, "gemm3_alone_ms": 27.96}

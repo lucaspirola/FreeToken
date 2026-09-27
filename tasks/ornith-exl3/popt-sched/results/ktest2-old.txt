@@ -1,0 +1,53 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_______ test_shared_expert_add_one_build_for_every_length_and_bit_exact ________
+
+    def test_shared_expert_add_one_build_for_every_length_and_bit_exact():
+        from freetoken.kernel.triton.shared_expert import _shared_expert_add_kernel, fused_shared_expert_add_
+    
+        hidden = 2048
+        counts = []
+        for tokens in (1, 7, 300, 1000, 4097, 12345):
+            g = torch.Generator(device="cuda").manual_seed(tokens)
+            routed = torch.randn(tokens, hidden, device="cuda", generator=g).to(torch.bfloat16)
+            shared = torch.randn(tokens, hidden, device="cuda", generator=g).to(torch.bfloat16)
+            gate = torch.randn(tokens, 1, device="cuda", generator=g).to(torch.bfloat16)
+            ref = routed.clone()
+            n = ref.numel()
+            _per_length_add[(triton.cdiv(n, 256),)](ref, shared, gate, hidden=hidden, n_elements=n, BLOCK=256,
+                                                   num_warps=4)
+            out = fused_shared_expert_add_(routed.clone(), shared, gate)
+            assert torch.equal(out, ref), tokens
+            counts.append(_variants(_shared_expert_add_kernel))
+        # tokens * hidden is a multiple of 16 for every length: one build serves them all
+>       assert counts[-1] == counts[0] == 1, counts
+E       AssertionError: [1, 2, 3, 4, 5, 6]
+E       assert 6 == 1
+
+tests/kernels/test_shared_expert_epilogue.py:54: AssertionError
+_____________ test_shared_route_reduce_one_build_for_every_length ______________
+
+    def test_shared_route_reduce_one_build_for_every_length():
+        from freetoken.kernel.triton.shared_expert import _shared_route_reduce_kernel, fused_shared_route_reduce
+    
+        hidden, top_k = 1024, 8
+        counts = []
+        for tokens in (1, 300, 1000, 2049):
+            g = torch.Generator(device="cuda").manual_seed(tokens)
+            routes = torch.randn(tokens * (top_k + 1), hidden, device="cuda", generator=g).to(torch.bfloat16)
+            weights = torch.rand(tokens, top_k, device="cuda", generator=g)
+            gate = torch.randn(tokens, device="cuda", generator=g).to(torch.bfloat16)
+            r = routes.view(tokens, top_k + 1, hidden).float()
+            ref = (r[:, :top_k] * weights[:, :, None]).sum(1) + r[:, top_k] * torch.sigmoid(gate.float())[:, None]
+            out = fused_shared_route_reduce(routes, weights, gate)
+            torch.testing.assert_close(out.float(), ref, atol=3e-2, rtol=1e-2)
+            counts.append(_variants(_shared_route_reduce_kernel))
+>       assert counts[-1] == counts[0] == 1, counts
+E       AssertionError: [1, 2, 3, 4]
+E       assert 4 == 1
+
+tests/kernels/test_shared_expert_epilogue.py:72: AssertionError
+=========================== short test summary info ============================
+FAILED tests/kernels/test_shared_expert_epilogue.py::test_shared_expert_add_one_build_for_every_length_and_bit_exact
+FAILED tests/kernels/test_shared_expert_epilogue.py::test_shared_route_reduce_one_build_for_every_length
+2 failed in 2.44s

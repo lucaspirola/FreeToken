@@ -105,6 +105,7 @@ See [models.md](models.md#moe-strategies) for what each strategy does.
 | `--moe-pageable-profile` | off | Persistent pageable-layer policy: `off` uses the deterministic built-in placement, `read` applies an existing model-scoped profile, and `train` also updates it from telemetry |
 | `--moe-hybrid-max-fetch` | auto | With `hybrid`: max experts fetched over PCIe per layer per step; rest computed on CPU |
 | `--moe-prefill-hit-d2d` | off | Prefill: copy cache-hit experts device-side, stream only misses (CUDA >= 13) |
+| `--moe-prefill-hit-d2d-tokens` | 2048 | Chunks of at most this many tokens take that split automatically (a short chunk cannot hide the full-layer H2D); 0 = only the flag |
 | `--disable-moe-prefill-overlap` | overlap on | Disable the two-buffer prefill copy overlap |
 
 ### API behaviour
