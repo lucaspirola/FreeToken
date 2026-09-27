@@ -221,29 +221,23 @@ class VMMAllocation {
 
     std::vector<Mapping> added;
     try {
-      // One physical allocation per range (uncommit_ranges must match a commit exactly),
-      // but access is granted once per run of adjacent ranges: cuMemSetAccess may span
-      // several mappings, and on WSL each call costs ~0.1 ms -- an expert-arena grow
-      // commits hundreds of (bank, chunk) ranges, and per-range SetAccess was ~17 ms of
-      // the ~50 ms headroom release that sits before the first token after a prefill.
       for (const auto& range : requested) {
         CUmemGenericAllocationHandle handle{};
         check_cu(cuMemCreate(&handle, range.size, &prop, 0), "cuMemCreate");
-        const CUresult mapped = cuMemMap(state_->base + range.offset, range.size, 0, handle, 0);
-        cuMemRelease(handle);  // the mapping (if any) holds the allocation
-        check_cu(mapped, "cuMemMap");
-        added.push_back(range);
-      }
-      for (size_t i = 0; i < added.size();) {
-        size_t j = i + 1;
-        while (j < added.size() && added[j - 1].offset + added[j - 1].size == added[j].offset) {
-          ++j;
+        try {
+          check_cu(
+              cuMemMap(state_->base + range.offset, range.size, 0, handle, 0),
+              "cuMemMap");
+          check_cu(
+              cuMemSetAccess(state_->base + range.offset, range.size, &access, 1),
+              "cuMemSetAccess");
+        } catch (...) {
+          cuMemUnmap(state_->base + range.offset, range.size);
+          cuMemRelease(handle);
+          throw;
         }
-        const size_t run_bytes = added[j - 1].offset + added[j - 1].size - added[i].offset;
-        check_cu(
-            cuMemSetAccess(state_->base + added[i].offset, run_bytes, &access, 1),
-            "cuMemSetAccess");
-        i = j;
+        check_cu(cuMemRelease(handle), "cuMemRelease");
+        added.push_back(range);
       }
     } catch (...) {
       for (auto it = added.rbegin(); it != added.rend(); ++it) {
