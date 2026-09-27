@@ -1,0 +1,4 @@
+ck8-local/gate/ck8o-nat-whole-1-natural.json    168.0 tok/s  100.0%  md5 same as ref 5/5
+ck8-local/gate/ck8o-nat-mirror-1-natural.json   154.2 tok/s   91.8%  md5 same as ref 5/5
+ck8-local/gate/ck8o-nat-whole-2-natural.json    167.5 tok/s   99.7%  md5 same as ref 5/5
+ck8-local/gate/ck8o-nat-mirror-2-natural.json   154.8 tok/s   92.1%  md5 same as ref 5/5

@@ -1,0 +1,20 @@
+   1476416 KiB anon    1476416 KiB rss  [heap]
+    378392 KiB anon     378392 KiB rss  [anon-unnamed]
+      5288 KiB anon     117516 KiB rss  /home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/_mlir_libs/_cutlass_ir.cu13.cpython-312-x86_64-linux-gnu.so
+      1948 KiB anon      14440 KiB rss  /home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/llvmlite/binding/libllvmlite.so
+      1540 KiB anon       7472 KiB rss  /usr/lib/wsl/drivers/nv_dispi.inf_amd64_b20cc8aeaed64fc2/libcuda.so.1.1
+      1404 KiB anon      31372 KiB rss  /home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/triton/_C/libtriton.so
+      1108 KiB anon       5740 KiB rss  /usr/bin/python3.12
+--- largest single mappings by Anonymous
+   1476416 KiB  3b158000-98ca1000 [heap]
+     39936 KiB  77e6802d4000-77e6829d4000 
+     34272 KiB  77e67777e000-77e67997e000 
+     31228 KiB  77e8a3355000-77e8a5200000 
+     23572 KiB  77e17a100000-77e17c021000 
+     21504 KiB  77e8a7900000-77e8a8e00000 
+     20480 KiB  77e180000000-77e181400000 
+     18868 KiB  77e897c97000-77e898f05000 
+     17420 KiB  77e66d500000-77e66ee00000 
+     16132 KiB  77e8a6829000-77e8a782a000 
+     14336 KiB  77e674e00000-77e675c00000 
+     13312 KiB  77e899900000-77e89a600000 

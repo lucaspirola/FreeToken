@@ -1,0 +1,16 @@
+claude-code  cold    ck8o prompt 19572 cached 0 | ck7o prompt 19573 cached 0 DIFF
+claude-code  A       ck8o prompt 47739 cached 8128 | ck7o prompt 47739 cached 8128 SAME
+claude-code  clear   ck8o prompt 19526 cached 8128 | ck7o prompt 19526 cached 8128 SAME
+claude-code  repeat  ck8o prompt 19526 cached 19520 | ck7o prompt 19526 cached 19520 SAME
+claude-code  next    ck8o prompt 19585 cached 19520 | ck7o prompt 19585 cached 19520 SAME
+omp          cold    ck8o prompt 8279 cached 0 | ck7o prompt 8283 cached 0 DIFF
+omp          A       ck8o prompt 36402 cached 0 | ck7o prompt 36402 cached 0 SAME
+omp          clear   ck8o prompt 8249 cached 8128 | ck7o prompt 8249 cached 8128 SAME
+omp          repeat  ck8o prompt 8249 cached 8192 | ck7o prompt 8249 cached 8192 SAME
+omp          next    ck8o prompt 8277 cached 8192 | ck7o prompt 8277 cached 8192 SAME
+codex        cold    ck8o prompt None cached None | ck7o prompt None cached None SAME
+codex        A       ck8o prompt None cached None | ck7o prompt None cached None SAME
+codex        clear   ck8o prompt None cached None | ck7o prompt None cached None SAME
+codex        repeat  ck8o prompt None cached None | ck7o prompt None cached None SAME
+codex        next    ck8o prompt None cached None | ck7o prompt None cached None SAME
+15 requests, 2 differ (ck8o vs ck7o; Codex reports no usage)

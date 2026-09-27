@@ -1,0 +1,8 @@
+== ck8o-mirror-256k vs ck8o-whole-256k (bar 91%)
+     8K p1:   190.9 vs   194.9    97.9%  gap 5.0 vs 4.7 ms  ttft 0.33 vs 0.4 s  ok
+     8K p2:   182.2 vs   185.7    98.1%  gap 5.1 vs 4.8 ms  ttft 1.02 vs 1.02 s  ok
+   256K p1:   116.3 vs   118.3    98.3%  gap 8.2 vs 7.9 ms  ttft 81.3 vs 80.73 s  ok
+   256K p2:   113.7 vs   121.3    93.7%  gap 8.2 vs 7.7 ms  ttft 78.72 vs 78.22 s  ok
+  ck8o-whole-256k: ram_gib=21.94, rss_ready_gib=22.74, anon_gib=2.07, coverage_faults=None, starved=None, code=None
+  ck8o-mirror-256k: ram_gib=18.69, rss_ready_gib=17.58, anon_gib=16.77, coverage_faults=0, starved=0, code=None
+0 point(s) outside the band
