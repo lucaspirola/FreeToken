@@ -52,3 +52,34 @@ def test_flag_forces_the_split_on_long_chunks():
 def test_zero_disables_the_auto_split():
     _, asked = _begin(300, tokens=0, usable=False)
     assert asked == []
+
+
+def _prime_stub(*, overlap=True, cached=False):
+    calls = []
+    stub = SimpleNamespace(
+        prefill_overlap=overlap, _size_class_enabled=False, _primed_prefill_tokens=None,
+        use_cached_extend=lambda layer, n: cached,
+        begin_prefill=lambda n: calls.append(("begin", n)),
+        prefetch_prefill_layer=lambda layer: calls.append(("prefetch", layer)),
+    )
+    return stub, calls
+
+
+def test_prime_starts_layer_zero_before_the_forward_and_is_consumed_once():
+    stub, calls = _prime_stub()
+    OffloadMoeCache.prime_prefill(stub, 1017)
+    assert calls == [("begin", 1017), ("prefetch", 0)]
+    assert OffloadMoeCache.take_primed_prefill(stub, 1017) is True
+    assert OffloadMoeCache.take_primed_prefill(stub, 1017) is False  # layer 0 of the next forward begins itself
+
+
+def test_prime_mismatch_or_cached_path_leaves_layer_zero_to_begin():
+    stub, calls = _prime_stub()
+    OffloadMoeCache.prime_prefill(stub, 1017)
+    assert OffloadMoeCache.take_primed_prefill(stub, 1000) is False
+    stub, calls = _prime_stub(cached=True)
+    OffloadMoeCache.prime_prefill(stub, 16)
+    assert calls == [] and OffloadMoeCache.take_primed_prefill(stub, 16) is False
+    stub, calls = _prime_stub(overlap=False)
+    OffloadMoeCache.prime_prefill(stub, 4096)
+    assert calls == []

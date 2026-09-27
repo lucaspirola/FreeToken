@@ -589,6 +589,7 @@ class OffloadMoeCache:
         # binds the bounded host mirror.
         self.residency = WholeModelResidency()
         self._prefill_hit_d2d_active = False
+        self._primed_prefill_tokens: int | None = None
         self._hit_d2d_fallback_logged = False
         self._batch_memcpy = None
         self.prefill_hit_rows = 0
@@ -2333,6 +2334,36 @@ class OffloadMoeCache:
             with torch.cuda.stream(self.prefill_copy_stream):
                 self._prefill_slot_snapshot.copy_(self.slot_for_id, non_blocking=True)
             self.prefill_copy_stream.synchronize()
+
+    def prime_prefill(self, num_tokens: int) -> None:
+        """Start a prefill forward's first expert-layer copy before the forward runs.
+
+        Layer 0's copy used to be issued by layer 0's own MoE block, after that
+        layer's attention/GDN and router, and its GEMMs then waited for the whole
+        copy (Ornith EXL3 whole mode: ~8 ms of a 0.3 s 1000-token TTFT, once per
+        chunk forward; later layers are hidden behind the previous layer's work).
+        Called by the engine right before an eager prefill forward; layer 0 then
+        finds its buffer already filling (``take_primed_prefill``). Skipped when
+        layer 0 would not stream (the short-extend cached path) -- the same gate
+        ``_prefill_routed`` applies.
+        """
+        self._primed_prefill_tokens = None
+        if (
+            not self.prefill_overlap
+            or num_tokens <= 0
+            or self._size_class_enabled
+            or self.use_cached_extend(0, num_tokens)
+        ):
+            return
+        self.begin_prefill(num_tokens)
+        self.prefetch_prefill_layer(0)
+        self._primed_prefill_tokens = num_tokens
+
+    def take_primed_prefill(self, num_tokens: int | None) -> bool:
+        """Whether ``prime_prefill`` already began this forward's prefill (consumes it)."""
+        primed = num_tokens is not None and self._primed_prefill_tokens == num_tokens
+        self._primed_prefill_tokens = None
+        return primed
 
     def prefetch_prefill_layer(self, layer_id: int) -> None:
         if not self.prefill_overlap or layer_id >= self.num_layers:

@@ -1818,10 +1818,15 @@ class Engine:
         self.ctx.hidden_state_sink = self.hidden_states.begin_batch(batch)
         try:
             use_graph = self.graph_runner.can_use_cuda_graph(batch)
+            moe = self.moe_offload_cache
+            if moe is not None and batch.is_prefill and not use_graph:
+                moe.prime_prefill(int(batch.input_ids.shape[0]))
             with self.ctx.forward_batch(batch), self.model.forward_host_ctx(batch, use_graph):
                 logits = self.graph_runner.replay(batch) if use_graph else self.model.forward()
         finally:
             self.ctx.hidden_state_sink = None
+            if self.moe_offload_cache is not None:
+                self.moe_offload_cache.take_primed_prefill(None)  # never outlives its forward
         if self.cpu_moe_executor is not None:
             # One pinned read: surfaces a fired flag-handshake watchdog (dead coordinator
             # -> stale expert outputs) as a loud error instead of silent corruption.

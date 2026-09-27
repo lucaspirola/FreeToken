@@ -1,0 +1,28 @@
+........................................................................ [  6%]
+........................................................................ [ 12%]
+........................................................................ [ 18%]
+........................................................................ [ 24%]
+......................................sss......s................s....... [ 31%]
+........................................................................ [ 37%]
+........................................................................ [ 43%]
+.......................................................s................ [ 49%]
+........................................................................ [ 55%]
+.......................................ss............................... [ 62%]
+........................................................................ [ 68%]
+........................................................................ [ 74%]
+...................................................s.................... [ 80%]
+........................................................................ [ 86%]
+........................................................................ [ 93%]
+...................................................................... [ 99%]
+...........                                                              [100%]
+=============================== warnings summary ===============================
+tests/moe/test_cpu_moe.py::test_cpu_decode_matches_gpu_decode_kernel[1]
+  /home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/flashinfer/cute_dsl/utils.py:86: DeprecationWarning: Arch from arch.py is deprecated. Use Arch from enums.py instead.
+    from cutlass.base_dsl.arch import Arch
+
+tests/moe/test_mirror_pool_gguf.py::test_pool_row_matches_the_loader_row
+  /home/lucas/ai/FreeToken-wt/popt-sched/python/freetoken/models/gguf/reader.py:112: UserWarning: The given NumPy array is not writable, and PyTorch does not support non-writable tensors. This means writing to this tensor will result in undefined behavior. You may want to copy the array to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at /pytorch/torch/csrc/utils/tensor_numpy.cpp:213.)
+    return torch.from_numpy(self._raw)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1152 passed, 9 skipped, 2 warnings, 2 subtests passed in 84.77s (0:01:24)
