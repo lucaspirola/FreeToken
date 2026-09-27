@@ -1,0 +1,6 @@
+start 2026-09-28T00:36:31+04:00 load 1.38 1.94 2.96 tree /home/lucas/ai/FreeToken-wt/popt-exl3 382bdd1 GDN prefill: tiled transposes into the con
+equal True
+round 0: rows+copy 405.1 us, heads 295.8 us, heads 289.1 us, rows+copy 404.9 us
+round 1: rows+copy 405.2 us, heads 294.3 us, heads 292.9 us, rows+copy 406.0 us
+round 2: rows+copy 403.9 us, heads 293.2 us, heads 298.0 us, rows+copy 404.7 us
+rc=0 end 2026-09-28T00:36:34+04:00

@@ -192,6 +192,13 @@ class GatedRMSNorm(BaseOP):
             is_rms_norm=True, norm_before_gate=True, activation=self.activation,
         )
 
+    def forward_heads(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        """``forward`` per head of ``x [T, H, D]``, reading a strided ``z [T, H, D]`` (a column slice
+        of a wider projection) in place instead of copying it; bitwise equal."""
+        from freetoken.kernel.fla import rms_norm_gated_heads
+
+        return rms_norm_gated_heads(x=x, weight=self.weight, z=z, eps=self.eps, activation=self.activation)
+
 
 class LayerNorm(BaseOP):
     """LayerNorm with bias on torch's fused kernel; the decoders use the RMSNorm family."""

@@ -204,6 +204,10 @@ class Qwen3_5GatedDeltaNet(BaseOP):
             else:
                 core_out = result
 
+        if not batch.is_decode and core_out.is_contiguous() and z.stride(-2) == self.head_v_dim:
+            # z is a column slice of the in_proj output: read it through its strides (no copy)
+            out = self.norm.forward_heads(core_out.view(total, self.num_v_heads, self.head_v_dim), z)
+            return self.out_proj.forward(out.view(total, -1))
         core_out = core_out.reshape(-1, self.head_v_dim)
         z = z.reshape(-1, self.head_v_dim)
         if batch.is_decode and hasattr(self.out_proj, "forward_gdn_norm"):

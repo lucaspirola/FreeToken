@@ -1,6 +1,7 @@
 """The tiled transpose is a pure copy: bitwise equal to ``x.t().contiguous()``, and the GDN prefill
 path built on it (conv in, q/k/v out) gives the same conv states, recurrent states and output as the
-torch-strided-copy path it replaced."""
+torch-strided-copy path it replaced. The gated norm reading a strided z per head equals the row-per-head
+launch on a contiguous copy of z."""
 
 import pytest
 import torch
@@ -56,3 +57,20 @@ def test_gdn_prefill_transposes_equal_strided_copies(lens):
 
     for a, b in zip(run(False), run(True)):
         assert torch.equal(a, b)
+
+
+@cuda
+@pytest.mark.parametrize("T", [1, 3, 17, 300, 8192])
+@pytest.mark.parametrize("H,D", [(32, 128), (16, 64), (3, 128)])
+def test_gated_norm_heads_equals_rows(T, H, D):
+    from freetoken.kernel.fla import rms_norm_gated, rms_norm_gated_heads
+
+    torch.manual_seed(T)
+    x = torch.randn(T, H, D, device="cuda").to(torch.bfloat16)
+    proj = torch.randn(T, 3 * H * D + 40, device="cuda").to(torch.bfloat16)
+    z = proj[:, H * D + 8: 2 * H * D + 8].reshape(T, H, D)
+    w = (1 + 0.1 * torch.randn(D, device="cuda")).to(torch.bfloat16)
+    ref = rms_norm_gated(x=x.reshape(-1, D), weight=w, bias=None, z=z.reshape(-1, D), eps=1e-6,
+                         is_rms_norm=True, norm_before_gate=True, activation="silu")
+    got = rms_norm_gated_heads(x=x, weight=w, z=z, eps=1e-6, activation="silu")
+    assert torch.equal(got.reshape(-1, D), ref)

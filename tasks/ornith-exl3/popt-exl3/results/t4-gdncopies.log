@@ -1,0 +1,10 @@
+start 2026-09-28T00:21:57+04:00 load 8.76 5.64 4.37 tree /home/lucas/ai/FreeToken-wt/popt-exl3 382bdd1 GDN prefill: tiled transposes into the con
+....................................                                     [100%]
+=============================== warnings summary ===============================
+tests/kernels/test_gdn_prefill_copies.py::test_gdn_prefill_transposes_equal_strided_copies[lens0]
+  /home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/flashinfer/cute_dsl/utils.py:86: DeprecationWarning: Arch from arch.py is deprecated. Use Arch from enums.py instead.
+    from cutlass.base_dsl.arch import Arch
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+36 passed, 1 warning in 5.40s
+rc=0 end 2026-09-28T00:22:04+04:00

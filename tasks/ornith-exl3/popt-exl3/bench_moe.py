@@ -10,7 +10,8 @@ from freetoken.layers.quantization.linear.exl3 import exl3_forward
 from freetoken.models.exl3_banks import exl3_bank_shapes
 
 DEV = torch.device("cuda")
-H, I, E, TOPK, BITS = 2048, 512, 256, 8, 5
+import os
+H, I, E, TOPK, BITS = 2048, 512, 256, 8, int(os.environ.get("BENCH_BITS", "5"))  # BENCH_BITS=4: the 4.0bpw checkpoint
 torch.manual_seed(0)
 B = []
 for name, (shape, dtype) in exl3_bank_shapes(H, I, BITS).items():
