@@ -1,0 +1,8 @@
+E       AttributeError: 'types.SimpleNamespace' object has no attribute '_mirror_idle_seed'
+E       AttributeError: 'types.SimpleNamespace' object has no attribute '_mirror_idle_seed'
+E       AttributeError: 'types.SimpleNamespace' object has no attribute '_mirror_idle_seed'
+E       AttributeError: 'types.SimpleNamespace' object has no attribute '_mirror_idle_seed'
+FAILED tests/scheduler/test_moe_stats_logging.py::test_per_layer_stats_are_logged_as_json_for_every_layer[0]
+FAILED tests/scheduler/test_moe_stats_logging.py::test_per_layer_stats_are_logged_as_json_for_every_layer[5]
+FAILED tests/scheduler/test_moe_stats_logging.py::test_nothing_is_logged_without_moe_collect_stats
+FAILED tests/scheduler/test_moe_stats_logging.py::test_repeat_idle_without_new_calls_does_not_redump

@@ -48,6 +48,7 @@ def _stub_scheduler(per_layer, collect_stats=True, calls=64):
         _last_moe_stats_calls=0,
         cache_manager=SimpleNamespace(check_integrity=lambda: None),
         _maybe_retune_pageable_layers=lambda rows: None,
+        _mirror_idle_seed=lambda: None,
     )
 
 

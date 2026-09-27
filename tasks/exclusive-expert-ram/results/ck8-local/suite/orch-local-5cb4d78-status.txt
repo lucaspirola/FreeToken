@@ -1,0 +1,4 @@
+start 2026-09-27T06:20:45+04:00 gpu=0 MiB  06:20:46 up 19:24,  1 user,  load average: 6.85, 6.46, 5.69
+tree 5cb4d78 ck8: round-5 gate on 4b34dd4 (DUP_BAND off + idle seed) passes locally; ft-dev suite pending
+suite rc=1 4 failed, 3432 passed, 27 skipped, 3 warnings, 2 subtests passed in 638.64s (0:10:38) | illegal: 0 | failed-lines: 4
+ALLDONE
