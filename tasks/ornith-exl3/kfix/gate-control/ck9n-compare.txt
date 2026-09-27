@@ -1,0 +1,18 @@
+== 8K, 512 tokens: mirror vs the whole arm run before it
+  p1 run 1: whole  198.4 (gap1 51.8 ms, median gap 4.9 ms)  mirror  191.2 (gap1 29.8 ms, median gap 5.1 ms)  ratio  96.4%  after gap1: whole 202.0 mirror 193.1
+  p1 run 2: whole  198.8 (gap1 40.6 ms, median gap 4.9 ms)  mirror  198.1 (gap1 34.2 ms, median gap 5.0 ms)  ratio  99.7%  after gap1: whole 201.4 mirror 200.6
+  p1 run 3: whole  198.3 (gap1 45.3 ms, median gap 4.9 ms)  mirror  189.3 (gap1 50.3 ms, median gap 5.2 ms)  ratio  95.5%  after gap1: whole 201.8 mirror 192.8
+  p1 median ratio  96.4%  PASS (>= 91%)
+  p2 run 1: whole  199.2 (gap1 62.1 ms, median gap 4.9 ms)  mirror  189.9 (gap1 49.3 ms, median gap 5.1 ms)  ratio  95.3%  after gap1: whole 203.7 mirror 193.1
+  p2 run 2: whole  198.6 (gap1 51.9 ms, median gap 4.9 ms)  mirror  187.1 (gap1 44.5 ms, median gap 5.2 ms)  ratio  94.2%  after gap1: whole 202.1 mirror 190.1
+  p2 run 3: whole  205.2 (gap1 49.6 ms, median gap 4.7 ms)  mirror  188.8 (gap1 58.3 ms, median gap 5.1 ms)  ratio  92.0%  after gap1: whole 209.2 mirror 192.5
+  p2 median ratio  94.2%  PASS (>= 91%)
+== 80K, 512 tokens: mirror vs the whole arm run before it
+  p1 run 1: whole  169.3 (gap1 58.9 ms, median gap 5.8 ms)  mirror  161.4 (gap1 52.8 ms, median gap 6.1 ms)  ratio  95.3%  after gap1: whole 172.2 mirror 163.6
+  p1 run 2: whole  170.3 (gap1 48.3 ms, median gap 5.8 ms)  mirror  161.1 (gap1 41.9 ms, median gap 6.1 ms)  ratio  94.6%  after gap1: whole 172.8 mirror 162.7
+  p1 run 3: whole  173.2 (gap1 58.6 ms, median gap 5.6 ms)  mirror  162.3 (gap1 56.5 ms, median gap 6.0 ms)  ratio  93.7%  after gap1: whole 176.6 mirror 164.7
+  p1 median ratio  94.6%  PASS (>= 91%)
+  p2 run 1: whole  169.7 (gap1 50.1 ms, median gap 5.8 ms)  mirror  160.1 (gap1 57.1 ms, median gap 6.1 ms)  ratio  94.4%  after gap1: whole 172.1 mirror 162.6
+  p2 run 2: whole  160.8 (gap1 74.2 ms, median gap 6.0 ms)  mirror  164.3 (gap1 53.0 ms, median gap 6.0 ms)  ratio 102.2%  after gap1: whole 164.6 mirror 166.7
+  p2 run 3: whole  166.7 (gap1 53.1 ms, median gap 5.9 ms)  mirror  161.0 (gap1 54.4 ms, median gap 6.0 ms)  ratio  96.6%  after gap1: whole 169.4 mirror 163.7
+  p2 median ratio  96.6%  PASS (>= 91%)

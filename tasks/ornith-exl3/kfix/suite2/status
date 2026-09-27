@@ -1,0 +1,4 @@
+suite start 2026-09-27T20:12:42+04:00 gpu=0 MiB  20:12:42 up 1 day,  8:43,  1 user,  load average: 7.83, 5.61, 3.93
+tree ddfd389 kfix: gate ck9k on 4fe9bc3 (every item passes; 8K p2 91.1%), suite (1 failure: stale _cpu_moe build), comparison; so: 6e0c37de53,28e1fa757b,6c40504c5a,55b89d1d67
+suite rc=0 3442 passed, 27 skipped, 3 warnings, 2 subtests passed in 306.92s (0:05:06) | illegal: 0 | failed-lines: 0
+SUITEDONE

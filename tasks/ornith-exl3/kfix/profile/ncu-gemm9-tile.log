@@ -1,0 +1,8 @@
+ncu start 2026-09-27T14:59:30+04:00 load 5.14 7.65 7.92 tree b967140 Merge exp/final-numbers: Ornith EXL3 final numbers o
+==PROF== Connected to process 3231788 (/usr/bin/python3.12)
+==PROF== Profiling "_exl3_gemm_kernel": 0%....50%....100% - 19 passes
+==PROF== Profiling "_exl3_gemm_kernel": 0%....50%....100% - 19 passes
+done
+==PROF== Disconnected from process 3231788
+==PROF== Report: /home/lucas/ai/FreeToken-wt/kfix/tasks/ornith-exl3/kfix/profile/ncu-gemm9-tile.ncu-rep
+NCUDONE 2026-09-27T14:59:37+04:00

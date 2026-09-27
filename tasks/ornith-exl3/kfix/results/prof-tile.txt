@@ -1,0 +1,47 @@
+=== base
+/home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/torch/profiler/profiler.py:224: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+M=9 (5 calls)
+------------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                        Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls  
+------------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                           _exl3_gemm_kernel         0.00%       0.000us         0.00%       0.000us       0.000us      19.036ms        99.67%      19.036ms       1.904ms            10  
+                                            _had_rows_kernel         0.00%       0.000us         0.00%       0.000us       0.000us      34.246us         0.18%      34.246us       3.425us            10  
+void moe_align_block_size_kernel<int>(int const*, int*, i...         0.00%       0.000us         0.00%       0.000us       0.000us      10.406us         0.05%      10.406us       2.081us             5  
+void flashinfer::activation::act_and_mul_kernel<__half, &...         0.00%       0.000us         0.00%       0.000us       0.000us       5.188us         0.03%       5.188us       1.038us             5  
+void count_and_sort_expert_tokens_kernel<int>(int const*,...         0.00%       0.000us         0.00%       0.000us       0.000us       4.879us         0.03%       4.879us       0.976us             5  
+                                      _splitk_combine_kernel         0.00%       0.000us         0.00%       0.000us       0.000us       4.848us         0.03%       4.848us       0.970us             5  
+                              Memcpy DtoD (Device -> Device)         0.00%       0.000us         0.00%       0.000us       0.000us       3.737us         0.02%       3.737us       0.747us             5  
+                                     Activity Buffer Request        10.00%       2.014ms        10.00%       2.014ms       2.014ms       0.000us         0.00%       0.000us       0.000us             1  
+                                            cudaLaunchKernel         0.50%     101.601us         0.50%     101.601us      10.160us       0.000us         0.00%       0.000us       0.000us            10  
+                                            cuLaunchKernelEx         0.73%     146.783us         0.73%     146.783us       5.871us       0.000us         0.00%       0.000us       0.000us            25  
+                                         cudaLaunchKernelExC         0.16%      32.086us         0.16%      32.086us       6.417us       0.000us         0.00%       0.000us       0.000us             5  
+                                             cudaMemcpyAsync         0.25%      50.473us         0.25%      50.473us      10.095us       0.000us         0.00%       0.000us       0.000us             5  
+------------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 20.135ms
+Self CUDA time total: 19.099ms
+
+=== new
+/home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/torch/profiler/profiler.py:224: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+M=9 (5 calls)
+------------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                        Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls  
+------------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                           _exl3_gemm_kernel         0.00%       0.000us         0.00%       0.000us       0.000us      13.212ms        99.52%      13.212ms       1.321ms            10  
+                                            _had_rows_kernel         0.00%       0.000us         0.00%       0.000us       0.000us      34.547us         0.26%      34.547us       3.455us            10  
+void moe_align_block_size_kernel<int>(int const*, int*, i...         0.00%       0.000us         0.00%       0.000us       0.000us      10.395us         0.08%      10.395us       2.079us             5  
+void flashinfer::activation::act_and_mul_kernel<__half, &...         0.00%       0.000us         0.00%       0.000us       0.000us       5.306us         0.04%       5.306us       1.061us             5  
+void count_and_sort_expert_tokens_kernel<int>(int const*,...         0.00%       0.000us         0.00%       0.000us       0.000us       4.874us         0.04%       4.874us       0.975us             5  
+                                      _splitk_combine_kernel         0.00%       0.000us         0.00%       0.000us       0.000us       4.844us         0.04%       4.844us       0.969us             5  
+                              Memcpy DtoD (Device -> Device)         0.00%       0.000us         0.00%       0.000us       0.000us       3.794us         0.03%       3.794us       0.759us             5  
+                                     Activity Buffer Request        13.11%       1.876ms        13.11%       1.876ms       1.876ms       0.000us         0.00%       0.000us       0.000us             1  
+                                            cudaLaunchKernel         0.60%      85.737us         0.60%      85.737us       8.574us       0.000us         0.00%       0.000us       0.000us            10  
+                                            cuLaunchKernelEx         0.93%     133.202us         0.93%     133.202us       5.328us       0.000us         0.00%       0.000us       0.000us            25  
+                                         cudaLaunchKernelExC         0.21%      29.336us         0.21%      29.336us       5.867us       0.000us         0.00%       0.000us       0.000us             5  
+                                             cudaMemcpyAsync         0.29%      42.191us         0.29%      42.191us       8.438us       0.000us         0.00%       0.000us       0.000us             5  
+------------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 14.308ms
+Self CUDA time total: 13.276ms
+
+PROFDONE

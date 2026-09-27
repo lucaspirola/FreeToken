@@ -46,7 +46,10 @@ from freetoken.kernel.triton.exl3 import (
 # 2 * tokens * top_k * H fp16 (512 MiB at 8192 x 8 x 2048) and the down output the same in fp32.
 PREFILL_CHUNK_TOKENS = 8192
 # a chunk of at least this many tokens decodes W_hat into the scratch; shorter ones (extends of a
-# few hundred tokens touch only part of the experts) keep the in-kernel decode
+# few hundred tokens touch only part of the experts) keep the in-kernel decode. The two paths are
+# bitwise equal (same W_hat values, same 16-wide mma k-steps). Offline the in-kernel GEMM is faster up
+# to ~1100 tokens (Ornith), but moving the switch there did not shorten the server's 300 / 1000-token
+# TTFT, where the prefill layer stream dominates (tasks/ornith-exl3/kfix/README.md), so it stays.
 PREFILL_DECODED_MIN_TOKENS = 256
 # experts per decoded scratch group: gate_up + down W_hat are 3 * H * I * 2 bytes per expert
 # (6 MiB for Ornith), so 32 experts hold 192 MiB

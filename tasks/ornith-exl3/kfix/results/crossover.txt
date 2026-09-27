@@ -1,0 +1,22 @@
+# 2026-09-27T15:02:40+04:00 sm 277 MHz load 1.70 5.05 6.86
+=== base b967140  +
+M   16 inline   5.8739  decoded   3.4355 EQ  decoded+fold   6.8564 DIFF
+M  128 inline  13.8858  decoded   4.1254 EQ  decoded+fold   7.5903 DIFF
+M  256 inline  14.6593  decoded   4.2435 EQ  decoded+fold   7.7426 DIFF
+M  384 inline  15.7286  decoded   4.3297 EQ  decoded+fold   7.7088 DIFF
+M  512 inline  14.6741  decoded   4.4319 EQ  decoded+fold   7.8115 DIFF
+M  768 inline  15.4098  decoded   4.5855 EQ  decoded+fold   7.8388 DIFF
+M 1024 inline  20.6084  decoded   4.8223 EQ  decoded+fold   8.0448 DIFF
+M 2048 inline  25.0680  decoded   5.5830 EQ  decoded+fold   8.5411 DIFF
+M 4096 inline  43.5049  decoded   7.5422 EQ  decoded+fold  10.1064 DIFF
+=== new b967140  + 1 file changed, 53 insertions(+), 32 deletions(-)
+M   16 inline   1.1833  decoded   3.3236 EQ  decoded+fold   6.3423 DIFF
+M  128 inline   2.7228  decoded   4.0301 EQ  decoded+fold   7.0916 DIFF
+M  256 inline   2.9292  decoded   4.1541 EQ  decoded+fold   7.1869 DIFF
+M  384 inline   3.2101  decoded   4.2489 EQ  decoded+fold   7.2357 DIFF
+M  512 inline   2.8974  decoded   4.3193 EQ  decoded+fold   7.3236 DIFF
+M  768 inline   3.0546  decoded   4.4714 EQ  decoded+fold   7.3678 DIFF
+M 1024 inline   4.1059  decoded   4.7153 EQ  decoded+fold   7.6212 DIFF
+M 2048 inline  16.6305  decoded   5.3988 EQ  decoded+fold   8.0613 DIFF
+M 4096 inline  28.7733  decoded   7.1973 EQ  decoded+fold   9.4689 DIFF
+SWEEPDONE

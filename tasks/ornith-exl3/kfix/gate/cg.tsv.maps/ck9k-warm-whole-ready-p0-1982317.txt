@@ -1,0 +1,10 @@
+    224416 KiB anon     224416 KiB rss  [anon-unnamed]
+     12136 KiB anon      12136 KiB rss  [heap]
+--- largest single mappings by Anonymous
+     61708 KiB  79faa4000000-79faa7c43000 
+     59368 KiB  79fa98000000-79fa9ba97000 
+     45288 KiB  79fa9c800000-79fa9f700000 
+     24588 KiB  79fab05fc000-79fab1ffc000 
+     12136 KiB  2b82b000-3503b000 [heap]
+      9620 KiB  79fab9300000-79fabb200000 
+      5676 KiB  79fac7fc2000-79fac8bc2000 

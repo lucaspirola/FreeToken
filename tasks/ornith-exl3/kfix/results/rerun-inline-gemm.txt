@@ -1,0 +1,44 @@
+# 2026-09-27T15:01:43+04:00 sm 277 MHz load 3.11 5.91 7.23
+=== base b967140  +
+moe9           shipped      median 3.5449  3.652 3.545 3.542
+moe9           bk16 w4 s1   median 1.1637  1.242 1.164 1.161
+moe9           bk32 w4 s1   median 1.8566  1.872 1.851 1.857
+moe9           bk32 w8 s1   median 0.8130  0.813 0.799 0.814
+moe9           bk16 w8 s1   median 1.2481  1.288 1.248 1.245
+moe64          shipped      median 12.5411  12.563 12.537 12.541
+moe64          bk16 w4 s1   median 3.8521  3.852 3.851 3.855
+moe64          bk32 w4 s1   median 6.2814  6.291 6.281 6.281
+moe64          bk32 w8 s1   median 2.5540  2.561 2.554 2.544
+moe64          bk16 w8 s1   median 4.1860  4.167 4.186 4.190
+moe200         shipped      median 14.4144  14.445 14.414 14.401
+moe200         bk16 w4 s1   median 4.5353  4.545 4.535 4.523
+moe200         bk32 w4 s1   median 7.4056  7.388 7.406 7.416
+moe200         bk32 w8 s1   median 2.9633  2.959 2.963 2.964
+moe200         bk16 w8 s1   median 4.8812  4.882 4.871 4.881
+dense12x6144   shipped      median 0.4607  0.462 0.461 0.461
+dense12x6144   bk16 w4 s1   median 0.1870  0.192 0.187 0.187
+dense12x6144   bk32 w4 s1   median 0.2460  0.260 0.246 0.245
+dense12x6144   bk32 w8 s1   median 0.1318  0.147 0.132 0.130
+dense12x6144   bk16 w8 s1   median 0.1558  0.161 0.156 0.155
+=== new b967140  + 1 file changed, 44 insertions(+), 29 deletions(-)
+moe9           shipped      median 2.5278  2.530 2.528 2.525
+moe9           bk16 w4 s1   median 0.7474  0.754 0.744 0.747
+moe9           bk32 w4 s1   median 0.8606  0.873 0.858 0.861
+moe9           bk32 w8 s1   median 0.7936  0.803 0.793 0.794
+moe9           bk16 w8 s1   median 0.8273  0.841 0.827 0.827
+moe64          shipped      median 8.8347  8.835 8.819 8.843
+moe64          bk16 w4 s1   median 2.4223  2.424 2.417 2.422
+moe64          bk32 w4 s1   median 2.8652  2.847 2.865 2.872
+moe64          bk32 w8 s1   median 2.5782  2.581 2.573 2.578
+moe64          bk16 w8 s1   median 2.6978  2.716 2.696 2.698
+moe200         shipped      median 10.0764  10.077 10.060 10.076
+moe200         bk16 w4 s1   median 2.8606  2.864 2.858 2.861
+moe200         bk32 w4 s1   median 3.3356  3.336 3.345 3.334
+moe200         bk32 w8 s1   median 2.9771  2.991 2.977 2.969
+moe200         bk16 w8 s1   median 3.1648  3.165 3.162 3.177
+dense12x6144   shipped      median 0.3337  0.335 0.334 0.329
+dense12x6144   bk16 w4 s1   median 0.1292  0.135 0.129 0.127
+dense12x6144   bk32 w4 s1   median 0.1351  0.139 0.135 0.132
+dense12x6144   bk32 w8 s1   median 0.1363  0.142 0.136 0.136
+dense12x6144   bk16 w8 s1   median 0.1403  0.155 0.140 0.135
+SWEEPDONE

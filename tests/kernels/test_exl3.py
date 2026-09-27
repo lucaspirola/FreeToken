@@ -389,7 +389,8 @@ def test_reconstruct_path_matches_gemm_path(monkeypatch, codebook):
 @pytest.mark.parametrize("codebook", tuple(CODEBOOKS))
 def test_moe_prefill_decoded_scratch_matches_in_kernel_decode(monkeypatch, codebook):
     """Long prefills decode W_hat into an fp16 scratch a group of experts at a time and the GEMM
-    reads it; the product must match the in-kernel trellis decode (same W_hat, same K loop)."""
+    reads it; the product must be bitwise the in-kernel trellis decode's (same W_hat values, same
+    16-wide mma k-steps), which makes PREFILL_DECODED_MIN_TOKENS a pure speed knob."""
     import freetoken.moe.fused_exl3 as fe
 
     banks = tuple(b.cuda() for b in _moe_banks(4, codebook, E, seed=11))
@@ -401,7 +402,7 @@ def test_moe_prefill_decoded_scratch_matches_in_kernel_decode(monkeypatch, codeb
     monkeypatch.setattr(fe, "PREFILL_DECODED_MIN_TOKENS", 1)
     monkeypatch.setattr(fe, "PREFILL_DECODE_GROUP", 5)  # groups that do not divide the expert count
     scratch = fe.fused_experts_exl3(x, banks, w, ids, **kw)
-    assert rel_err(scratch, in_kernel) < 1e-6, rel_err(scratch, in_kernel)
+    assert torch.equal(scratch.view(torch.int16), in_kernel.view(torch.int16))
 
 
 @cuda

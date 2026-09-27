@@ -1,0 +1,6 @@
+# 2026-09-27T15:05:11+04:00 new=b967140 +3fileschanged,65insertions(+),40deletions(-) load 9.77 6.83 7.26 sm 2152 MHz, 3090 MHz
+base	moe8192=11.6992	moe512=4.4280	moe9=4.0684	dense8192=0.6545	dense64=0.1557
+new	moe8192=11.3684	moe512=2.8740	moe9=0.8869	dense8192=0.6343	dense64=0.1583
+base	moe8192=11.6795	moe512=4.4248	moe9=4.0714	dense8192=0.6434	dense64=0.1594
+new	moe8192=11.3437	moe512=2.8736	moe9=0.8865	dense8192=0.6408	dense64=0.1632
+BENCHDONE
