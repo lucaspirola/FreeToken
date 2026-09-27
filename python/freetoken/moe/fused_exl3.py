@@ -45,9 +45,16 @@ from freetoken.kernel.triton.exl3 import (
 # 31.2 -> 13.6 ms at 8192 tokens (bench_moe_prefill.py, box). The rotated input is
 # 2 * tokens * top_k * H fp16 (512 MiB at 8192 x 8 x 2048) and the down output the same in fp32.
 PREFILL_CHUNK_TOKENS = 8192
-# a chunk of at least this many tokens decodes W_hat into the scratch; shorter ones (extends of a
-# few hundred tokens touch only part of the experts) keep the in-kernel decode
-PREFILL_DECODED_MIN_TOKENS = 256
+# From this many routes per expert (tokens * top_k / num_experts) a prefill decodes W_hat into the
+# scratch; below, the in-kernel decode GEMM (decoding each weight once per row block) is faster. The
+# two paths are bitwise equal (same W_hat values, same 16-wide mma k-steps), so this is only speed.
+# RTX 5080, Ornith (256 experts, top-8; tasks/ornith-exl3/kfix/results/crossover2.txt): in-kernel
+# 4.15 vs decoded 4.73 ms per MoE layer at 1024 tokens (32 per expert), 5.39 vs 4.91 at 1280 (40).
+PREFILL_DECODED_MIN_ROUTES_PER_EXPERT = 36
+# The opt-in variants that exist only on the decoded path (FREETOKEN_EXL3_MOE_FOLD's folded weight,
+# FREETOKEN_EXL3_F16ACC's fp16 accumulators: each a different rounding) keep their own switch point,
+# so their outputs do not move with the one above.
+PREFILL_DECODED_MIN_TOKENS_VARIANTS = 256
 # experts per decoded scratch group: gate_up + down W_hat are 3 * H * I * 2 bytes per expert
 # (6 MiB for Ornith), so 32 experts hold 192 MiB
 PREFILL_DECODE_GROUP = 32
@@ -164,7 +171,10 @@ def _prefill(x, banks, topk_weights, topk_ids, top_k, parts, activation, alpha, 
     gu_tr, gu_suh, gu_svh, dn_tr, dn_suh, dn_svh = banks
     gu, dn = parts
     out = torch.empty_like(x)
-    decoded = x.shape[0] >= PREFILL_DECODED_MIN_TOKENS
+    if PREFILL_FOLD_INPUT or f16acc_enabled():
+        decoded = x.shape[0] >= PREFILL_DECODED_MIN_TOKENS_VARIANTS
+    else:
+        decoded = x.shape[0] * top_k >= PREFILL_DECODED_MIN_ROUTES_PER_EXPERT * num_experts
     if decoded:
         group = min(PREFILL_DECODE_GROUP, num_experts)
         w_gu = torch.empty((group, gu.k, gu.n), dtype=torch.float16, device=x.device)

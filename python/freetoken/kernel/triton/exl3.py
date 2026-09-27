@@ -199,25 +199,14 @@ def _exl3_decode(tr_ptr, kk, nn, n_tiles, BITS: tl.constexpr, CB: tl.constexpr):
     b0 = t * BITS + (BITS - 16 + 256 * BITS)
     b1 = b0 + 16
     i1 = (b1 - 1) // 32
-    shift = ((i1 + 1) * 32 - b1).to(tl.uint64)
-    a = tl.load(tr_ptr + base + (b0 // 32) % WORDS).to(tl.uint32, bitcast=True).to(tl.uint64)
-    b = tl.load(tr_ptr + base + i1 % WORDS).to(tl.uint32, bitcast=True).to(tl.uint64)
-    w = (((a << 32) | b) >> shift) & 0xFFFF
-    if CB == 2:
-        x = (w * 0x83DCD12D) & 0xFFFFFFFF
-        s = (x & 0xFF) + ((x >> 8) & 0xFF) + ((x >> 16) & 0xFF) + ((x >> 24) & 0xFF)
-        # (1024 + s) * inv + bias is exact in fp32; one rounding to fp16 matches exllamav3's hfma
-        v = (s + 1024).to(tl.float32) * 0.00676727294921875 + (-10.3828125)
-        return v.to(tl.float16)
-    else:
-        if CB == 1:
-            x = (w * 0xCBAC1FED) & 0xFFFFFFFF
-        else:
-            x = (w * 89226354 + 64248484) & 0xFFFFFFFF
-        x = (x & 0x8FFF8FFF) ^ 0x3B603B60
-        lo = (x & 0xFFFF).to(tl.uint16).to(tl.float16, bitcast=True)
-        hi = (x >> 16).to(tl.uint16).to(tl.float16, bitcast=True)
-        return lo + hi
+    # 32-bit words through _decode_words: the uint64 window (a << 32 | b) >> shift made ptxas emit
+    # I2F.U64 (FP64 pipe on GeForce) for the byte-sum conversion. Bit-exact: shift is in [0, 31],
+    # so the funnel shift is the same window; the multiplies only ever kept the low 32 bits; and
+    # s + 1024 <= 2044 converts exactly from either width (tests/kernels/test_exl3_bitexact.py).
+    shift = ((i1 + 1) * 32 - b1).to(tl.uint32)
+    a = tl.load(tr_ptr + base + (b0 // 32) % WORDS).to(tl.uint32, bitcast=True)
+    b = tl.load(tr_ptr + base + i1 % WORDS).to(tl.uint32, bitcast=True)
+    return _decode_words(a, b, shift, CB)
 
 
 @triton.jit
@@ -226,8 +215,11 @@ def _had_rows_kernel(
     out_ptr, stride_opart, stride_om,
     suh_ptr, suh_expert_stride, suh_part_stride,
     expert_ptr, had_ptr, P,
-    SRC_DIV: tl.constexpr, HAS_EXPERT: tl.constexpr, BM: tl.constexpr, KB: tl.constexpr,
+    SRC_DIV: tl.constexpr, HAS_EXPERT: tl.constexpr, BM: tl.constexpr, KB: tl.constexpr, NS: tl.constexpr = 1,
 ):
+    """``NS`` > 1 multiplies by H in NS column slices of 128 / NS (each slice loaded per block, not
+    held): every output element keeps the same K=128 hi and lo dots, so the result is bitwise the
+    same for any BM / NS / KB / warps; the smaller H operand frees the registers for BM 64."""
     pid_m = tl.program_id(0)
     pid_k = tl.program_id(1)
     part = tl.program_id(2)
@@ -239,7 +231,10 @@ def _had_rows_kernel(
     else:
         e = tl.zeros([BM], dtype=tl.int64)
     idx = tl.arange(0, 128)
-    h = tl.load(had_ptr + idx[:, None] * 128 + idx[None, :])  # once per program, KB column blocks
+    SW: tl.constexpr = 128 // NS
+    jn = tl.arange(0, SW)
+    if NS == 1:
+        h = tl.load(had_ptr + idx[:, None] * 128 + idx[None, :])  # once per program, KB column blocks
     for i in tl.static_range(KB):
         cols = (pid_k * KB + i) * 128 + idx
         x = tl.load(x_ptr + src[:, None].to(tl.int64) * stride_xm + cols[None, :], mask=rmask[:, None], other=0.0).to(tl.float32)
@@ -247,8 +242,15 @@ def _had_rows_kernel(
         xs = x * s
         hi = xs.to(tl.float16)
         lo = (xs - hi.to(tl.float32)).to(tl.float16)
-        y = (tl.dot(hi, h) + tl.dot(lo, h)) * 0.08838834764831843
-        tl.store(out_ptr + part * stride_opart + rows[:, None].to(tl.int64) * stride_om + cols[None, :], y.to(tl.float16), mask=rmask[:, None])
+        if NS == 1:
+            y = (tl.dot(hi, h) + tl.dot(lo, h)) * 0.08838834764831843
+            tl.store(out_ptr + part * stride_opart + rows[:, None].to(tl.int64) * stride_om + cols[None, :], y.to(tl.float16), mask=rmask[:, None])
+        else:
+            for n in tl.static_range(NS):
+                hs = tl.load(had_ptr + idx[:, None] * 128 + n * SW + jn[None, :])
+                y = (tl.dot(hi, hs) + tl.dot(lo, hs)) * 0.08838834764831843
+                oc = (pid_k * KB + i) * 128 + n * SW + jn
+                tl.store(out_ptr + part * stride_opart + rows[:, None].to(tl.int64) * stride_om + oc[None, :], y.to(tl.float16), mask=rmask[:, None])
 
 
 @triton.jit
@@ -284,7 +286,7 @@ def _exl3_gemm_kernel(
     rows64 = rows.to(tl.int64)
     part = tl.load(part_of_nb_ptr + pid_n)
     n_tiles = tl.load(ntiles_ptr + part)
-    n_local = pid_n * 128 - tl.load(nstart_ptr + part) + tl.arange(0, 128)
+    n_local0 = pid_n * 128 - tl.load(nstart_ptr + part)
     tr = tr_ptr + expert * tr_expert_stride + tl.load(word_off_ptr + part)
     a_ptr = xh_ptr + part * stride_xpart + (rows64 // SRC_DIV)[:, None] * stride_xm
     if F16ACC:  # mma.sync with fp16 accumulators: 2x the fp32-accumulate rate on GeForce parts
@@ -298,7 +300,12 @@ def _exl3_gemm_kernel(
             w = tl.load(w_ptr + (expert - e_lo) * w_expert_stride + kk[:, None].to(tl.int64) * (tl.num_programs(1) * 128)
                         + (pid_n * 128 + tl.arange(0, 128))[None, :])
         else:
-            w = _exl3_decode(tr, kk[:, None], n_local[None, :], n_tiles, BITS, CB)
+            # decoded tile-major, [BK/16, 8 tiles, 16, 16], then permuted to [BK, 128]: the same
+            # values, but a warp's gathers stay inside one tile's words (few L1 wavefronts)
+            k4 = k0 + tl.arange(0, BK // 16)[:, None, None, None] * 16 + tl.arange(0, 16)[None, None, :, None]
+            n4 = n_local0 + tl.arange(0, 8)[None, :, None, None] * 16 + tl.arange(0, 16)[None, None, None, :]
+            w4 = _exl3_decode(tr, k4, n4, n_tiles, BITS, CB)
+            w = tl.reshape(tl.permute(w4, (0, 2, 1, 3)), (BK, 128))
         if F16ACC:
             acc = tl.dot(a, w, acc, out_dtype=tl.float16)
         else:
@@ -508,6 +515,11 @@ HAD_ROWS_KB = 16  # clamped to the divisors of K / 128 (down input: 4)
 # ... only from this many rows on: a decode step (a few rows) needs one program per column block
 # to fill the SMs
 HAD_ROWS_KB_MIN_ROWS = 4096
+# From HAD_ROWS_KB_MIN_ROWS rows on: H in 2 column slices loaded per block (bit-exact, see the kernel)
+# frees the registers of the held 128x128 H (255 -> fewer per thread), so 64-row tiles fit. RTX 5080,
+# 8192 tokens x top-8, interleaved medians (tasks/ornith-exl3/kfix/results/rerun2-had-rows.txt):
+# gate_up input 0.744 -> 0.673 ms, down input 0.244 -> 0.201 ms. Holding both slices spills (x2.5).
+HAD_ROWS_BIG = dict(BM=64, KB=2, NS=2, num_warps=4)
 
 
 def had_rows(
@@ -523,6 +535,7 @@ def had_rows(
     block_m: int | None = None,
     num_warps: int | None = None,
     k_blocks: int | None = None,
+    n_slices: int | None = None,
 ) -> torch.Tensor:
     """``out[part, p] = H_blocks(x[p // src_div] * suh[experts[p], part])`` as fp16 ``[parts, rows, K]``.
 
@@ -535,8 +548,10 @@ def had_rows(
         out = torch.empty((parts.num_parts, rows, k), dtype=torch.float16, device=x.device)
     if rows == 0:
         return out
-    bm = block_m or HAD_ROWS_BM
-    kb = k_blocks or (HAD_ROWS_KB if rows >= HAD_ROWS_KB_MIN_ROWS else 1)
+    big = HAD_ROWS_BIG if rows >= HAD_ROWS_KB_MIN_ROWS else {}
+    bm = block_m or big.get("BM", HAD_ROWS_BM)
+    kb = k_blocks or big.get("KB", HAD_ROWS_KB if rows >= HAD_ROWS_KB_MIN_ROWS else 1)
+    ns = n_slices or big.get("NS", 1)
     while (k // HAD) % kb:
         kb //= 2
     grid = (triton.cdiv(rows, bm), k // HAD // kb, parts.num_parts)
@@ -545,8 +560,8 @@ def had_rows(
         out, out.stride(0), out.stride(1),
         suh, suh_expert_stride, parts.suh_part_stride,
         experts if experts is not None else x, hadamard_pm1(x.device), rows,
-        SRC_DIV=src_div, HAS_EXPERT=experts is not None, BM=bm, KB=kb,
-        num_warps=num_warps or HAD_ROWS_WARPS,
+        SRC_DIV=src_div, HAS_EXPERT=experts is not None, BM=bm, KB=kb, NS=ns,
+        num_warps=num_warps or big.get("num_warps", HAD_ROWS_WARPS),
     )
     return out
 
@@ -570,8 +585,8 @@ def exl3_gemm(
     block_m: int = 64,
     decoded: torch.Tensor | None = None,
     expert_range: tuple[int, int] = (0, 0),
-    block_k: int = 32,
-    num_stages: int = 2,
+    block_k: int = 16,
+    num_stages: int = 1,
     num_warps: int = 4,
     src_div: int = 0,
     f16acc: bool = False,
@@ -584,7 +599,13 @@ def exl3_gemm(
 
     ``src_div > 0``: ``xh`` is the RAW activation ``[T, K]`` fp16 shared by all parts (route ``p``
     reads row ``p // src_div``) and ``decoded`` must carry the input rotation
-    (``reconstruct_folded(..., fold_out=False)``); rows = ``T * src_div``."""
+    (``reconstruct_folded(..., fold_out=False)``); rows = ``T * src_div``.
+
+    The defaults are the in-kernel-decode tile (the decoded path passes its own): one stage, since
+    software-pipelining the decode gathers routes them through shared memory and leaves the kernel
+    MIO-bound (RTX 5080, fused MoE prefill at 64 tokens 12.5 -> 2.4 ms per layer, bk 32 / 2 stages ->
+    bk 16 / 1 stage, tasks/ornith-exl3/kfix/results/rerun-inline-gemm.txt). Tile shape and stages
+    keep each output's 16-wide mma k-step sequence, so the result is bitwise the same."""
     raw = src_div > 0
     rows = xh.shape[0] * src_div if raw else xh.shape[1]
     if rows == 0:
