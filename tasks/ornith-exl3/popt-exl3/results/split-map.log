@@ -1,0 +1,8 @@
+start 2026-09-27T23:25:01+04:00 load 3.09 3.12 3.67 tree /home/lucas/ai/FreeToken-wt/popt-exl3 757caee Merge exp/exl3-kfix: EXL3 expert kernels, 
+K2048 N2048: cuBLAS differs from sequential-k at M = []
+K4096 N2048: cuBLAS differs from sequential-k at M = [256, 512, 768, 1024, 1000]
+K2048 N1024: cuBLAS differs from sequential-k at M = [768]
+K512 N2048: cuBLAS differs from sequential-k at M = []
+K2048 N512: cuBLAS differs from sequential-k at M = [256, 768, 1536, 2048]
+K2048 N1536: cuBLAS differs from sequential-k at M = [256, 512]
+rc=0 end 2026-09-27T23:25:04+04:00

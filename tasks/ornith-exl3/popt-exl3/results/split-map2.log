@@ -1,0 +1,6 @@
+start 2026-09-27T23:25:37+04:00 load 6.24 3.85 3.89 tree /home/lucas/ai/FreeToken-wt/popt-exl3 757caee Merge exp/exl3-kfix: EXL3 expert kernels, 
+K2048 N2048: 0 differing M, ranges []
+K2048 N1024: 0 differing M, ranges []
+K4096 N2048: 31 differing M, ranges [[1024, 1024], [1059, 1088]]
+K512 N2048: 0 differing M, ranges []
+rc=0 end 2026-09-27T23:25:43+04:00

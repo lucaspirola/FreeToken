@@ -1,0 +1,64 @@
+start 2026-09-27T22:03:04+04:00 load 1.56 2.31 2.56 tree /home/lucas/ai/FreeToken-wt/popt-exl3 757caee Merge exp/exl3-kfix: EXL3 expert kernels, 
+gu prod {'block_m': 32, 'block_k': 64, 'num_stages': 3, 'num_warps': 8} 3.489 ms
+gu {'block_m': 32, 'block_k': 32, 'num_stages': 2, 'num_warps': 4} 5.259 ms equal
+gu {'block_m': 32, 'block_k': 32, 'num_stages': 2, 'num_warps': 8} 5.256 ms equal
+gu {'block_m': 32, 'block_k': 32, 'num_stages': 3, 'num_warps': 4} 3.873 ms equal
+gu {'block_m': 32, 'block_k': 32, 'num_stages': 3, 'num_warps': 8} 3.862 ms equal
+gu {'block_m': 32, 'block_k': 32, 'num_stages': 4, 'num_warps': 4} 3.659 ms equal
+gu {'block_m': 32, 'block_k': 32, 'num_stages': 4, 'num_warps': 8} 3.663 ms equal
+gu {'block_m': 32, 'block_k': 64, 'num_stages': 2, 'num_warps': 4} 4.168 ms equal
+gu {'block_m': 32, 'block_k': 64, 'num_stages': 2, 'num_warps': 8} 4.169 ms equal
+gu {'block_m': 32, 'block_k': 64, 'num_stages': 3, 'num_warps': 4} 3.549 ms equal
+gu {'block_m': 32, 'block_k': 64, 'num_stages': 3, 'num_warps': 8} 3.504 ms equal
+gu {'block_m': 32, 'block_k': 64, 'num_stages': 4, 'num_warps': 4} 4.590 ms equal
+gu {'block_m': 32, 'block_k': 64, 'num_stages': 4, 'num_warps': 8} 4.379 ms equal
+gu {'block_m': 32, 'block_k': 128, 'num_stages': 2, 'num_warps': 4} 4.349 ms equal
+gu {'block_m': 32, 'block_k': 128, 'num_stages': 2, 'num_warps': 8} 4.145 ms equal
+gu {'block_m': 32, 'block_k': 128, 'num_stages': 3, 'num_warps': 4} 4.558 ms equal
+gu {'block_m': 32, 'block_k': 128, 'num_stages': 3, 'num_warps': 8} 4.559 ms equal
+gu {'block_m': 32, 'block_k': 128, 'num_stages': 4, 'num_warps': 4} fail OutOfResources
+gu {'block_m': 32, 'block_k': 128, 'num_stages': 4, 'num_warps': 8} fail OutOfResources
+gu {'block_m': 64, 'block_k': 32, 'num_stages': 2, 'num_warps': 4} 6.514 ms equal
+gu {'block_m': 64, 'block_k': 32, 'num_stages': 2, 'num_warps': 8} 6.444 ms equal
+gu {'block_m': 64, 'block_k': 32, 'num_stages': 3, 'num_warps': 4} 4.471 ms equal
+gu {'block_m': 64, 'block_k': 32, 'num_stages': 3, 'num_warps': 8} 4.333 ms equal
+gu {'block_m': 64, 'block_k': 32, 'num_stages': 4, 'num_warps': 4} 4.250 ms equal
+gu {'block_m': 64, 'block_k': 32, 'num_stages': 4, 'num_warps': 8} 4.149 ms equal
+gu {'block_m': 64, 'block_k': 64, 'num_stages': 2, 'num_warps': 4} 5.335 ms equal
+gu {'block_m': 64, 'block_k': 64, 'num_stages': 2, 'num_warps': 8} 5.221 ms equal
+gu {'block_m': 64, 'block_k': 64, 'num_stages': 3, 'num_warps': 4} 3.927 ms equal
+gu {'block_m': 64, 'block_k': 64, 'num_stages': 3, 'num_warps': 8} 3.904 ms equal
+gu {'block_m': 64, 'block_k': 64, 'num_stages': 4, 'num_warps': 4} 3.949 ms equal
+gu {'block_m': 64, 'block_k': 64, 'num_stages': 4, 'num_warps': 8} 3.915 ms equal
+gu {'block_m': 64, 'block_k': 128, 'num_stages': 2, 'num_warps': 4} 4.446 ms equal
+gu {'block_m': 64, 'block_k': 128, 'num_stages': 2, 'num_warps': 8} 4.595 ms equal
+gu {'block_m': 64, 'block_k': 128, 'num_stages': 3, 'num_warps': 4} 3.797 ms equal
+gu {'block_m': 64, 'block_k': 128, 'num_stages': 3, 'num_warps': 8} 3.895 ms equal
+gu {'block_m': 64, 'block_k': 128, 'num_stages': 4, 'num_warps': 4} fail OutOfResources
+gu {'block_m': 64, 'block_k': 128, 'num_stages': 4, 'num_warps': 8} fail OutOfResources
+gu {'block_m': 128, 'block_k': 32, 'num_stages': 2, 'num_warps': 4} 8.543 ms equal
+gu {'block_m': 128, 'block_k': 32, 'num_stages': 2, 'num_warps': 8} 5.462 ms equal
+gu {'block_m': 128, 'block_k': 32, 'num_stages': 3, 'num_warps': 4} 4.828 ms equal
+gu {'block_m': 128, 'block_k': 32, 'num_stages': 3, 'num_warps': 8} 4.384 ms equal
+gu {'block_m': 128, 'block_k': 32, 'num_stages': 4, 'num_warps': 4} 4.563 ms equal
+gu {'block_m': 128, 'block_k': 32, 'num_stages': 4, 'num_warps': 8} 4.305 ms equal
+gu {'block_m': 128, 'block_k': 64, 'num_stages': 2, 'num_warps': 4} 4.933 ms equal
+gu {'block_m': 128, 'block_k': 64, 'num_stages': 2, 'num_warps': 8} 4.633 ms equal
+gu {'block_m': 128, 'block_k': 64, 'num_stages': 3, 'num_warps': 4} 6.865 ms equal
+gu {'block_m': 128, 'block_k': 64, 'num_stages': 3, 'num_warps': 8} 3.948 ms equal
+gu {'block_m': 128, 'block_k': 64, 'num_stages': 4, 'num_warps': 4} 4.152 ms equal
+gu {'block_m': 128, 'block_k': 64, 'num_stages': 4, 'num_warps': 8} 3.950 ms equal
+gu {'block_m': 128, 'block_k': 128, 'num_stages': 2, 'num_warps': 4} 4.702 ms equal
+gu {'block_m': 128, 'block_k': 128, 'num_stages': 2, 'num_warps': 8} 4.156 ms equal
+gu {'block_m': 128, 'block_k': 128, 'num_stages': 3, 'num_warps': 4} fail OutOfResources
+gu {'block_m': 128, 'block_k': 128, 'num_stages': 3, 'num_warps': 8} fail OutOfResources
+gu {'block_m': 128, 'block_k': 128, 'num_stages': 4, 'num_warps': 4} fail OutOfResources
+gu {'block_m': 128, 'block_k': 128, 'num_stages': 4, 'num_warps': 8} fail OutOfResources
+best:
+3.504 {'block_m': 32, 'block_k': 64, 'num_stages': 3, 'num_warps': 8} True
+3.549 {'block_m': 32, 'block_k': 64, 'num_stages': 3, 'num_warps': 4} True
+3.659 {'block_m': 32, 'block_k': 32, 'num_stages': 4, 'num_warps': 4} True
+3.663 {'block_m': 32, 'block_k': 32, 'num_stages': 4, 'num_warps': 8} True
+3.797 {'block_m': 64, 'block_k': 128, 'num_stages': 3, 'num_warps': 4} True
+3.862 {'block_m': 32, 'block_k': 32, 'num_stages': 3, 'num_warps': 8} True
+rc=0 end 2026-09-27T22:03:30+04:00

@@ -1,0 +1,4 @@
+start 2026-09-27T22:05:58+04:00 load 0.85 1.74 2.30 tree /home/lucas/ai/FreeToken-wt/popt-exl3 757caee Merge exp/exl3-kfix: EXL3 expert kernels, 
+gu empty launch 57.2 us, one group 445.6 us
+dn empty launch 62.5 us, one group 338.2 us
+rc=0 end 2026-09-27T22:06:01+04:00

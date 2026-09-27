@@ -1,0 +1,7 @@
+start 2026-09-27T23:10:37+04:00 load 1.85 3.23 3.60 tree /home/lucas/ai/FreeToken-wt/popt-exl3 757caee Merge exp/exl3-kfix: EXL3 expert kernels, 
+M8192 K2048 N2048: cast+cuBLAS+cast 0.731 ms (cuBLAS alone 0.590); best fused Triton 0.628 ms (128, 64, 64, 3, 4) equal=True
+M8192 K4096 N2048: cast+cuBLAS+cast 1.424 ms (cuBLAS alone 1.186); best fused Triton 1.237 ms (64, 128, 32, 3, 8) equal=True
+M8192 K2048 N1024: cast+cuBLAS+cast 0.410 ms (cuBLAS alone 0.317); best fused Triton 0.326 ms (64, 64, 64, 3, 4) equal=True
+M8192 K512 N2048: cast+cuBLAS+cast 0.247 ms (cuBLAS alone 0.166); best fused Triton 0.168 ms (64, 128, 32, 3, 4) equal=True
+M3000 K2048 N2048: cast+cuBLAS+cast 0.268 ms (cuBLAS alone 0.231); best fused Triton 0.242 ms (64, 128, 32, 4, 4) equal=True
+rc=0 end 2026-09-27T23:11:29+04:00

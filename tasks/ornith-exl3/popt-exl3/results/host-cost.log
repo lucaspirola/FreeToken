@@ -1,0 +1,8 @@
+start 2026-09-27T22:40:45+04:00 load 1.52 1.69 2.31 tree /home/lucas/ai/FreeToken-wt/popt-exl3 757caee Merge exp/exl3-kfix: EXL3 expert kernels, 
+M=512 group 32: host 0.959 ms per call
+M=512 group 16: host 1.499 ms per call
+M=512 group 8: host 2.910 ms per call
+M=8192 group 32: host 0.908 ms per call
+M=8192 group 16: host 1.493 ms per call
+M=8192 group 8: host 2.532 ms per call
+rc=0 end 2026-09-27T22:40:59+04:00

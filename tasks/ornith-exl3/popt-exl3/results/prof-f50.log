@@ -1,0 +1,28 @@
+start 2026-09-27T22:54:47+04:00 load 1.62 3.62 3.15 tree /home/lucas/ai/FreeToken-wt/popt-exl3 757caee Merge exp/exl3-kfix: EXL3 expert kernels, 
+/home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/torch/profiler/profiler.py:224: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+M=8192 group override=None ms per call:
+  _exl3_gemm_kernel                                              5.638  x48
+  _had_rows_kernel                                               1.422  x2
+  _reconstruct_experts_kernel                                    1.189  x48
+  _splitk_combine_kernel                                         0.610  x1
+  void flashinfer::activation::act_and_mul_kernel<__half, &(si   0.199  x1
+  Memcpy DtoD (Device -> Device)                                 0.031  x1
+  void moe_align_block_size_kernel<int>(int const*, int*, int*   0.023  x1
+  void count_and_sort_expert_tokens_kernel<int>(int const*, in   0.011  x1
+  _group_blocks_kernel                                           0.004  x2
+  total 9.126
+/home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/torch/profiler/profiler.py:224: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+M=512 group override=None ms per call:
+  _exl3_gemm_kernel                                              1.317  x48
+  _reconstruct_experts_kernel                                    0.956  x48
+  _had_rows_kernel                                               0.100  x2
+  _splitk_combine_kernel                                         0.033  x1
+  void flashinfer::activation::act_and_mul_kernel<__half, &(si   0.009  x1
+  void moe_align_block_size_kernel<int>(int const*, int*, int*   0.003  x1
+  _group_blocks_kernel                                           0.002  x2
+  Memcpy DtoD (Device -> Device)                                 0.002  x1
+  void count_and_sort_expert_tokens_kernel<int>(int const*, in   0.001  x1
+  total 2.424
+rc=0 end 2026-09-27T22:55:01+04:00
