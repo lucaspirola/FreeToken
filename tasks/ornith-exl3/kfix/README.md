@@ -10,6 +10,12 @@ Summary:
   * 8192 tokens: −3%;
   * extends under 256 tokens: 4–5× faster.
   * EXL3 extends always run the fused prefill, because cached extends are NVFP4-only.
+* In the server:
+  * saver TTFT: 64-token extends −33%, 150-token −40%;
+  * whole TTFT: 150-token extends −20%;
+  * prefill at 32K–256K: +0.5 to +1.6%;
+  * decode: unchanged.
+* The gate (ck9k) and the suite pass. Merged into exp/reorg.
 
 ## Step 1: the decode path has no I2F.U64 / FP64
 * **SASS of every cached cubin** (cuobjdump, 249 `_exl3_gemv_kernel` variants): 0 I2F.U64, 0 DADD/DMUL/DFMA.
@@ -200,8 +206,47 @@ ratio 1.00. Saver = mirror with the pool's default reserve; whole = pin budget 2
   * ck8o ran on the round5 worktree with the 09-25 builds of `_pinned_tensor` / `_pageable_stage` /
     `_cpu_moe`;
   * this gate, and both e2e trees, ran with the 09-06 builds copied from the main tree (see the suite).
-* Same-day control: `control-8k.sh`, the identical recheck on b967140 and on this tree, back to back
-  (`gate-control/`).
+* **Same-day control** (`control-8k.sh`, `gate-control/`): the identical recheck, 3 alternated pairs,
+  on b967140 (ck9b) and then on this tree (ck9n), back to back, with the same builds:
+
+  | point | b967140 ck9b | kfix ck9n |
+  |---|---:|---:|
+  | 8K p1 | 95.1% | 96.4% |
+  | 8K p2 | 93.2% | 94.2% |
+  | 80K p1 | 92.8% | 94.6% |
+  | 80K p2 | 95.7% | 96.6% |
+
+  kfix is at or above the base on every point. The gate's 91.1% was run-to-run spread of the saver
+  arms, not this branch.
+
+**Suite.**
+* **First run** (`suite/`, same builds as the gate): 1 failed, 3441 passed.
+  * The failure: `test_cpu_extension_supports_swiglu_clamp`, "compiled _cpu_moe extension is stale".
+  * Cause: the untracked extension builds had been copied from the main tree (built 09-06), which
+    predate ACT_SWIGLU_CLAMP.
+  * Fix: installed the exp/reorg worktree's builds (09-25: `_cpu_moe`, `_pageable_stage`,
+    `_pinned_tensor`, `_ple_store`). No code change.
+* **Re-run** (`suite2/`, md5s in `suite2/status`): rc 0, **3442 passed**, 27 skipped, 0 failed,
+  0 illegal memory access.
+* The gate, the e2e A/B (both trees) and the control ran with the 09-06 builds. The live server's
+  main tree has the same ones.
+
+## Verdict
+Faster, identical outputs, suite and gate pass. Merged into exp/reorg (local, not pushed).
+
+**Kept:**
+* the 32-bit decode;
+* sliced-H had_rows;
+* the in-kernel-decode GEMM tile (tile-major, bk 16, 1 stage).
+
+**Reverted:** the routes-per-expert switch point, which was not faster in the server.
+
+**Open items:**
+* The decode GEMV is latency/ramp-bound. Nothing bit-exact is left there; D3 (fusing the shared
+  expert) is the known lever.
+* At 300–1000 tokens, TTFT is set by the layer stream (`fast_index_copy_multi`), not the MoE kernels.
+* The main tree's extension builds (09-06) are stale for `test_swiglu_clamp`. Rebuilding them in the
+  owner's tree is the owner's call.
 
 ## Files
 * `ncu_decode.py`, `ncu-decode.sh`, `ncu_moe_m.py`, `ncu-m.sh`: ncu drivers.
