@@ -1,0 +1,14 @@
+start 2026-09-27T23:58:20+04:00 load 1.41 3.25 4.11 tree /home/lucas/ai/FreeToken-wt/popt-exl3 337b2fa popt-exl3: dense EXL3 folded prefill: gemm
+round 0 strided: 3.710 ms
+round 0 tiled : 2.590 ms
+round 0 tiled : 2.587 ms
+round 0 strided: 3.711 ms
+round 1 strided: 3.697 ms
+round 1 tiled : 2.585 ms
+round 1 tiled : 2.584 ms
+round 1 strided: 3.713 ms
+round 2 strided: 3.699 ms
+round 2 tiled : 2.591 ms
+round 2 tiled : 2.586 ms
+round 2 strided: 3.705 ms
+rc=0 end 2026-09-27T23:58:25+04:00

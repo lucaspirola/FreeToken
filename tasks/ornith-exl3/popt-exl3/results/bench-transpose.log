@@ -1,0 +1,21 @@
+start 2026-09-27T23:55:55+04:00 load 1.59 4.34 4.56 tree /home/lucas/ai/FreeToken-wt/popt-exl3 337b2fa popt-exl3: dense EXL3 folded prefill: gemm
+torch: conv_in^T 959.2 us, q/k/v^T 866.2 us
+tile 32x32 w4: conv_in^T 451.9 us, q/k/v^T 369.8 us, equal=True
+tile 32x32 w8: conv_in^T 470.9 us, q/k/v^T 385.3 us, equal=True
+tile 32x64 w4: conv_in^T 367.0 us, q/k/v^T 352.6 us, equal=True
+tile 32x64 w8: conv_in^T 364.3 us, q/k/v^T 348.0 us, equal=True
+tile 32x128 w4: conv_in^T 355.5 us, q/k/v^T 351.2 us, equal=True
+tile 32x128 w8: conv_in^T 355.5 us, q/k/v^T 346.0 us, equal=True
+tile 64x32 w4: conv_in^T 418.5 us, q/k/v^T 371.5 us, equal=True
+tile 64x32 w8: conv_in^T 435.8 us, q/k/v^T 369.9 us, equal=True
+tile 64x64 w4: conv_in^T 365.0 us, q/k/v^T 354.1 us, equal=True
+tile 64x64 w8: conv_in^T 364.5 us, q/k/v^T 349.6 us, equal=True
+tile 64x128 w4: conv_in^T 359.0 us, q/k/v^T 351.2 us, equal=True
+tile 64x128 w8: conv_in^T 356.6 us, q/k/v^T 348.0 us, equal=True
+tile 128x32 w4: conv_in^T 417.6 us, q/k/v^T 377.3 us, equal=True
+tile 128x32 w8: conv_in^T 416.7 us, q/k/v^T 358.9 us, equal=True
+tile 128x64 w4: conv_in^T 360.2 us, q/k/v^T 356.4 us, equal=True
+tile 128x64 w8: conv_in^T 361.0 us, q/k/v^T 354.3 us, equal=True
+tile 128x128 w4: conv_in^T 374.0 us, q/k/v^T 348.8 us, equal=True
+tile 128x128 w8: conv_in^T 354.7 us, q/k/v^T 352.1 us, equal=True
+rc=0 end 2026-09-27T23:55:59+04:00
