@@ -1,0 +1,18 @@
+chain start base=b967140  new=4fe9bc3  2026-09-27T16:48:02+04:00 load=2.89 3.46 3.95
+kf2-probe-base-saver-1 start 2026-09-27T16:48:02+04:00 load=2.89 3.46 3.95
+kf2-probe-base-saver-1 done 2026-09-27T16:50:40+04:00 load=6.29 4.29 4.16
+kf2-probe-new-saver-1 start 2026-09-27T17:01:09+04:00 load=2.42 6.01 5.55
+kf2-probe-new-saver-1 done 2026-09-27T17:03:55+04:00 load=1.15 4.21 4.95
+kf2-probe-new-saver-2 start 2026-09-27T17:03:55+04:00 load=1.15 4.21 4.95
+kf2-probe-new-saver-2 done 2026-09-27T17:06:36+04:00 load=2.57 3.60 4.60
+kf2-probe-base-saver-2 start 2026-09-27T17:06:36+04:00 load=2.57 3.60 4.60
+kf2-probe-base-saver-2 done 2026-09-27T17:09:13+04:00 load=1.82 3.03 4.25
+kf2-probe-new-whole-1 start 2026-09-27T17:09:13+04:00 load=1.82 3.03 4.25
+kf2-probe-new-whole-1 done 2026-09-27T17:11:57+04:00 load=9.12 5.91 5.18
+kf2-probe-base-whole-1 start 2026-09-27T17:25:35+04:00 load=1.62 5.83 6.10
+kf2-probe-base-whole-1 done 2026-09-27T17:27:39+04:00 load=2.90 5.25 5.87
+kf2-probe-base-whole-2 start 2026-09-27T17:27:39+04:00 load=2.90 5.25 5.87
+kf2-probe-base-whole-2 done 2026-09-27T17:30:02+04:00 load=3.17 5.07 5.76
+kf2-probe-new-whole-2 start 2026-09-27T17:31:04+04:00 load=1.84 4.33 5.46
+kf2-probe-new-whole-2 done 2026-09-27T17:33:37+04:00 load=3.65 4.96 5.59
+E2EDONE 2026-09-27T17:33:37+04:00 load=3.65 4.96 5.59

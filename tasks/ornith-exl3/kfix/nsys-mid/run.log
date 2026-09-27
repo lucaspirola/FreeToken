@@ -1,0 +1,31 @@
+=== mid-base-saver 2026-09-27T15:57:43+04:00 load 0.85 2.76 4.48 gpu 0 MiB sm 277 MHz code b967140
+Running as unit: ft-measure-nsys-mid-base-saver.service; invocation ID: 0625467a6a134d5e831865cf914ba29c
+ready after 89s
+{"target": 300, "pass": 1, "prompt_tokens": 326, "ttft_s": 0.56, "prefill_tok_s": 584.0, "gen_tokens": 15, "decode_tok_s": 137.4, "decode_tok_s_wall": 137.4, "total_s": 0.7, "ttft_mono_s": 0.559, "prefill_tok_s_mono": 584.0, "total_mono_s": 0.66, "t_start_wall": 1790510376.615, "out_sha1": "a1abb5c1fb2f95fc735d380ed10eded8d784b0ed", "gap1_ms": 33.8, "max_gap_ms": 33.8, "median_gap_ms": 5.2, "decode_tok_s_after_gap1": 190.8}
+{"target": 1000, "pass": 1, "prompt_tokens": 1017, "ttft_s": 0.53, "prefill_tok_s": 1926.0, "gen_tokens": 15, "decode_tok_s": 139.3, "decode_tok_s_wall": 139.3, "total_s": 0.6, "ttft_mono_s": 0.528, "prefill_tok_s_mono": 1926.0, "total_mono_s": 0.63, "t_start_wall": 1790510377.276, "out_sha1": "82aa758779449ff02e3643b5be37aab74a1c9ecf", "gap1_ms": 35.0, "max_gap_ms": 35.0, "median_gap_ms": 5.0, "decode_tok_s_after_gap1": 198.5}
+{"target": 300, "pass": 1, "prompt_tokens": 330, "ttft_s": 0.5, "prefill_tok_s": 658.0, "gen_tokens": 15, "decode_tok_s": 128.0, "decode_tok_s_wall": 128.0, "total_s": 0.6, "ttft_mono_s": 0.501, "prefill_tok_s_mono": 658.0, "total_mono_s": 0.61, "t_start_wall": 1790510378.224, "out_sha1": "9f7e170036c23b7c7690338baee50e59b22056b6", "gap1_ms": 38.5, "max_gap_ms": 38.5, "median_gap_ms": 5.5, "decode_tok_s_after_gap1": 183.6}
+Generating '/tmp/nsys-report-270d.qdstrm'
+[1/1] [0%                          ] mid-base-saver-300.nsys-rep[1/1] [0%                          ] mid-base-saver-300.nsys-rep[1/1] [==========49%               ] mid-base-saver-300.nsys-rep[1/1] [===========51%              ] mid-base-saver-300.nsys-rep[1/1] [========================100%] mid-base-saver-300.nsys-rep[1/1] [========================100%] mid-base-saver-300.nsys-rep
+Generated:
+	/home/lucas/ai/FreeToken-wt/kfix/tasks/ornith-exl3/kfix/nsys-mid/mid-base-saver-300.nsys-rep
+{"target": 1000, "pass": 1, "prompt_tokens": 1022, "ttft_s": 0.53, "prefill_tok_s": 1930.0, "gen_tokens": 15, "decode_tok_s": 124.8, "decode_tok_s_wall": 124.8, "total_s": 0.6, "ttft_mono_s": 0.53, "prefill_tok_s_mono": 1930.0, "total_mono_s": 0.64, "t_start_wall": 1790510379.873, "out_sha1": "9d694cc7de19bfdeb2bd597baf9375cf9fe3218b", "gap1_ms": 46.2, "max_gap_ms": 46.2, "median_gap_ms": 5.2, "decode_tok_s_after_gap1": 196.9}
+Generating '/tmp/nsys-report-a8a2.qdstrm'
+[1/1] [0%                          ] mid-base-saver-1000.nsys-rep[1/1] [0%                          ] mid-base-saver-1000.nsys-rep[1/1] [===========51%              ] mid-base-saver-1000.nsys-rep[1/1] [========================100%] mid-base-saver-1000.nsys-rep[1/1] [========================100%] mid-base-saver-1000.nsys-rep
+Generated:
+	/home/lucas/ai/FreeToken-wt/kfix/tasks/ornith-exl3/kfix/nsys-mid/mid-base-saver-1000.nsys-rep
+=== mid-new-saver 2026-09-27T16:05:38+04:00 load 6.55 4.05 4.26 gpu 0 MiB sm 277 MHz code 69938fe
+Running as unit: ft-measure-nsys-mid-new-saver.service; invocation ID: bf6c4a9f54374a9ba7f98a2ec477e9e5
+ready after 84s
+{"target": 300, "pass": 1, "prompt_tokens": 326, "ttft_s": 0.94, "prefill_tok_s": 346.0, "gen_tokens": 15, "decode_tok_s": 133.5, "decode_tok_s_wall": 133.5, "total_s": 1.0, "ttft_mono_s": 0.942, "prefill_tok_s_mono": 346.0, "total_mono_s": 1.05, "t_start_wall": 1790510848.044, "out_sha1": "a1abb5c1fb2f95fc735d380ed10eded8d784b0ed", "gap1_ms": 38.2, "max_gap_ms": 38.2, "median_gap_ms": 5.1, "decode_tok_s_after_gap1": 194.9}
+{"target": 1000, "pass": 1, "prompt_tokens": 1017, "ttft_s": 0.39, "prefill_tok_s": 2586.0, "gen_tokens": 15, "decode_tok_s": 139.5, "decode_tok_s_wall": 139.5, "total_s": 0.5, "ttft_mono_s": 0.393, "prefill_tok_s_mono": 2586.0, "total_mono_s": 0.49, "t_start_wall": 1790510849.091, "out_sha1": "82aa758779449ff02e3643b5be37aab74a1c9ecf", "gap1_ms": 36.0, "max_gap_ms": 36.0, "median_gap_ms": 5.0, "decode_tok_s_after_gap1": 201.9}
+{"target": 300, "pass": 1, "prompt_tokens": 330, "ttft_s": 0.38, "prefill_tok_s": 869.0, "gen_tokens": 15, "decode_tok_s": 131.1, "decode_tok_s_wall": 131.1, "total_s": 0.5, "ttft_mono_s": 0.38, "prefill_tok_s_mono": 869.0, "total_mono_s": 0.49, "t_start_wall": 1790510849.875, "out_sha1": "9f7e170036c23b7c7690338baee50e59b22056b6", "gap1_ms": 37.4, "max_gap_ms": 37.4, "median_gap_ms": 5.3, "decode_tok_s_after_gap1": 187.4}
+Generating '/tmp/nsys-report-482e.qdstrm'
+[1/1] [0%                          ] mid-new-saver-300.nsys-rep[1/1] [0%                          ] mid-new-saver-300.nsys-rep[1/1] [===========52%              ] mid-new-saver-300.nsys-rep[1/1] [========================100%] mid-new-saver-300.nsys-rep[1/1] [========================100%] mid-new-saver-300.nsys-rep
+Generated:
+	/home/lucas/ai/FreeToken-wt/kfix/tasks/ornith-exl3/kfix/nsys-mid/mid-new-saver-300.nsys-rep
+{"target": 1000, "pass": 1, "prompt_tokens": 1022, "ttft_s": 0.41, "prefill_tok_s": 2497.0, "gen_tokens": 15, "decode_tok_s": 137.3, "decode_tok_s_wall": 137.3, "total_s": 0.5, "ttft_mono_s": 0.409, "prefill_tok_s_mono": 2497.0, "total_mono_s": 0.51, "t_start_wall": 1790510851.29, "out_sha1": "9d694cc7de19bfdeb2bd597baf9375cf9fe3218b", "gap1_ms": 36.3, "max_gap_ms": 36.3, "median_gap_ms": 5.2, "decode_tok_s_after_gap1": 198.0}
+Generating '/tmp/nsys-report-1ebd.qdstrm'
+[1/1] [0%                          ] mid-new-saver-1000.nsys-rep[1/1] [0%                          ] mid-new-saver-1000.nsys-rep[1/1] [===========52%              ] mid-new-saver-1000.nsys-rep[1/1] [========================100%] mid-new-saver-1000.nsys-rep[1/1] [========================100%] mid-new-saver-1000.nsys-rep
+Generated:
+	/home/lucas/ai/FreeToken-wt/kfix/tasks/ornith-exl3/kfix/nsys-mid/mid-new-saver-1000.nsys-rep
+NSYSDONE

@@ -1,0 +1,15 @@
+start 2026-09-27T14:04:46+04:00 b967140 Merge exp/final-numbers: Ornith EXL3 final +diff  1 file changed, 8 insertions(+), 19 deletions(-)
+0 MiB
+........................................................................ [ 22%]
+........................................................................ [ 44%]
+........................................................................ [ 67%]
+........................................................................ [ 89%]
+..................................                                       [100%]
+=============================== warnings summary ===============================
+tests/kernels/test_exl3.py::test_moe_matches_reference[prefill-5-3inst-2]
+  /home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/flashinfer/cute_dsl/utils.py:86: DeprecationWarning: Arch from arch.py is deprecated. Use Arch from enums.py instead.
+    from cutlass.base_dsl.arch import Arch
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+322 passed, 1 warning in 238.60s (0:03:58)
+rc=0 PYTESTDONE 2026-09-27T14:08:53+04:00
