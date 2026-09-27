@@ -1,0 +1,771 @@
+The user wants a complete, well-documented Python module that implements:
+1. A thread-safe LRU cache with per-entry time-to-live (TTL)
+2. Size-based eviction
+3. Hit/miss statistics
+4. A decorator for memoizing functions
+5. Type hints
+6. A set of unittest test cases
+
+Let me design this carefully.
+
+I'll create a module with:
+- An `LRUCache` class that:
+  - Uses `OrderedDict` for LRU ordering
+  - Uses a `threading.Lock` for thread safety
+  - Supports per-entry TTL
+  - Supports size-based eviction
+  - Tracks hit/miss statistics
+- A `CacheStats` class or just track stats in the cache
+- A `memoize` decorator that uses the cache
+
+Let me think about the design:
+
+```python
+"""
+thread_safe_lru.py
+
+A thread-safe LRU (Least Recently Used) cache implementation with:
+- Per-entry time-to-live (TTL) support
+- Size-based eviction
+- Hit/miss statistics
+- A decorator for memoizing functions
+"""
+
+from __future__ import annotations
+
+import functools
+import threading
+import time
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, Hashable, Optional, Tuple
+
+
+@dataclass(frozen=True)
+class CacheStats:
+    """Immutable snapshot of cache statistics."""
+    hits: int = 0
+    misses: int = 0
+    evictions: int = 0
+    expirations: int = 0
+    size: int = 0
+
+    @property
+    def total_requests(self) -> int:
+        return self.hits + self.misses
+
+    @property
+    def hit_rate(self) -> float:
+        total = self.total_requests
+        return self.hits / total if total else 0.0
+```
+
+Now the main cache class:
+
+```python
+class LRUCache:
+    """
+    A thread-safe LRU cache with per-entry TTL and size-based eviction.
+    """
+
+    def __init__(
+        self,
+        maxsize: Optional[int] = None,
+        default_ttl: Optional[float] = None,
+    ) -> None:
+        if maxsize is not None and maxsize <= 0:
+            raise ValueError("maxsize must be a positive integer or None")
+        self._maxsize = maxsize
+        self._default_ttl = default_ttl
+        self._store: "OrderedDict[Hashable, _Entry]" = OrderedDict()
+        self._lock = threading.RLock()
+        # statistics
+        self._hits = 0
+        self._misses = 0
+        self._evictions = 0
+        self._expirations = 0
+
+    ...
+```
+
+Let me define an internal entry class to hold value and expiry:
+
+```python
+@dataclass
+class _Entry:
+    value: Any
+    expires_at: Optional[float]
+```
+
+Now the methods:
+
+- `__getitem__` / `get`
+- `__setitem__` / `set`
+- `__contains__`
+- `__len__`
+- `pop`
+- `clear`
+- `stats`
+- `remove_expired` / `purge_expired`
+
+Let me think about TTL handling. When we set an entry, we compute `expires_at = time.monotonic() + ttl` if ttl is not None. We use `time.monotonic()` for TTL because it's not affected by system clock changes. Actually, for a cache, monotonic time is the right choice. But some users might want wall-clock time. I'll use monotonic by default but allow passing an explicit expiry or a clock function.
+
+Actually, let me keep it simple but robust. I'll use `time.monotonic()` for TTL calculations.
+
+Let me think about the `get` method:
+
+```python
+def get(self, key, default=None):
+    with self._lock:
+        if key not in self._store:
+            self._misses += 1
+            return default
+        entry = self._store[key]
+        if self._is_expired(entry):
+            self._remove(key)  # removes and counts expiration
+            self._misses += 1
+            return default
+        # move to end (most recently used)
+        self._store.move_to_end(key)
+        self._hits += 1
+        return entry.value
+```
+
+Wait, I need to be careful about counting hits/misses. When a key is expired, is it a hit or a miss? It's a miss (the value wasn't returned). And it should count as an expiration.
+
+Let me define helper methods:
+
+```python
+def _is_expired(self, entry: _Entry) -> bool:
+    return entry.expires_at is not None and entry.expires_at <= self._now()
+
+def _remove(self, key) -> None:
+    # caller must hold lock
+    self._store.pop(key, None)
+```
+
+For eviction when size exceeds maxsize:
+
+```python
+def _evict_if_needed(self) -> None:
+    # caller must hold lock
+    if self._maxsize is None:
+        return
+    while len(self._store) > self._maxsize:
+        # pop the oldest (first) item
+        self._store.popitem(last=False)
+        self._evictions += 1
+```
+
+Now `set`:
+
+```python
+def set(self, key, value, ttl=None):
+    with self._lock:
+        if ttl is None:
+            ttl = self._default_ttl
+        expires_at = None
+        if ttl is not None:
+            expires_at = self._now() + ttl
+        if key in self._store:
+            self._store[key] = _Entry(value, expires_at)
+            self._store.move_to_end(key)
+        else:
+            self._store[key] = _Entry(value, expires_at)
+        self._evict_if_needed()
+```
+
+Hmm, but there's a subtlety. When we set a key that already exists, should we count it? No, set operations don't affect hit/miss stats.
+
+Also, when we set a key and it evicts, we need to be careful. If the key already exists, we update it in place, no eviction needed. If it's new, we add it and possibly evict.
+
+Let me reconsider. Actually the code above handles both cases but let me clean it up:
+
+```python
+def set(self, key, value, ttl=None):
+    with self._lock:
+        expires_at = self._compute_expiry(ttl)
+        existed = key in self._store
+        self._store[key] = _Entry(value, expires_at)
+        self._store.move_to_end(key)
+        if not existed:
+            self._evict_if_needed()
+```
+
+Wait, but if the key existed and we updated it, and the cache was at maxsize, we don't need to evict. If it didn't exist, we added a new entry, so we might need to evict. This is correct.
+
+Actually, even simpler: always call `_evict_if_needed()` but only when we added a new key. Let me keep the `existed` check.
+
+Hmm, but there's an edge case: what if maxsize is 0? We already reject maxsize <= 0. So maxsize >= 1.
+
+Let me also think about `__setitem__`:
+
+```python
+def __setitem__(self, key, value):
+    self.set(key, value)
+```
+
+But we might want to allow ttl via a different mechanism. Let me keep `__setitem__` simple and use `set` for the full API.
+
+Now the `now` function:
+
+```python
+def _now(self) -> float:
+    return time.monotonic()
+```
+
+I'll make this a method so it can be overridden in tests, or I could inject a clock. Let me make it a method `_now()` that tests can monkeypatch, or better, allow injecting a clock function. Actually, for testability, I'll allow passing a `clock` parameter. But that complicates the API. Let me use a method `_now()` that returns `time.monotonic()`, and in tests I can either use real sleeps or monkeypatch.
+
+Actually, a cleaner approach for testing is to allow injecting a clock. Let me add a `clock` parameter defaulting to `time.monotonic`.
+
+Hmm, but that changes the signature. Let me think. I'll keep it simple: use `time.monotonic()` via a method `_now()`. Tests can use small real sleeps, or I can make the clock injectable. Let me make it injectable for robust testing:
+
+```python
+def __init__(self, maxsize=None, default_ttl=None, clock=time.monotonic):
+    ...
+    self._clock = clock
+```
+
+This is clean and testable. Good.
+
+Now the decorator:
+
+```python
+def memoize(cache=None, key_func=None, default_ttl=None):
+    ...
+```
+
+The decorator should:
+- Create a cache (either use provided or create a new one)
+- Wrap the function
+- On call, compute a key from arguments
+- Get from cache, if miss, call function and set
+
+Let me design:
+
+```python
+def memoize(maxsize=128, default_ttl=None, key_func=None, cache=None):
+    def decorator(func):
+        if cache is None:
+            cache = LRUCache(maxsize=maxsize, default_ttl=default_ttl)
+        if key_func is None:
+            key_func = _default_key_func
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            key = key_func(args, kwargs)
+            cached = cache.get(key, _MISSING)
+            if cached is _MISSING:
+                result = func(*args, **kwargs)
+                cache.set(key, result, ttl=default_ttl)
+                return result
+            return cached
+        wrapper.cache = cache
+        return wrapper
+    return decorator
+```
+
+Wait, there's a subtlety with TTL in the decorator. When we set, should we use default_ttl? Let me use default_ttl for the set. Actually, let me think about whether the decorator should support per-call TTL. That's more complex. Let me keep it simple: use default_ttl for all memoized calls.
+
+Hmm, but actually, I want the decorator to be flexible. Let me allow the cache to be shared across multiple decorated functions, which is useful.
+
+Let me reconsider the key function. The default key function should combine args and kwargs into a hashable key. Something like:
+
+```python
+def _default_key_func(args, kwargs):
+    # sort kwargs for consistency
+    return (args, tuple(sorted(kwargs.items())))
+```
+
+But args might not be hashable (e.g., lists). For a cache, keys need to be hashable. The default key function creates a tuple which is hashable if its contents are hashable. If args contains unhashable items, this will raise TypeError. That's acceptable behavior, but maybe I should catch it and fall back to using the args directly or repr. Let me keep it simple and let it raise, or I could use a try/except. Actually, let me make the default key function robust by trying to hash and falling back to repr.
+
+Hmm, let me think. For a memoize decorator, the common case is hashable args. Let me provide a default key function that handles the common case and document that args must be hashable. But to be safe, I'll make it fall back to repr for unhashable args.
+
+Actually, let me keep it clean:
+
+```python
+def _default_key_func(args, kwargs):
+    try:
+        return (args, frozenset(kwargs.items()))
+    except TypeError:
+        # Fall back to a repr-based key for unhashable arguments.
+        return (repr(args), frozenset((k, repr(v)) for k, v in kwargs.items()))
+```
+
+Wait, `frozenset(kwargs.items())` requires the items to be hashable too. Let me use a tuple of sorted items instead:
+
+```python
+def _default_key_func(args, kwargs):
+    try:
+        key_args = args
+        key_kwargs = tuple(sorted(kwargs.items(), key=lambda kv: str(kv[0])))
+        return (key_args, key_kwargs)
+    except TypeError:
+        return (repr(args), tuple(sorted((k, repr(v)) for k, v in kwargs.items()), key=lambda kv: str(kv[0])))
+```
+
+This is getting complicated. Let me simplify. I'll make the default key function try to build a tuple key, and on TypeError fall back to repr-based.
+
+Actually, let me reconsider. The cleanest approach:
+
+```python
+def _default_key_func(args, kwargs):
+    """Build a hashable key from positional and keyword arguments."""
+    try:
+        return (args, tuple(sorted(kwargs.items())))
+    except TypeError:
+        # Unhashable arguments: fall back to a repr-based key.
+        sorted_kwargs = sorted(((k, repr(v)) for k, v in kwargs.items()),
+                               key=lambda item: str(item[0]))
+        return (repr(args), tuple(sorted_kwargs))
+```
+
+`tuple(sorted(kwargs.items()))` - sorting a list of (key, value) tuples requires comparing the tuples, which compares first by key then by value. If keys are strings, this works. If keys are mixed types, it might fail. But for typical use, kwargs keys are strings. Let me use `key=lambda item: str(item[0])` to be safe.
+
+Let me finalize:
+
+```python
+def _default_key_func(args, kwargs):
+    try:
+        return (args, tuple(sorted(kwargs.items(), key=lambda kv: str(kv[0]))))
+    except TypeError:
+        return (repr(args), tuple(sorted(
+            ((k, repr(v)) for k, v in kwargs.items()),
+            key=lambda kv: str(kv[0]),
+        )))
+```
+
+OK this is fine.
+
+Now, let me also think about thread safety of the decorator. Since the cache is thread-safe (uses a lock), the wrapper is thread-safe. Good.
+
+Let me also add a `__repr__` to the cache for debugging.
+
+Now let me think about the statistics. I want to expose:
+- hits
+- misses
+- evictions
+- expirations
+- size (current number of entries)
+- hit_rate
+- total_requests
+
+I'll add a `stats` property that returns a `CacheStats` snapshot, and also individual properties.
+
+Let me also add a method to reset stats.
+
+Now let me write the test cases. I'll use unittest.
+
+Tests to include:
+1. Basic set/get
+2. Miss returns default
+3. LRU eviction when maxsize exceeded
+4. TTL expiration
+5. Size-based eviction
+6. Thread safety (concurrent access)
+7. Hit/miss statistics
+8. Decorator memoization
+9. Decorator with shared cache
+10. Decorator key function
+11. Clear
+12. Pop
+13. Contains
+14. Len
+15. Expired entry counts as miss and expiration
+16. maxsize validation
+17. move_to_end on access (recency)
+18. default_ttl
+19. TTL with injected clock (fast test)
+
+Let me write these tests.
+
+For thread safety test, I'll spawn multiple threads that set and get, and verify no exceptions and final state consistency.
+
+Let me write the full module now.
+
+Let me also think about whether to use `threading.Lock` or `threading.RLock`. Since my internal helper methods (`_evict_if_needed`, `_remove`) are called from within locked methods, if they try to acquire the lock again, a regular `Lock` would deadlock. So I should either use `RLock` or ensure helpers don't acquire the lock. I'll use `RLock` for safety and simplicity,
+<<content>>
+The user wants a complete, well-documented Python module that implements:
+1. A thread-safe LRU cache with per-entry time-to-live (TTL)
+2. Size-based eviction
+3. Hit/miss statistics
+4. A decorator for memoizing functions
+5. Type hints
+6. A set of unittest test cases
+
+Let me design this carefully.
+
+I'll create a module with:
+- An `LRUCache` class that:
+  - Uses `OrderedDict` for LRU ordering
+  - Uses a `threading.Lock` for thread safety
+  - Supports per-entry TTL
+  - Supports size-based eviction
+  - Tracks hit/miss statistics
+- A `CacheStats` class or just track stats in the cache
+- A `memoize` decorator that uses the cache
+
+Let me think about the design:
+
+```python
+"""
+thread_safe_lru.py
+
+A thread-safe LRU (Least Recently Used) cache implementation with:
+- Per-entry time-to-live (TTL) support
+- Size-based eviction
+- Hit/miss statistics
+- A decorator for memoizing functions
+"""
+
+from __future__ import annotations
+
+import functools
+import threading
+import time
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, Hashable, Optional, Tuple
+
+
+@dataclass(frozen=True)
+class CacheStats:
+    """Immutable snapshot of cache statistics."""
+    hits: int = 0
+    misses: int = 0
+    evictions: int = 0
+    expirations: int = 0
+    size: int = 0
+
+    @property
+    def total_requests(self) -> int:
+        return self.hits + self.misses
+
+    @property
+    def hit_rate(self) -> float:
+        total = self.total_requests
+        return self.hits / total if total else 0.0
+```
+
+Now the main cache class:
+
+```python
+class LRUCache:
+    """
+    A thread-safe LRU cache with per-entry TTL and size-based eviction.
+    """
+
+    def __init__(
+        self,
+        maxsize: Optional[int] = None,
+        default_ttl: Optional[float] = None,
+    ) -> None:
+        if maxsize is not None and maxsize <= 0:
+            raise ValueError("maxsize must be a positive integer or None")
+        self._maxsize = maxsize
+        self._default_ttl = default_ttl
+        self._store: "OrderedDict[Hashable, _Entry]" = OrderedDict()
+        self._lock = threading.RLock()
+        # statistics
+        self._hits = 0
+        self._misses = 0
+        self._evictions = 0
+        self._expirations = 0
+
+    ...
+```
+
+Let me define an internal entry class to hold value and expiry:
+
+```python
+@dataclass
+class _Entry:
+    value: Any
+    expires_at: Optional[float]
+```
+
+Now the methods:
+
+- `__getitem__` / `get`
+- `__setitem__` / `set`
+- `__contains__`
+- `__len__`
+- `pop`
+- `clear`
+- `stats`
+- `remove_expired` / `purge_expired`
+
+Let me think about TTL handling. When we set an entry, we compute `expires_at = time.monotonic() + ttl` if ttl is not None. We use `time.monotonic()` for TTL because it's not affected by system clock changes. Actually, for a cache, monotonic time is the right choice. But some users might want wall-clock time. I'll use monotonic by default but allow passing an explicit expiry or a clock function.
+
+Actually, let me keep it simple but robust. I'll use `time.monotonic()` for TTL calculations.
+
+Let me think about the `get` method:
+
+```python
+def get(self, key, default=None):
+    with self._lock:
+        if key not in self._store:
+            self._misses += 1
+            return default
+        entry = self._store[key]
+        if self._is_expired(entry):
+            self._remove(key)  # removes and counts expiration
+            self._misses += 1
+            return default
+        # move to end (most recently used)
+        self._store.move_to_end(key)
+        self._hits += 1
+        return entry.value
+```
+
+Wait, I need to be careful about counting hits/misses. When a key is expired, is it a hit or a miss? It's a miss (the value wasn't returned). And it should count as an expiration.
+
+Let me define helper methods:
+
+```python
+def _is_expired(self, entry: _Entry) -> bool:
+    return entry.expires_at is not None and entry.expires_at <= self._now()
+
+def _remove(self, key) -> None:
+    # caller must hold lock
+    self._store.pop(key, None)
+```
+
+For eviction when size exceeds maxsize:
+
+```python
+def _evict_if_needed(self) -> None:
+    # caller must hold lock
+    if self._maxsize is None:
+        return
+    while len(self._store) > self._maxsize:
+        # pop the oldest (first) item
+        self._store.popitem(last=False)
+        self._evictions += 1
+```
+
+Now `set`:
+
+```python
+def set(self, key, value, ttl=None):
+    with self._lock:
+        if ttl is None:
+            ttl = self._default_ttl
+        expires_at = None
+        if ttl is not None:
+            expires_at = self._now() + ttl
+        if key in self._store:
+            self._store[key] = _Entry(value, expires_at)
+            self._store.move_to_end(key)
+        else:
+            self._store[key] = _Entry(value, expires_at)
+        self._evict_if_needed()
+```
+
+Hmm, but there's a subtlety. When we set a key that already exists, should we count it? No, set operations don't affect hit/miss stats.
+
+Also, when we set a key and it evicts, we need to be careful. If the key already exists, we update it in place, no eviction needed. If it's new, we add it and possibly evict.
+
+Let me reconsider. Actually the code above handles both cases but let me clean it up:
+
+```python
+def set(self, key, value, ttl=None):
+    with self._lock:
+        expires_at = self._compute_expiry(ttl)
+        existed = key in self._store
+        self._store[key] = _Entry(value, expires_at)
+        self._store.move_to_end(key)
+        if not existed:
+            self._evict_if_needed()
+```
+
+Wait, but if the key existed and we updated it, and the cache was at maxsize, we don't need to evict. If it didn't exist, we added a new entry, so we might need to evict. This is correct.
+
+Actually, even simpler: always call `_evict_if_needed()` but only when we added a new key. Let me keep the `existed` check.
+
+Hmm, but there's an edge case: what if maxsize is 0? We already reject maxsize <= 0. So maxsize >= 1.
+
+Let me also think about `__setitem__`:
+
+```python
+def __setitem__(self, key, value):
+    self.set(key, value)
+```
+
+But we might want to allow ttl via a different mechanism. Let me keep `__setitem__` simple and use `set` for the full API.
+
+Now the `now` function:
+
+```python
+def _now(self) -> float:
+    return time.monotonic()
+```
+
+I'll make this a method so it can be overridden in tests, or I could inject a clock. Let me make it a method `_now()` that tests can monkeypatch, or better, allow injecting a clock function. Actually, for testability, I'll allow passing a `clock` parameter. But that complicates the API. Let me use a method `_now()` that returns `time.monotonic()`, and in tests I can either use real sleeps or monkeypatch.
+
+Actually, a cleaner approach for testing is to allow injecting a clock. Let me add a `clock` parameter defaulting to `time.monotonic`.
+
+Hmm, but that changes the signature. Let me think. I'll keep it simple: use `time.monotonic()` via a method `_now()`. Tests can use small real sleeps, or I can make the clock injectable. Let me make it injectable for robust testing:
+
+```python
+def __init__(self, maxsize=None, default_ttl=None, clock=time.monotonic):
+    ...
+    self._clock = clock
+```
+
+This is clean and testable. Good.
+
+Now the decorator:
+
+```python
+def memoize(cache=None, key_func=None, default_ttl=None):
+    ...
+```
+
+The decorator should:
+- Create a cache (either use provided or create a new one)
+- Wrap the function
+- On call, compute a key from arguments
+- Get from cache, if miss, call function and set
+
+Let me design:
+
+```python
+def memoize(maxsize=128, default_ttl=None, key_func=None, cache=None):
+    def decorator(func):
+        if cache is None:
+            cache = LRUCache(maxsize=maxsize, default_ttl=default_ttl)
+        if key_func is None:
+            key_func = _default_key_func
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            key = key_func(args, kwargs)
+            cached = cache.get(key, _MISSING)
+            if cached is _MISSING:
+                result = func(*args, **kwargs)
+                cache.set(key, result, ttl=default_ttl)
+                return result
+            return cached
+        wrapper.cache = cache
+        return wrapper
+    return decorator
+```
+
+Wait, there's a subtlety with TTL in the decorator. When we set, should we use default_ttl? Let me use default_ttl for the set. Actually, let me think about whether the decorator should support per-call TTL. That's more complex. Let me keep it simple: use default_ttl for all memoized calls.
+
+Hmm, but actually, I want the decorator to be flexible. Let me allow the cache to be shared across multiple decorated functions, which is useful.
+
+Let me reconsider the key function. The default key function should combine args and kwargs into a hashable key. Something like:
+
+```python
+def _default_key_func(args, kwargs):
+    # sort kwargs for consistency
+    return (args, tuple(sorted(kwargs.items())))
+```
+
+But args might not be hashable (e.g., lists). For a cache, keys need to be hashable. The default key function creates a tuple which is hashable if its contents are hashable. If args contains unhashable items, this will raise TypeError. That's acceptable behavior, but maybe I should catch it and fall back to using the args directly or repr. Let me keep it simple and let it raise, or I could use a try/except. Actually, let me make the default key function robust by trying to hash and falling back to repr.
+
+Hmm, let me think. For a memoize decorator, the common case is hashable args. Let me provide a default key function that handles the common case and document that args must be hashable. But to be safe, I'll make it fall back to repr for unhashable args.
+
+Actually, let me keep it clean:
+
+```python
+def _default_key_func(args, kwargs):
+    try:
+        return (args, frozenset(kwargs.items()))
+    except TypeError:
+        # Fall back to a repr-based key for unhashable arguments.
+        return (repr(args), frozenset((k, repr(v)) for k, v in kwargs.items()))
+```
+
+Wait, `frozenset(kwargs.items())` requires the items to be hashable too. Let me use a tuple of sorted items instead:
+
+```python
+def _default_key_func(args, kwargs):
+    try:
+        key_args = args
+        key_kwargs = tuple(sorted(kwargs.items(), key=lambda kv: str(kv[0])))
+        return (key_args, key_kwargs)
+    except TypeError:
+        return (repr(args), tuple(sorted((k, repr(v)) for k, v in kwargs.items()), key=lambda kv: str(kv[0])))
+```
+
+This is getting complicated. Let me simplify. I'll make the default key function try to build a tuple key, and on TypeError fall back to repr-based.
+
+Actually, let me reconsider. The cleanest approach:
+
+```python
+def _default_key_func(args, kwargs):
+    """Build a hashable key from positional and keyword arguments."""
+    try:
+        return (args, tuple(sorted(kwargs.items())))
+    except TypeError:
+        # Unhashable arguments: fall back to a repr-based key.
+        sorted_kwargs = sorted(((k, repr(v)) for k, v in kwargs.items()),
+                               key=lambda item: str(item[0]))
+        return (repr(args), tuple(sorted_kwargs))
+```
+
+`tuple(sorted(kwargs.items()))` - sorting a list of (key, value) tuples requires comparing the tuples, which compares first by key then by value. If keys are strings, this works. If keys are mixed types, it might fail. But for typical use, kwargs keys are strings. Let me use `key=lambda item: str(item[0])` to be safe.
+
+Let me finalize:
+
+```python
+def _default_key_func(args, kwargs):
+    try:
+        return (args, tuple(sorted(kwargs.items(), key=lambda kv: str(kv[0]))))
+    except TypeError:
+        return (repr(args), tuple(sorted(
+            ((k, repr(v)) for k, v in kwargs.items()),
+            key=lambda kv: str(kv[0]),
+        )))
+```
+
+OK this is fine.
+
+Now, let me also think about thread safety of the decorator. Since the cache is thread-safe (uses a lock), the wrapper is thread-safe. Good.
+
+Let me also add a `__repr__` to the cache for debugging.
+
+Now let me think about the statistics. I want to expose:
+- hits
+- misses
+- evictions
+- expirations
+- size (current number of entries)
+- hit_rate
+- total_requests
+
+I'll add a `stats` property that returns a `CacheStats` snapshot, and also individual properties.
+
+Let me also add a method to reset stats.
+
+Now let me write the test cases. I'll use unittest.
+
+Tests to include:
+1. Basic set/get
+2. Miss returns default
+3. LRU eviction when maxsize exceeded
+4. TTL expiration
+5. Size-based eviction
+6. Thread safety (concurrent access)
+7. Hit/miss statistics
+8. Decorator memoization
+9. Decorator with shared cache
+10. Decorator key function
+11. Clear
+12. Pop
+13. Contains
+14. Len
+15. Expired entry counts as miss and expiration
+16. maxsize validation
+17. move_to_end on access (recency)
+18. default_ttl
+19. TTL with injected clock (fast test)
+
+Let me write these tests.
+
+For thread safety test, I'll spawn multiple threads that set and get, and verify no exceptions and final state consistency.
+
+Let me write the full module now.
+
+Let me also think about whether to use `threading.Lock` or `threading.RLock`. Since my internal helper methods (`_evict_if_needed`, `_remove`) are called from within locked methods, if they try to acquire the lock again, a regular `Lock` would deadlock. So I should either use `RLock` or ensure helpers don't acquire the lock. I'll use `RLock` for safety and simplicity,

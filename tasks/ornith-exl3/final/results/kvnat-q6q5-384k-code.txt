@@ -1,0 +1,651 @@
+The user wants a complete, well-documented Python module that implements:
+1. A thread-safe LRU cache with per-entry time-to-live (TTL)
+2. Size-based eviction
+3. Hit/miss statistics
+4. A decorator for memoizing functions
+5. Type hints
+6. A set of unittest test cases
+
+Let me design this carefully.
+
+I'll create a module with:
+- `CacheEntry` - internal data structure for storing cached values with metadata
+- `LRUCache` - the main cache class with thread-safety, TTL, size-based eviction, and statistics
+- `CacheStats` - a class to track hit/miss statistics (or I could just use attributes)
+- `memoize` - a decorator for memoizing functions
+
+Let me think about the design:
+
+**Thread-safety**: Use `threading.RLock` to protect all operations.
+
+**LRU eviction**: Use `collections.OrderedDict` to maintain insertion order. On access, move to the end (most recently used). When size exceeds max, evict from the front (least recently used).
+
+**TTL**: Each entry stores a timestamp (absolute expiry time). On access, check if expired. Expired entries should be treated as misses and removed.
+
+**Size-based eviction**: When the number of entries exceeds `max_size`, evict the LRU entry.
+
+**Statistics**: Track hits, misses, evictions, expirations.
+
+Let me write this out.
+
+```python
+"""
+threaded_lru_cache.py
+=====================
+
+A thread-safe Least-Recently-Used (LRU) cache implementation supporting:
+
+* Per-entry time-to-live (TTL) expiration.
+* Size-based eviction (evicts the least-recently-used entry when the cache
+  exceeds ``max_size``).
+* Hit / miss / eviction / expiration statistics.
+* A decorator-based memoization helper.
+
+The implementation is safe to share a single cache instance across multiple
+threads.  All public methods acquire an internal re-entrant lock so that
+concurrent access cannot corrupt the underlying ordering structure.
+
+Example
+-------
+>>> from threaded_lru_cache import LRUCache, memoize
+>>> cache = LRUCache(max_size=2, ttl=1.0)
+>>> cache.set("a", 1)
+>>> cache.get("a")
+1
+>>> cache.stats
+CacheStats(hits=1, misses=1, evictions=0, expirations=0)
+
+
+Decorator usage
+---------------
+>>> @memoize(ttl=5.0, maxsize=128)
+>>> def expensive(x):
+...     return x * x
+"""
+```
+
+Let me think about the API design. I want:
+- `LRUCache(max_size=..., ttl=..., clock=...)` constructor
+- `get(key)` -> Optional[value]
+- `set(key, value)` -> None
+- `pop(key)` -> Optional[value]
+- `delete(key)` -> bool
+- `contains(key)` / `__contains__` -> bool
+- `__getitem__`, `__setitem__`, `__delitem__`
+- `__len__`
+- `clear()`
+- `stats` property -> CacheStats
+- `__repr__`
+
+For the decorator:
+- `memoize(ttl=..., maxsize=...)` returns a decorator
+- Should support instance methods (using `self` as part of key? or exclude it?)
+
+Let me think about the TTL. There are two modes:
+1. Global TTL - all entries have the same TTL
+2. Per-entry TTL - each entry can have its own TTL
+
+The user said "per-entry time-to-live" which suggests each entry can have its own TTL. But they also might mean the cache supports TTL on a per-entry basis (i.e., entries expire based on TTL). Let me support both: a default TTL from the constructor, and an optional per-entry TTL override in `set`.
+
+Actually, "per-entry time-to-live" most naturally means each entry has its own TTL. Let me support:
+- Constructor `ttl` parameter as the default TTL for all entries
+- `set(key, value, ttl=...)` to override per entry
+
+Let me use a `clock` parameter for testability - a callable that returns the current time. Default to `time.monotonic` or `time.time`. Actually for TTL, `time.monotonic` is better because it's not affected by system clock changes. But for testing expiration, I might want to control time. Let me use `time.monotonic` by default but allow injection.
+
+Hmm, but `monotonic` can't go backwards, which is good for TTL. Let me use that.
+
+Let me design the `CacheStats` as a frozen dataclass or a simple class with a nice repr.
+
+Let me write the code:
+
+```python
+from __future__ import annotations
+
+import functools
+import threading
+import time
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, Generic, Hashable, Optional, TypeVar, Union
+
+__all__ = ["CacheStats", "LRUCache", "memoize"]
+
+T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class CacheStats:
+    """Immutable snapshot of cache statistics.
+
+    Attributes
+    ----------
+    hits:
+        Number of successful ``get`` lookups.
+    misses:
+        Number of failed ``get`` lookups (including expired entries).
+    evictions:
+        Number of entries removed because the cache exceeded ``max_size``.
+    expirations:
+        Number of entries removed because their TTL elapsed.
+    """
+    hits: int = 0
+    misses: int = 0
+    evictions: int = 0
+    expirations: int = 0
+
+    @property
+    def total_lookups(self) -> int:
+        return self.hits + self.misses
+
+    @property
+    def hit_rate(self) -> float:
+        total = self.total_lookups
+        return self.hits / total if total else 0.0
+
+    def __repr__(self) -> str:  # pragma: no cover - trivial
+        return (
+            f"CacheStats(hits={self.hits}, misses={self.misses}, "
+            f"evictions={self.evictions}, expirations={self.expirations})"
+        )
+```
+
+Now the internal entry:
+
+```python
+@dataclass
+class _Entry(Generic[T]):
+    value: T
+    expires_at: Optional[float]
+```
+
+Now the main cache:
+
+```python
+class LRUCache(Generic[T]):
+    """Thread-safe LRU cache with per-entry TTL and size-based eviction."""
+
+    def __init__(
+        self,
+        max_size: int = 128,
+        ttl: Optional[float] = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if max_size <= 0:
+            raise ValueError("max_size must be a positive integer")
+        if ttl is not None and ttl <= 0:
+            raise ValueError("ttl must be positive or None")
+
+        self._max_size = max_size
+        self._default_ttl = ttl
+        self._clock = clock
+
+        self._store: "OrderedDict[Hashable, _Entry[T]]" = OrderedDict()
+        self._lock = threading.RLock()
+
+        # Statistics are guarded by _lock.
+        self._hits = 0
+        self._misses = 0
+        self._evictions = 0
+        self._expirations = 0
+
+    ...
+```
+
+Let me write the methods.
+
+```python
+    def get(self, key: Hashable) -> Optional[T]:
+        with self._lock:
+            entry = self._store.get(key)
+            if entry is None:
+                self._misses += 1
+                return None
+            if self._is_expired(entry):
+                self._remove(key, reason="expire")
+                self._misses += 1
+                return None
+            # Move to most-recently-used position.
+            self._store.move_to_end(key)
+            self._hits += 1
+            return entry.value
+
+    def set(self, key: Hashable, value: T, ttl: Optional[float] = None) -> None:
+        with self._lock:
+            expires_at = None
+            if ttl is not None:
+                expires_at = self._clock() + ttl
+            elif self._default_ttl is not None:
+                expires_at = self._clock() + self._default_ttl
+
+            if key in self._store:
+                self._store[key] = _Entry(value=value, expires_at=expires_at)
+                self._store.move_to_end(key)
+                return
+
+            self._store[key] = _Entry(value=value, expires_at=expires_at)
+            # Evict if over capacity.
+            while len(self._store) > self._max_size:
+                self._evict_lru()
+
+    def _evict_lru(self) -> None:
+        # Caller must hold the lock.
+        if not self._store:
+            return
+        _, expired_entry = self._store.popitem(last=False)
+        # Should we count eviction of expired entries? They're already expired.
+        # We'll count it as eviction since it's size-based removal.
+        self._evictions += 1
+```
+
+Wait, there's a subtlety. When we evict, we might evict an expired entry. Should that count as an eviction or an expiration? I think for simplicity, size-based eviction counts as eviction regardless. But it might be cleaner to prefer evicting expired entries first. Let me keep it simple: evict LRU, count as eviction.
+
+Actually, let me reconsider. When we call `set` and need to evict, we pop the LRU. If that LRU entry is expired, it's a bit ambiguous. I'll just count it as an eviction since the trigger was size. This is fine.
+
+Let me continue with other methods:
+
+```python
+    def pop(self, key: Hashable, default: Optional[T] = None) -> Optional[T]:
+        with self._lock:
+            entry = self._store.get(key)
+            if entry is None:
+                return default
+            if self._is_expired(entry):
+                self._remove(key, reason="expire")
+                return default
+            self._store.pop(key)
+            self._hits += 1  # hmm, is pop a hit?
+            return entry.value
+```
+
+Hmm, should `pop` count as a hit? I don't think so. Let me not count pop as a hit or miss. Let me just remove and return.
+
+Actually, let me reconsider the statistics semantics. Hits and misses are about lookups (get). pop/delete/remove are mutations. Let me keep it clean:
+- `get`: hit or miss
+- `pop`: returns value or default, doesn't affect hit/miss stats. But maybe counts as eviction if it removes due to size? No, pop is explicit. Let me not count pop in evictions either.
+
+Let me simplify:
+- `get`: increments hits or misses
+- `set`: may increment evictions
+- expired entries removed during get: increments expirations and misses
+- expired entries removed during set (when evicting): hmm
+
+Let me think about expiration counting more carefully. When an entry expires and is lazily removed:
+- During `get`: it's both an expiration and a miss. Count both.
+- During `set` eviction: if we evict an expired entry, count as expiration? Or eviction? 
+
+I think the cleanest approach: when we proactively remove an expired entry (whether during get or during set's eviction loop), count it as an expiration. When we remove due to size (non-expired), count as eviction.
+
+But during set, we evict LRU. If the LRU is expired, we should count expiration. Let me handle that in `_evict_lru` by checking expiry.
+
+Actually, let me restructure. Let me have a helper that removes an expired entry and counts it. And `_evict_lru` that removes the LRU entry (counting eviction), but first checks if it's expired.
+
+Hmm, this is getting complex. Let me simplify the semantics:
+
+- `_remove_expired(key)`: removes key if expired, returns True if it removed (and counts expiration).
+- On `get`: check expiry, if expired remove and count expiration + miss.
+- On `set`: after inserting, if over capacity, evict LRU. The LRU eviction counts as eviction. But if the LRU happens to be expired, I'll still count it as eviction (size-based). Actually, let me count it as expiration if expired, to be more accurate.
+
+Let me just make `_evict_lru` check: pop LRU. If it was expired, count expiration; else count eviction.
+
+Wait, but that changes the meaning. Let me think about what's most useful. I think:
+- Evictions = entries removed because cache was full (size-based)
+- Expirations = entries removed because they timed out
+
+If an entry is both expired AND being evicted due to size, it's ambiguous. I'll count it as an eviction because the trigger was size pressure. But actually, it's cleaner to count expiration if it's expired, because the entry "would have" expired anyway.
+
+You know what, let me just make a decision and document it clearly:
+- When an entry is lazily removed due to expiry (detected during get), count as expiration.
+- When an entry is removed due to size pressure during set, count as eviction (regardless of whether it was also expired).
+- I'll also add a `purge_expired()` method that proactively removes all expired entries, counting them as expirations.
+
+This is clean and well-defined. Let me go with that.
+
+Actually, let me reconsider. Let me make eviction smarter: when evicting due to size, if the LRU entry is expired, count it as expiration; otherwise eviction. This gives the most accurate picture. But it complicates the code slightly. Let me do it but document it.
+
+Hmm, let me keep it simpler and more predictable. I'll count size-based removals as evictions and time-based removals as expirations. During set, removals are size-based → evictions. During get, removals are time-based → expirations. During purge_expired, removals are time-based → expirations.
+
+Let me finalize this design.
+
+Let me also add `__contains__`, `__getitem__`, `__setitem__`, `__delitem__`, `__len__`, `clear`, `__repr__`, `__eq__` maybe.
+
+For `__getitem__`, should it raise KeyError on miss or return None? For a cache, I think raising KeyError is more Pythonic and consistent with dict. But then it doesn't update stats. Hmm. Let me make `__getitem__` raise KeyError on miss (like dict) and NOT count stats (since it's a lower-level operation). Actually, to keep stats consistent, maybe `__getitem__` should call `get` and raise KeyError if None. But that conflates "key not present" with "value is None". 
+
+Let me make `__getitem__` raise KeyError on miss, and it will call the internal logic. To avoid the None ambiguity, I'll use a sentinel. Actually, let me just have `__getitem__` raise KeyError and count a miss. Let me use a sentinel for "not found".
+
+Let me reconsider. I'll keep `get` returning `Optional[T]` (None on miss) and counting stats. `__getitem__` will raise KeyError on miss. To distinguish, I'll use a module-level sentinel `_MISSING`.
+
+Actually, for `__getitem__`, let me just do:
+```python
+def __getitem__(self, key):
+    value = self.get(key)
+    if value is None and key not in self._store:
+        raise KeyError(key)
+    return value
+```
+<<content>>
+The user wants a complete, well-documented Python module that implements:
+1. A thread-safe LRU cache with per-entry time-to-live (TTL)
+2. Size-based eviction
+3. Hit/miss statistics
+4. A decorator for memoizing functions
+5. Type hints
+6. A set of unittest test cases
+
+Let me design this carefully.
+
+I'll create a module with:
+- `CacheEntry` - internal data structure for storing cached values with metadata
+- `LRUCache` - the main cache class with thread-safety, TTL, size-based eviction, and statistics
+- `CacheStats` - a class to track hit/miss statistics (or I could just use attributes)
+- `memoize` - a decorator for memoizing functions
+
+Let me think about the design:
+
+**Thread-safety**: Use `threading.RLock` to protect all operations.
+
+**LRU eviction**: Use `collections.OrderedDict` to maintain insertion order. On access, move to the end (most recently used). When size exceeds max, evict from the front (least recently used).
+
+**TTL**: Each entry stores a timestamp (absolute expiry time). On access, check if expired. Expired entries should be treated as misses and removed.
+
+**Size-based eviction**: When the number of entries exceeds `max_size`, evict the LRU entry.
+
+**Statistics**: Track hits, misses, evictions, expirations.
+
+Let me write this out.
+
+```python
+"""
+threaded_lru_cache.py
+=====================
+
+A thread-safe Least-Recently-Used (LRU) cache implementation supporting:
+
+* Per-entry time-to-live (TTL) expiration.
+* Size-based eviction (evicts the least-recently-used entry when the cache
+  exceeds ``max_size``).
+* Hit / miss / eviction / expiration statistics.
+* A decorator-based memoization helper.
+
+The implementation is safe to share a single cache instance across multiple
+threads.  All public methods acquire an internal re-entrant lock so that
+concurrent access cannot corrupt the underlying ordering structure.
+
+Example
+-------
+>>> from threaded_lru_cache import LRUCache, memoize
+>>> cache = LRUCache(max_size=2, ttl=1.0)
+>>> cache.set("a", 1)
+>>> cache.get("a")
+1
+>>> cache.stats
+CacheStats(hits=1, misses=1, evictions=0, expirations=0)
+
+
+Decorator usage
+---------------
+>>> @memoize(ttl=5.0, maxsize=128)
+>>> def expensive(x):
+...     return x * x
+"""
+```
+
+Let me think about the API design. I want:
+- `LRUCache(max_size=..., ttl=..., clock=...)` constructor
+- `get(key)` -> Optional[value]
+- `set(key, value)` -> None
+- `pop(key)` -> Optional[value]
+- `delete(key)` -> bool
+- `contains(key)` / `__contains__` -> bool
+- `__getitem__`, `__setitem__`, `__delitem__`
+- `__len__`
+- `clear()`
+- `stats` property -> CacheStats
+- `__repr__`
+
+For the decorator:
+- `memoize(ttl=..., maxsize=...)` returns a decorator
+- Should support instance methods (using `self` as part of key? or exclude it?)
+
+Let me think about the TTL. There are two modes:
+1. Global TTL - all entries have the same TTL
+2. Per-entry TTL - each entry can have its own TTL
+
+The user said "per-entry time-to-live" which suggests each entry can have its own TTL. But they also might mean the cache supports TTL on a per-entry basis (i.e., entries expire based on TTL). Let me support both: a default TTL from the constructor, and an optional per-entry TTL override in `set`.
+
+Actually, "per-entry time-to-live" most naturally means each entry has its own TTL. Let me support:
+- Constructor `ttl` parameter as the default TTL for all entries
+- `set(key, value, ttl=...)` to override per entry
+
+Let me use a `clock` parameter for testability - a callable that returns the current time. Default to `time.monotonic` or `time.time`. Actually for TTL, `time.monotonic` is better because it's not affected by system clock changes. But for testing expiration, I might want to control time. Let me use `time.monotonic` by default but allow injection.
+
+Hmm, but `monotonic` can't go backwards, which is good for TTL. Let me use that.
+
+Let me design the `CacheStats` as a frozen dataclass or a simple class with a nice repr.
+
+Let me write the code:
+
+```python
+from __future__ import annotations
+
+import functools
+import threading
+import time
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, Generic, Hashable, Optional, TypeVar, Union
+
+__all__ = ["CacheStats", "LRUCache", "memoize"]
+
+T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class CacheStats:
+    """Immutable snapshot of cache statistics.
+
+    Attributes
+    ----------
+    hits:
+        Number of successful ``get`` lookups.
+    misses:
+        Number of failed ``get`` lookups (including expired entries).
+    evictions:
+        Number of entries removed because the cache exceeded ``max_size``.
+    expirations:
+        Number of entries removed because their TTL elapsed.
+    """
+    hits: int = 0
+    misses: int = 0
+    evictions: int = 0
+    expirations: int = 0
+
+    @property
+    def total_lookups(self) -> int:
+        return self.hits + self.misses
+
+    @property
+    def hit_rate(self) -> float:
+        total = self.total_lookups
+        return self.hits / total if total else 0.0
+
+    def __repr__(self) -> str:  # pragma: no cover - trivial
+        return (
+            f"CacheStats(hits={self.hits}, misses={self.misses}, "
+            f"evictions={self.evictions}, expirations={self.expirations})"
+        )
+```
+
+Now the internal entry:
+
+```python
+@dataclass
+class _Entry(Generic[T]):
+    value: T
+    expires_at: Optional[float]
+```
+
+Now the main cache:
+
+```python
+class LRUCache(Generic[T]):
+    """Thread-safe LRU cache with per-entry TTL and size-based eviction."""
+
+    def __init__(
+        self,
+        max_size: int = 128,
+        ttl: Optional[float] = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if max_size <= 0:
+            raise ValueError("max_size must be a positive integer")
+        if ttl is not None and ttl <= 0:
+            raise ValueError("ttl must be positive or None")
+
+        self._max_size = max_size
+        self._default_ttl = ttl
+        self._clock = clock
+
+        self._store: "OrderedDict[Hashable, _Entry[T]]" = OrderedDict()
+        self._lock = threading.RLock()
+
+        # Statistics are guarded by _lock.
+        self._hits = 0
+        self._misses = 0
+        self._evictions = 0
+        self._expirations = 0
+
+    ...
+```
+
+Let me write the methods.
+
+```python
+    def get(self, key: Hashable) -> Optional[T]:
+        with self._lock:
+            entry = self._store.get(key)
+            if entry is None:
+                self._misses += 1
+                return None
+            if self._is_expired(entry):
+                self._remove(key, reason="expire")
+                self._misses += 1
+                return None
+            # Move to most-recently-used position.
+            self._store.move_to_end(key)
+            self._hits += 1
+            return entry.value
+
+    def set(self, key: Hashable, value: T, ttl: Optional[float] = None) -> None:
+        with self._lock:
+            expires_at = None
+            if ttl is not None:
+                expires_at = self._clock() + ttl
+            elif self._default_ttl is not None:
+                expires_at = self._clock() + self._default_ttl
+
+            if key in self._store:
+                self._store[key] = _Entry(value=value, expires_at=expires_at)
+                self._store.move_to_end(key)
+                return
+
+            self._store[key] = _Entry(value=value, expires_at=expires_at)
+            # Evict if over capacity.
+            while len(self._store) > self._max_size:
+                self._evict_lru()
+
+    def _evict_lru(self) -> None:
+        # Caller must hold the lock.
+        if not self._store:
+            return
+        _, expired_entry = self._store.popitem(last=False)
+        # Should we count eviction of expired entries? They're already expired.
+        # We'll count it as eviction since it's size-based removal.
+        self._evictions += 1
+```
+
+Wait, there's a subtlety. When we evict, we might evict an expired entry. Should that count as an eviction or an expiration? I think for simplicity, size-based eviction counts as eviction regardless. But it might be cleaner to prefer evicting expired entries first. Let me keep it simple: evict LRU, count as eviction.
+
+Actually, let me reconsider. When we call `set` and need to evict, we pop the LRU. If that LRU entry is expired, it's a bit ambiguous. I'll just count it as an eviction since the trigger was size. This is fine.
+
+Let me continue with other methods:
+
+```python
+    def pop(self, key: Hashable, default: Optional[T] = None) -> Optional[T]:
+        with self._lock:
+            entry = self._store.get(key)
+            if entry is None:
+                return default
+            if self._is_expired(entry):
+                self._remove(key, reason="expire")
+                return default
+            self._store.pop(key)
+            self._hits += 1  # hmm, is pop a hit?
+            return entry.value
+```
+
+Hmm, should `pop` count as a hit? I don't think so. Let me not count pop as a hit or miss. Let me just remove and return.
+
+Actually, let me reconsider the statistics semantics. Hits and misses are about lookups (get). pop/delete/remove are mutations. Let me keep it clean:
+- `get`: hit or miss
+- `pop`: returns value or default, doesn't affect hit/miss stats. But maybe counts as eviction if it removes due to size? No, pop is explicit. Let me not count pop in evictions either.
+
+Let me simplify:
+- `get`: increments hits or misses
+- `set`: may increment evictions
+- expired entries removed during get: increments expirations and misses
+- expired entries removed during set (when evicting): hmm
+
+Let me think about expiration counting more carefully. When an entry expires and is lazily removed:
+- During `get`: it's both an expiration and a miss. Count both.
+- During `set` eviction: if we evict an expired entry, count as expiration? Or eviction? 
+
+I think the cleanest approach: when we proactively remove an expired entry (whether during get or during set's eviction loop), count it as an expiration. When we remove due to size (non-expired), count as eviction.
+
+But during set, we evict LRU. If the LRU is expired, we should count expiration. Let me handle that in `_evict_lru` by checking expiry.
+
+Actually, let me restructure. Let me have a helper that removes an expired entry and counts it. And `_evict_lru` that removes the LRU entry (counting eviction), but first checks if it's expired.
+
+Hmm, this is getting complex. Let me simplify the semantics:
+
+- `_remove_expired(key)`: removes key if expired, returns True if it removed (and counts expiration).
+- On `get`: check expiry, if expired remove and count expiration + miss.
+- On `set`: after inserting, if over capacity, evict LRU. The LRU eviction counts as eviction. But if the LRU happens to be expired, I'll still count it as eviction (size-based). Actually, let me count it as expiration if expired, to be more accurate.
+
+Let me just make `_evict_lru` check: pop LRU. If it was expired, count expiration; else count eviction.
+
+Wait, but that changes the meaning. Let me think about what's most useful. I think:
+- Evictions = entries removed because cache was full (size-based)
+- Expirations = entries removed because they timed out
+
+If an entry is both expired AND being evicted due to size, it's ambiguous. I'll count it as an eviction because the trigger was size pressure. But actually, it's cleaner to count expiration if it's expired, because the entry "would have" expired anyway.
+
+You know what, let me just make a decision and document it clearly:
+- When an entry is lazily removed due to expiry (detected during get), count as expiration.
+- When an entry is removed due to size pressure during set, count as eviction (regardless of whether it was also expired).
+- I'll also add a `purge_expired()` method that proactively removes all expired entries, counting them as expirations.
+
+This is clean and well-defined. Let me go with that.
+
+Actually, let me reconsider. Let me make eviction smarter: when evicting due to size, if the LRU entry is expired, count it as expiration; otherwise eviction. This gives the most accurate picture. But it complicates the code slightly. Let me do it but document it.
+
+Hmm, let me keep it simpler and more predictable. I'll count size-based removals as evictions and time-based removals as expirations. During set, removals are size-based → evictions. During get, removals are time-based → expirations. During purge_expired, removals are time-based → expirations.
+
+Let me finalize this design.
+
+Let me also add `__contains__`, `__getitem__`, `__setitem__`, `__delitem__`, `__len__`, `clear`, `__repr__`, `__eq__` maybe.
+
+For `__getitem__`, should it raise KeyError on miss or return None? For a cache, I think raising KeyError is more Pythonic and consistent with dict. But then it doesn't update stats. Hmm. Let me make `__getitem__` raise KeyError on miss (like dict) and NOT count stats (since it's a lower-level operation). Actually, to keep stats consistent, maybe `__getitem__` should call `get` and raise KeyError if None. But that conflates "key not present" with "value is None". 
+
+Let me make `__getitem__` raise KeyError on miss, and it will call the internal logic. To avoid the None ambiguity, I'll use a sentinel. Actually, let me just have `__getitem__` raise KeyError and count a miss. Let me use a sentinel for "not found".
+
+Let me reconsider. I'll keep `get` returning `Optional[T]` (None on miss) and counting stats. `__getitem__` will raise KeyError on miss. To distinguish, I'll use a module-level sentinel `_MISSING`.
+
+Actually, for `__getitem__`, let me just do:
+```python
+def __getitem__(self, key):
+    value = self.get(key)
+    if value is None and key not in self._store:
+        raise KeyError(key)
+    return value
+```

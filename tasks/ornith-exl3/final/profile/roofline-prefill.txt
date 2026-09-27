@@ -1,0 +1,62 @@
+Peaks measured on this GPU: fp16 tensor core 121.8 TF/s, DRAM 830 GB/s (`profile/roofline.log`).
+
+### saver, 32028 tokens (traced TTFT 4.71 s = 6793 tok/s; kernel span 4.77 s, compute stream 4.34 s)
+
+| bucket (compute stream) | measured s | bound s | measured / bound | work |
+|---|---:|---:|---:|---|
+| attention (flashinfer + prefix dequant + merge + rope) | 0.79 | 0.69 | 1.15 | 84 TFLOP |
+| routed experts (exl3 GEMM, reconstruct, Hadamard, combine, act, align) | 1.81 | 0.53 | 3.43 | 64 TFLOP, 81 GB 5-bit weights |
+| dense projections (cuBLAS fp16 + weight reconstruct) | 1.00 | 0.74 | 1.36 | 90 TFLOP |
+| copies/casts (torch direct_copy, elementwise) | 0.47 | – | – | (no FLOP bound counted) |
+| GDN + conv + norms | 0.24 | – | – | (no FLOP bound counted) |
+| other | 0.02 | – | – | (no FLOP bound counted) |
+| idle / launch gaps on the compute stream | 0.43 | 0 | – | |
+| **total** | **4.77** | **1.96** | **2.43** | roofline 16355 tok/s |
+
+Side streams (overlapped): fast_index_copy_multi 1.15 s, _writeback_buffer_kernel 0.01 s, vectorized_elementwise_kernel 0.00 s
+
+### saver, 80029 tokens (traced TTFT 14.53 s = 5509 tok/s; kernel span 14.50 s, compute stream 13.82 s)
+
+| bucket (compute stream) | measured s | bound s | measured / bound | work |
+|---|---:|---:|---:|---|
+| attention (flashinfer + prefix dequant + merge + rope) | 4.86 | 4.31 | 1.13 | 525 TFLOP |
+| routed experts (exl3 GEMM, reconstruct, Hadamard, combine, act, align) | 4.57 | 1.32 | 3.45 | 161 TFLOP, 201 GB 5-bit weights |
+| dense projections (cuBLAS fp16 + weight reconstruct) | 2.54 | 1.85 | 1.38 | 225 TFLOP |
+| copies/casts (torch direct_copy, elementwise) | 1.19 | – | – | (no FLOP bound counted) |
+| GDN + conv + norms | 0.61 | – | – | (no FLOP bound counted) |
+| other | 0.05 | – | – | (no FLOP bound counted) |
+| idle / launch gaps on the compute stream | 0.68 | 0 | – | |
+| **total** | **14.50** | **7.48** | **1.94** | roofline 10704 tok/s |
+
+Side streams (overlapped): fast_index_copy_multi 2.91 s, _writeback_buffer_kernel 0.02 s, vectorized_elementwise_kernel 0.00 s
+
+### whole, 32028 tokens (traced TTFT 4.51 s = 7103 tok/s; kernel span 4.57 s, compute stream 4.29 s)
+
+| bucket (compute stream) | measured s | bound s | measured / bound | work |
+|---|---:|---:|---:|---|
+| attention (flashinfer + prefix dequant + merge + rope) | 0.79 | 0.69 | 1.14 | 84 TFLOP |
+| routed experts (exl3 GEMM, reconstruct, Hadamard, combine, act, align) | 1.84 | 0.53 | 3.48 | 64 TFLOP, 81 GB 5-bit weights |
+| dense projections (cuBLAS fp16 + weight reconstruct) | 0.94 | 0.74 | 1.28 | 90 TFLOP |
+| copies/casts (torch direct_copy, elementwise) | 0.44 | – | – | (no FLOP bound counted) |
+| GDN + conv + norms | 0.26 | – | – | (no FLOP bound counted) |
+| other | 0.02 | – | – | (no FLOP bound counted) |
+| idle / launch gaps on the compute stream | 0.28 | 0 | – | |
+| **total** | **4.57** | **1.96** | **2.33** | roofline 16355 tok/s |
+
+Side streams (overlapped): vectorized_elementwise_kernel 0.00 s, DeviceSelectSweepKernel 0.00 s, DeviceReduceSingleTileKernel 0.00 s
+
+### whole, 80029 tokens (traced TTFT 14.09 s = 5679 tok/s; kernel span 14.06 s, compute stream 13.51 s)
+
+| bucket (compute stream) | measured s | bound s | measured / bound | work |
+|---|---:|---:|---:|---|
+| attention (flashinfer + prefix dequant + merge + rope) | 4.83 | 4.31 | 1.12 | 525 TFLOP |
+| routed experts (exl3 GEMM, reconstruct, Hadamard, combine, act, align) | 4.56 | 1.32 | 3.45 | 161 TFLOP, 201 GB 5-bit weights |
+| dense projections (cuBLAS fp16 + weight reconstruct) | 2.35 | 1.85 | 1.27 | 225 TFLOP |
+| copies/casts (torch direct_copy, elementwise) | 1.09 | – | – | (no FLOP bound counted) |
+| GDN + conv + norms | 0.63 | – | – | (no FLOP bound counted) |
+| other | 0.05 | – | – | (no FLOP bound counted) |
+| idle / launch gaps on the compute stream | 0.55 | 0 | – | |
+| **total** | **14.06** | **7.48** | **1.88** | roofline 10704 tok/s |
+
+Side streams (overlapped): vectorized_elementwise_kernel 0.00 s, DeviceSelectSweepKernel 0.00 s, DeviceReduceSingleTileKernel 0.00 s
+

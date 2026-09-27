@@ -1,0 +1,5 @@
+{"task": "code", "prompt_tokens": 61, "completion_tokens": 3499, "finish": "length", "s": 23.41, "md5": "ace3bb26cf99e8543ae61de454d7492d"}
+{"task": "essay", "prompt_tokens": 58, "completion_tokens": 3499, "finish": "length", "s": 19.82, "md5": "13c6f95fe1bfbb6c29d29b3e31d24d40"}
+{"task": "math", "prompt_tokens": 113, "completion_tokens": 3499, "finish": "length", "s": 23.32, "md5": "66d7041030bf2531a377e618771bc624"}
+{"task": "translate", "prompt_tokens": 81, "completion_tokens": 1869, "finish": "stop", "s": 11.34, "md5": "543ea9be16e734c7c5d509241b3f216f"}
+{"task": "summary", "prompt_tokens": 20030, "completion_tokens": 3499, "finish": "length", "s": 26.89, "md5": "5770b0e1e46c37d5a9cd179ec561e04c"}

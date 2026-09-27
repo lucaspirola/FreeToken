@@ -1,0 +1,57 @@
+[kvnat-q6q5-384k] starting: model=Ornith-1.5-35B-A3B-exl3-5.0bpw-hq rows=-1 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/final@cf26ac4 venv=/home/lucas/ai/FreeToken/.venv launcher=systemd
+Running as unit: ft-measure-kvnat-q6q5-384k.service; invocation ID: 57a7d66e4c324ae2a7984beef6371332
+[kvnat-q6q5-384k] ready after 71s
+Sep 27 09:54:56 TESSERACT serve-default.sh[545705]: [2026-09-27|09:54:56|core|rank=0] INFO     Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode graphs enabled, prefill overlap on (layers assembled from resident slots + pool rows, no disk)
+Sep 27 09:54:56 TESSERACT serve-default.sh[545705]: [2026-09-27|09:54:56|core|rank=0] INFO     Mirror pool: reserve resolved to 768 rows (default: 3 * num_experts)
+Sep 27 09:55:09 TESSERACT serve-default.sh[545705]: [2026-09-27|09:55:09|core|rank=0] INFO     Mirror pool: 7397 rows pinned (13.65 GiB), 4532 cover the complement of 5708 GPU residents, 768 reserved, up to 2097 duplicates (a duplicate makes its expert's next eviction free of any host traffic)
+Sep 27 09:55:09 TESSERACT serve-default.sh[545705]: [2026-09-27|09:55:09|core|rank=0] INFO     Mirror pool: the coverage floor is 3616 of 5708 arena slots, leaving 2092 slots (3.86 GiB) the growable KV may still take
+Sep 27 09:55:09 TESSERACT serve-default.sh[545705]: [2026-09-27|09:55:09|core|rank=0] INFO     Allocating 393216 tokens for KV cache, K + V = 2.81 GiB
+Sep 27 09:55:58 TESSERACT serve-default.sh[545705]: [2026-09-27|09:55:58|core|rank=0] INFO     Prefill headroom: transient 1.12 GiB measured on a 8192-token chunk (empty prefix 1.12 GiB, after a 8192-token prefix 1.12 GiB, allocator peak 0.97 GiB); headroom 1.12 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 3616 -> 4944 of 5708 slots, 1.25 GiB free (target 1.24 GiB), 764 slots below the ratio plan
+Sep 27 09:55:58 TESSERACT serve-default.sh[545705]: [2026-09-27|09:55:58|core|rank=0] INFO     Startup geometry: memory ratio 1.00, runtime reserve 0.00 GiB; expert arena 4944 slots; KV 65536 tokens mapped of 393216 (0.55 GiB); 1.25 GiB free
+[kvnat-q6q5-384k] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8009, "ttft_s": 0.35, "prefill_tok_s": 23067.0, "gen_tokens": 127, "decode_tok_s": 174.9, "decode_tok_s_wall": 174.9, "total_s": 1.1, "ttft_mono_s": 0.347, "prefill_tok_s_mono": 23067.0, "total_mono_s": 1.07, "t_start_wall": 1790488583.814, "out_sha1": "63eebfa00ce83e09897869b567bc240711b32366", "gap1_ms": 35.9, "max_gap_ms": 37.8, "median_gap_ms": 5.4, "decode_tok_s_after_gap1": 182.6, "mirror_delta": {"swaps": 0, "free_evictions": 0, "writebacks": 0, "coverage_faults": 0, "starved_writebacks": 0, "buffer_free_evictions": 0, "retained_rows": 0, "staged_writebacks": 0, "stage_redirects": 0, "ring_full_fallbacks": 0, "wb_stage_rows": 0, "dma_writebacks": 0, "wb_peak_pending": 0, "idle_seed_rows": 0}, "decode_delta": {}}
+{"target": 8000, "pass": 2, "prompt_tokens": 8011, "ttft_s": 1.08, "prefill_tok_s": 7411.0, "gen_tokens": 127, "decode_tok_s": 170.6, "decode_tok_s_wall": 170.6, "total_s": 1.8, "ttft_mono_s": 1.081, "prefill_tok_s_mono": 7411.0, "total_mono_s": 1.82, "t_start_wall": 1790488584.885, "out_sha1": "72ab896f07072c3e4c9cd741a3b338e4f35cd421", "gap1_ms": 47.8, "max_gap_ms": 47.8, "median_gap_ms": 5.5, "decode_tok_s_after_gap1": 181.0, "mirror_delta": {"swaps": 498, "free_evictions": 498, "writebacks": 0, "coverage_faults": 0, "starved_writebacks": 0, "buffer_free_evictions": 0, "retained_rows": 497, "staged_writebacks": 0, "stage_redirects": 0, "ring_full_fallbacks": 0, "wb_stage_rows": 0, "dma_writebacks": 0, "wb_peak_pending": 0, "idle_seed_rows": 656}, "decode_delta": {}}
+[kvnat-q6q5-384k] post: python3 /home/lucas/ai/FreeToken-wt/final/tasks/ornith-exl3/final/natural_gen.py --doc /home/lucas/ai/FreeToken-wt/final/docs/nemotron.md --doc /home/lucas/ai/FreeToken-wt/final/docs/cli.md --max-tokens 3500 --out /home/lucas/ai/FreeToken-wt/final/tasks/ornith-exl3/final/results/kvnat-q6q5-384k-natural.json --texts /home/lucas/ai/FreeToken-wt/final/tasks/ornith-exl3/final/results/kvnat-q6q5-384k
+{"task": "code", "prompt_tokens": 61, "completion_tokens": 3499, "finish": "length", "s": 22.13, "md5": "2faeb7516cfd0716474dfafc0912a801"}
+{"task": "essay", "prompt_tokens": 58, "completion_tokens": 3499, "finish": "length", "s": 20.35, "md5": "082799fc53dffcf1daadb69e68d470b9"}
+{"task": "math", "prompt_tokens": 113, "completion_tokens": 3499, "finish": "length", "s": 22.95, "md5": "e6683a6fc1e641068702b438d7a2c3c5"}
+{"task": "translate", "prompt_tokens": 81, "completion_tokens": 1577, "finish": "stop", "s": 9.94, "md5": "0377cbff9cd7f05160ecd59827843136"}
+{"task": "summary", "prompt_tokens": 20030, "completion_tokens": 3499, "finish": "length", "s": 26.48, "md5": "9ce48b0091b3c7879400c40a3c01f85b"}
+{
+  "arm": "kvnat-q6q5-384k",
+  "model": "Ornith-1.5-35B-A3B-exl3-5.0bpw-hq",
+  "rows": "-1",
+  "commit": "cf26ac4",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q6q5",
+  "ram_gib": 16.86,
+  "rss_ready_gib": 17.83,
+  "devzero_gib": 0.08,
+  "ram_after_80k_gib": 16.97,
+  "rss_gib": 17.93,
+  "locked_gib": 0.0,
+  "anon_gib": 16.81,
+  "file_gib": 0.1,
+  "unevict_gib": 0.0,
+  "shmem_gib": 0.08,
+  "current_gib": 16.95,
+  "peak_current_gib": 17.54,
+  "gpu_mib": "15082",
+  "decode_8k_p1": 174.9,
+  "ttft_8k_p1": 0.35,
+  "total_8k_p1": 1.1,
+  "ttft_mono_8k_p1": 0.35,
+  "decode_8k": 170.6,
+  "ttft_8k": 1.08,
+  "total_8k": 1.8,
+  "ttft_mono_8k": 1.08,
+  "coverage_faults": 0,
+  "starved": 0,
+  "swaps": 263719,
+  "retained_rows": 162866,
+  "free_evict_rate": 0.619,
+  "buffer_free_evictions": 2500
+}
+74 arms -> /home/lucas/ai/FreeToken-wt/final/tasks/exclusive-expert-ram/results/sweep.tsv
+[kvnat-q6q5-384k] stopping

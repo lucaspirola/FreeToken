@@ -1,0 +1,377 @@
+The user has given me a detailed engineering design document about serving NVIDIA Nemotron models on FreeToken. They want me to:
+1. Summarize its main design decisions
+2. Critique them: which decisions look fragile, what measurements are missing, and what would I change first
+
+Let me carefully read through this document and extract the key design decisions, then provide a thoughtful critique.
+
+Let me organize the main design decisions:
+
+**Architecture context:**
+- Serving `NemotronHForCausalLM` family (Nemotron 3 Super 120B-A12B and Nemotron 3.5 Lightning 30B-A3B)
+- Hybrid Mamba-2 / full-attention / latent-MoE architecture
+- NVFP4 quantized experts
+
+**Main design decisions:**
+
+1. **Single-stream-only for Super, but Lightning is not single-stream**
+   - Super: ~160 MiB Mamba-2 state per sequence → one concurrent session
+   - Lightning: 47 MiB state → up to 16 concurrent requests
+
+2. **MoE offload backend** (`--moe-backend offload`)
+   - Experts live in host RAM, fetched via PCIe on demand
+   - NVFP4 expert banks ~15.4 GiB (Super ~60 GiB)
+   - `--moe-pageable-gpu` for WSL pin-budget overflow
+
+3. **Expert cache policy: LFU over LRU**
+   - At bs=16, LRU degenerates to 99.6% miss rate
+   - LFU halves to 51%, worth 1.80× throughput
+   - Rule of thumb: LFU above ~15% miss rate, LRU below
+
+4. **Triton expert GEMM over b12x/marlin/flashinfer**
+   - Triton wins microbenchmarks at most widths
+   - Backend chosen once at bank-load time (pins weight layout)
+
+5. **Growable KV vs fixed KV**
+   - Growable KV (`--kv-grow-step-tokens`) funds from expert cache
+   - BUT: costs the whole prefix cache on prefix-reuse-heavy workloads (565 teardowns, 89% pure loss)
+   - Decision: keep for multi-agent session serving, drop for prefix-reuse-heavy batch work
+
+6. **KV dtype: q8_0** (Phase 1 A/B)
+   - fp8_e4m3 flipped first tokens on cached-prefix reuse
+
+7. **CUDA graphs: dense to 16 for offload-MoE**
+   - Padded rows route their own experts (not free)
+   - Dense set [1..16] 1.074× faster than sparse
+
+8. **Launch profiles:**
+   - Default (single lane): 150-170 tok/s
+   - P1: bring-up
+   - P2: 16 concurrent (historical)
+
+9. **Prefill chunk size: 8192**
+   - Not a throughput lever (total work ~N²/2)
+   - Below 3K tokens goes host-bound
+
+10. **Speculative decoding: ngram, shipped 2026-09-05**
+    - `--spec-ngram-n 8`, `--spec-draft-len 8`, `--no-spec-adaptive`
+    - Greedy and single-stream only
+    - Copy-heavy traffic benefits, long context regresses
+
+11. **1M single-session profile**
+    - One resident session, others queue/spill
+    - Session spill to RAM then NVMe
+    - Look-ahead promotion, partial-prefix restore
+
+12. **Memory ratio: 1.00**
+    - Fixed by owner decision, not a tuning knob
+    - Engine predicts from config, measures prefill transient
+
+13. **Pin budget: FREETOKEN_PIN_BUDGET_GB=17**
+    - ≥ 15.41 GiB expert banks puts whole model in RAM
+
+14. **Context ceiling: 262K** (tokenizer model_max_length)
+
+15. **cache_type='hybrid_radix'** resolves from radix
+
+16. **Mamba-2 state dtype: fp32 required** (bf16 rejected)
+
+Now let me critique these. Let me think about which are fragile, what measurements are missing, and what I'd change first.
+
+**Fragile decisions:**
+
+1. **The 16-lane decode CUDA graph dense set** — this is geometry-specific and pinned by a test. The claim that "a padded row routes its own top-6 experts" means padding isn't free. This is a subtle interaction. The 1.074× is real but the 80 MiB cost and the fact that it's offload-MoE-specific... Actually this seems well-measured.
+
+2. **LFU cache policy** — the rule of thumb (LFU above 15% miss) is heuristic. It's measured but the threshold is empirical. Fragile because it depends on traffic distribution.
+
+3. **The `--kv-grow-step-tokens` decision** — this is interesting. The document itself flags that it "costs the whole prefix cache." The decision to keep it for multi-agent but drop for batch work is a manual, per-workload choice. This is fragile because it's a footgun — the default launch profiles... wait, actually the default profile does NOT use kv-grow-step-tokens (it uses fixed linear-state-slots). Let me re-read.
+
+Actually the default profile uses `--linear-state-slots 13` and growable KV `--kv-grow-step-tokens 65536`. Wait, let me re-read:
+
+"Single lane: `--max-running-requests 1 --linear-state-slots 13`, growable KV `--kv-grow-step-tokens 65536` up to `--num-tokens 1048576 --max-seq-len-override 1048576`"
+
+Hmm, so the default profile DOES use kv-grow-step-tokens. But then the section "kv-grow-step-tokens costs the whole prefix cache" is under P2 (historical 16-lane). Let me re-read.
+
+Actually the section is under P2's discussion. The conclusion is: "Keep `--kv-grow-step-tokens` for multi-agent session serving where KV is genuinely idle between turns and worth borrowing back; drop it for prefix-reuse-heavy batch work (replay, evaluation, teacher forcing)."
+
+But the default profile uses it... This is a bit contradictory. Wait, the default profile is single-lane (max-running-requests 1). With a single session, prefix reuse across requests isn't really a thing unless the same prompt repeats. Hmm. Actually with single lane, the prefix cache matters for repeated prompts within a session. Let me think...
+
+Actually, this is a real tension. The default profile uses growable KV, which the document says "costs the whole prefix cache on a prefix-reuse-heavy workload." But the default profile is single-lane serving. Is single-lane serving prefix-reuse-heavy? For agent workloads with long sessions, maybe not in the batch sense. But the teardown cost (89% pure loss) is concerning.
+
+Wait, but actually re-reading: the A/B shows identical-prefix probe hit rate 45.8% with growable KV vs 100% without. That's a big deal. If the default profile uses growable KV, then the default profile has this problem. Unless single-lane doesn't trigger the teardowns...
+
+Actually the teardowns happen "on every finished request" when `_growable_shrink_pending` is armed. So even single-lane would arm it. Hmm. But maybe with single lane and one resident session, the shrink doesn't actually evict much? The document says "before it knows a shrink is achievable" — so it evicts then checks. This seems like it would hurt even single-lane.
+
+This is a potential inconsistency I should flag. Actually, let me reconsider — maybe the default profile's single-lane means the prefix cache is small and the teardowns are less impactful, or maybe the soak numbers (18.6s p95) reflect this. But the A/B is clear: growable KV hurts prefix reuse.
+
+Actually, I think this is a genuine point of critique: the default serving profile uses `--kv-grow-step-tokens`, which the document's own measurement shows destroys prefix-cache hit rate (45.8% vs 100%). For a serving deployment (not batch), prefix reuse across sessions/requests is exactly what radix cache is for. So there's a real tension here.
+
+Hmm wait, but let me reconsider. The default profile is for serving. In serving, you have many different requests. Prefix reuse happens when requests share prefixes (e.g., system prompts, common instructions). The growable KV teardown would evict these. So yes, this is a real concern for the default profile.
+
+But actually — maybe the point is that with growable KV, the KV is funded from the expert cache, and the teardown is about shrinking. Let me not over-index on this. The document is internally a bit muddled here. I'll flag it.
+
+4. **The memory-ratio = 1.00 decision** — "an override, not a tuning knob." The engine predicts VRAM from config and measures the prefill transient. This is fragile because the prediction is "outside ±25%" triggers a WARN but doesn't fail. And the prediction model has to be right. If it's wrong, you OOM or waste VRAM. The document says on the 5080 it passed from the start, but that's one GPU.
+
+5. **Speculative decoding acceptance is traffic-dependent** — copy-heavy benefits 1.61×, but long context regresses 12×, and code/prose are neutral-to-slightly-negative. The default is 8, and 16 is a NO-GO. This is fragile because the benefit is entirely concentrated in copy-heavy agent traffic, and the gate mechanism (which costs 2 verify steps) "never closed" at 131K. So speculation is essentially only useful for short-context copy-heavy traffic, and even then it's a lottery (1.04× to 1.67×).
+
+6. **The MoE backend is chosen once at bank-load time** — this is a hard constraint. You can't use b12x for prefill and Triton for decode. This is fragile in the sense that it's a global decision with no per-operation tuning. But it's well-justified.
+
+7. **The 1M session profile relies on spill/restore** — this is fragile because it depends on NVMe bandwidth (1.3 GiB/s), look-ahead threads, fingerprint matching, etc. The restore is byte-identical which is good, but the whole thing is complex.
+
+**Measurements missing:**
+
+1. **End-to-end latency under real mixed traffic** — most measurements are synthetic needle prompts. Real agent traffic (copy-heavy, code, prose mixed) is only partially measured.
+
+2. **The prefix-cache hit rate under the default profile's actual serving workload** — the A/B is on replay/eval, not serving.
+
+3. **Multi-GPU / multi-host** — nothing about scaling beyond one GPU.
+
+4. **The memory prediction accuracy across different GPUs and model sizes** — only measured on 5080.
+
+5. **Cold-start / restart time** — the restore is measured (2.681s) but startup + model load isn't emphasized.
+
+6. **Cost of the dense CUDA graph set under memory pressure** — 80 MiB is small but under tight VRAM it matters.
+
+7. **LFU vs LRU under non-synthetic traffic** — the miss rates are measured on synthetic.
+
+8. **Speculative decoding on real (not copy-class) traffic** — the acceptance is measured on copy-heavy, but real traffic?
+
+9. **The interaction between growable KV and the expert cache under real serving** — the teardown cost.
+
+10. **Power/thermal** — nothing.
+
+11. **Tail latency (p99) under contention** — the soak mentions p95.
+
+**What I'd change first:**
+
+I'd want to prioritize based on impact and risk. Let me think about what's most fragile and highest-impact.
+
+1. **The growable KV / prefix cache tension in the default profile** — this is the most actionable. If the default serving profile destroys prefix-cache hit rate, that's a serving-quality problem. I'd investigate whether the default profile actually needs growable KV, or whether the teardown can be made conditional (only shrink when a shrink is actually achievable, rather than evict-then-check).
+
+Actually, the document itself describes the bug: `_maybe_shrink_growable_kv` "calls `evict_all_unlocked_prefixes()` — throwing away the entire prefix cache — *before* it knows a shrink is achievable. When it is not, the eviction is pure loss." This is a clear bug/inefficiency. Fixing this (check-then-evict) would be a high-value change.
+
+2. **The memory prediction** — if it's wrong, OOM. But it's guarded by WARN. Maybe should be a hard check.
+
+3. **Speculative decoding gate** — the gate never closes at long context, so speculation is effectively disabled there anyway. The complexity of the gate might not be worth it. But it's off by default.
+
+Let me also think about the overall architecture critique:
+
+- The whole thing is built around a single GPU (5080, 16 GB). This is a very specific hardware target. The design decisions (pin budget, memory ratio, single-stream for Super) are all GPU-specific. This makes the design fragile to hardware changes.
+
+- The reliance on PCIe for MoE experts (offload) means performance is fundamentally movement-bound (74% PCIe expert misses at bs=16). This is a fundamental constraint, not a bug.
+
+- The model is served as one concurrent session for Super because of Mamba-2 state. This is a fundamental memory constraint.
+
+Let me also note the documentation quality — it's extremely detailed and measurement-driven, which is good. But some decisions are presented as final when they're actually empirical heuristics (LFU threshold, draft length).
+
+Let me also think about the "latent MoE" for Super vs the non-latent for Lightning. The Super is 120B-A12B (12B active experts). The Lightning is 30B-A3B. Different geometries.
+
+Now, let me also think about what's genuinely well-done:
+- The measurement-driven approach is excellent. Every decision has a benchmark.
+- The A/B methodology is rigorous (same binary, alternating repeats, byte-identical outputs).
+- The corrections to earlier write-ups (retractions, NO-GO decisions) show scientific honesty.
+- The "rule of thumb" heuristics are clearly labeled as heuristics.
+
+Let me structure my response:
+
+1. **Summary of main design decisions** (grouped logically)
+2. **Critique: fragile decisions**
+3. **Critique: missing measurements**
+4. **What I'd change first**
+
+Let me be specific and use the document's own numbers.
+
+Let me think more carefully about the fragile points and make sure I'm being accurate.
+
+**Fragility 1: Growable KV in the default profile vs prefix cache.**
+The default profile uses `--kv-grow-step-tokens 65536`. The document's own A/B shows this drops identical-prefix probe hit rate from 100% to 45.8%, with 89% of teardowns being pure loss. For a serving deployment, this is concerning. The document says keep it for "multi-agent session serving where KV is genuinely idle between turns" — but the default profile IS multi-agent serving. So either the default profile is wrong, or the teardown behavior needs fixing. This is a real tension.
+
+Actually, wait. Let me reconsider.
+<<content>>
+The user has given me a detailed engineering design document about serving NVIDIA Nemotron models on FreeToken. They want me to:
+1. Summarize its main design decisions
+2. Critique them: which decisions look fragile, what measurements are missing, and what would I change first
+
+Let me carefully read through this document and extract the key design decisions, then provide a thoughtful critique.
+
+Let me organize the main design decisions:
+
+**Architecture context:**
+- Serving `NemotronHForCausalLM` family (Nemotron 3 Super 120B-A12B and Nemotron 3.5 Lightning 30B-A3B)
+- Hybrid Mamba-2 / full-attention / latent-MoE architecture
+- NVFP4 quantized experts
+
+**Main design decisions:**
+
+1. **Single-stream-only for Super, but Lightning is not single-stream**
+   - Super: ~160 MiB Mamba-2 state per sequence → one concurrent session
+   - Lightning: 47 MiB state → up to 16 concurrent requests
+
+2. **MoE offload backend** (`--moe-backend offload`)
+   - Experts live in host RAM, fetched via PCIe on demand
+   - NVFP4 expert banks ~15.4 GiB (Super ~60 GiB)
+   - `--moe-pageable-gpu` for WSL pin-budget overflow
+
+3. **Expert cache policy: LFU over LRU**
+   - At bs=16, LRU degenerates to 99.6% miss rate
+   - LFU halves to 51%, worth 1.80× throughput
+   - Rule of thumb: LFU above ~15% miss rate, LRU below
+
+4. **Triton expert GEMM over b12x/marlin/flashinfer**
+   - Triton wins microbenchmarks at most widths
+   - Backend chosen once at bank-load time (pins weight layout)
+
+5. **Growable KV vs fixed KV**
+   - Growable KV (`--kv-grow-step-tokens`) funds from expert cache
+   - BUT: costs the whole prefix cache on prefix-reuse-heavy workloads (565 teardowns, 89% pure loss)
+   - Decision: keep for multi-agent session serving, drop for prefix-reuse-heavy batch work
+
+6. **KV dtype: q8_0** (Phase 1 A/B)
+   - fp8_e4m3 flipped first tokens on cached-prefix reuse
+
+7. **CUDA graphs: dense to 16 for offload-MoE**
+   - Padded rows route their own experts (not free)
+   - Dense set [1..16] 1.074× faster than sparse
+
+8. **Launch profiles:**
+   - Default (single lane): 150-170 tok/s
+   - P1: bring-up
+   - P2: 16 concurrent (historical)
+
+9. **Prefill chunk size: 8192**
+   - Not a throughput lever (total work ~N²/2)
+   - Below 3K tokens goes host-bound
+
+10. **Speculative decoding: ngram, shipped 2026-09-05**
+    - `--spec-ngram-n 8`, `--spec-draft-len 8`, `--no-spec-adaptive`
+    - Greedy and single-stream only
+    - Copy-heavy traffic benefits, long context regresses
+
+11. **1M single-session profile**
+    - One resident session, others queue/spill
+    - Session spill to RAM then NVMe
+    - Look-ahead promotion, partial-prefix restore
+
+12. **Memory ratio: 1.00**
+    - Fixed by owner decision, not a tuning knob
+    - Engine predicts from config, measures prefill transient
+
+13. **Pin budget: FREETOKEN_PIN_BUDGET_GB=17**
+    - ≥ 15.41 GiB expert banks puts whole model in RAM
+
+14. **Context ceiling: 262K** (tokenizer model_max_length)
+
+15. **cache_type='hybrid_radix'** resolves from radix
+
+16. **Mamba-2 state dtype: fp32 required** (bf16 rejected)
+
+Now let me critique these. Let me think about which are fragile, what measurements are missing, and what I'd change first.
+
+**Fragile decisions:**
+
+1. **The 16-lane decode CUDA graph dense set** — this is geometry-specific and pinned by a test. The claim that "a padded row routes its own top-6 experts" means padding isn't free. This is a subtle interaction. The 1.074× is real but the 80 MiB cost and the fact that it's offload-MoE-specific... Actually this seems well-measured.
+
+2. **LFU cache policy** — the rule of thumb (LFU above 15% miss) is heuristic. It's measured but the threshold is empirical. Fragile because it depends on traffic distribution.
+
+3. **The `--kv-grow-step-tokens` decision** — this is interesting. The document itself flags that it "costs the whole prefix cache." The decision to keep it for multi-agent but drop for batch work is a manual, per-workload choice. This is fragile because it's a footgun — the default launch profiles... wait, actually the default profile does NOT use kv-grow-step-tokens (it uses fixed linear-state-slots). Let me re-read.
+
+Actually the default profile uses `--linear-state-slots 13` and growable KV `--kv-grow-step-tokens 65536`. Wait, let me re-read:
+
+"Single lane: `--max-running-requests 1 --linear-state-slots 13`, growable KV `--kv-grow-step-tokens 65536` up to `--num-tokens 1048576 --max-seq-len-override 1048576`"
+
+Hmm, so the default profile DOES use kv-grow-step-tokens. But then the section "kv-grow-step-tokens costs the whole prefix cache" is under P2 (historical 16-lane). Let me re-read.
+
+Actually the section is under P2's discussion. The conclusion is: "Keep `--kv-grow-step-tokens` for multi-agent session serving where KV is genuinely idle between turns and worth borrowing back; drop it for prefix-reuse-heavy batch work (replay, evaluation, teacher forcing)."
+
+But the default profile uses it... This is a bit contradictory. Wait, the default profile is single-lane (max-running-requests 1). With a single session, prefix reuse across requests isn't really a thing unless the same prompt repeats. Hmm. Actually with single lane, the prefix cache matters for repeated prompts within a session. Let me think...
+
+Actually, this is a real tension. The default profile uses growable KV, which the document says "costs the whole prefix cache on a prefix-reuse-heavy workload." But the default profile is single-lane serving. Is single-lane serving prefix-reuse-heavy? For agent workloads with long sessions, maybe not in the batch sense. But the teardown cost (89% pure loss) is concerning.
+
+Wait, but actually re-reading: the A/B shows identical-prefix probe hit rate 45.8% with growable KV vs 100% without. That's a big deal. If the default profile uses growable KV, then the default profile has this problem. Unless single-lane doesn't trigger the teardowns...
+
+Actually the teardowns happen "on every finished request" when `_growable_shrink_pending` is armed. So even single-lane would arm it. Hmm. But maybe with single lane and one resident session, the shrink doesn't actually evict much? The document says "before it knows a shrink is achievable" — so it evicts then checks. This seems like it would hurt even single-lane.
+
+This is a potential inconsistency I should flag. Actually, let me reconsider — maybe the default profile's single-lane means the prefix cache is small and the teardowns are less impactful, or maybe the soak numbers (18.6s p95) reflect this. But the A/B is clear: growable KV hurts prefix reuse.
+
+Actually, I think this is a genuine point of critique: the default serving profile uses `--kv-grow-step-tokens`, which the document's own measurement shows destroys prefix-cache hit rate (45.8% vs 100%). For a serving deployment (not batch), prefix reuse across sessions/requests is exactly what radix cache is for. So there's a real tension here.
+
+Hmm wait, but let me reconsider. The default profile is for serving. In serving, you have many different requests. Prefix reuse happens when requests share prefixes (e.g., system prompts, common instructions). The growable KV teardown would evict these. So yes, this is a real concern for the default profile.
+
+But actually — maybe the point is that with growable KV, the KV is funded from the expert cache, and the teardown is about shrinking. Let me not over-index on this. The document is internally a bit muddled here. I'll flag it.
+
+4. **The memory-ratio = 1.00 decision** — "an override, not a tuning knob." The engine predicts VRAM from config and measures the prefill transient. This is fragile because the prediction is "outside ±25%" triggers a WARN but doesn't fail. And the prediction model has to be right. If it's wrong, you OOM or waste VRAM. The document says on the 5080 it passed from the start, but that's one GPU.
+
+5. **Speculative decoding acceptance is traffic-dependent** — copy-heavy benefits 1.61×, but long context regresses 12×, and code/prose are neutral-to-slightly-negative. The default is 8, and 16 is a NO-GO. This is fragile because the benefit is entirely concentrated in copy-heavy agent traffic, and the gate mechanism (which costs 2 verify steps) "never closed" at 131K. So speculation is essentially only useful for short-context copy-heavy traffic, and even then it's a lottery (1.04× to 1.67×).
+
+6. **The MoE backend is chosen once at bank-load time** — this is a hard constraint. You can't use b12x for prefill and Triton for decode. This is fragile in the sense that it's a global decision with no per-operation tuning. But it's well-justified.
+
+7. **The 1M session profile relies on spill/restore** — this is fragile because it depends on NVMe bandwidth (1.3 GiB/s), look-ahead threads, fingerprint matching, etc. The restore is byte-identical which is good, but the whole thing is complex.
+
+**Measurements missing:**
+
+1. **End-to-end latency under real mixed traffic** — most measurements are synthetic needle prompts. Real agent traffic (copy-heavy, code, prose mixed) is only partially measured.
+
+2. **The prefix-cache hit rate under the default profile's actual serving workload** — the A/B is on replay/eval, not serving.
+
+3. **Multi-GPU / multi-host** — nothing about scaling beyond one GPU.
+
+4. **The memory prediction accuracy across different GPUs and model sizes** — only measured on 5080.
+
+5. **Cold-start / restart time** — the restore is measured (2.681s) but startup + model load isn't emphasized.
+
+6. **Cost of the dense CUDA graph set under memory pressure** — 80 MiB is small but under tight VRAM it matters.
+
+7. **LFU vs LRU under non-synthetic traffic** — the miss rates are measured on synthetic.
+
+8. **Speculative decoding on real (not copy-class) traffic** — the acceptance is measured on copy-heavy, but real traffic?
+
+9. **The interaction between growable KV and the expert cache under real serving** — the teardown cost.
+
+10. **Power/thermal** — nothing.
+
+11. **Tail latency (p99) under contention** — the soak mentions p95.
+
+**What I'd change first:**
+
+I'd want to prioritize based on impact and risk. Let me think about what's most fragile and highest-impact.
+
+1. **The growable KV / prefix cache tension in the default profile** — this is the most actionable. If the default serving profile destroys prefix-cache hit rate, that's a serving-quality problem. I'd investigate whether the default profile actually needs growable KV, or whether the teardown can be made conditional (only shrink when a shrink is actually achievable, rather than evict-then-check).
+
+Actually, the document itself describes the bug: `_maybe_shrink_growable_kv` "calls `evict_all_unlocked_prefixes()` — throwing away the entire prefix cache — *before* it knows a shrink is achievable. When it is not, the eviction is pure loss." This is a clear bug/inefficiency. Fixing this (check-then-evict) would be a high-value change.
+
+2. **The memory prediction** — if it's wrong, OOM. But it's guarded by WARN. Maybe should be a hard check.
+
+3. **Speculative decoding gate** — the gate never closes at long context, so speculation is effectively disabled there anyway. The complexity of the gate might not be worth it. But it's off by default.
+
+Let me also think about the overall architecture critique:
+
+- The whole thing is built around a single GPU (5080, 16 GB). This is a very specific hardware target. The design decisions (pin budget, memory ratio, single-stream for Super) are all GPU-specific. This makes the design fragile to hardware changes.
+
+- The reliance on PCIe for MoE experts (offload) means performance is fundamentally movement-bound (74% PCIe expert misses at bs=16). This is a fundamental constraint, not a bug.
+
+- The model is served as one concurrent session for Super because of Mamba-2 state. This is a fundamental memory constraint.
+
+Let me also note the documentation quality — it's extremely detailed and measurement-driven, which is good. But some decisions are presented as final when they're actually empirical heuristics (LFU threshold, draft length).
+
+Let me also think about the "latent MoE" for Super vs the non-latent for Lightning. The Super is 120B-A12B (12B active experts). The Lightning is 30B-A3B. Different geometries.
+
+Now, let me also think about what's genuinely well-done:
+- The measurement-driven approach is excellent. Every decision has a benchmark.
+- The A/B methodology is rigorous (same binary, alternating repeats, byte-identical outputs).
+- The corrections to earlier write-ups (retractions, NO-GO decisions) show scientific honesty.
+- The "rule of thumb" heuristics are clearly labeled as heuristics.
+
+Let me structure my response:
+
+1. **Summary of main design decisions** (grouped logically)
+2. **Critique: fragile decisions**
+3. **Critique: missing measurements**
+4. **What I'd change first**
+
+Let me be specific and use the document's own numbers.
+
+Let me think more carefully about the fragile points and make sure I'm being accurate.
+
+**Fragility 1: Growable KV in the default profile vs prefix cache.**
+The default profile uses `--kv-grow-step-tokens 65536`. The document's own A/B shows this drops identical-prefix probe hit rate from 100% to 45.8%, with 89% of teardowns being pure loss. For a serving deployment, this is concerning. The document says keep it for "multi-agent session serving where KV is genuinely idle between turns" — but the default profile IS multi-agent serving. So either the default profile is wrong, or the teardown behavior needs fixing. This is a real tension.
+
+Actually, wait. Let me reconsider.

@@ -1,0 +1,20 @@
+verify start 2026-09-27T13:14:00+04:00 load 1.90 4.55 5.25 code cf26ac4+serve-default
+tune-memory-ratio.sh is retired: running scripts/verify-memory-ratio.sh (ratio 1.00, no bisection)
+=== verify memory-ratio 1.00 (nohup, port 1920) 13:14:00
+--- startup memory lines
+[2026-09-27|13:14:08|core|rank=0] INFO     Startup memory prediction: prefill transient 0.88 GiB on a 8192-token chunk (peak layer gdn; full_attention 0.30 GiB, gdn 0.88 GiB, moe 0.52 GiB); graph pool 0.03 GiB (max bs 1); linear-state pool 0.78 GiB; KV floor 0.66 GiB (65536 tokens); non-expert weights 2.50 GiB; runtime reserve 0.00 GiB (growable KV: none, the arena is filled back around the measur
+[2026-09-27|13:14:08|core|rank=0] INFO     Memory prediction check: non-expert weights predicted 2.50 GiB, measured 2.69 GiB (-7%)
+[2026-09-27|13:14:11|core|rank=0] INFO     --moe-cache-auto resolved moe_cache_size=5623 num_pages=73364 (prefill_overlap=True)
+[2026-09-27|13:14:57|core|rank=0] INFO     Memory prediction check: CUDA graph pool (max bs 1) predicted 0.03 GiB, measured 0.04 GiB (-24%)
+[2026-09-27|13:15:17|core|rank=0] INFO     Prefill headroom: transient 1.10 GiB measured on a 8192-token chunk (empty prefix 1.10 GiB, after a 8192-token prefix 1.10 GiB, allocator peak 0.97 GiB); headroom 1.10 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 3720 -> 4864 of 5623 slots, 1.24 GiB free (target 1.22 GiB), 759 slots below the ratio plan
+[2026-09-27|13:15:17|core|rank=0] INFO     Memory prediction check: prefill transient (8192-token chunk, peak layer gdn) predicted 0.88 GiB, measured 1.10 GiB (-20%)
+[2026-09-27|13:15:17|core|rank=0] INFO     Memory prediction check: linear-state pool predicted 0.78 GiB, measured 0.78 GiB (+0%)
+[2026-09-27|13:15:17|core|rank=0] INFO     Startup geometry: memory ratio 1.00, runtime reserve 0.00 GiB; expert arena 4864 slots; KV 65536 tokens mapped of 262144 (0.74 GiB); 1.24 GiB free
+[2026-09-27|13:15:23|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 4864 -> 5448 (1.08 GiB committed, 1.21 GiB free before, target 0.12 GiB, 43.0 ms)
+[2026-09-27|13:15:24|core|rank=0] INFO     Prefill headroom reserved: MoE slots 5448 -> 4856 (1.09 GiB released, 1.23 GiB free, target 1.22 GiB, 34.4 ms)
+[2026-09-27|13:15:38|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 4496 -> 5088 (1.09 GiB committed, 1.23 GiB free before, target 0.12 GiB, 48.1 ms)
+[2026-09-27|13:15:40|core|rank=0] INFO     Prefill headroom reserved: MoE slots 5088 -> 4856 (0.43 GiB released, 1.23 GiB free, target 1.22 GiB, 19.3 ms)
+[2026-09-27|13:16:59|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 3776 -> 4368 (1.10 GiB committed, 1.22 GiB free before, target 0.12 GiB, 43.9 ms)
+--- PASS (ratio 1.00, ready 81s, captures 1, decode 147.9/145.1/109.2 tok/s, prediction WARNs 0)
+TSV: /home/lucas/ai/FreeToken-wt/final/tasks/ornith-exl3/final/results/verify-memory-ratio.tsv
+VERIFYDONE rc=0 2026-09-27T13:17:03+04:00

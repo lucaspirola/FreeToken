@@ -1,0 +1,34 @@
+nsys: NVIDIA Nsight Systems version 2025.6.3.541-256337736014v0 code cf26ac4 trace=graph
+=== whole-graph 2026-09-27T11:58:59+04:00 load 6.74 4.00 2.67 gpu 17 MiB
+Running as unit: ft-measure-nsys-whole-graph.service; invocation ID: a58eaecb9a3b4f92a5baa9365a5751b6
+ready after 0s
+Traceback (most recent call last):
+  File "/home/lucas/ai/FreeToken-wt/final/scripts/probe_decode.py", line 125, in <module>
+    rec = {"target": s, "pass": p, **run(s, tag)}
+                                     ^^^^^^^^^^^
+  File "/home/lucas/ai/FreeToken-wt/final/scripts/probe_decode.py", line 49, in run
+    with urllib.request.urlopen(req, timeout=3600) as r:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 521, in open
+    response = meth(req, response)
+               ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 630, in http_response
+    response = self.parent.error(
+               ^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 559, in error
+    return self._call_chain(*args)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 639, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 503: Service Unavailable
+Generating '/tmp/nsys-report-cdb9.qdstrm'
+[1/1] [0%                          ] whole-graph.nsys-rep[1/1] [0%                          ] whole-graph.nsys-rep[1/1] [========40%                 ] whole-graph.nsys-rep[1/1] [===========50%              ] whole-graph.nsys-rep[1/1] [=====================86%    ] whole-graph.nsys-rep[1/1] [=====================87%    ] whole-graph.nsys-rep[1/1] [========================100%] whole-graph.nsys-rep[1/1] [========================100%] whole-graph.nsys-rep
+Generated:
+	/home/lucas/ai/FreeToken-wt/final/tasks/ornith-exl3/final/profile/decode-nsys/whole-graph.nsys-rep
+NSYSDONE

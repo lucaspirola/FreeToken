@@ -1,0 +1,389 @@
+Let me carefully work through this problem.
+
+We have:
+- Pipe A fills the tank in 6 hours, so rate = 1/6 per hour.
+- Pipe B fills the tank in 9 hours, so rate = 1/9 per hour.
+- Drain empties the tank in 12 hours, so rate = -1/12 per hour.
+
+Timeline:
+- 8:00: A and drain opened.
+- 9:30: B opened (A and drain still open).
+- 11:00: A closed (B and drain still open).
+- Question: When is the tank full?
+
+Let me compute the amount of water at each stage.
+
+Stage 1: 8:00 to 9:30 (1.5 hours). Only A and drain open.
+Rate = 1/6 - 1/12 = 2/12 - 1/12 = 1/12 per hour.
+Amount after 1.5 hours = 1.5 × 1/12 = 1.5/12 = 1/8.
+
+Stage 2: 9:30 to 11:00 (1.5 hours). A, B, and drain open.
+Rate = 1/6 + 1/9 - 1/12.
+Let me compute: common denominator 36.
+1/6 = 6/36, 1/9 = 4/36, 1/12 = 3/36.
+Rate = 6/36 + 4/36 - 3/36 = 7/36 per hour.
+Amount added in 1.5 hours = 1.5 × 7/36 = 10.5/36 = 21/72 = 7/24.
+
+Total after 11:00 = 1/8 + 7/24.
+1/8 = 3/24. So total = 3/24 + 7/24 = 10/24 = 5/12.
+
+Stage 3: After 11:00, only B and drain open (A closed).
+Rate = 1/9 - 1/12.
+Common denominator 36: 1/9 = 4/36, 1/12 = 3/36.
+Rate = 4/36 - 3/36 = 1/36 per hour.
+Remaining to fill = 1 - 5/12 = 7/12.
+Time needed = (7/12) / (1/36) = (7/12) × 36 = 7 × 3 = 21 hours.
+
+So the tank fills 21 hours after 11:00.
+
+11:00 + 21 hours = 8:00 next day.
+
+Wait, let me double check. 11:00 + 21 hours. 11:00 + 13 hours = 24:00 (midnight). Then + 8 hours = 8:00. So 8:00 the next day.
+
+Hmm, that's a long time. Let me double-check the rates.
+
+Actually wait, let me reconsider. After 11:00, only B and drain. B fills at 1/9, drain empties at 1/12. Net = 1/9 - 1/12 = 1/36 per hour. That's very slow. So it takes a long time. 21 hours.
+
+So the tank is full at 8:00 the next day.
+
+Let me verify the total amount.
+
+Stage 1: 8:00-9:30, 1.5 hours, rate 1/12. Water = 1.5/12 = 0.125 = 1/8. ✓
+Stage 2: 9:30-11:00, 1.5 hours, rate 7/36. Water added = 1.5 × 7/36 = 10.5/36 = 0.29166... = 7/24. ✓
+Total at 11:00 = 1/8 + 7/24 = 3/24 + 7/24 = 10/24 = 5/12 ≈ 0.4167. ✓
+Stage 3: rate 1/36, need 7/12 = 0.5833 more. Time = 0.5833/0.02778 = 21 hours. ✓
+
+So full at 8:00 next day.
+
+Now, the problem asks to "generalise the method and prove that it always gives the right answer."
+
+Let me think about the general method.
+
+General method:
+- We have a set of "sources" (pipes filling) and "sinks" (drains), each with a constant rate.
+- At various times, subsets of these are open/closed.
+- The total volume is a piecewise-linear function of time, with slopes equal to the sum of rates of the currently-open components.
+- We track cumulative volume at each transition time.
+- We find the interval where the cumulative volume crosses 1 (full tank), and interpolate linearly within that interval.
+
+The key insight for the proof: Because each component contributes a constant rate, the volume added by each component over any time interval is proportional to the length of the interval (rate × time). The total volume is the sum of contributions, which is piecewise linear. Within each interval where the set of open components is constant, the volume is a linear function of time. So we can:
+1. Compute the volume at each transition point by summing rate × time over completed intervals.
+2. Identify the interval where volume crosses 1.
+3. Solve the linear equation within that interval.
+
+Let me formalize and prove.
+
+Let me set up the general framework.
+
+Setup:
+- Let there be $n$ components (pipes/drains). Component $i$ has rate $r_i$ (positive for filling, negative for draining).
+- Let the "schedule" specify, for each component, the time intervals during which it is open.
+- The tank starts empty (volume 0) and we want to find when volume reaches 1 (full).
+
+Actually, let me think about what "generalise the method" means. I think it means: generalize the approach of computing piecewise-linear volume and finding the crossing.
+
+Let me define things carefully.
+
+Let $t_0 < t_1 < t_2 < \dots < t_k$ be the transition times (times when some component opens or closes). Between consecutive transition times, the set of open components is constant, so the total rate $R_j = \sum_{i \in S_j} r_i$ is constant on interval $(t_{j-1}, t_j)$, where $S_j$ is the set of open components during that interval.
+
+The volume at time $t$ within interval $j$ (i.e., $t_{j-1} \le t \le t_j$) is:
+$$V(t) = V(t_{j-1}) + R_j (t - t_{j-1})$$
+where $V(t_{j-1})$ is the volume at the start of the interval.
+
+By induction, $V(t_{j-1}) = \sum_{m=1}^{j-1} R_m (t_m - t_{m-1})$.
+
+The volume function $V(t)$ is continuous and piecewise linear.
+
+We want to find $t^*$ such that $V(t^*) = 1$.
+
+Method:
+1. Compute $V(t_j)$ for $j = 0, 1, \dots, k$ iteratively: $V(t_0) = 0$, $V(t_j) = V(t_{j-1}) + R_j (t_j - t_{j-1})$.
+2. Find the smallest $j$ such that $V(t_j) \ge 1$ (assuming the tank eventually fills; if all rates are non-positive eventually, it never fills, etc.). Actually we need $V$ to reach 1 at some point.
+3. Within interval $j$, solve $V(t_{j-1}) + R_j (t^* - t_{j-1}) = 1$ for $t^*$:
+$$t^* = t_{j-1} + \frac{1 - V(t_{j-1})}{R_j}.$$
+
+This requires $R_j > 0$ (which must hold since $V$ is increasing through 1 in this interval).
+
+Proof of correctness:
+- The volume function is exactly piecewise linear as described, because each component's contribution is rate × time (a linear function of time on each interval), and sums of linear functions are linear.
+- Continuity: volume can't jump (water accumulates continuously).
+- Since $V$ is continuous and piecewise linear, and $V(t_{j-1}) < 1 \le V(t_j)$, there's a unique crossing in interval $j$ (as long as $R_j > 0$; if $R_j = 0$ then $V$ constant and can't cross unless already at 1). The linear equation gives the unique solution.
+
+Hmm, let me think about whether I should be more careful about the "prove it always gives the right answer" part.
+
+The claim to prove: The method (compute cumulative volumes at transition times, find the interval where volume crosses 1, linearly interpolate) correctly finds the time when the tank is full.
+
+Proof:
+1. Model each component's contribution. Component $i$ contributes volume $\int r_i \mathbb{1}[i \text{ open at } s] ds$. Since $r_i$ is constant and the "open" indicator is piecewise constant, each component's contribution is piecewise linear in $t$.
+
+Actually, let me think about it more simply. The total rate at time $s$ is $R(s) = \sum_i r_i \mathbb{1}[i \text{ open at } s]$. This is a step function (piecewise constant). The volume is $V(t) = \int_{t_0}^t R(s) ds$. Since $R$ is piecewise constant, $V$ is piecewise linear, with the breakpoints at the transition times. On each interval where $R$ is constant $= R_j$, $V$ has slope $R_j$.
+
+This is the rigorous justification. Then the method of computing $V$ at transition points and interpolating is just evaluating this piecewise linear function and inverting it.
+
+Let me also handle the edge cases:
+- If $V(t_j) = 1$ exactly at a transition time, then the tank is full exactly at $t_j$.
+- If the tank never reaches 1 (e.g., rates become net negative or zero and volume plateaus below 1), then it never fills.
+
+Let me also double check: in our problem, is the tank actually going to fill? After 11:00, rate is 1/36 > 0, so yes it keeps filling, just slowly. Good.
+
+Let me reconsider the problem statement to make sure I have the schedule right.
+
+"Starting empty, A and the drain are opened at 8:00, B is opened at 9:30, and A is closed at 11:00."
+
+So:
+- 8:00: A opens, drain opens.
+- 9:30: B opens. (A and drain still open.)
+- 11:00: A closes. (B and drain still open.)
+
+Yes, that's what I had.
+
+So the answer is 8:00 the next day.
+
+Let me re-examine the arithmetic once more.
+
+Rates:
+- A: +1/6 hr⁻¹
+- B: +1/9 hr⁻¹
+- Drain: -1/12 hr⁻¹
+
+Stage 1 (8:00–9:30, 1.5 hr): A + drain = 1/6 − 1/12 = 1/12 hr⁻¹.
+Volume = 1.5 × 1/12 = 1.5/12 = 0.125.
+
+Stage 2 (9:30–11:00, 1.5 hr): A + B + drain = 1/6 + 1/9 − 1/12.
+LCM(6,9,12) = 36.
+= 6/36 + 4/36 − 3/36 = 7/36 hr⁻¹.
+Volume added = 1.5 × 7/36 = 10.5/36 = 0.291667.
+
+Cumulative at 11:00 = 0.125 + 0.291667 = 0.416667 = 5/12. ✓
+
+Stage 3 (after 11:00): B + drain = 1/9 − 1/12 = 4/36 − 3/36 = 1/36 hr⁻¹.
+Remaining = 1 − 5/12 = 7/12.
+Time = (7/12)/(1/36) = (7/12) × 36 = 252/12 = 21 hr.
+
+11:00 + 21 hr = 8:00 next day.
+
+Great.
+
+Now let me write up the generalization and proof.
+
+Generalization:
+
+The method generalizes to any number of pipes/drains with any schedule of opening/closing. The key structural facts:
+
+1. Each pipe/drain has a constant rate (volume per unit time). This is the standard assumption in these problems.
+
+2. The net rate at any instant is the sum of the rates of the currently-open components. This is the principle of superposition / additivity of flows.
+
+3. Volume is the integral of net rate over time. Since net rate is piecewise constant (changes only at transition times), volume is piecewise linear.
+
+4. A piecewise linear continuous function can be evaluated at breakpoints by summing (rate × duration) over completed intervals, and the crossing of a target value is found by linear interpolation within the relevant interval.
+
+Proof of correctness:
+
+Let me write this more formally.
+
+Let the transition times be $0 = \tau_0 < \tau_1 < \dots < \tau_N$ (measuring time in hours from 8:00, or any reference). Actually let me use absolute times but it doesn't matter.
+
+Define $R_j$ = net rate during interval $(\tau_{j-1}, \tau_j)$, and $\Delta_j = \tau_j - \tau_{j-1}$ = duration.
+
+Claim: The volume at time $t$, $V(t)$, satisfies:
+- On $[\tau_{j-1}, \tau_j]$: $V(t) = V(\tau_{j-1}) + R_j (t - \tau_{j-1})$.
+- $V(\tau_0) = 0$ (starts empty).
+- $V(\tau_j) = V(\tau_{j-1}) + R_j \Delta_j$.
+
+Proof of claim: The net flow rate at time $s$ is $q(s) = \sum_{i} r_i \mathbb{1}[
+<<content>>
+Let me carefully work through this problem.
+
+We have:
+- Pipe A fills the tank in 6 hours, so rate = 1/6 per hour.
+- Pipe B fills the tank in 9 hours, so rate = 1/9 per hour.
+- Drain empties the tank in 12 hours, so rate = -1/12 per hour.
+
+Timeline:
+- 8:00: A and drain opened.
+- 9:30: B opened (A and drain still open).
+- 11:00: A closed (B and drain still open).
+- Question: When is the tank full?
+
+Let me compute the amount of water at each stage.
+
+Stage 1: 8:00 to 9:30 (1.5 hours). Only A and drain open.
+Rate = 1/6 - 1/12 = 2/12 - 1/12 = 1/12 per hour.
+Amount after 1.5 hours = 1.5 × 1/12 = 1.5/12 = 1/8.
+
+Stage 2: 9:30 to 11:00 (1.5 hours). A, B, and drain open.
+Rate = 1/6 + 1/9 - 1/12.
+Let me compute: common denominator 36.
+1/6 = 6/36, 1/9 = 4/36, 1/12 = 3/36.
+Rate = 6/36 + 4/36 - 3/36 = 7/36 per hour.
+Amount added in 1.5 hours = 1.5 × 7/36 = 10.5/36 = 21/72 = 7/24.
+
+Total after 11:00 = 1/8 + 7/24.
+1/8 = 3/24. So total = 3/24 + 7/24 = 10/24 = 5/12.
+
+Stage 3: After 11:00, only B and drain open (A closed).
+Rate = 1/9 - 1/12.
+Common denominator 36: 1/9 = 4/36, 1/12 = 3/36.
+Rate = 4/36 - 3/36 = 1/36 per hour.
+Remaining to fill = 1 - 5/12 = 7/12.
+Time needed = (7/12) / (1/36) = (7/12) × 36 = 7 × 3 = 21 hours.
+
+So the tank fills 21 hours after 11:00.
+
+11:00 + 21 hours = 8:00 next day.
+
+Wait, let me double check. 11:00 + 21 hours. 11:00 + 13 hours = 24:00 (midnight). Then + 8 hours = 8:00. So 8:00 the next day.
+
+Hmm, that's a long time. Let me double-check the rates.
+
+Actually wait, let me reconsider. After 11:00, only B and drain. B fills at 1/9, drain empties at 1/12. Net = 1/9 - 1/12 = 1/36 per hour. That's very slow. So it takes a long time. 21 hours.
+
+So the tank is full at 8:00 the next day.
+
+Let me verify the total amount.
+
+Stage 1: 8:00-9:30, 1.5 hours, rate 1/12. Water = 1.5/12 = 0.125 = 1/8. ✓
+Stage 2: 9:30-11:00, 1.5 hours, rate 7/36. Water added = 1.5 × 7/36 = 10.5/36 = 0.29166... = 7/24. ✓
+Total at 11:00 = 1/8 + 7/24 = 3/24 + 7/24 = 10/24 = 5/12 ≈ 0.4167. ✓
+Stage 3: rate 1/36, need 7/12 = 0.5833 more. Time = 0.5833/0.02778 = 21 hours. ✓
+
+So full at 8:00 next day.
+
+Now, the problem asks to "generalise the method and prove that it always gives the right answer."
+
+Let me think about the general method.
+
+General method:
+- We have a set of "sources" (pipes filling) and "sinks" (drains), each with a constant rate.
+- At various times, subsets of these are open/closed.
+- The total volume is a piecewise-linear function of time, with slopes equal to the sum of rates of the currently-open components.
+- We track cumulative volume at each transition time.
+- We find the interval where the cumulative volume crosses 1 (full tank), and interpolate linearly within that interval.
+
+The key insight for the proof: Because each component contributes a constant rate, the volume added by each component over any time interval is proportional to the length of the interval (rate × time). The total volume is the sum of contributions, which is piecewise linear. Within each interval where the set of open components is constant, the volume is a linear function of time. So we can:
+1. Compute the volume at each transition point by summing rate × time over completed intervals.
+2. Identify the interval where volume crosses 1.
+3. Solve the linear equation within that interval.
+
+Let me formalize and prove.
+
+Let me set up the general framework.
+
+Setup:
+- Let there be $n$ components (pipes/drains). Component $i$ has rate $r_i$ (positive for filling, negative for draining).
+- Let the "schedule" specify, for each component, the time intervals during which it is open.
+- The tank starts empty (volume 0) and we want to find when volume reaches 1 (full).
+
+Actually, let me think about what "generalise the method" means. I think it means: generalize the approach of computing piecewise-linear volume and finding the crossing.
+
+Let me define things carefully.
+
+Let $t_0 < t_1 < t_2 < \dots < t_k$ be the transition times (times when some component opens or closes). Between consecutive transition times, the set of open components is constant, so the total rate $R_j = \sum_{i \in S_j} r_i$ is constant on interval $(t_{j-1}, t_j)$, where $S_j$ is the set of open components during that interval.
+
+The volume at time $t$ within interval $j$ (i.e., $t_{j-1} \le t \le t_j$) is:
+$$V(t) = V(t_{j-1}) + R_j (t - t_{j-1})$$
+where $V(t_{j-1})$ is the volume at the start of the interval.
+
+By induction, $V(t_{j-1}) = \sum_{m=1}^{j-1} R_m (t_m - t_{m-1})$.
+
+The volume function $V(t)$ is continuous and piecewise linear.
+
+We want to find $t^*$ such that $V(t^*) = 1$.
+
+Method:
+1. Compute $V(t_j)$ for $j = 0, 1, \dots, k$ iteratively: $V(t_0) = 0$, $V(t_j) = V(t_{j-1}) + R_j (t_j - t_{j-1})$.
+2. Find the smallest $j$ such that $V(t_j) \ge 1$ (assuming the tank eventually fills; if all rates are non-positive eventually, it never fills, etc.). Actually we need $V$ to reach 1 at some point.
+3. Within interval $j$, solve $V(t_{j-1}) + R_j (t^* - t_{j-1}) = 1$ for $t^*$:
+$$t^* = t_{j-1} + \frac{1 - V(t_{j-1})}{R_j}.$$
+
+This requires $R_j > 0$ (which must hold since $V$ is increasing through 1 in this interval).
+
+Proof of correctness:
+- The volume function is exactly piecewise linear as described, because each component's contribution is rate × time (a linear function of time on each interval), and sums of linear functions are linear.
+- Continuity: volume can't jump (water accumulates continuously).
+- Since $V$ is continuous and piecewise linear, and $V(t_{j-1}) < 1 \le V(t_j)$, there's a unique crossing in interval $j$ (as long as $R_j > 0$; if $R_j = 0$ then $V$ constant and can't cross unless already at 1). The linear equation gives the unique solution.
+
+Hmm, let me think about whether I should be more careful about the "prove it always gives the right answer" part.
+
+The claim to prove: The method (compute cumulative volumes at transition times, find the interval where volume crosses 1, linearly interpolate) correctly finds the time when the tank is full.
+
+Proof:
+1. Model each component's contribution. Component $i$ contributes volume $\int r_i \mathbb{1}[i \text{ open at } s] ds$. Since $r_i$ is constant and the "open" indicator is piecewise constant, each component's contribution is piecewise linear in $t$.
+
+Actually, let me think about it more simply. The total rate at time $s$ is $R(s) = \sum_i r_i \mathbb{1}[i \text{ open at } s]$. This is a step function (piecewise constant). The volume is $V(t) = \int_{t_0}^t R(s) ds$. Since $R$ is piecewise constant, $V$ is piecewise linear, with the breakpoints at the transition times. On each interval where $R$ is constant $= R_j$, $V$ has slope $R_j$.
+
+This is the rigorous justification. Then the method of computing $V$ at transition points and interpolating is just evaluating this piecewise linear function and inverting it.
+
+Let me also handle the edge cases:
+- If $V(t_j) = 1$ exactly at a transition time, then the tank is full exactly at $t_j$.
+- If the tank never reaches 1 (e.g., rates become net negative or zero and volume plateaus below 1), then it never fills.
+
+Let me also double check: in our problem, is the tank actually going to fill? After 11:00, rate is 1/36 > 0, so yes it keeps filling, just slowly. Good.
+
+Let me reconsider the problem statement to make sure I have the schedule right.
+
+"Starting empty, A and the drain are opened at 8:00, B is opened at 9:30, and A is closed at 11:00."
+
+So:
+- 8:00: A opens, drain opens.
+- 9:30: B opens. (A and drain still open.)
+- 11:00: A closes. (B and drain still open.)
+
+Yes, that's what I had.
+
+So the answer is 8:00 the next day.
+
+Let me re-examine the arithmetic once more.
+
+Rates:
+- A: +1/6 hr⁻¹
+- B: +1/9 hr⁻¹
+- Drain: -1/12 hr⁻¹
+
+Stage 1 (8:00–9:30, 1.5 hr): A + drain = 1/6 − 1/12 = 1/12 hr⁻¹.
+Volume = 1.5 × 1/12 = 1.5/12 = 0.125.
+
+Stage 2 (9:30–11:00, 1.5 hr): A + B + drain = 1/6 + 1/9 − 1/12.
+LCM(6,9,12) = 36.
+= 6/36 + 4/36 − 3/36 = 7/36 hr⁻¹.
+Volume added = 1.5 × 7/36 = 10.5/36 = 0.291667.
+
+Cumulative at 11:00 = 0.125 + 0.291667 = 0.416667 = 5/12. ✓
+
+Stage 3 (after 11:00): B + drain = 1/9 − 1/12 = 4/36 − 3/36 = 1/36 hr⁻¹.
+Remaining = 1 − 5/12 = 7/12.
+Time = (7/12)/(1/36) = (7/12) × 36 = 252/12 = 21 hr.
+
+11:00 + 21 hr = 8:00 next day.
+
+Great.
+
+Now let me write up the generalization and proof.
+
+Generalization:
+
+The method generalizes to any number of pipes/drains with any schedule of opening/closing. The key structural facts:
+
+1. Each pipe/drain has a constant rate (volume per unit time). This is the standard assumption in these problems.
+
+2. The net rate at any instant is the sum of the rates of the currently-open components. This is the principle of superposition / additivity of flows.
+
+3. Volume is the integral of net rate over time. Since net rate is piecewise constant (changes only at transition times), volume is piecewise linear.
+
+4. A piecewise linear continuous function can be evaluated at breakpoints by summing (rate × duration) over completed intervals, and the crossing of a target value is found by linear interpolation within the relevant interval.
+
+Proof of correctness:
+
+Let me write this more formally.
+
+Let the transition times be $0 = \tau_0 < \tau_1 < \dots < \tau_N$ (measuring time in hours from 8:00, or any reference). Actually let me use absolute times but it doesn't matter.
+
+Define $R_j$ = net rate during interval $(\tau_{j-1}, \tau_j)$, and $\Delta_j = \tau_j - \tau_{j-1}$ = duration.
+
+Claim: The volume at time $t$, $V(t)$, satisfies:
+- On $[\tau_{j-1}, \tau_j]$: $V(t) = V(\tau_{j-1}) + R_j (t - \tau_{j-1})$.
+- $V(\tau_0) = 0$ (starts empty).
+- $V(\tau_j) = V(\tau_{j-1}) + R_j \Delta_j$.
+
+Proof of claim: The net flow rate at time $s$ is $q(s) = \sum_{i} r_i \mathbb{1}[

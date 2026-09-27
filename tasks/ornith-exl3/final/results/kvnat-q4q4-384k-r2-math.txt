@@ -1,0 +1,399 @@
+Let me carefully work through this problem.
+
+We have:
+- Pipe A fills the tank in 6 hours, so rate = 1/6 per hour.
+- Pipe B fills the tank in 9 hours, so rate = 1/9 per hour.
+- Drain empties the tank in 12 hours, so rate = -1/12 per hour.
+
+Timeline:
+- 8:00: A and drain opened. Tank is empty.
+- 9:30: B opened (A and drain still open).
+- 11:00: A closed (B and drain still open).
+- Find when tank is full.
+
+Let me compute the volume filled at each stage.
+
+Let me use hours as units, measuring time from 8:00.
+
+Stage 1: 8:00 to 9:30 (1.5 hours): A and drain open.
+Net rate = 1/6 - 1/12 = 2/12 - 1/12 = 1/12 per hour.
+Volume after 1.5 hours = 1.5 × 1/12 = 1.5/12 = 1/8.
+
+Stage 2: 9:30 to 11:00 (1.5 hours): A, B, and drain open.
+Net rate = 1/6 + 1/9 - 1/12.
+Let me compute: common denominator 36.
+1/6 = 6/36, 1/9 = 4/36, 1/12 = 3/36.
+Net rate = 6/36 + 4/36 - 3/36 = 7/36 per hour.
+Volume added in 1.5 hours = 1.5 × 7/36 = 10.5/36 = 21/72 = 7/24.
+
+Total after 11:00 = 1/8 + 7/24.
+1/8 = 3/24. So total = 3/24 + 7/24 = 10/24 = 5/12.
+
+Stage 3: after 11:00: B and drain open (A closed).
+Net rate = 1/9 - 1/12.
+Common denominator 36: 4/36 - 3/36 = 1/36 per hour.
+Remaining volume = 1 - 5/12 = 7/12.
+Time needed = (7/12) / (1/36) = (7/12) × 36 = 7 × 3 = 21 hours.
+
+So 21 hours after 11:00.
+11:00 + 21 hours = 8:00 next day.
+
+Wait, let me double check. 11:00 + 21 hours. 11:00 + 13 hours = 24:00 (midnight). Then + 8 hours = 8:00 next day. Yes.
+
+So the tank is full at 8:00 the next day.
+
+Hmm, let me double-check the net rate in stage 3. B fills at 1/9, drain empties at 1/12. Net = 1/9 - 1/12 = 4/36 - 3/36 = 1/36 per hour. Yes.
+
+Remaining = 1 - 5/12 = 7/12. Time = (7/12)/(1/36) = 7/12 × 36 = 252/12 = 21 hours. Yes.
+
+So 8:00 next day.
+
+Let me verify the total volume at 11:00 again.
+Stage 1: 1.5 hours at 1/12 = 1.5/12 = 0.125 = 1/8. ✓
+Stage 2: 1.5 hours at 7/36 = 10.5/36 = 0.29166... = 7/24. ✓
+Total = 1/8 + 7/24 = 3/24 + 7/24 = 10/24 = 5/12 ≈ 0.4167. ✓
+
+Remaining = 7/12 ≈ 0.5833.
+At 1/36 per hour, time = 0.5833/0.02778 = 21 hours. ✓
+
+So the answer is 8:00 the next day.
+
+Now, the second part: "generalise the method and prove that it always gives the right answer."
+
+Let me think about how to generalize.
+
+General method:
+- We have a set of "inflow" pipes with rates $r_i > 0$ and "outflow" (drain) with rate $d > 0$.
+- Each pipe/drain is open during certain time intervals.
+- The volume in the tank is the integral of the net rate over time.
+- Since rates are piecewise constant, the volume is piecewise linear in time.
+
+The general approach:
+1. Determine the sequence of "events" (times when a pipe opens or closes).
+2. Between consecutive events, the net rate is constant.
+3. Compute the cumulative volume at each event time.
+4. Find the interval where the cumulative volume crosses 1 (full tank).
+5. Within that interval, solve the linear equation for the exact time.
+
+Proof of correctness:
+The key insight is that the volume in the tank at time $t$ is:
+$$V(t) = \int_0^t r(s) \, ds$$
+where $r(s)$ is the net rate at time $s$. Since each pipe contributes a constant rate when open and 0 when closed, $r(s)$ is a step function, and $V(t)$ is continuous and piecewise linear.
+
+Actually, let me think about what "generalise the method" means more precisely. I think they want:
+
+General method for these problems:
+- Represent each source/sink as a rate.
+- The total volume is the sum over all sources of (rate × time open) minus sum over all sinks of (rate × time open).
+- Set equal to 1 (full tank) and solve.
+
+Let me formalize.
+
+Let the tank capacity be 1 (unit volume). Let there be $n$ filling pipes with rates $a_1, \ldots, a_n$ (fraction of tank per unit time) and $m$ drains with rates $b_1, \ldots, b_m$.
+
+Each pipe/drain $k$ is open during a set of time intervals. Let $T_k$ be the total time pipe $k$ is open during $[0, t]$. Then:
+$$V(t) = \sum_{\text{fills}} a_k T_k - \sum_{\text{drains}} b_k T_k$$
+
+We want to find $t$ such that $V(t) = 1$.
+
+The method:
+1. List all event times (when any pipe changes state).
+2. Sort them: $0 = t_0 < t_1 < \cdots < t_N$.
+3. On each interval $(t_{j-1}, t_j)$, the net rate $R_j$ is constant.
+4. Compute cumulative volume $V(t_j) = \sum_{i=1}^j R_i (t_i - t_{i-1})$.
+5. Find $j$ such that $V(t_{j-1}) < 1 \le V(t_j)$ (assuming $R_j > 0$; if the volume never reaches 1, the tank never fills).
+6. The exact time is $t_{j-1} + (1 - V(t_{j-1}))/R_j$.
+
+Proof:
+- $V(t)$ is continuous (integral of bounded function) and piecewise linear with slopes $R_j$.
+- On interval $j$, $V(t) = V(t_{j-1}) + R_j (t - t_{j-1})$.
+- This is a bijection from $[t_{j-1}, t_j]$ to $[V(t_{j-1}), V(t_j)]$ if $R_j > 0$.
+- So there's a unique $t$ in this interval with $V(t) = 1$ iff $V(t_{j-1}) \le 1 \le V(t_j)$.
+
+Actually, I should be careful: we need $V(t_{j-1}) < 1$ and $V(t_j) \ge 1$ and $R_j > 0$.
+
+Let me also address the subtlety: what if the tank overflows before we account for it? Well, the problem is well-posed as long as we stop at volume 1.
+
+Also, there's a subtlety about whether the tank can be "full" and then we keep adding. But the question asks when it first becomes full, so we find the first time $V(t) = 1$.
+
+Let me also think about whether the net rate could be negative in the final interval, meaning the tank never fills. In our problem, the final interval has positive rate, so it fills.
+
+Let me also mention the "work" interpretation: think of the tank as 1 unit of work. Each pipe does work at its rate. The total work done equals the volume. This is the standard "work" problem approach.
+
+Let me write up the solution clearly.
+
+Actually, let me reconsider the generalization. The problem says "generalise the method and prove that it always gives the right answer." So I should:
+1. State the general method.
+2. Prove it's correct.
+
+Let me think about the cleanest way to present this.
+
+General Method (the "net volume" or "accumulated work" method):
+
+Setup: Tank capacity normalized to 1. Filling pipes have positive rates, drains have negative rates (or we track them separately). Pipes open/close at specified times.
+
+Step 1: Identify all "switch times" — the times at which the set of open pipes changes. Include $t=0$ (start) and the times pipes open/close.
+
+Step 2: Order these times: $0 = \tau_0 < \tau_1 < \cdots < \tau_k$.
+
+Step 3: For each interval $[\tau_{i-1}, \tau_i]$, compute the constant net rate $R_i$ = (sum of rates of open fillers) − (sum of rates of open drains).
+
+Step 4: Compute cumulative volume at each switch time:
+$$V(\tau_i) = \sum_{j=1}^{i} R_j (\tau_i - \tau_{j-1}).$$
+
+Step 5: Find the first interval where $V$ reaches 1. That is, find $i$ with $V(\tau_{i-1}) < 1 \le V(\tau_i)$ and $R_i > 0$.
+
+Step 6: The fill time is
+$$t^* = \tau_{i-1} + \frac{1 - V(\tau_{i-1})}{R_i}.$$
+
+Proof of correctness:
+
+Lemma: The volume $V(t)$ at any time $t$ equals the net amount of water that has entered the tank, which is $\int_0^t R(s)\,ds$ where $R(s)$ is the instantaneous net rate.
+
+This holds because water is conserved: the rate of change of volume equals (inflow rate) − (outflow rate) = $R(s)$. Integrating gives $V(t) = V(0) + \int_0^t R(s) ds = \int_0^t R(s) ds$ since $V(0) = 0$ (starts empty).
+
+Since $R(s)$ is a step function (constant on each $[\tau_{i-1}, \tau_i)$), the integral is:
+$$V(t) = \sum_{j: \tau_j \le t} R_j (\tau_j - \tau_{j-1}) + R_i (t - \tau_{i-1})$$ for $t \in [\tau_{i-1}, \tau_i)$.
+
+This is continuous and piecewise linear.
+
+On interval $i$, $V(t) = V(\tau_{i-1}) + R_i (t - \tau_{i-1})$.
+
+The tank is full at the first time $t^*$ with $V(t^*) = 1$.
+
+If $R_i > 0$ on the relevant interval, $V$ is strictly increasing there, so there's a unique solution, given by the formula in Step 6.
+
+If no interval has $V$ reaching 1 (e.g., all remaining rates negative, or $V$ never reaches 1), the tank never fills.
+
+This proves the method.
+
+Let me also verify with the numbers once more, carefully.
+
+Rates:
+- A: +1/6 per hour.
+- B: +1/9 per hour.
+- Drain: −1/12 per hour.
+
+Switch times (measuring from 8:00 = 0):
+- 8:00 = 0: A and drain open.
+- 9:30 = 1.5: B opens.
+- 11:00 = 3: A closes.
+
+Intervals:
+1. $[0, 1.5]$: A + drain. $R_1 = 1/6 - 1/12 = 1/12$.
+2. $[1.5, 3]$: A + B + drain. $R_2 = 1/6 + 1/9 - 1/12$.
+   $= 6/36 + 4/36 - 3/36 = 7/36$.
+3. $[3, \infty)$: B + drain. $R_3 = 1/9 - 1/12 = 4/36 - 3/36 = 1/36$.
+
+Cumulative volumes:
+- $V(1.5) = R_1 \times 1.5 = (1/12)(1.5) = 1.5/12 = 1/8 = 0.125$.
+- $V(3) = V(1.5) + R_2 \times 1.5 = 1/8 + (7/36)(1.5) = 1/8 + 10.5/36$.
+  $10.5/36 = 21/72 = 7/24 ≈ 0.29167$.
+  $1/8 = 3/24$. Total = $10/24 = 5/12 ≈ 0.41667$.
+
+Since $V(3) = 5/12 < 1$, tank not full at 11:00.
+
+Interval 3: $R_3 = 1/36 > 0$. Need to go from $5/12$ to $1$, i.e., add $7/12$.
+Time = $(7/12)/(1/36) = (7/12)(36) = 252/12 = 21$ hours.
+
+$t^* = 3 + 21 = 24$ hours after 8:00 = 8:00 next
+<<content>>
+Let me carefully work through this problem.
+
+We have:
+- Pipe A fills the tank in 6 hours, so rate = 1/6 per hour.
+- Pipe B fills the tank in 9 hours, so rate = 1/9 per hour.
+- Drain empties the tank in 12 hours, so rate = -1/12 per hour.
+
+Timeline:
+- 8:00: A and drain opened. Tank is empty.
+- 9:30: B opened (A and drain still open).
+- 11:00: A closed (B and drain still open).
+- Find when tank is full.
+
+Let me compute the volume filled at each stage.
+
+Let me use hours as units, measuring time from 8:00.
+
+Stage 1: 8:00 to 9:30 (1.5 hours): A and drain open.
+Net rate = 1/6 - 1/12 = 2/12 - 1/12 = 1/12 per hour.
+Volume after 1.5 hours = 1.5 × 1/12 = 1.5/12 = 1/8.
+
+Stage 2: 9:30 to 11:00 (1.5 hours): A, B, and drain open.
+Net rate = 1/6 + 1/9 - 1/12.
+Let me compute: common denominator 36.
+1/6 = 6/36, 1/9 = 4/36, 1/12 = 3/36.
+Net rate = 6/36 + 4/36 - 3/36 = 7/36 per hour.
+Volume added in 1.5 hours = 1.5 × 7/36 = 10.5/36 = 21/72 = 7/24.
+
+Total after 11:00 = 1/8 + 7/24.
+1/8 = 3/24. So total = 3/24 + 7/24 = 10/24 = 5/12.
+
+Stage 3: after 11:00: B and drain open (A closed).
+Net rate = 1/9 - 1/12.
+Common denominator 36: 4/36 - 3/36 = 1/36 per hour.
+Remaining volume = 1 - 5/12 = 7/12.
+Time needed = (7/12) / (1/36) = (7/12) × 36 = 7 × 3 = 21 hours.
+
+So 21 hours after 11:00.
+11:00 + 21 hours = 8:00 next day.
+
+Wait, let me double check. 11:00 + 21 hours. 11:00 + 13 hours = 24:00 (midnight). Then + 8 hours = 8:00 next day. Yes.
+
+So the tank is full at 8:00 the next day.
+
+Hmm, let me double-check the net rate in stage 3. B fills at 1/9, drain empties at 1/12. Net = 1/9 - 1/12 = 4/36 - 3/36 = 1/36 per hour. Yes.
+
+Remaining = 1 - 5/12 = 7/12. Time = (7/12)/(1/36) = 7/12 × 36 = 252/12 = 21 hours. Yes.
+
+So 8:00 next day.
+
+Let me verify the total volume at 11:00 again.
+Stage 1: 1.5 hours at 1/12 = 1.5/12 = 0.125 = 1/8. ✓
+Stage 2: 1.5 hours at 7/36 = 10.5/36 = 0.29166... = 7/24. ✓
+Total = 1/8 + 7/24 = 3/24 + 7/24 = 10/24 = 5/12 ≈ 0.4167. ✓
+
+Remaining = 7/12 ≈ 0.5833.
+At 1/36 per hour, time = 0.5833/0.02778 = 21 hours. ✓
+
+So the answer is 8:00 the next day.
+
+Now, the second part: "generalise the method and prove that it always gives the right answer."
+
+Let me think about how to generalize.
+
+General method:
+- We have a set of "inflow" pipes with rates $r_i > 0$ and "outflow" (drain) with rate $d > 0$.
+- Each pipe/drain is open during certain time intervals.
+- The volume in the tank is the integral of the net rate over time.
+- Since rates are piecewise constant, the volume is piecewise linear in time.
+
+The general approach:
+1. Determine the sequence of "events" (times when a pipe opens or closes).
+2. Between consecutive events, the net rate is constant.
+3. Compute the cumulative volume at each event time.
+4. Find the interval where the cumulative volume crosses 1 (full tank).
+5. Within that interval, solve the linear equation for the exact time.
+
+Proof of correctness:
+The key insight is that the volume in the tank at time $t$ is:
+$$V(t) = \int_0^t r(s) \, ds$$
+where $r(s)$ is the net rate at time $s$. Since each pipe contributes a constant rate when open and 0 when closed, $r(s)$ is a step function, and $V(t)$ is continuous and piecewise linear.
+
+Actually, let me think about what "generalise the method" means more precisely. I think they want:
+
+General method for these problems:
+- Represent each source/sink as a rate.
+- The total volume is the sum over all sources of (rate × time open) minus sum over all sinks of (rate × time open).
+- Set equal to 1 (full tank) and solve.
+
+Let me formalize.
+
+Let the tank capacity be 1 (unit volume). Let there be $n$ filling pipes with rates $a_1, \ldots, a_n$ (fraction of tank per unit time) and $m$ drains with rates $b_1, \ldots, b_m$.
+
+Each pipe/drain $k$ is open during a set of time intervals. Let $T_k$ be the total time pipe $k$ is open during $[0, t]$. Then:
+$$V(t) = \sum_{\text{fills}} a_k T_k - \sum_{\text{drains}} b_k T_k$$
+
+We want to find $t$ such that $V(t) = 1$.
+
+The method:
+1. List all event times (when any pipe changes state).
+2. Sort them: $0 = t_0 < t_1 < \cdots < t_N$.
+3. On each interval $(t_{j-1}, t_j)$, the net rate $R_j$ is constant.
+4. Compute cumulative volume $V(t_j) = \sum_{i=1}^j R_i (t_i - t_{i-1})$.
+5. Find $j$ such that $V(t_{j-1}) < 1 \le V(t_j)$ (assuming $R_j > 0$; if the volume never reaches 1, the tank never fills).
+6. The exact time is $t_{j-1} + (1 - V(t_{j-1}))/R_j$.
+
+Proof:
+- $V(t)$ is continuous (integral of bounded function) and piecewise linear with slopes $R_j$.
+- On interval $j$, $V(t) = V(t_{j-1}) + R_j (t - t_{j-1})$.
+- This is a bijection from $[t_{j-1}, t_j]$ to $[V(t_{j-1}), V(t_j)]$ if $R_j > 0$.
+- So there's a unique $t$ in this interval with $V(t) = 1$ iff $V(t_{j-1}) \le 1 \le V(t_j)$.
+
+Actually, I should be careful: we need $V(t_{j-1}) < 1$ and $V(t_j) \ge 1$ and $R_j > 0$.
+
+Let me also address the subtlety: what if the tank overflows before we account for it? Well, the problem is well-posed as long as we stop at volume 1.
+
+Also, there's a subtlety about whether the tank can be "full" and then we keep adding. But the question asks when it first becomes full, so we find the first time $V(t) = 1$.
+
+Let me also think about whether the net rate could be negative in the final interval, meaning the tank never fills. In our problem, the final interval has positive rate, so it fills.
+
+Let me also mention the "work" interpretation: think of the tank as 1 unit of work. Each pipe does work at its rate. The total work done equals the volume. This is the standard "work" problem approach.
+
+Let me write up the solution clearly.
+
+Actually, let me reconsider the generalization. The problem says "generalise the method and prove that it always gives the right answer." So I should:
+1. State the general method.
+2. Prove it's correct.
+
+Let me think about the cleanest way to present this.
+
+General Method (the "net volume" or "accumulated work" method):
+
+Setup: Tank capacity normalized to 1. Filling pipes have positive rates, drains have negative rates (or we track them separately). Pipes open/close at specified times.
+
+Step 1: Identify all "switch times" — the times at which the set of open pipes changes. Include $t=0$ (start) and the times pipes open/close.
+
+Step 2: Order these times: $0 = \tau_0 < \tau_1 < \cdots < \tau_k$.
+
+Step 3: For each interval $[\tau_{i-1}, \tau_i]$, compute the constant net rate $R_i$ = (sum of rates of open fillers) − (sum of rates of open drains).
+
+Step 4: Compute cumulative volume at each switch time:
+$$V(\tau_i) = \sum_{j=1}^{i} R_j (\tau_i - \tau_{j-1}).$$
+
+Step 5: Find the first interval where $V$ reaches 1. That is, find $i$ with $V(\tau_{i-1}) < 1 \le V(\tau_i)$ and $R_i > 0$.
+
+Step 6: The fill time is
+$$t^* = \tau_{i-1} + \frac{1 - V(\tau_{i-1})}{R_i}.$$
+
+Proof of correctness:
+
+Lemma: The volume $V(t)$ at any time $t$ equals the net amount of water that has entered the tank, which is $\int_0^t R(s)\,ds$ where $R(s)$ is the instantaneous net rate.
+
+This holds because water is conserved: the rate of change of volume equals (inflow rate) − (outflow rate) = $R(s)$. Integrating gives $V(t) = V(0) + \int_0^t R(s) ds = \int_0^t R(s) ds$ since $V(0) = 0$ (starts empty).
+
+Since $R(s)$ is a step function (constant on each $[\tau_{i-1}, \tau_i)$), the integral is:
+$$V(t) = \sum_{j: \tau_j \le t} R_j (\tau_j - \tau_{j-1}) + R_i (t - \tau_{i-1})$$ for $t \in [\tau_{i-1}, \tau_i)$.
+
+This is continuous and piecewise linear.
+
+On interval $i$, $V(t) = V(\tau_{i-1}) + R_i (t - \tau_{i-1})$.
+
+The tank is full at the first time $t^*$ with $V(t^*) = 1$.
+
+If $R_i > 0$ on the relevant interval, $V$ is strictly increasing there, so there's a unique solution, given by the formula in Step 6.
+
+If no interval has $V$ reaching 1 (e.g., all remaining rates negative, or $V$ never reaches 1), the tank never fills.
+
+This proves the method.
+
+Let me also verify with the numbers once more, carefully.
+
+Rates:
+- A: +1/6 per hour.
+- B: +1/9 per hour.
+- Drain: −1/12 per hour.
+
+Switch times (measuring from 8:00 = 0):
+- 8:00 = 0: A and drain open.
+- 9:30 = 1.5: B opens.
+- 11:00 = 3: A closes.
+
+Intervals:
+1. $[0, 1.5]$: A + drain. $R_1 = 1/6 - 1/12 = 1/12$.
+2. $[1.5, 3]$: A + B + drain. $R_2 = 1/6 + 1/9 - 1/12$.
+   $= 6/36 + 4/36 - 3/36 = 7/36$.
+3. $[3, \infty)$: B + drain. $R_3 = 1/9 - 1/12 = 4/36 - 3/36 = 1/36$.
+
+Cumulative volumes:
+- $V(1.5) = R_1 \times 1.5 = (1/12)(1.5) = 1.5/12 = 1/8 = 0.125$.
+- $V(3) = V(1.5) + R_2 \times 1.5 = 1/8 + (7/36)(1.5) = 1/8 + 10.5/36$.
+  $10.5/36 = 21/72 = 7/24 ≈ 0.29167$.
+  $1/8 = 3/24$. Total = $10/24 = 5/12 ≈ 0.41667$.
+
+Since $V(3) = 5/12 < 1$, tank not full at 11:00.
+
+Interval 3: $R_3 = 1/36 > 0$. Need to go from $5/12$ to $1$, i.e., add $7/12$.
+Time = $(7/12)/(1/36) = (7/12)(36) = 252/12 = 21$ hours.
+
+$t^* = 3 + 21 = 24$ hours after 8:00 = 8:00 next

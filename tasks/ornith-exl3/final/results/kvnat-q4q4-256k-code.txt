@@ -1,0 +1,731 @@
+The user wants a complete, well-documented Python module that implements:
+1. A thread-safe LRU cache
+2. Per-entry time-to-live (TTL)
+3. Size-based eviction
+4. Hit/miss statistics
+5. A decorator for memoizing functions
+6. Type hints
+7. A set of unittest test cases
+
+Let me write a comprehensive module. I'll structure it well with:
+- Module docstring
+- Imports
+- Custom exceptions
+- The LRU cache class
+- The decorator
+- Test cases
+
+Let me think about the design:
+
+**LRUCache class:**
+- Uses `OrderedDict` for O(1) LRU operations
+- Uses `threading.Lock` for thread safety
+- Supports TTL per entry
+- Size-based eviction
+- Tracks hits and misses
+
+Let me design the API:
+
+```python
+class LRUCache:
+    def __init__(self, maxsize, ttl=None, time_func=time.monotonic):
+        ...
+    
+    def get(self, key, default=None):
+        ...
+    
+    def set(self, key, value):
+        ...
+    
+    def __getitem__(self, key):
+        ...
+    
+    def __setitem__(self, key, value):
+        ...
+    
+    def __contains__(self, key):
+        ...
+    
+    def __delitem__(self, key):
+        ...
+    
+    def pop(self, key, default=None):
+        ...
+    
+    def clear(self):
+        ...
+    
+    @property
+    def stats(self):
+        ...
+```
+
+For TTL, I'll store entries as tuples of `(value, expiry_time)`. When `ttl` is None, entries never expire. When `ttl` is a number, all entries use that TTL. We could also allow per-entry TTL via the `set` method.
+
+Let me think about thread safety. I'll use a `threading.RLock` so that re-entrant calls (like if a property accesses internal state) work. Actually, let me use a regular Lock but be careful. Actually, using RLock is safer for properties that access internal state. Let me use RLock.
+
+Wait, but there's a subtlety with statistics and locking. Let me be careful.
+
+Let me think about the expiry check. I'll have a helper `_is_expired` that checks if an entry has expired. I'll also have a method to purge expired entries lazily.
+
+Let me think about the time function. Using `time.monotonic` is best for measuring durations because it's not affected by system clock changes. But for tests, we might want to inject a fake clock. So I'll allow a `time_func` parameter.
+
+Let me write the code:
+
+```python
+"""
+threaded_lru.py
+A thread-safe LRU cache with per-entry TTL, size-based eviction,
+hit/miss statistics, and a memoization decorator.
+"""
+
+from __future__ import annotations
+
+import functools
+import threading
+import time
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, Generic, Hashable, Optional, Tuple, TypeVar, Union
+
+__all__ = [
+    "LRUCache",
+    "CacheStats",
+    "TTLCacheError",
+    "memoize",
+]
+
+T = TypeVar("T")
+
+
+class TTLCacheError(Exception):
+    """Base exception for the cache module."""
+
+
+@dataclass(frozen=True)
+class CacheStats:
+    """Immutable snapshot of cache statistics."""
+    hits: int = 0
+    misses: int = 0
+    evictions: int = 0
+    expirations: int = 0
+    set_calls: int = 0
+    size: int = 0
+
+    @property
+    def total_lookups(self) -> int:
+        return self.hits + self.misses
+
+    @property
+    def hit_rate(self) -> float:
+        total = self.total_lookups
+        return self.hits / total if total else 0.0
+```
+
+Now the main class:
+
+```python
+class LRUCache(Generic[T]):
+    """A thread-safe Least-Recently-Used cache.
+
+    Features:
+      * O(1) get/set backed by an ``OrderedDict``.
+      * Size-based eviction (``maxsize`` entries).
+      * Optional per-entry time-to-live (TTL).
+      * Thread-safe via a re-entrant lock.
+      * Hit/miss/eviction/expiry statistics.
+    """
+
+    def __init__(
+        self,
+        maxsize: Optional[int] = 16,
+        ttl: Optional[Union[int, float]] = None,
+        *,
+        time_func: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if maxsize is not None and maxsize <= 0:
+            raise ValueError("maxsize must be a positive integer or None")
+        self._maxsize = maxsize
+        self._ttl = ttl
+        self._time = time_func
+        self._store: "OrderedDict[Hashable, Tuple[Any, Optional[float]]]" = OrderedDict()
+        self._lock = threading.RLock()
+        # statistics
+        self._hits = 0
+        self._misses = 0
+        self._evictions = 0
+        self._expirations = 0
+        self._set_calls = 0
+
+    ...
+```
+
+Hmm, wait. Should maxsize=None mean unbounded? That's a common convention. Let me support that.
+
+Let me continue with the methods.
+
+```python
+    def get(self, key, default=None):
+        with self._lock:
+            if key not in self._store:
+                self._misses += 1
+                return default
+            value, expiry = self._store[key]
+            if self._is_expired(expiry):
+                self._pop(key, reason="expiry")
+                self._expirations += 1
+                self._misses += 1
+                return default
+            # mark as recently used
+            self._store.move_to_end(key)
+            self._hits += 1
+            return value
+```
+
+Wait, there's a subtlety. When we pop an expired entry, we increment expirations. But should we count it as a miss too? I think yes, a lookup on an expired entry is a miss. Let me keep it.
+
+Actually, let me reconsider. Some implementations count expired lookups as misses. That seems reasonable.
+
+Let me define `_is_expired`:
+
+```python
+    def _is_expired(self, expiry):
+        return expiry is not None and self._time() >= expiry
+```
+
+And `_pop`:
+
+```python
+    def _pop(self, key, reason):
+        # caller must hold lock
+        self._store.pop(key, None)
+        if reason == "eviction":
+            self._evictions += 1
+        elif reason == "expiry":
+            self._expirations += 1
+```
+
+Hmm, but I'm incrementing expirations in get() separately. Let me restructure to avoid double counting. Let me have `_pop` just remove and increment the appropriate counter, and not do it in the caller.
+
+Actually, let me be careful. Let me make `_pop` handle the counter. But then in `get`, when I pop for expiry, I increment expirations via `_pop`. Good.
+
+But wait, there's a subtle issue: when I pop an expired entry in `get`, I need to make sure I don't also count it elsewhere. Let me just have `_pop` increment the counter based on reason.
+
+Let me rewrite:
+
+```python
+    def get(self, key, default=None):
+        with self._lock:
+            entry = self._store.get(key)
+            if entry is None:
+                self._misses += 1
+                return default
+            value, expiry = entry
+            if self._is_expired(expiry):
+                self._pop(key, "expiry")
+                self._misses += 1
+                return default
+            self._store.move_to_end(key)
+            self._hits += 1
+            return value
+```
+
+Good.
+
+Now `set`:
+
+```python
+    def set(self, key, value, ttl=None):
+        with self._lock:
+            expiry = None
+            if ttl is not None:
+                expiry = self._time() + ttl
+            elif self._ttl is not None:
+                expiry = self._time() + self._ttl
+            if key in self._store:
+                self._store[key] = (value, expiry)
+                self._store.move_to_end(key)
+            else:
+                self._store[key] = (value, expiry)
+            self._set_calls += 1
+            self._evict_if_needed()
+```
+
+Wait, I need to be careful. If key exists, I update it. If not, I add it. Either way I set the value. Then I need to evict if over maxsize.
+
+Actually, let me handle the case where setting a new key exceeds maxsize. After adding, if len > maxsize, evict oldest.
+
+```python
+    def _evict_if_needed(self):
+        # caller must hold lock
+        if self._maxsize is None:
+            return
+        while len(self._store) > self._maxsize:
+            self._store.popitem(last=False)  # remove oldest
+            self._evictions += 1
+```
+
+Hmm, but there's a subtlety. When we set a key that already exists, we shouldn't count it as an eviction if we're just updating. But if we update an existing key, len doesn't grow, so no eviction. Good.
+
+But wait, what if we set a key that exists but is expired? We should probably remove the expired entry first, then add the new one. Otherwise we might evict a different entry. Actually, let me think. If the key exists but is expired, and we set a new value, we're overwriting it. That's fine. But should we count the old expired entry removal? Hmm, this is getting complicated. Let me keep it simple: setting overwrites regardless of expiry.
+
+Actually, there's a subtle bug. Consider: maxsize=1, store has key A (expired). We set key B. Now store has A and B, len=2 > 1, so we evict A (oldest). That's fine, A was expired anyway. But what if we set key A again (same key, expired)? Then we overwrite A, len stays 1, no eviction. Good.
+
+Let me also think: should `set` purge expired entries? Not necessarily, lazy expiry is fine. But there's a subtle issue with size accounting. If expired entries count toward maxsize, that could cause premature eviction of valid entries. Hmm. Let me think about whether to purge expired on set.
+
+Actually, a common approach: on set, if the store is full, first try to purge expired entries, then evict if still full. But this adds complexity. Let me keep it simple but mention it. Actually, let me purge expired entries lazily in a way that's correct.
+
+Hmm, let me reconsider. I think for correctness and simplicity, I'll do lazy expiry: entries are removed when accessed (in get) or when evicted. On set, if we exceed maxsize, we evict oldest regardless of expiry. This is a reasonable behavior. But it means expired entries occupy slots until accessed or evicted.
+
+Actually, to be more correct, let me purge expired entries when we need to evict. Let me add a helper that, when we need to make room, first purges expired entries, then evicts non-expired ones if still over.
+
+Let me think about this more carefully. Actually, I'll keep it simpler and just evict oldest. But I'll add a `purge_expired` method for users who want proactive cleanup. And I'll document the behavior.
+
+Hmm, but actually there's a real correctness concern. Let me think about a scenario:
+- maxsize = 2
+- set A (ttl 10s)
+- set B (ttl 10s)
+- wait 11s
+- set C
+
+Now, when we set C, store has A, B (both expired), and we add C → len 3 > 2. We evict oldest = A. Store has B, C. B is expired but still there. This is a bit odd but not incorrect per se. B will be removed on next access or eviction.
+
+Alternatively, if we purge expired first: when setting C, purge A and B (both expired), store empty, add C, len 1. Better.
+
+I think purging expired entries before evicting is the more correct behavior. Let me implement `_make_room`:
+
+```python
+    def _make_room(self):
+        # caller must hold lock
+        if self._maxsize is None:
+            return
+        # First, purge expired entries.
+        self._purge_expired()
+        # Then evict oldest until within capacity.
+        while len(self._store) > self._maxsize:
+            self._store.popitem(last=False)
+            self._evictions += 1
+
+    def _purge_expired(self):
+        # caller must hold lock
+        expired_keys = [
+            k for k, (_, expiry) in self._store.items()
+            if self._is_expired(expiry)
+        ]
+        for k in expired_keys:
+            self._store.pop(k, None)
+            self._expirations += 1
+```
+
+Hmm wait, but if I purge expired in `_make_room`, and also count expirations there, then in `get` I also count expirations. That's fine because they're different code paths. But I need to make sure I don't double count. In `get`, I pop a single expired entry and count it. In `_make_room`, I purge all and count each. These don't overlap because they're called at different times.
+
+But actually, there's a subtle issue: if I purge expired in `_make_room` during a `set`, and the user then does a `get` on one of those purged keys, it'll be a miss (correct, it's gone). Good.
+
+Let me reconsider whether to purge in `_make_room`. It adds a bit of complexity but is more correct. I'll include it but make it clear.
+
+Actually, let me reconsider. There's a question of whether purging expired entries during set should count as "expirations" in stats. I think yes, it's a legitimate expiration. OK.
+
+Hmm, but actually, I realize there might be an even simpler and cleaner approach. Let me reconsider the whole design to make it clean.
+
+Let me reconsider: I'll keep `_make_room` that purges expired then evicts. This is good.
+
+Now let me think about the `stats` property. I want to return a snapshot. Since stats are mutated under lock, I should copy them under lock.
+
+```python
+    @property
+    def stats(self) -> CacheStats:
+        with self._lock:
+            return CacheStats(
+                hits=self._hits,
+                misses=self._misses,
+                evictions=self._evictions,
+                expirations=self._expirations,
+                set_calls=self._set_calls,
+                size=len(self._store),
+            )
+```
+
+Now other methods:
+
+```python
+    def __getitem__(self, key):
+        value = self.get(key)
+        if value is None and key not in self:  # hmm, this is tricky
+            raise KeyError(key)
+        return value
+```
+
+Wait, `__getitem__` raising KeyError is tricky when the stored value is None or falsy. Let me handle it carefully. I'll check membership.
+
+Actually, `__contains__` needs to account for expiry. Let me define:
+
+```python
+    def __contains__(self, key):
+        with self._lock:
+            entry = self._store.get(key)
+<<content>>
+The user wants a complete, well-documented Python module that implements:
+1. A thread-safe LRU cache
+2. Per-entry time-to-live (TTL)
+3. Size-based eviction
+4. Hit/miss statistics
+5. A decorator for memoizing functions
+6. Type hints
+7. A set of unittest test cases
+
+Let me write a comprehensive module. I'll structure it well with:
+- Module docstring
+- Imports
+- Custom exceptions
+- The LRU cache class
+- The decorator
+- Test cases
+
+Let me think about the design:
+
+**LRUCache class:**
+- Uses `OrderedDict` for O(1) LRU operations
+- Uses `threading.Lock` for thread safety
+- Supports TTL per entry
+- Size-based eviction
+- Tracks hits and misses
+
+Let me design the API:
+
+```python
+class LRUCache:
+    def __init__(self, maxsize, ttl=None, time_func=time.monotonic):
+        ...
+    
+    def get(self, key, default=None):
+        ...
+    
+    def set(self, key, value):
+        ...
+    
+    def __getitem__(self, key):
+        ...
+    
+    def __setitem__(self, key, value):
+        ...
+    
+    def __contains__(self, key):
+        ...
+    
+    def __delitem__(self, key):
+        ...
+    
+    def pop(self, key, default=None):
+        ...
+    
+    def clear(self):
+        ...
+    
+    @property
+    def stats(self):
+        ...
+```
+
+For TTL, I'll store entries as tuples of `(value, expiry_time)`. When `ttl` is None, entries never expire. When `ttl` is a number, all entries use that TTL. We could also allow per-entry TTL via the `set` method.
+
+Let me think about thread safety. I'll use a `threading.RLock` so that re-entrant calls (like if a property accesses internal state) work. Actually, let me use a regular Lock but be careful. Actually, using RLock is safer for properties that access internal state. Let me use RLock.
+
+Wait, but there's a subtlety with statistics and locking. Let me be careful.
+
+Let me think about the expiry check. I'll have a helper `_is_expired` that checks if an entry has expired. I'll also have a method to purge expired entries lazily.
+
+Let me think about the time function. Using `time.monotonic` is best for measuring durations because it's not affected by system clock changes. But for tests, we might want to inject a fake clock. So I'll allow a `time_func` parameter.
+
+Let me write the code:
+
+```python
+"""
+threaded_lru.py
+A thread-safe LRU cache with per-entry TTL, size-based eviction,
+hit/miss statistics, and a memoization decorator.
+"""
+
+from __future__ import annotations
+
+import functools
+import threading
+import time
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, Generic, Hashable, Optional, Tuple, TypeVar, Union
+
+__all__ = [
+    "LRUCache",
+    "CacheStats",
+    "TTLCacheError",
+    "memoize",
+]
+
+T = TypeVar("T")
+
+
+class TTLCacheError(Exception):
+    """Base exception for the cache module."""
+
+
+@dataclass(frozen=True)
+class CacheStats:
+    """Immutable snapshot of cache statistics."""
+    hits: int = 0
+    misses: int = 0
+    evictions: int = 0
+    expirations: int = 0
+    set_calls: int = 0
+    size: int = 0
+
+    @property
+    def total_lookups(self) -> int:
+        return self.hits + self.misses
+
+    @property
+    def hit_rate(self) -> float:
+        total = self.total_lookups
+        return self.hits / total if total else 0.0
+```
+
+Now the main class:
+
+```python
+class LRUCache(Generic[T]):
+    """A thread-safe Least-Recently-Used cache.
+
+    Features:
+      * O(1) get/set backed by an ``OrderedDict``.
+      * Size-based eviction (``maxsize`` entries).
+      * Optional per-entry time-to-live (TTL).
+      * Thread-safe via a re-entrant lock.
+      * Hit/miss/eviction/expiry statistics.
+    """
+
+    def __init__(
+        self,
+        maxsize: Optional[int] = 16,
+        ttl: Optional[Union[int, float]] = None,
+        *,
+        time_func: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if maxsize is not None and maxsize <= 0:
+            raise ValueError("maxsize must be a positive integer or None")
+        self._maxsize = maxsize
+        self._ttl = ttl
+        self._time = time_func
+        self._store: "OrderedDict[Hashable, Tuple[Any, Optional[float]]]" = OrderedDict()
+        self._lock = threading.RLock()
+        # statistics
+        self._hits = 0
+        self._misses = 0
+        self._evictions = 0
+        self._expirations = 0
+        self._set_calls = 0
+
+    ...
+```
+
+Hmm, wait. Should maxsize=None mean unbounded? That's a common convention. Let me support that.
+
+Let me continue with the methods.
+
+```python
+    def get(self, key, default=None):
+        with self._lock:
+            if key not in self._store:
+                self._misses += 1
+                return default
+            value, expiry = self._store[key]
+            if self._is_expired(expiry):
+                self._pop(key, reason="expiry")
+                self._expirations += 1
+                self._misses += 1
+                return default
+            # mark as recently used
+            self._store.move_to_end(key)
+            self._hits += 1
+            return value
+```
+
+Wait, there's a subtlety. When we pop an expired entry, we increment expirations. But should we count it as a miss too? I think yes, a lookup on an expired entry is a miss. Let me keep it.
+
+Actually, let me reconsider. Some implementations count expired lookups as misses. That seems reasonable.
+
+Let me define `_is_expired`:
+
+```python
+    def _is_expired(self, expiry):
+        return expiry is not None and self._time() >= expiry
+```
+
+And `_pop`:
+
+```python
+    def _pop(self, key, reason):
+        # caller must hold lock
+        self._store.pop(key, None)
+        if reason == "eviction":
+            self._evictions += 1
+        elif reason == "expiry":
+            self._expirations += 1
+```
+
+Hmm, but I'm incrementing expirations in get() separately. Let me restructure to avoid double counting. Let me have `_pop` just remove and increment the appropriate counter, and not do it in the caller.
+
+Actually, let me be careful. Let me make `_pop` handle the counter. But then in `get`, when I pop for expiry, I increment expirations via `_pop`. Good.
+
+But wait, there's a subtle issue: when I pop an expired entry in `get`, I need to make sure I don't also count it elsewhere. Let me just have `_pop` increment the counter based on reason.
+
+Let me rewrite:
+
+```python
+    def get(self, key, default=None):
+        with self._lock:
+            entry = self._store.get(key)
+            if entry is None:
+                self._misses += 1
+                return default
+            value, expiry = entry
+            if self._is_expired(expiry):
+                self._pop(key, "expiry")
+                self._misses += 1
+                return default
+            self._store.move_to_end(key)
+            self._hits += 1
+            return value
+```
+
+Good.
+
+Now `set`:
+
+```python
+    def set(self, key, value, ttl=None):
+        with self._lock:
+            expiry = None
+            if ttl is not None:
+                expiry = self._time() + ttl
+            elif self._ttl is not None:
+                expiry = self._time() + self._ttl
+            if key in self._store:
+                self._store[key] = (value, expiry)
+                self._store.move_to_end(key)
+            else:
+                self._store[key] = (value, expiry)
+            self._set_calls += 1
+            self._evict_if_needed()
+```
+
+Wait, I need to be careful. If key exists, I update it. If not, I add it. Either way I set the value. Then I need to evict if over maxsize.
+
+Actually, let me handle the case where setting a new key exceeds maxsize. After adding, if len > maxsize, evict oldest.
+
+```python
+    def _evict_if_needed(self):
+        # caller must hold lock
+        if self._maxsize is None:
+            return
+        while len(self._store) > self._maxsize:
+            self._store.popitem(last=False)  # remove oldest
+            self._evictions += 1
+```
+
+Hmm, but there's a subtlety. When we set a key that already exists, we shouldn't count it as an eviction if we're just updating. But if we update an existing key, len doesn't grow, so no eviction. Good.
+
+But wait, what if we set a key that exists but is expired? We should probably remove the expired entry first, then add the new one. Otherwise we might evict a different entry. Actually, let me think. If the key exists but is expired, and we set a new value, we're overwriting it. That's fine. But should we count the old expired entry removal? Hmm, this is getting complicated. Let me keep it simple: setting overwrites regardless of expiry.
+
+Actually, there's a subtle bug. Consider: maxsize=1, store has key A (expired). We set key B. Now store has A and B, len=2 > 1, so we evict A (oldest). That's fine, A was expired anyway. But what if we set key A again (same key, expired)? Then we overwrite A, len stays 1, no eviction. Good.
+
+Let me also think: should `set` purge expired entries? Not necessarily, lazy expiry is fine. But there's a subtle issue with size accounting. If expired entries count toward maxsize, that could cause premature eviction of valid entries. Hmm. Let me think about whether to purge expired on set.
+
+Actually, a common approach: on set, if the store is full, first try to purge expired entries, then evict if still full. But this adds complexity. Let me keep it simple but mention it. Actually, let me purge expired entries lazily in a way that's correct.
+
+Hmm, let me reconsider. I think for correctness and simplicity, I'll do lazy expiry: entries are removed when accessed (in get) or when evicted. On set, if we exceed maxsize, we evict oldest regardless of expiry. This is a reasonable behavior. But it means expired entries occupy slots until accessed or evicted.
+
+Actually, to be more correct, let me purge expired entries when we need to evict. Let me add a helper that, when we need to make room, first purges expired entries, then evicts non-expired ones if still over.
+
+Let me think about this more carefully. Actually, I'll keep it simpler and just evict oldest. But I'll add a `purge_expired` method for users who want proactive cleanup. And I'll document the behavior.
+
+Hmm, but actually there's a real correctness concern. Let me think about a scenario:
+- maxsize = 2
+- set A (ttl 10s)
+- set B (ttl 10s)
+- wait 11s
+- set C
+
+Now, when we set C, store has A, B (both expired), and we add C → len 3 > 2. We evict oldest = A. Store has B, C. B is expired but still there. This is a bit odd but not incorrect per se. B will be removed on next access or eviction.
+
+Alternatively, if we purge expired first: when setting C, purge A and B (both expired), store empty, add C, len 1. Better.
+
+I think purging expired entries before evicting is the more correct behavior. Let me implement `_make_room`:
+
+```python
+    def _make_room(self):
+        # caller must hold lock
+        if self._maxsize is None:
+            return
+        # First, purge expired entries.
+        self._purge_expired()
+        # Then evict oldest until within capacity.
+        while len(self._store) > self._maxsize:
+            self._store.popitem(last=False)
+            self._evictions += 1
+
+    def _purge_expired(self):
+        # caller must hold lock
+        expired_keys = [
+            k for k, (_, expiry) in self._store.items()
+            if self._is_expired(expiry)
+        ]
+        for k in expired_keys:
+            self._store.pop(k, None)
+            self._expirations += 1
+```
+
+Hmm wait, but if I purge expired in `_make_room`, and also count expirations there, then in `get` I also count expirations. That's fine because they're different code paths. But I need to make sure I don't double count. In `get`, I pop a single expired entry and count it. In `_make_room`, I purge all and count each. These don't overlap because they're called at different times.
+
+But actually, there's a subtle issue: if I purge expired in `_make_room` during a `set`, and the user then does a `get` on one of those purged keys, it'll be a miss (correct, it's gone). Good.
+
+Let me reconsider whether to purge in `_make_room`. It adds a bit of complexity but is more correct. I'll include it but make it clear.
+
+Actually, let me reconsider. There's a question of whether purging expired entries during set should count as "expirations" in stats. I think yes, it's a legitimate expiration. OK.
+
+Hmm, but actually, I realize there might be an even simpler and cleaner approach. Let me reconsider the whole design to make it clean.
+
+Let me reconsider: I'll keep `_make_room` that purges expired then evicts. This is good.
+
+Now let me think about the `stats` property. I want to return a snapshot. Since stats are mutated under lock, I should copy them under lock.
+
+```python
+    @property
+    def stats(self) -> CacheStats:
+        with self._lock:
+            return CacheStats(
+                hits=self._hits,
+                misses=self._misses,
+                evictions=self._evictions,
+                expirations=self._expirations,
+                set_calls=self._set_calls,
+                size=len(self._store),
+            )
+```
+
+Now other methods:
+
+```python
+    def __getitem__(self, key):
+        value = self.get(key)
+        if value is None and key not in self:  # hmm, this is tricky
+            raise KeyError(key)
+        return value
+```
+
+Wait, `__getitem__` raising KeyError is tricky when the stored value is None or falsy. Let me handle it carefully. I'll check membership.
+
+Actually, `__contains__` needs to account for expiry. Let me define:
+
+```python
+    def __contains__(self, key):
+        with self._lock:
+            entry = self._store.get(key)

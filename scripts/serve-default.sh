@@ -2,41 +2,64 @@
 # Default serving profile for the persistent `freetoken-serve` system unit
 # (scripts/systemd/freetoken-serve.service.in, installed by scripts/systemd/install.sh).
 # Change the profile HERE, not in the unit, and never hand-type flags on another host:
-# this file IS the reference configuration (docs/nemotron.md "Default profile").
+# this file IS the reference configuration.
+#
+# Model (2026-09-27, exp/final-numbers): Ornith-1.5-35B-A3B EXL3 5.0 bpw
+# (~/ai/models/Ornith-1.5-35B-A3B-exl3-5.0bpw-hq), text only, served as `ornith` with the
+# qwen3 reasoning parser. Nemotron 3.5 Lightning is no longer served (owner, 2026-09-26).
+# Numbers behind every choice below: tasks/ornith-exl3/final/README.md.
 #
 # Single-lane profile: ONE session resident on the GPU at a time (max experts),
 # every other session checkpointed to RAM/disk and swapped back in on its turn.
 #   --linear-state-slots 13 = the 4-slot working set of that one lane + padding + 8 GDN
-#   snapshot slots (~80 MB each) so cold-session restores and prefix snapshots have
-#   somewhere to land; with 6 slots the soak logged "no GDN snapshot slot available for
-#   cold session restore" on every swap-in and fell back to a full re-prefill.
+#   snapshot slots so cold-session restores and prefix snapshots have somewhere to land
+#   (measured on Nemotron, 2026-09: with 6 slots the soak logged "no GDN snapshot slot
+#   available for cold session restore" on every swap-in and fell back to a full re-prefill;
+#   Ornith is a GDN hybrid too: 30 linear-attention + 10 full-attention layers).
 # Prefix pins stay at the default scope (shared: only a prefix two sessions share is pinned).
 #   A session's own haystack survives between its questions through its session lease and
-#   the RAM/disk spill, measured 2026-09-23: a 105K haystack hit 104,832 cached tokens
-#   across a 30K and a 961K handoff with nothing pinned (TTFT 0.5 s / 6.1 s). The
-#   --pin-prefix-scope session option (plan S13) is NOT used here: it added nothing in
-#   those runs and, when the pinned prefix plus the next session exceeded the KV pool, it
-#   blocked that session's admission indefinitely (tasks/exclusive-expert-ram/results/
-#   s13b-session-stuck.txt). A request without a session key gets no cache across
-#   requests: send session-id / x-session-id (or prompt_cache_key) to keep one.
-# KV starts at one 64K step and grows on demand up to 1M tokens, funded from the on-GPU
+#   the RAM/disk spill (measured on Nemotron 2026-09-23: a 105K haystack hit 104,832 cached
+#   tokens across a 30K and a 961K handoff with nothing pinned). The --pin-prefix-scope
+#   session option (plan S13) is NOT used here: when the pinned prefix plus the next session
+#   exceeded the KV pool, it blocked that session's admission indefinitely
+#   (tasks/exclusive-expert-ram/results/s13b-session-stuck.txt). A request without a session
+#   key gets no cache across requests: send session-id / x-session-id (or prompt_cache_key).
+# Context: 262144 tokens, the model's native maximum. 384K runs with
+#   FREETOKEN_EXTRA_ARGS="--rope-yarn-factor 2 --num-tokens 393216 --max-seq-len-override 393216"
+#   (measured: 384K prefill 2466-2521 tok/s, decode 90-92 tok/s on the RTX 5080), but static YaRN
+#   rescales RoPE at every position, so it is not the default.
+# KV: q8_0 keys and values. The lower lanes (K q8_0/V q6_0, K q6_0/V q5_0, q4_0) free
+#   0.3-1.25 GiB of KV at 256K for expert slots, but their prefill runs on the triton extend
+#   kernel (kernel/extend_flashinfer.py eligible() takes q8_0/fp8/unquantized only): 256K
+#   prefill 855-1441 tok/s vs 3569 on q8_0, and 256K decode 107-114 vs 123 tok/s.
+#
+# RAM SAVER ON (G3, a switch): the expert residency is the bounded host mirror
+# (FREETOKEN_MIRROR_EXPERT_RAM=1, FREETOKEN_MIRROR_HOST_ROWS=-1 = auto rows; the aliases
+# server/args.py resolves into --expert-residency mirror --moe-mirror-host-rows -1). Ornith's
+# routed experts are 19.28 GiB; the saver pins a ~13.4 GiB pool instead (ram_gib 16.6-16.8 vs
+# 19.9-22.2 for the whole model) at 91-92% of the whole model's natural-text decode, 91-97% of
+# its probe decode and 96-100% of its prefill (8K-256K, saver/whole in the same period). Set FREETOKEN_MIRROR_EXPERT_RAM=0 FREETOKEN_MIRROR_HOST_ROWS=0
+# (serve.env or the environment) for the whole model in RAM; then FREETOKEN_PIN_BUDGET_GB must be
+# >= the expert banks (19.28 GiB for Ornith EXL3) so every bank is cudaHostRegister'd + mlock'd
+# and no layer is silently moved to CPU decode. Pinning needs RLIMIT_MEMLOCK=infinity, which only
+# the system unit / the user@UID memlock drop-in grant (see scripts/systemd/install.sh). The host
+# needs the pinned set + ~4 GiB of free RAM at start.
+#
+# KV starts at one 64K step and grows on demand up to the ceiling, funded from the on-GPU
 # expert cache only when VRAM actually runs out. The expert cache is a fixed-capacity VMM
 # arena (FREETOKEN_EXPERT_ARENA=1, the alias server/args.py resolves into --expert-arena),
 # so growing or shrinking it never reallocates buffers
 # and decode CUDA graphs are never recaptured; FREETOKEN_GROWABLE_OVERLAP=1 keeps overlap
 # scheduling on while KV is growable.
 #
-# WHOLE MODEL IN RAM: FREETOKEN_PIN_BUDGET_GB must be >= the MoE expert banks (15.41 GiB
-# for Nemotron 3.5 Lightning NVFP4) so every bank is cudaHostRegister'd + mlock'd and no
-# layer is silently moved to CPU decode (the WSL auto budget of 0.4 x RAM is too small).
-# Pinning that much needs RLIMIT_MEMLOCK=infinity, which only the system unit / the
-# user@UID memlock drop-in grant (see scripts/systemd/install.sh). The host needs about
-# banks + 4 GiB of free RAM at start (28 GiB machines run it with ~6-7 GiB headroom).
-#
 # Per-host knobs (environment, or $HOME/.config/freetoken/serve.env which is sourced):
 #   FREETOKEN_MODEL               model directory
 #   FREETOKEN_PORT                default 1919
-#   FREETOKEN_PIN_BUDGET_GB       default 17 (>= expert banks; lower only if RAM is short)
+#   FREETOKEN_MIRROR_EXPERT_RAM   default 1 (RAM saver on); 0 with FREETOKEN_MIRROR_HOST_ROWS=0
+#                                 = whole model in RAM
+#   FREETOKEN_MIRROR_HOST_ROWS    default -1 (auto pool rows)
+#   FREETOKEN_PIN_BUDGET_GB       default 20 (>= Ornith EXL3's 19.28 GiB of expert banks, for
+#                                 the whole-model residency; lower only if RAM is short)
 #   FREETOKEN_HOST_RAM_RESERVE_GB default 0 (RAM the preflight keeps free; owner's choice)
 #   FREETOKEN_MEMORY_RATIO        default 1.00 of FREE VRAM (KV ceiling + expert cache),
 #                                 the engine's default too (2026-09-24, owner decision):
@@ -59,14 +82,16 @@ if [ -f "$HOST_ENV" ]; then
   . "$HOST_ENV"
 fi
 
-MODEL="${FREETOKEN_MODEL:-$HOME/ai/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4}"
+MODEL="${FREETOKEN_MODEL:-$HOME/ai/models/Ornith-1.5-35B-A3B-exl3-5.0bpw-hq}"
 CACHE="${FREETOKEN_CACHE_DIR:-$HOME/.cache/freetoken}"
 if [ -z "${TVM_FFI_CUDA_ARCH_LIST:-}" ]; then
   TVM_FFI_CUDA_ARCH_LIST=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d ' ' || true)
   export TVM_FFI_CUDA_ARCH_LIST="${TVM_FFI_CUDA_ARCH_LIST:-12.0}"
 fi
 
-export FREETOKEN_PIN_BUDGET_GB="${FREETOKEN_PIN_BUDGET_GB:-17}"
+export FREETOKEN_PIN_BUDGET_GB="${FREETOKEN_PIN_BUDGET_GB:-20}"
+export FREETOKEN_MIRROR_EXPERT_RAM="${FREETOKEN_MIRROR_EXPERT_RAM:-1}"
+export FREETOKEN_MIRROR_HOST_ROWS="${FREETOKEN_MIRROR_HOST_ROWS:--1}"
 export FREETOKEN_SCHEDULER_INVARIANT="${FREETOKEN_SCHEDULER_INVARIANT:-warn}"
 export FREETOKEN_EXPERT_ARENA="${FREETOKEN_EXPERT_ARENA:-1}"
 export FREETOKEN_ARENA_STEP_SLOTS="${FREETOKEN_ARENA_STEP_SLOTS:-8}"
@@ -74,30 +99,28 @@ export FREETOKEN_GROWABLE_OVERLAP="${FREETOKEN_GROWABLE_OVERLAP:-1}"
 
 mkdir -p "$CACHE"/{hidden-states,pooled-sink,spill,trace,logs}
 
-# Output cap: 65536, raised from 16384 on 2026-09-22. Measured on the needle
-# battery in this tree: a multi-hop question over a 20K haystack emitted 125119
-# characters of reasoning and hit finish_reason=length at exactly 16383
-# completion tokens, having already FOUND the fact but never reaching the
-# answer. The model card's own examples use max_tokens=16000 (README), which is
-# an example and not a ceiling: this model serves thinking ON by default and
-# reasoning is billed from the same budget as the answer, so a cap that merely
-# fits the answer truncates the thought that produces it. 65536 against a 1M
+# Output cap: 65536, raised from 16384 on 2026-09-22. Measured on Nemotron's needle
+# battery: a multi-hop question over a 20K haystack emitted 125119 characters of
+# reasoning and hit finish_reason=length at exactly 16383 completion tokens, having
+# already FOUND the fact but never reaching the answer. Ornith also serves thinking ON
+# by default, and reasoning is billed from the same budget as the answer, so a cap that
+# merely fits the answer truncates the thought that produces it (the ck6o-ck8o needle runs
+# on Ornith used 65536 and reached it on "ordering" at 21K/120K). 65536 against a 262144
 # context; FREETOKEN_MAX_OUTPUT_TOKENS overrides it per host.
 exec uv run ft serve \
   --model "$MODEL" \
   --host 127.0.0.1 --port "${FREETOKEN_PORT:-1919}" \
   --max-running-requests 1 --linear-state-slots 13 --kv-grow-step-tokens 65536 \
-  --num-tokens 1048576 --max-seq-len-override 1048576 --kv-cache-dtype q8_0 \
+  --text-model-only \
+  --num-tokens 262144 --max-seq-len-override 262144 --kv-cache-dtype q8_0 \
   --attention-backend triton --moe-backend offload --moe-cache-auto --moe-cache-policy lfu \
   --memory-ratio "${FREETOKEN_MEMORY_RATIO:-1.00}" --max-prefill-length 8192 \
   --host-ram-reserve-gb "${FREETOKEN_HOST_RAM_RESERVE_GB:-0}" \
   --session-spill-ram-gb 1 --session-spill-disk-gb 50 --session-spill-limit-gb 50 \
   --session-spill-dir "$CACHE/spill" \
   --enable-cache-report \
-  --served-model-name nemotron-3.5-lightning \
-  --served-model-alias nemotron-3.5-lightning-judge \
-  --served-model-alias nemotron-3.5-lightning-collect \
-  --reasoning-parser nemotron_v3 --tool-call-parser qwen3_coder \
+  --served-model-name ornith \
+  --reasoning-parser qwen3 --tool-call-parser qwen3_coder \
   --force-nonempty-content \
   --max-output-tokens "${FREETOKEN_MAX_OUTPUT_TOKENS:-65536}" \
   --trace-dir "$CACHE/trace" \

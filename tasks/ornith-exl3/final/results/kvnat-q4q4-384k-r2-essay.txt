@@ -1,0 +1,164 @@
+The user wants a detailed essay on the French Revolution covering:
+1. Economic and social causes
+2. The role of the Estates-General
+3. How events of 1789 changed European politics in the following decades
+
+They want clear sections and concrete historical examples.
+
+Let me write a comprehensive, well-structured essay. This is a historical/academic topic, so I should be accurate and detailed. Let me organize this into clear sections.
+
+Let me think about the content:
+
+**Economic and Social Causes:**
+
+Economic:
+- France's financial crisis - massive debt from wars (Seven Years' War, American Revolution), court expenses at Versailles
+- Regressive tax system - the First Estate (clergy) and Second Estate (nobility) were largely exempt from taxes
+- The Third Estate bore the tax burden
+- Bad harvests of 1788, grain shortages
+- Bread prices skyrocketed - by 1789 bread prices consumed huge portion of workers' income
+- Structural economic problems - internal tariffs, guilds, lack of internal market unity
+- Rise of a wealthy bourgeoisie (Third Estate) who were economically powerful but politically excluded
+- Cost of funding the American Revolution added ~2 billion livres to debt
+
+Social:
+- The three estates system - rigid hierarchy
+- First Estate: clergy (~100,000 people), owned ~10% of land, paid voluntary "donation"
+- Second Estate: nobility (~400,000), owned ~20-25% of land, held high offices, exempt from most taxes, paid the taille in a reduced form
+- Third Estate: everyone else (~25-27 million people) - included bourgeoisie, sans-culottes, peasants, lawyers, etc.
+- Enlightenment ideas challenged the ancien régime
+- The bourgeoisie resented their political exclusion despite wealth
+- Nobility's privilege - venal offices, feudal dues owed by peasants to lords
+- Intellectual climate - Voltaire, Rousseau, Montesquieu, Diderot
+
+**Role of the Estates-General:**
+
+- Called by Louis XVI in May 1789 to solve the financial crisis
+- Last called since 1614
+- Three estates, one vote each (which disadvantaged the Third Estate)
+- Dispute over voting by order vs. by head - Third Estate wanted double representation and voting by head
+- Third Estate got double representation (1789)
+- Assembly of notables (1787) advised calling the Estates-General
+- The Third Estate declared itself the National Assembly (June 1789)
+- The Tennis Court Oath (June 20, 1789)
+- National Assembly invited First and Second Estate members to join
+
+**Events of 1789:**
+
+- Storming of the Bastille (July 14, 1789)
+- Great Fear (summer 1789)
+- Abolition of feudalism (August 4, 1789)
+- Declaration of the Rights of Man and of the Citizen (August 26, 1789)
+- Women's March on Versailles (October 5-6, 1789)
+- National Assembly became Constituent Assembly
+- Civil Constitution of the Clergy (1790)
+- Flight to Varennes (1791) - though this is 1791
+
+**How 1789 changed European politics in following decades:**
+
+- Spread of revolutionary ideals - nationalism, liberalism
+- Napoleonic era - Napoleon conquered much of Europe
+- Napoleonic Code spread legal reforms
+- Metternich and the Concert of Europe / Congress of Vienna (1815) - restoration and conservative order
+- Revolutions of 1830 and 1848
+- Spread of nationalism in Germany, Italy
+- Decembrist revolt in Russia (1825)
+- Greek independence
+- Impact on Latin American independence movements (Bolivar inspired by Enlightenment/revolutionary ideas)
+- End of feudalism in parts of Europe
+- Secularization, administrative reforms
+
+Let me write this as a proper essay with clear sections. I'll aim for a detailed but readable essay. I should use headers to organize.
+
+Let me be careful with historical accuracy:
+- Louis XVI called the Estates-General
+- The financial minister was Calonne, then Necker
+- Assembly of Notables met in 1787
+- Double representation granted to Third Estate in December 1788
+- Estates-General met May 5, 1789 at Versailles
+- Third Estate declared National Assembly June 17, 1789
+- Tennis Court Oath June 20, 1789
+- Bastille stormed July 14, 1789
+- August 4, 1789 - abolition of feudal privileges
+- August 26, 1789 - Declaration of Rights of Man
+- October 5-6, 1789 - Women's March on Versailles
+- Louis XVI died January 21, 1793 (executed)
+- Napoleon crowned Emperor December 1804
+- Congress of Vienna 1814-1815
+- Napoleonic Code 1804
+
+Let me write a comprehensive essay. I'll aim for maybe 1500-2500 words given the request for "detailed."
+
+I'll use clear section headers. Let me structure:
+
+1. Introduction
+2. Economic Causes
+3. Social Causes
+4. The Estates-General and the Collapse of the Ancien Régime
+5. The Events of 1789
+6. The European Legacy of 1789
+7. Conclusion
+
+Let me write this out.
+<<content>>
+# The French Revolution: Causes, Catalysts, and Consequences
+
+## Introduction
+
+Few events reshaped the modern world as decisively as the French Revolution. What began as a fiscal impasse resolved into the collapse of a thousand-year-old social order and set in motion political ideologies—liberalism, nationalism, and radical democracy—that would dominate Europe for the next century. To understand the Revolution, one must examine the intersecting economic pressures, the rigid social hierarchy of the *ancien régime*, the fateful convocation of the Estates-General, and the explosive events of 1789 that made compromise impossible.
+
+## Economic Causes
+
+France's financial crisis was the immediate trigger for the Revolution, though it was rooted in structural failures that predated the 1780s. By the 1780s, the crown was effectively bankrupt. Decades of warfare had drained the treasury: France's involvement in the Seven Years' War (1756–1763) cost it its North American empire, and the subsequent support for the American revolutionaries against Britain added roughly 1 billion livres to the national debt. Interest payments alone consumed the majority of annual revenue, leaving the government unable to fund new borrowing.
+
+Several finance ministers attempted reform. Charles Alexandre de Calonne, controller-general in 1787, recognized that the tax system was the core problem and proposed a universal land tax that would have taxed the privileged estates. When the Assembly of Notables—a body of aristocrats and prelates summoned to approve the reform—refused, Calonne was dismissed and replaced by Jacques Necker, who revealed (perhaps misleadingly) that the deficit was even worse than feared.
+
+Compounding the debt was a series of poor harvests. The harvest of 1788 was devastated by hail and frost, and a harsh winter followed. Grain became scarce, and bread prices soared to unprecedented levels. By 1789, a Parisian laborer might spend as much as 80 percent of his income on bread. This "subsistence crisis" hit the urban poor and the rural peasant hardest, turning economic anxiety into outright desperation and anger.
+
+Underlying these immediate problems was a fundamentally outdated economic structure. France retained internal tariffs between provinces, a tangle of guild regulations, and inconsistent weights and measures—all barriers to a unified national market that Britain and the Netherlands had already dismantled. The economic modernization that had enriched the bourgeoisie was stymied by the political archaism of the state.
+
+## Social Causes
+
+The economic crisis exposed, and was intensified by, the rigidly hierarchical society of the *ancien régime*, organized into three estates.
+
+The **First Estate** consisted of the clergy, numbering perhaps 100,000 people. Despite owning an estimated 10 percent of French land and collecting tithes from the population, the Church paid little in the way of taxes, offering only a voluntary "donation." The upper clergy—bishops and abbots—were almost universally drawn from noble families, living in luxury, while the parish priests among whom most clergy actually served often lived in relative poverty.
+
+The **Second Estate** comprised the nobility, roughly 400,000 individuals. They owned between a quarter and a third of the nation's land, monopolized the highest offices in the church, the army, and the government, and were largely exempt from direct taxation such as the *taille*. Their privilege was enforced through feudal dues that peasants owed their lords—for use of the lord's mill, oven, or press, and for various labor obligations. Nobles defended these privileges fiercely, viewing them as the natural order.
+
+The **Third Estate** contained everyone else—roughly 25 to 27 million people. It was not a class but a catch-all, encompassing everyone from the wealthy bourgeoisie (lawyers, merchants, bankers, physicians) to the urban *sans-culottes* (artisans and laborers) and the vast majority of peasants who worked the land. The bourgeoisie had grown rich and educated under the Enlightenment, yet they were politically excluded, barred from office by birth rather than merit. Their resentment was intellectual as well as material.
+
+This is where the ideas of the Enlightenment proved revolutionary. Thinkers such as Voltaire attacked church and aristocratic privilege; Montesquieu articulated the separation of powers; and especially Jean-Jacques Rousseau, with his concept of popular sovereignty and the general will, provided an intellectual framework that legitimized the demand for a government based on the consent of the governed rather than divine right. The American Revolution had demonstrated that these ideas could be put into practice.
+
+## The Role of the Estates-General
+
+Faced with bankruptcy, Louis XVI had no choice but to raise revenue, and since only the Estates-General had the authority to approve new taxes, he convoked it in May 1789—the first time it had met since 1614.
+
+The fundamental problem lay in its structure. Each estate received one vote, meaning the First and Second Estates—the privileged minority—could always outvote the Third Estate, which represented the overwhelming majority of the population. The Third Estate demanded **voting by head** rather than by order, which would give it a fair say. After tense negotiations, the king granted the Third Estate **double representation** in December 1788, sending 600 deputies instead of 300. Yet the voting procedure remained unresolved, and the privileged estates had every incentive to maintain voting by order to preserve their dominance.
+
+The Estates-General opened at Versailles on May 5, 1789, but deadlocked almost immediately over the question of how to vote. Frustrated, the Third Estate invited members of the other estates to join it in a joint verification of credentials. On June 17, 1789, declaring that it represented 96 percent of the nation, the Third Estate proclaimed itself the **National Assembly**.
+
+Three days later, on June 20, they found their meeting hall closed and, according to tradition, relocated to an indoor tennis court, where they swore the **Tennis Court Oath**—a pledge not to disband until France had a written constitution. This was a revolutionary act: a body of subjects had seized constituent power from the king. When Louis XVI was forced to recognize the Assembly, the First Estate's clergy joined it, fracturing the old order from within.
+
+## The Events of 1789
+
+The summer of 1789 saw the Revolution accelerate beyond the control of even its moderate leaders. In the countryside, panic spread through rumors that brigands and royal troops were coming to destroy the harvest. This **"Great Fear"** prompted peasants to attack châteaux and burn feudal record books. In a calculated move to win popular support, the National Assembly, on the night of **August 4, 1789**, abolished the feudal privileges of the nobility and clergy, and the following month formally eliminated tithes and feudal dues.
+
+On **August 26, 1789**, the Assembly adopted the **Declaration of the Rights of Man and of the Citizen**, a foundational document proclaiming that "men are born and remain free and equal in rights" and that "the aim of all political association is the preservation of the natural and imprescriptible rights of man." It enshrined liberty, property, security, and resistance to oppression, and asserted that sovereignty resided in the nation. It remains one of the most influential statements of liberal rights in history.
+
+The relationship between the Revolution and the monarchy, however, continued to deteriorate. On **October 5–6, 1789**, a crowd of Parisian women, enraged by bread shortages and rumors of court intrigue, marched to Versailles and forced the royal family to return to Paris. The king was now effectively a prisoner of the Revolution, and the center of political gravity had shifted from Versailles to the capital.
+
+By the end of 1789, the National Assembly had transformed itself into a **Constituent Assembly** and had begun dismantling the *ancien régime* systematically: it abolished noble titles, reorganized France into departments, and moved toward the secularization of church property. The Revolution had become irreversible.
+
+## How 1789 Changed European Politics
+
+The fall of the Bastille on July 14, 1789—symbolized by the storming of the medieval prison that stood for royal absolutism—sent shockwaves across Europe. The consequences unfolded over the following decades in several distinct phases.
+
+**The Spread of Revolutionary Ideals.** The Declaration of the Rights of Man and the rhetoric of national sovereignty inspired reformers and radicals throughout Europe. The ideas of citizenship, legal equality, and the sovereignty of the people became the vocabulary of liberal politics. Secret societies, pamphlets, and the movement of educated travelers carried these notions to Germany, Italy, Spain, and beyond.
+
+**The Napoleonic Transformation.** The instability of the Revolution ultimately produced Napoleon Bonaparte, who seized power in 1799 and was crowned Emperor in 1804. Through conquest, Napoleon exported key revolutionary reforms across the continent. The **Napoleonic Code** abolished feudal privileges, established legal equality, guaranteed religious tolerance, and protected property rights in the territories he controlled—from the Rhineland to Naples to the Low Countries. Even those who resented French domination absorbed these modernizing principles. The Revolution, in Napoleon's hands, became both a liberator and an occupier, awakening national consciousness wherever French armies marched.
+
+**The Awakening of Nationalism.** Perhaps the most enduring legacy of the Revolutionary and Napoleonic era was the rise of modern nationalism. In Germany and Italy, the experience of French occupation stirred a sense of shared identity among people who had previously identified with local principalities. The French concept of the nation as the source of political legitimacy spread, transforming the old dynastic politics of Europe into the politics of nations.
+
+**The Conservative Reaction.** European monarchs were terrified by the Revolution's regicide of Louis XVI (1793) and the ensuing chaos. This fear produced a powerful conservative backlash. After Napoleon's defeat, the **Congress of Vienna (1814–1815)**, orchestrated by statesmen such as Austria's Klemens von Metternich, redrew the map of Europe to restore the old order and contain revolutionary contagion. The resulting **Concert of Europe** was designed to suppress future revolutions through collective action, and it succeeded in preventing a general European war for nearly a century.
+
+**The Persistence of the Revolutionary Legacy.** Despite this reaction, the ideals of 1789 proved impossible to extinguish. They surfaced repeatedly: in the **Revolutions of 1830** and **1848**, which swept across France, the German states,

@@ -1,0 +1,151 @@
+The user wants me to read this engineering design document about serving NVIDIA Nemotron models on FreeToken, then summarize its main design decisions, and critique them — identifying fragile decisions, missing measurements, and what I'd change first.
+
+Let me carefully read through this document and extract the key design decisions, then provide a thoughtful critique.
+
+Let me organize the main design decisions:
+
+**Architecture / Serving model:**
+1. Nemotron 3 Super is `single_stream_only` — one concurrent session because Mamba-2 recurrent state is ~160 MiB per sequence, forcing bs=1 decode graph.
+2. Nemotron 3.5 Lightning (30B-A3B) is NOT single_stream_only — up to 16 concurrent requests because its 47 MiB state fits many slots.
+3. Hybrid Mamba-2 / full-attention / latent-MoE architecture.
+
+**MoE backend decisions:**
+1. `offload` MoE backend for Lightning (CPU/hybrid available but 3.6× slower).
+2. `triton` expert GEMM is the default — NOT `auto` (which resolves to b12x) and NOT flashinfer. This is a key decision because the geometry (ungated relu2, moe_intermediate_size 1856 ≥ 1024 threshold) makes `auto` resolve to b12x which is wrong.
+3. Backend chosen once at bank-load time because it pins the on-GPU weight layout.
+
+**Expert cache policy:**
+1. LFU over LRU at 16-way concurrency (99.6% miss rate with LRU → LFU halves to 51%, worth 1.80×).
+2. Rule of thumb: LFU above ~15% miss rate, LRU below.
+
+**KV cache:**
+1. `q8_0` KV dtype (Phase 1 A/B chose it over fp8_e4m3 which flipped first tokens).
+2. Growable KV via `--kv-grow-step-tokens` funds from expert cache.
+3. `--memory-ratio 1.00` default — predicted from config, reserved/measured.
+
+**CUDA graphs:**
+1. Dense decode graph ladder [1..16] for offload-MoE models (padded rows route their own experts, so exact graphs better than padded).
+2. Sparse [1,2,4,8,16] is 1.074× slower.
+
+**Prefill:**
+1. `--max-prefill-length 8192` — chunk size is NOT a throughput lever.
+2. MoE prefill GEMM optimizations (per-block scale broadcast, native FP4 decode, deinterleaved A operand).
+
+**Speculative decoding:**
+1. `--speculative ngram` shipped, off by default, `--spec-ngram-n 8`, `--spec-draft-len 8`, `--no-spec-adaptive`.
+2. Greedy and single-stream only.
+3. `--moe-extend-cache-tokens` default 64 (crossover point).
+4. Long context regresses — online verify/decode ratio gate.
+
+**1M single-session profile:**
+1. One resident session, others queue/spill.
+2. Session spill to RAM then NVMe.
+3. Look-ahead promotion, partial-prefix restore, prefill-time state capture.
+4. Residency policy: no spill while queue empty, retention by capacity+age, survive restart.
+
+**Launch profiles:**
+1. Default profile (2026-09-17) — single lane, systemd unit.
+2. P1, P2 historical.
+
+Now let me think about the critique — which decisions look fragile, what measurements are missing, what I'd change first.
+
+**Fragile decisions:**
+
+1. **The `triton` vs `auto` expert GEMM decision** — this is fragile because it's a hardcoded override against the auto-resolution logic. The auto logic picks b12x based on geometry thresholds (ungated relu2, moe_intermediate_size ≥ 1024). The doc explicitly says "that resolution is now wrong on this geometry." So there's a special-case override. If the model geometry changes (new checkpoint), the override might need manual re-evaluation. Also, the decision is "chosen once at bank-load time" — you can't mix backends. This is brittle.
+
+2. **The `--moe-extend-cache-tokens` threshold of 64** — this is a measured crossover but it's a knife-edge. The doc says "The crossover is between 64 and 80, i.e. exactly at the shipped default." That's fragile — it's right at the boundary. Also there's a hard ceiling of m ≤ 170 at top-6 due to Triton's 1M element tensor cap, and `--moe-extend-cache-tokens 256` used to crash the engine. The threshold depends on the specific PCIe gather rate (52.9 GB/s) vs stream rate (61.9 GB/s), which could vary by hardware.
+
+3. **The dense decode graph ladder** — costs 80 MiB, and the 1.074× win is measured on one specific GPU (5080). On a different GPU the tradeoff could differ. Also padding a row routes its own experts — this is a fundamental cost of offload-MoE that's architecture-specific.
+
+4. **The `--memory-ratio 1.00` default** — the doc says it's "an override, not a per-host tuning knob" and the engine predicts it. But the prediction is "measured at startup" and WARNs outside ±25%. The 5080 passed from the start at 1.00 with 0 GiB free. This is fragile because it's a tight fit — 0 GiB free after graph capture means no headroom. If any measurement is off, you OOM.
+
+5. **LFU vs LRU rule of thumb** — the 15% miss rate threshold is a heuristic. At 16-way it's clearly LFU. But the doc notes LRU degenerates to 99.6% miss rate at 16-way with 1063 slots. This is fragile because it depends on the expert access distribution being stable.
+
+6. **Speculative decoding's online gate** — "There is deliberately no context-length threshold: the ratio depends on KV dtype, attention backend and acceptance." This is a self-measuring gate that stops drafting when it's not economical. But it "cannot refund the measurement" — pricing itself costs two verify steps. This is fragile because the gate's own cost is a fixed overhead that can't be amortized.
+
+7. **The 1M session profile's reliance on spill/restore** — byte-identical restore is claimed, but the coherence caveats (addressing under interference at ≥524K) show the model itself degrades. The spill/restore is correct but the underlying recall problem is a model property.
+
+**Missing measurements:**
+
+1. **Cross-GPU validation** — almost everything is measured on the RTX 5080 (sm_120). The doc mentions sm_120 several times. The Triton vs b12x decision, the graph ladder, the MoE GEMM — all 5080-specific. What about other GPUs? The doc says "The grid now scales with the GPU" for decode, but the specific numbers are 5080.
+
+2. **Long-term soak stability** — Phase 3 soak run is "pending." The doc mentions soak runs but the overall soak is pending. What about multi-hour stability, memory leaks, cache thrashing?
+
+3. **Mixed workload / real traffic** — most measurements are synthetic needle prompts. The doc acknowledges "which is not what the probe measures" for real traffic. The 16-way passthrough soak passes but "one 10-minute pair cannot separate that from variance."
+
+4. **The `--memory-ratio` prediction accuracy across hosts** — it WARNs outside ±25% but we don't know how often it warns. On hosts other than the 5080.
+
+5. **WSL-specific behavior** — the doc discusses WSL pin quota extensively (0.4 × RAM budget, `--moe-pageable-gpu`). But most measurements are on Linux (the 5080). WSL PCIe performance could differ.
+
+6. **Expert access pattern stability** — the LFU decision assumes stable access patterns. What if traffic is adversarial or highly variable?
+
+7. **The deinterleaved A prepass cost** — it's a host prepass that rewrites A. On default it's on. The cost is small but it's a host-side memory operation. Not measured for memory bandwidth impact.
+
+8. **Speculative decoding on real (non-copy) traffic** — the projection shows copy gets 1.61× but code/prose are 0.99× (neutral) and 131K needle regresses. So speculation only helps copy-heavy traffic. Is that enough to ship by default? It's off by default, so this is fine, but the "what shipped" section is copy-focused.
+
+9. **Energy/power** — not mentioned.
+
+10. **Cold start / model load time** — the doc mentions startup measurements but not full cold-start benchmarks across profiles.
+
+**What I'd change first:**
+
+Let me think about priorities. The most fragile and impactful:
+
+1. **The `--moe-extend-cache-tokens` threshold at exactly the crossover (64)** — this is the most knife-edge decision. It's right between 64 and 80. I'd want to either make it adaptive or move it to a safer value with a clear margin, or make the mechanism more robust. Actually, the doc says the crossover is "exactly at the shipped default" which is a red flag. But changing it has consequences (the m=128 cell takes 22 min to JIT). Hmm.
+
+2. **The `triton` vs `auto` expert GEMM special-case** — this is a hardcoded override that fights the auto-resolution. I'd want to make the auto-resolution geometry-aware so it doesn't need a manual override, OR document the exact conditions under which the override applies and add a test that fails if the geometry changes. Actually, the doc says "auto still resolves to b12x here... and that resolution is now wrong on this geometry." So the fix should be to make auto smarter, not to hardcode.
+
+3. **The `--memory-ratio 1.00` tight fit** — 0 GiB free is scary. But the doc argues the extra slots only pay off on varied real traffic. Still, I'd want a safety margin or at least better failure modes.
+
+Let me think about what's the single most important thing to change first. 
+
+I think the strongest candidate is the **expert GEMM backend resolution** — because it's a correctness/performance decision that's currently a manual override fighting the auto system, and it's the kind of thing that will silently regress on the next checkpoint. The doc itself flags it as fragile ("that resolution is now wrong on this geometry"). Making the auto-resolution geometry-aware (recognizing that ungated relu2 with the specific intermediate size on sm_120 should pick triton) would be more robust than a checkpoint-specific override.
+
+Actually, let me reconsider. The question asks for a summary of main design decisions, then critique: fragile decisions, missing measurements, and what I'd change first. Let me structure my answer clearly.
+
+Let me also note some interesting tensions and potential issues I notice:
+
+- The document is extremely detailed and measurement-driven, which is good. But there's a pattern of "measured on one GPU, one binary, one workload" that limits generalizability.
+
+- The speculative decoding section is huge and shows a lot of rigor, but the conclusion is that it only helps copy-heavy traffic. This raises the question: why ship it at all if it's off by default and only helps a narrow class? The answer is presumably future-proofing / the copy class is important for agent workloads. But this is worth questioning.
+
+- The `--moe-extend-cache-tokens` has a hard ceiling at m ≤ 170 that crashes the engine at 256. This is a latent bug — the flag accepts values that crash. The doc says `use_cached_extend` now refuses when numel > 1024, but this is a defensive patch over a fundamental Triton limitation.
+
+- The coherence problem at ≥524K is described as "a model property, not a FreeToken defect" — which is a fair attribution, but it means the 1M profile has a known quality ceiling that agents should be warned about.
+
+- The document mentions many retired flags and refactor steps (S11, 2B4, etc.) — this suggests a lot of churn and possibly architectural instability. The constant retirement of flags (`--elastic-initial-requests`, `tune-memory-ratio.sh`) suggests the design is still finding its shape.
+
+Let me also think about the concurrency model tension:
+- Super is single-stream (160 MiB state).
+- Lightning is up to 16-way (47 MiB state).
+- But the DEFAULT profile for Lightning is single-lane! So the 16-way capability is there but not the default. This is a design decision worth noting — the default prioritizes per-session latency (150-170 tok/s) over aggregate throughput.
+
+Actually this is an interesting decision: the default is single-lane even though the model supports 16-way. The rationale is that one session resident keeps ~1900 expert slots resident and decodes fast, while others are checkpointed. This is a latency-first design for agent workloads. But it means aggregate throughput is low unless you opt into the 16-way profile.
+
+Let me now write a comprehensive but well-organized response. I'll use headers and some structure. I should be substantive but not overly long. Let me aim for a clear, expert-level critique.
+
+Let me structure:
+1. Summary of main design decisions (grouped)
+2. Critique: fragile decisions
+3. Missing measurements
+4. What I'd change first
+
+I want to be genuinely useful and show I understand the material. Let me write this.
+
+For the summary, I'll group into: serving/concurrency model, MoE offload & kernel selection, expert cache eviction, KV cache & memory, CUDA graphs, prefill, speculation, 1M sessions.
+
+Let me be careful and accurate about the numbers I cite.
+
+Let me draft.
+
+Actually, I should think about format. This is a detailed technical document and the user wants a summary + critique. A moderately long response with clear headers is appropriate. I'll use markdown headers and tables where helpful. I shouldn't overdo length — but this is a complex topic that warrants depth. Let me aim for something thorough but tight.
+
+Let me write it.
+<<content>>
+# Summary of Main Design Decisions
+
+The document describes serving two checkpoints of the `NemotronHForCausalLM` family (Super-120B and Lightning-30B) on FreeToken, with a hybrid Mamba-2 / full-attention / latent-MoE architecture. The decisions cluster into seven areas:
+
+**1. Concurrency is geometry-driven, not uniform.** Super is forced `single_stream_only` because its ~160 MiB Mamba-2 state per sequence leaves room for one bs=1 session. Lightning's 47 MiB state fits many slots, so it *can* run 16-way — but the **default profile is deliberately single-lane**, trading aggregate throughput for a resident session decoding at 150–170 tok/s while others are checkpointed to RAM/NVMe. This is a latency-first agent design.
+
+**2. Expert GEMM backend is a hardcoded override against `auto`.** `triton` is mandated for Lightning; `auto` resolves to `b12x` (triggered by ungated relu2

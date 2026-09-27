@@ -1,0 +1,22 @@
+{
+  "arm": "p1-whole-1",
+  "model": "Ornith-1.5-35B-A3B-exl3-5.0bpw-hq",
+  "rows": "0",
+  "commit": "1dfad58",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 21.63,
+  "rss_ready_gib": 22.51,
+  "devzero_gib": 18.98,
+  "ram_after_80k_gib": 21.71,
+  "rss_gib": 22.59,
+  "locked_gib": 0.0,
+  "anon_gib": 2.89,
+  "file_gib": 21.36,
+  "unevict_gib": 0.0,
+  "shmem_gib": 18.98,
+  "current_gib": 24.41,
+  "peak_current_gib": 25.37,
+  "gpu_mib": "13998"
+}

@@ -5,6 +5,7 @@
     FREETOKEN_URL (default http://127.0.0.1:1919) and FREETOKEN_MODEL_NAME
     (default nemotron-3.5-lightning) select the server. One JSON line per size.
 """
+import hashlib
 import json
 import os
 import sys
@@ -44,6 +45,7 @@ def run(target_tokens: int, tag: str = "") -> dict:
     # an 80K TTFT straddles). The *_mono_s fields are the ones to trust.
     t0 = time.time(); m0 = time.monotonic(); first = None; mfirst = None; n = 0; usage = None
     arrivals = []  # monotonic arrival of every content chunk: shows a stall inside decode
+    text = []  # the streamed output, hashed into out_sha1 (greedy: same code + lane -> same hash)
     with urllib.request.urlopen(req, timeout=3600) as r:
         for line in r:
             if not line.startswith(b"data:"):
@@ -57,6 +59,7 @@ def run(target_tokens: int, tag: str = "") -> dict:
             for ch in d.get("choices", []):
                 delta = ch.get("delta", {})
                 if delta.get("content") or delta.get("reasoning_content"):
+                    text.append((delta.get("reasoning_content") or "") + (delta.get("content") or ""))
                     n += 1
                     arrivals.append(time.monotonic())
                     if first is None:
@@ -79,6 +82,9 @@ def run(target_tokens: int, tag: str = "") -> dict:
             "prefill_tok_s_mono": round(pt / ttft_m, 0) if ttft_m else None,
             "total_mono_s": round(m1 - m0, 2),
             "t_start_wall": round(t0, 3),
+            # sha1 of the streamed output text: lets two arms (KV lanes, residencies)
+            # say "identical output" or not without storing the text.
+            "out_sha1": hashlib.sha1("".join(text).encode()).hexdigest(),
             # Gap between the first and second streamed chunk (a server-side stall right
             # after the first token, e.g. the dynamic-headroom release, lands here), the
             # largest gap anywhere in decode, and decode excluding that first gap.
@@ -113,7 +119,10 @@ for p in range(1, PASSES + 1):
     for s in SIZES:
         before = moe_counters() if STATS else {}
         # The tag is the prefix, so pass 2 misses the prefix cache pass 1 left.
-        rec = {"target": s, "pass": p, **run(s, f"p{p} " if p > 1 else "")}
+        # PROBE_TAG prefixes every prompt (e.g. a profiler run that must miss the cache
+        # of an untraced run before it); empty by default, so records are unchanged.
+        tag = os.environ.get("PROBE_TAG", "") + (f"p{p} " if p > 1 else "")
+        rec = {"target": s, "pass": p, **run(s, tag)}
         if STATS:
             for block, after in moe_counters().items():
                 prior = before.get(block, {})

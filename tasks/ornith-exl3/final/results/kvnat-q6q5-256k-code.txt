@@ -1,0 +1,819 @@
+The user wants a complete, well-documented Python module that implements:
+1. A thread-safe LRU cache with per-entry time-to-live (TTL)
+2. Size-based eviction
+3. Hit/miss statistics
+4. A decorator for memoizing functions
+5. Type hints
+6. A set of unittest test cases
+
+Let me design this carefully.
+
+## Design
+
+### `LRUCache` class
+- Uses `OrderedDict` for O(1) LRU operations
+- Thread-safe using `threading.RLock`
+- Per-entry TTL: each entry stores value + expiration timestamp
+- Size-based eviction: max_size parameter
+- Hit/miss statistics: track hits, misses, and compute hit rate
+
+Let me think about the API:
+
+```python
+class LRUCache:
+    def __init__(self, max_size=512, ttl=None):
+        ...
+    
+    def get(self, key) -> Optional[T]:
+        ...
+    
+    def set(self, key, value) -> None:
+        ...
+    
+    def __getitem__(self, key) -> T:
+        ...
+    
+    def __setitem__(self, key, value) -> None:
+        ...
+    
+    def __contains__(self, key) -> bool:
+        ...
+    
+    def delete(self, key) -> bool:
+        ...
+    
+    def clear(self) -> None:
+        ...
+    
+    def pop(self, key) -> T:
+        ...
+    
+    def __len__(self) -> int:
+        ...
+    
+    def __iter__(self):
+        ...
+    
+    @property
+    def stats(self) -> CacheStats:
+        ...
+```
+
+Let me think about TTL. TTL can be:
+- `None`: no expiration
+- A number: seconds until expiration
+- A callable that takes the key and returns the TTL (for per-entry TTL)
+
+Actually, "per-entry time-to-live" suggests each entry can have its own TTL. So the `set` method could accept a `ttl` parameter. Let me support both a default TTL from the constructor and per-entry override.
+
+Let me think about the expiration. I'll store the expiration timestamp (absolute time) for each entry. When `get` is called, if the current time exceeds the expiration, treat it as a miss and evict.
+
+For time, I'll use `time.monotonic()` for robustness against system clock changes. Actually, for TTL purposes, monotonic is better because it's not affected by system clock adjustments. But some might want wall-clock. I'll use monotonic and make it injectable for testing.
+
+Let me use a `time_func` parameter defaulting to `time.monotonic`.
+
+### Statistics
+- `hits`: number of successful gets
+- `misses`: number of failed gets (including expired)
+- `evictions`: number of size-based evictions
+- `expired`: number of expired entries removed
+- `hit_rate`: hits / (hits + misses)
+
+I'll create a `CacheStats` namedtuple or dataclass.
+
+### Eviction
+When size exceeds max_size, evict the oldest (least recently used) entry. But we should also consider expired entries. Actually, standard LRU evicts the LRU entry regardless of expiration. But we could also lazily evict expired entries on access. Let me do lazy expiration on access and size-based eviction for the LRU.
+
+Actually, let me think. There's a subtlety: should expired entries count toward size? Typically they should be evicted. Let me handle expiration lazily:
+- On `get`: if expired, remove and return miss
+- On `set`: if at capacity, evict LRU (which might be expired or not)
+- Optionally provide a `purge_expired()` method to remove all expired entries
+
+Let me also consider a `max_size` of 0 or negative. If max_size is 0, the cache never stores anything (everything is a miss). Let me handle that edge case.
+
+### Decorator
+```python
+@cached(ttl=..., max_size=...)
+def my_func(...):
+    ...
+```
+
+The decorator should:
+- Memoize based on arguments
+- Support keyword and positional args
+- Handle unhashable arguments gracefully (fall back to calling the function)
+- Be reentrant-safe (thread-safe)
+- Optionally support async functions
+
+Let me think about how to build the cache key from function arguments. I'll use `inspect.signature` to bind arguments, then create a hashable key from positional and keyword arguments.
+
+For the decorator, I need to be careful about:
+- Methods (self as first arg) - should probably include self in the key or exclude it. Standard behavior includes everything.
+- Unhashable arguments like lists, dicts
+
+Let me create a helper to build a hashable key.
+
+Let me also think about whether the decorator should share a cache or create a new one per decorated function. Each decorated function gets its own cache instance.
+
+Let me write the code now.
+
+```python
+"""
+thread_lru_cache.py
+===================
+
+A thread-safe Least-Recently-Used (LRU) cache with per-entry time-to-live
+(TTL) support, size-based eviction, hit/miss statistics, and a decorator for
+memoizing functions.
+
+Features
+--------
+* Thread-safe operations (backed by a re-entrant lock).
+* O(1) ``get`` / ``set`` operations using an :class:`collections.OrderedDict`.
+* Per-entry time-to-live (TTL) with an injectable clock for testability.
+* Size-based eviction of the least-recently-used entry.
+* Lazy expiration of stale entries on access plus an explicit purge method.
+* Rich hit/miss/eviction statistics.
+* A :func:`cached` decorator for transparent function memoization.
+
+Example
+-------
+>>> from thread_lru_cache import cached, LRUCache
+>>> @cached(max_size=2, ttl=0.05)
+... def slow(x):
+...     return x * x
+>>> slow(3)
+9
+>>> slow(3)          # served from cache
+9
+"""
+```
+
+Let me write the full implementation.
+
+```python
+from __future__ import annotations
+
+import functools
+import inspect
+import threading
+import time
+from collections import OrderedDict
+from dataclasses import dataclass
+from typing import Any, Callable, Generic, Hashable, Iterator, Optional, Tuple, TypeVar, Union
+
+__all__ = [
+    "LRUCache",
+    "CacheStats",
+    "cached",
+    "CacheKeyError",
+]
+
+K = TypeVar("K", bound=Hashable)
+V = TypeVar("V")
+
+# A TTL can be expressed as a number of seconds, ``None`` for "never expire",
+# or a callable that receives the key and returns a TTL (seconds or ``None``).
+TTL = Union[None, float, Callable[[K], Union[None, float]]]
+
+
+@dataclass(frozen=True)
+class CacheStats:
+    """Immutable snapshot of cache statistics."""
+    hits: int
+    misses: int
+    evictions: int
+    expired: int
+
+    @property
+    def total_lookups(self) -> int:
+        return self.hits + self.misses
+
+    @property
+    def hit_rate(self) -> float:
+        total = self.total_lookups
+        return self.hits / total if total else 0.0
+```
+
+Now the main class:
+
+```python
+class LRUCache(Generic[K, V]):
+    def __init__(self, max_size: int = 512, ttl: TTL[K] = None, *,
+                 time_func: Callable[[], float] = time.monotonic,
+                 name: str = "cache"):
+        if max_size < 0:
+            raise ValueError("max_size must be non-negative")
+        self._max_size = max_size
+        self._ttl = ttl
+        self._time = time_func
+        self._name = name
+
+        self._store: OrderedDict[K, Tuple[V, Optional[float]]] = OrderedDict()
+        self._lock = threading.RLock()
+
+        # statistics
+        self._hits = 0
+        self._misses = 0
+        self._evictions = 0
+        self._expired = 0
+```
+
+Helper to compute expiration:
+
+```python
+    def _expiration(self, key: K) -> Optional[float]:
+        ttl = self._ttl
+        if ttl is None:
+            return None
+        if callable(ttl):
+            ttl = ttl(key)
+        if ttl is None:
+            return None
+        return self._time() + ttl
+```
+
+Get:
+
+```python
+    def get(self, key: K, default: Optional[V] = None) -> Optional[V]:
+        with self._lock:
+            if key not in self._store:
+                self._misses += 1
+                return default
+            value, expires_at = self._store[key]
+            if expires_at is not None and self._time() >= expires_at:
+                # expired
+                del self._store[key]
+                self._expired += 1
+                self._misses += 1
+                return default
+            # move to end (most recently used)
+            self._store.move_to_end(key)
+            self._hits += 1
+            return value
+```
+
+Wait, there's a subtlety with `default`. If the key exists but is expired, should we return `default`? Yes, that's consistent with a miss.
+
+But there's a subtle issue: what if the stored value is legitimately `None`? With `get(key, default=None)`, we can't distinguish. That's standard behavior though. Let me use a sentinel for the no-default case. Actually, let me keep it simple but use a sentinel to be correct.
+
+Hmm, let me think. The common pattern:
+
+```python
+def get(self, key, default=None):
+    ...
+```
+
+This is fine for most cases. But to be fully correct with `None` values, I could use a sentinel. Let me use a sentinel to be robust.
+
+Actually, let me reconsider. Using a sentinel makes the API cleaner for correctness. Let me define:
+
+```python
+_MISSING = object()
+
+def get(self, key, default=_MISSING):
+    with self._lock:
+        entry = self._store.get(key)
+        if entry is None:
+            self._misses += 1
+            if default is _MISSING:
+                raise KeyError(key)
+            return default
+        value, expires_at = entry
+        if expires_at is not None and self._time() >= expires_at:
+            del self._store[key]
+            self._expired += 1
+            self._misses += 1
+            if default is _MISSING:
+                raise KeyError(key)
+            return default
+        self._store.move_to_end(key)
+        self._hits += 1
+        return value
+```
+
+Hmm, but raising KeyError on missing key might be surprising for a `get` method. Let me think about the API design.
+
+Actually, I think it's cleaner to have:
+- `get(key, default=None)` returns default (or None) on miss
+- `__getitem__(key)` raises KeyError on miss (Pythonic)
+
+Let me keep `get` returning a default and `__getitem__` raising. But then `get` with default handling... Let me use the sentinel approach for `get` so that `get(key)` with no default raises KeyError, matching `__getitem__`. Actually that might be confusing.
+
+Let me go with:
+- `get(key, default=None)`: returns value or default. Never raises for missing key.
+- `__getitem__(key)`: returns value or raises KeyError.
+
+This is the most Pythonic and least surprising. I'll use a sentinel internally to distinguish "no default provided" so `__getitem__` can raise.
+
+Actually, let me simplify. I'll make `get` always return a default (defaulting to None), and `__getitem__` will call `get` and raise KeyError if not present. But to detect presence, I need `__contains__`.
+
+Let me restructure:
+
+```python
+def get(self, key, default=None):
+    with self._lock:
+        found, value = self._lookup(key)  # returns (found: bool, value: Optional[V])
+        if not found:
+            return default
+        return value
+
+def __getitem__(self, key):
+    with self._lock:
+        found, value = self._lookup(key)
+        if not found:
+            raise KeyError(key)
+        return value
+```
+
+Where `_lookup` does the expiration check, stats, and move_to_end. But stats incrementing inside `_lookup` while holding the lock is fine.
+
+Wait, but I need to be careful: `_lookup` increments hits/misses. Let me have it return a status.
+
+Let me define `_lookup` to return a tuple `(status, value)` where status is one of "hit", "miss", "expired". Actually let me just return `(found, value)` and let the caller decide, but stats need to be incremented. Let me increment stats inside `_lookup`.
+
+Hmm, but then `get` and `__getitem__` both call `_lookup` which increments stats. That's fine.
+
+Let me write `_lookup`:
+
+```python
+def _lookup(self, key):
+    # Must be called with lock held.
+    entry = self._store.get(key)
+    if entry is None:
+        self._misses += 1
+        return False, None
+    value, expires_at = entry
+    if expires_at is not None and self._time() >= expires_at:
+        del self._store[key]
+        self._expired += 1
+        self._misses += 1
+        return False, None
+    self._store.move_to_end(key)
+    self._hits += 1
+    return True, value
+```
+
+Set:
+
+```python
+def set(self, key, value, ttl=None):
+    with self._lock:
+        if ttl is None:
+            expires_at = self._expiration(key)
+        else:
+            if callable(ttl):
+                ttl = ttl(key)
+            expires_at = None if ttl is None else self._time() + ttl
+
+        if key in self._store:
+            self._store[key] = (value, expires_at)
+            self._store.move_to_end(key)
+        else:
+            self._store[key] = (value, expires_at)
+            # evict if over capacity
+            self._evict_if_needed()
+```
+
+Wait, but if `ttl` is provided as a callable, I need to call it. Let me handle that. Actually, let me make a helper `_compute_expiration(key, ttl)`.
+
+```python
+def _compute_expiration(self, key, ttl):
+    if ttl is None:
+        ttl = self._ttl
+    if ttl is None:
+        return None
+    if callable(ttl):
+        ttl = ttl(key)
+        if ttl is None:
+            return None
+    return self._time() + ttl
+```
+
+Eviction:
+
+```python
+def _evict_if_needed(self):
+    # Must be called with lock held.
+    while len(self._store) > self._max_size:
+        # remove oldest (first item)
+        _, _ = self._store.popitem(last=False)
+        self._evictions += 1
+```
+
+Wait, but if max_size is 0, then after adding one item, len is 1 > 0, so we evict it. That means nothing is ever stored. Good, that's the intended behavior for max_size=0.
+
+But there's a subtlety: when max_size is 0 and we set an item, we add it then immediately evict. That increments evictions. Is that correct? Arguably yes—an eviction happened. But it might be cleaner to check capacity before adding. Let me think.
+
+Actually, if max
+<<content>>
+The user wants a complete, well-documented Python module that implements:
+1. A thread-safe LRU cache with per-entry time-to-live (TTL)
+2. Size-based eviction
+3. Hit/miss statistics
+4. A decorator for memoizing functions
+5. Type hints
+6. A set of unittest test cases
+
+Let me design this carefully.
+
+## Design
+
+### `LRUCache` class
+- Uses `OrderedDict` for O(1) LRU operations
+- Thread-safe using `threading.RLock`
+- Per-entry TTL: each entry stores value + expiration timestamp
+- Size-based eviction: max_size parameter
+- Hit/miss statistics: track hits, misses, and compute hit rate
+
+Let me think about the API:
+
+```python
+class LRUCache:
+    def __init__(self, max_size=512, ttl=None):
+        ...
+    
+    def get(self, key) -> Optional[T]:
+        ...
+    
+    def set(self, key, value) -> None:
+        ...
+    
+    def __getitem__(self, key) -> T:
+        ...
+    
+    def __setitem__(self, key, value) -> None:
+        ...
+    
+    def __contains__(self, key) -> bool:
+        ...
+    
+    def delete(self, key) -> bool:
+        ...
+    
+    def clear(self) -> None:
+        ...
+    
+    def pop(self, key) -> T:
+        ...
+    
+    def __len__(self) -> int:
+        ...
+    
+    def __iter__(self):
+        ...
+    
+    @property
+    def stats(self) -> CacheStats:
+        ...
+```
+
+Let me think about TTL. TTL can be:
+- `None`: no expiration
+- A number: seconds until expiration
+- A callable that takes the key and returns the TTL (for per-entry TTL)
+
+Actually, "per-entry time-to-live" suggests each entry can have its own TTL. So the `set` method could accept a `ttl` parameter. Let me support both a default TTL from the constructor and per-entry override.
+
+Let me think about the expiration. I'll store the expiration timestamp (absolute time) for each entry. When `get` is called, if the current time exceeds the expiration, treat it as a miss and evict.
+
+For time, I'll use `time.monotonic()` for robustness against system clock changes. Actually, for TTL purposes, monotonic is better because it's not affected by system clock adjustments. But some might want wall-clock. I'll use monotonic and make it injectable for testing.
+
+Let me use a `time_func` parameter defaulting to `time.monotonic`.
+
+### Statistics
+- `hits`: number of successful gets
+- `misses`: number of failed gets (including expired)
+- `evictions`: number of size-based evictions
+- `expired`: number of expired entries removed
+- `hit_rate`: hits / (hits + misses)
+
+I'll create a `CacheStats` namedtuple or dataclass.
+
+### Eviction
+When size exceeds max_size, evict the oldest (least recently used) entry. But we should also consider expired entries. Actually, standard LRU evicts the LRU entry regardless of expiration. But we could also lazily evict expired entries on access. Let me do lazy expiration on access and size-based eviction for the LRU.
+
+Actually, let me think. There's a subtlety: should expired entries count toward size? Typically they should be evicted. Let me handle expiration lazily:
+- On `get`: if expired, remove and return miss
+- On `set`: if at capacity, evict LRU (which might be expired or not)
+- Optionally provide a `purge_expired()` method to remove all expired entries
+
+Let me also consider a `max_size` of 0 or negative. If max_size is 0, the cache never stores anything (everything is a miss). Let me handle that edge case.
+
+### Decorator
+```python
+@cached(ttl=..., max_size=...)
+def my_func(...):
+    ...
+```
+
+The decorator should:
+- Memoize based on arguments
+- Support keyword and positional args
+- Handle unhashable arguments gracefully (fall back to calling the function)
+- Be reentrant-safe (thread-safe)
+- Optionally support async functions
+
+Let me think about how to build the cache key from function arguments. I'll use `inspect.signature` to bind arguments, then create a hashable key from positional and keyword arguments.
+
+For the decorator, I need to be careful about:
+- Methods (self as first arg) - should probably include self in the key or exclude it. Standard behavior includes everything.
+- Unhashable arguments like lists, dicts
+
+Let me create a helper to build a hashable key.
+
+Let me also think about whether the decorator should share a cache or create a new one per decorated function. Each decorated function gets its own cache instance.
+
+Let me write the code now.
+
+```python
+"""
+thread_lru_cache.py
+===================
+
+A thread-safe Least-Recently-Used (LRU) cache with per-entry time-to-live
+(TTL) support, size-based eviction, hit/miss statistics, and a decorator for
+memoizing functions.
+
+Features
+--------
+* Thread-safe operations (backed by a re-entrant lock).
+* O(1) ``get`` / ``set`` operations using an :class:`collections.OrderedDict`.
+* Per-entry time-to-live (TTL) with an injectable clock for testability.
+* Size-based eviction of the least-recently-used entry.
+* Lazy expiration of stale entries on access plus an explicit purge method.
+* Rich hit/miss/eviction statistics.
+* A :func:`cached` decorator for transparent function memoization.
+
+Example
+-------
+>>> from thread_lru_cache import cached, LRUCache
+>>> @cached(max_size=2, ttl=0.05)
+... def slow(x):
+...     return x * x
+>>> slow(3)
+9
+>>> slow(3)          # served from cache
+9
+"""
+```
+
+Let me write the full implementation.
+
+```python
+from __future__ import annotations
+
+import functools
+import inspect
+import threading
+import time
+from collections import OrderedDict
+from dataclasses import dataclass
+from typing import Any, Callable, Generic, Hashable, Iterator, Optional, Tuple, TypeVar, Union
+
+__all__ = [
+    "LRUCache",
+    "CacheStats",
+    "cached",
+    "CacheKeyError",
+]
+
+K = TypeVar("K", bound=Hashable)
+V = TypeVar("V")
+
+# A TTL can be expressed as a number of seconds, ``None`` for "never expire",
+# or a callable that receives the key and returns a TTL (seconds or ``None``).
+TTL = Union[None, float, Callable[[K], Union[None, float]]]
+
+
+@dataclass(frozen=True)
+class CacheStats:
+    """Immutable snapshot of cache statistics."""
+    hits: int
+    misses: int
+    evictions: int
+    expired: int
+
+    @property
+    def total_lookups(self) -> int:
+        return self.hits + self.misses
+
+    @property
+    def hit_rate(self) -> float:
+        total = self.total_lookups
+        return self.hits / total if total else 0.0
+```
+
+Now the main class:
+
+```python
+class LRUCache(Generic[K, V]):
+    def __init__(self, max_size: int = 512, ttl: TTL[K] = None, *,
+                 time_func: Callable[[], float] = time.monotonic,
+                 name: str = "cache"):
+        if max_size < 0:
+            raise ValueError("max_size must be non-negative")
+        self._max_size = max_size
+        self._ttl = ttl
+        self._time = time_func
+        self._name = name
+
+        self._store: OrderedDict[K, Tuple[V, Optional[float]]] = OrderedDict()
+        self._lock = threading.RLock()
+
+        # statistics
+        self._hits = 0
+        self._misses = 0
+        self._evictions = 0
+        self._expired = 0
+```
+
+Helper to compute expiration:
+
+```python
+    def _expiration(self, key: K) -> Optional[float]:
+        ttl = self._ttl
+        if ttl is None:
+            return None
+        if callable(ttl):
+            ttl = ttl(key)
+        if ttl is None:
+            return None
+        return self._time() + ttl
+```
+
+Get:
+
+```python
+    def get(self, key: K, default: Optional[V] = None) -> Optional[V]:
+        with self._lock:
+            if key not in self._store:
+                self._misses += 1
+                return default
+            value, expires_at = self._store[key]
+            if expires_at is not None and self._time() >= expires_at:
+                # expired
+                del self._store[key]
+                self._expired += 1
+                self._misses += 1
+                return default
+            # move to end (most recently used)
+            self._store.move_to_end(key)
+            self._hits += 1
+            return value
+```
+
+Wait, there's a subtlety with `default`. If the key exists but is expired, should we return `default`? Yes, that's consistent with a miss.
+
+But there's a subtle issue: what if the stored value is legitimately `None`? With `get(key, default=None)`, we can't distinguish. That's standard behavior though. Let me use a sentinel for the no-default case. Actually, let me keep it simple but use a sentinel to be correct.
+
+Hmm, let me think. The common pattern:
+
+```python
+def get(self, key, default=None):
+    ...
+```
+
+This is fine for most cases. But to be fully correct with `None` values, I could use a sentinel. Let me use a sentinel to be robust.
+
+Actually, let me reconsider. Using a sentinel makes the API cleaner for correctness. Let me define:
+
+```python
+_MISSING = object()
+
+def get(self, key, default=_MISSING):
+    with self._lock:
+        entry = self._store.get(key)
+        if entry is None:
+            self._misses += 1
+            if default is _MISSING:
+                raise KeyError(key)
+            return default
+        value, expires_at = entry
+        if expires_at is not None and self._time() >= expires_at:
+            del self._store[key]
+            self._expired += 1
+            self._misses += 1
+            if default is _MISSING:
+                raise KeyError(key)
+            return default
+        self._store.move_to_end(key)
+        self._hits += 1
+        return value
+```
+
+Hmm, but raising KeyError on missing key might be surprising for a `get` method. Let me think about the API design.
+
+Actually, I think it's cleaner to have:
+- `get(key, default=None)` returns default (or None) on miss
+- `__getitem__(key)` raises KeyError on miss (Pythonic)
+
+Let me keep `get` returning a default and `__getitem__` raising. But then `get` with default handling... Let me use the sentinel approach for `get` so that `get(key)` with no default raises KeyError, matching `__getitem__`. Actually that might be confusing.
+
+Let me go with:
+- `get(key, default=None)`: returns value or default. Never raises for missing key.
+- `__getitem__(key)`: returns value or raises KeyError.
+
+This is the most Pythonic and least surprising. I'll use a sentinel internally to distinguish "no default provided" so `__getitem__` can raise.
+
+Actually, let me simplify. I'll make `get` always return a default (defaulting to None), and `__getitem__` will call `get` and raise KeyError if not present. But to detect presence, I need `__contains__`.
+
+Let me restructure:
+
+```python
+def get(self, key, default=None):
+    with self._lock:
+        found, value = self._lookup(key)  # returns (found: bool, value: Optional[V])
+        if not found:
+            return default
+        return value
+
+def __getitem__(self, key):
+    with self._lock:
+        found, value = self._lookup(key)
+        if not found:
+            raise KeyError(key)
+        return value
+```
+
+Where `_lookup` does the expiration check, stats, and move_to_end. But stats incrementing inside `_lookup` while holding the lock is fine.
+
+Wait, but I need to be careful: `_lookup` increments hits/misses. Let me have it return a status.
+
+Let me define `_lookup` to return a tuple `(status, value)` where status is one of "hit", "miss", "expired". Actually let me just return `(found, value)` and let the caller decide, but stats need to be incremented. Let me increment stats inside `_lookup`.
+
+Hmm, but then `get` and `__getitem__` both call `_lookup` which increments stats. That's fine.
+
+Let me write `_lookup`:
+
+```python
+def _lookup(self, key):
+    # Must be called with lock held.
+    entry = self._store.get(key)
+    if entry is None:
+        self._misses += 1
+        return False, None
+    value, expires_at = entry
+    if expires_at is not None and self._time() >= expires_at:
+        del self._store[key]
+        self._expired += 1
+        self._misses += 1
+        return False, None
+    self._store.move_to_end(key)
+    self._hits += 1
+    return True, value
+```
+
+Set:
+
+```python
+def set(self, key, value, ttl=None):
+    with self._lock:
+        if ttl is None:
+            expires_at = self._expiration(key)
+        else:
+            if callable(ttl):
+                ttl = ttl(key)
+            expires_at = None if ttl is None else self._time() + ttl
+
+        if key in self._store:
+            self._store[key] = (value, expires_at)
+            self._store.move_to_end(key)
+        else:
+            self._store[key] = (value, expires_at)
+            # evict if over capacity
+            self._evict_if_needed()
+```
+
+Wait, but if `ttl` is provided as a callable, I need to call it. Let me handle that. Actually, let me make a helper `_compute_expiration(key, ttl)`.
+
+```python
+def _compute_expiration(self, key, ttl):
+    if ttl is None:
+        ttl = self._ttl
+    if ttl is None:
+        return None
+    if callable(ttl):
+        ttl = ttl(key)
+        if ttl is None:
+            return None
+    return self._time() + ttl
+```
+
+Eviction:
+
+```python
+def _evict_if_needed(self):
+    # Must be called with lock held.
+    while len(self._store) > self._max_size:
+        # remove oldest (first item)
+        _, _ = self._store.popitem(last=False)
+        self._evictions += 1
+```
+
+Wait, but if max_size is 0, then after adding one item, len is 1 > 0, so we evict it. That means nothing is ever stored. Good, that's the intended behavior for max_size=0.
+
+But there's a subtlety: when max_size is 0 and we set an item, we add it then immediately evict. That increments evictions. Is that correct? Arguably yes—an eviction happened. But it might be cleaner to check capacity before adding. Let me think.
+
+Actually, if max
