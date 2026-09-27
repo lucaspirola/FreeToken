@@ -1,0 +1,18 @@
+# 2026-09-27T15:51:19+04:00 sm 277 MHz load 0.98 4.74 5.57
+=== base b967140  + 1 file changed, 4 insertions(+)
+moe M300 uniform experts=256 max_routes=18: 4.3108 ms
+moe M300 zipf    experts=229 max_routes=273: 4.2498 ms
+moe M1017 uniform experts=256 max_routes=46: 4.8674 ms
+moe M1017 zipf    experts=253 max_routes=950: 4.8941 ms
+had_rows gate_up rows=2400: 0.0545 ms
+had_rows gate_up rows=8136: 0.1111 ms
+had_rows gate_up rows=16384: 2.3514 ms
+=== new 69938fe  + 1 file changed, 6 insertions(+)
+moe M300 uniform experts=256 max_routes=18: 2.9279 ms
+moe M300 zipf    experts=229 max_routes=273: 3.4944 ms
+moe M1017 uniform experts=256 max_routes=46: 4.0955 ms
+moe M1017 zipf    experts=253 max_routes=950: 4.6810 ms
+had_rows gate_up rows=2400: 0.0560 ms
+had_rows gate_up rows=8136: 0.0972 ms
+had_rows gate_up rows=16384: 0.1967 ms
+SWEEPDONE

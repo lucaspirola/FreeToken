@@ -1,4 +1,4 @@
-"""Fused MoE prefill: in-kernel-decode GEMM vs decoded-scratch path (PREFILL_DECODED_MIN_ROUTES_PER_EXPERT) at
+"""Fused MoE prefill: in-kernel-decode GEMM vs decoded-scratch path (PREFILL_DECODED_MIN_TOKENS) at
 Ornith shapes, per token count: median ms of each and whether the outputs are bitwise equal (both
 feed the same W_hat values to 16-wide mma k-steps in the same order). Also with the MoE input fold."""
 import torch
@@ -27,9 +27,9 @@ for M in MS:
     w = torch.softmax(torch.randn(M, TOPK, device=DEV), -1)
     ids = torch.stack([torch.randperm(E, device=DEV)[:TOPK] for _ in range(M)]).to(torch.int32)
     run = lambda: fe.fused_experts_exl3(x, B, w, ids, bits=BITS, codebook="mul1", is_prefill=True, num_experts=E)
-    fe.PREFILL_DECODED_MIN_ROUTES_PER_EXPERT = 1 << 30
+    fe.PREFILL_DECODED_MIN_TOKENS = 1 << 30
     yi = run(); ti = med(run, 10)
-    fe.PREFILL_DECODED_MIN_ROUTES_PER_EXPERT = 0
+    fe.PREFILL_DECODED_MIN_TOKENS = 1
     yd = run(); td = med(run, 10)
     yf, tf = yd, float('nan')
     print(f"M{M:5d} inline {ti:8.4f}  decoded {td:8.4f} {'EQ' if torch.equal(yi.view(torch.int16), yd.view(torch.int16)) else 'DIFF'}"

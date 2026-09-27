@@ -1,5 +1,5 @@
 """Launcher configs of the in-kernel-decode grouped GEMM (fused MoE prefill below
-PREFILL_DECODED_MIN_ROUTES_PER_EXPERT) at Ornith shapes: block_k / num_warps / num_stages keep every output's
+PREFILL_DECODED_MIN_TOKENS) at Ornith shapes: block_k / num_warps / num_stages keep every output's
 16-wide mma k-step sequence, so outputs must be bitwise equal to the shipped config. Median ms of the
 whole fused prefill (CUDA events) per config and token count."""
 import functools
