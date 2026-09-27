@@ -1,8 +1,10 @@
 # Round 5: the saver's pass-1 gap, cause and fix (Ornith EXL3 5.0bpw, 262144 tokens, local RTX 5080, 2026-09-27)
 
-**Verdict: every local gate item passes on exp/reorg-round5 4b34dd4 (ck8o). The ft-dev suite is
-still pending: Vast answered `resources_unavailable` to every start from 03:13 on
-(`_orch/r5/box-start.log`). So nothing is merged into exp/reorg yet.**
+**Verdict: every gate item passes. The local gate (ck8o) ran on exp/reorg-round5 4b34dd4, and the
+suite on 7e1df41 (4b34dd4 + a test-stub fix). exp/reorg-round5 is merged into exp/reorg (local,
+not pushed).** ft-dev answered `resources_unavailable` to every start from 03:13 on
+(`_orch/r5/box-start.log`), so the orchestrator stopped the retry loop and the suite ran locally
+with the model unloaded.
 
 Setup is the same as ck6o/ck7o (`ck7-local/chain-r5.sh`, `CK_LABEL=ck8o CK_OUT=ck8-local/gate`):
 * Saver = FT_ROWS=-1 with the pool's default reserve (3E = 768 rows). Whole = FT_ROWS=0.
@@ -86,7 +88,7 @@ evidence says otherwise:
 | natural text x2 (`ck8o-nat-compare.txt`) | whole 168.0 / 167.5, saver 154.2 / 154.8 tok/s = 91.8% / 92.1%; md5 5/5 in all arms | PASS |
 | /clear replay (`ck8o-replay-compare.txt`) | cached counts identical to ck7o (and ck7o to ck6o, `ck7-local/gate/ck7o-replay-compare.txt`) for all 15 requests | PASS |
 | RAM (256K arm) | whole ram_gib 21.94 (RSS 22.74); saver ram_gib 18.69, RSS 17.58, anon 16.77 GiB (ck7o: 16.64 / 17.59 / 16.84) | recorded |
-| ft-dev suite, exp/reorg-round5 9593a1a + exp/r5-seed-b 5c4dcd1 (same python/tests as 4b34dd4) | not run: box unavailable | **PENDING** |
+| suite, 8 dirs, local RTX 5080 with the model unloaded (`suite/`) | on 5cb4d78 (orchestrator run, `suite/orch-local-5cb4d78-*`): 4 failed, 3432 passed, all 4 in `test_moe_stats_logging.py`. Cause: AttributeError, the SimpleNamespace scheduler stub lacked the new `_mirror_idle_seed`. **Fixed** in 7e1df41 (a no-op on the stub, like its `_maybe_retune_pageable_layers`). On 7e1df41: rc 0, **3436 passed**, 27 skipped, 0 failed, 0 illegal access | PASS |
 
 * The saver's ram_gib (a MemAvailable difference) reads 2 GiB higher than in ck7o, but RSS and
   anon memory match ck7o within 0.1 GiB. The pool is pinned once at startup and idle seeding
@@ -105,8 +107,8 @@ evidence says otherwise:
 | natural text | 90.5 / 92.7% | 92.3 / 93.3% | 91.8 / 92.1% |
 
 ## Open
-* The ft-dev suite. `box-suite/box-start-suite2.sh` (unit ft-r5-box3) retries the start every
-  5 min until about 11:40. Once the box runs, it tests both trees, copies status and suite.txt back
-  into `ck7-local/box-suite/`, then stops the box and records actual_status.
-* Natural text sits ~1% above the bar. Its residual is the in-decode writeback cost: ~132K writebacks per
-  arm, 0.18 per decode layer-call (`ck7-local/seed/`, sd-nat stats).
+* Natural text sits ~1% above the bar. Its residual is the in-decode writeback cost: ~132K
+  writebacks per arm, 0.18 per decode layer-call (`ck7-local/seed/`, sd-nat stats). Idle seeding
+  cannot reach it, because there is no idle boundary inside a long decode.
+* The suite has not run on ft-dev (Blackwell box) for the seed code; it passed on the local RTX 5080
+  (sm_120 as well).
