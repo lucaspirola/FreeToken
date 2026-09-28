@@ -1,0 +1,4 @@
+b-sn1      155.0 tok/s   100.0% of b-sn1  md5 5/5 vs b-sn1
+n-sn1      150.9 tok/s    97.4% of b-sn1  md5 5/5 vs b-sn1
+n-sn2      155.2 tok/s   100.1% of b-sn1  md5 5/5 vs b-sn1
+b-sn2      154.9 tok/s   100.0% of b-sn1  md5 5/5 vs b-sn1

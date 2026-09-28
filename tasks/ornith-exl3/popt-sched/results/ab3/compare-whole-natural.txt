@@ -1,0 +1,4 @@
+b-wn1      167.5 tok/s   100.0% of b-wn1  md5 5/5 vs b-wn1
+n-wn1      169.9 tok/s   101.5% of b-wn1  md5 5/5 vs b-wn1
+n-wn2      169.0 tok/s   100.9% of b-wn1  md5 5/5 vs b-wn1
+b-wn2      167.7 tok/s   100.1% of b-wn1  md5 5/5 vs b-wn1
