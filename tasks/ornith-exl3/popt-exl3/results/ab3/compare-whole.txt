@@ -1,0 +1,5 @@
+shape                                  b-wd1+b-wd2             n-wd1+n-wd2  identical
+probe 8000                    0.973s   8238  184.2    0.829s   9672  192.0  yes
+probe 80000                  12.650s   6326  161.9   11.848s   6755  156.8  yes
+probe 256000                 71.439s   3584  119.7   68.776s   3722  120.5  yes
+cells: TTFT s, prefill/extend tok/s, decode tok/s

@@ -1,0 +1,8 @@
+b-sn1-natural.json  154.7 tok/s  md5 same as b-sn1 5/5
+n-sn1-natural.json  154.9 tok/s  md5 same as b-sn1 5/5
+n-sn2-natural.json  155.0 tok/s  md5 same as b-sn1 5/5
+b-sn2-natural.json  152.0 tok/s  md5 same as b-sn1 5/5
+b-wn1-natural.json  167.7 tok/s  md5 same as b-sn1 5/5
+n-wn1-natural.json  167.9 tok/s  md5 same as b-sn1 5/5
+n-wn2-natural.json  166.6 tok/s  md5 same as b-sn1 5/5
+b-wn2-natural.json  167.7 tok/s  md5 same as b-sn1 5/5
