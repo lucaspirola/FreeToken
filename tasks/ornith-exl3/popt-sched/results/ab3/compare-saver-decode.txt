@@ -1,0 +1,5 @@
+shape                                  b-sd1+b-sd2             n-sd1+n-sd2  identical
+probe 8000                    0.994s   8059  179.6    0.963s   8318  181.1  yes
+probe 80000                  13.081s   6118  155.1   13.052s   6132  155.1  yes
+probe 256000                 73.531s   3482  108.7   72.960s   3509  114.2  yes
+cells: TTFT s, prefill/extend tok/s, decode tok/s

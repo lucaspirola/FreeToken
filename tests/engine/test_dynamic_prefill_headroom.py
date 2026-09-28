@@ -191,8 +191,8 @@ def test_scheduler_drains_before_moving_the_headroom():
     order = []
     sched = SimpleNamespace(
         engine=SimpleNamespace(
-            prefill_headroom_transition=lambda prefill, prefill_pending: (
-                "reserve" if prefill else None
+            prefill_headroom_transition=lambda prefill, prefill_pending, new_tokens=None: (
+                order.append(("ask", new_tokens)) or ("reserve" if prefill else None)
             ),
             apply_prefill_headroom=lambda kind: order.append(("apply", kind)),
         ),
@@ -200,13 +200,13 @@ def test_scheduler_drains_before_moving_the_headroom():
         _last_data="inflight",
     )
     sched._drain_inflight = lambda last: order.append(("drain", last))
-    Scheduler._move_prefill_headroom(sched, SimpleNamespace(is_prefill=True))
-    assert order == [("drain", "inflight"), ("apply", "reserve")]
+    Scheduler._move_prefill_headroom(sched, SimpleNamespace(is_prefill=True, log_new_tokens=700))
+    assert order == [("ask", 700), ("drain", "inflight"), ("apply", "reserve")]
     assert sched._last_data is None
 
     order.clear()
-    Scheduler._move_prefill_headroom(sched, SimpleNamespace(is_prefill=False))
-    assert order == []
+    Scheduler._move_prefill_headroom(sched, SimpleNamespace(is_prefill=False, log_new_tokens=0))
+    assert order == [("ask", None)]
 
 
 def test_scheduler_tolerates_stub_engines():
@@ -257,3 +257,51 @@ def test_teardown_shrink_at_the_prefill_level_needs_no_reserve():
     _kv_shrink(ctl, engine, ledger, int(0.21 * GIB))
     assert ledger["free"] >= ctl.prefill_free_target_bytes()
     assert ctl.prefill_headroom_transition(prefill=True, prefill_pending=True) is None
+
+
+def _small(ctl, engine, tokens=1024, gib=0.1):
+    engine.prefill_transient_small = (tokens, int(gib * GIB))
+
+
+def test_short_batch_reserves_only_the_short_chunk():
+    """A batch that forwards <= the small measured chunk (a short prompt, a tool result)
+    reserves that chunk's headroom (VMM cushion 256 MiB here, above its 0.1 GiB
+    transient) instead of the full chunk's 1 GiB: fewer slots unmapped and written back."""
+    ctl, engine, moe, ledger = _controller(free_gib=1.125, size=512, capacity=2048)
+    _small(ctl, engine)
+    ctl.release_prefill_headroom()
+    assert moe.cache_size == 1024
+    assert ctl.prefill_free_target_bytes(1000) == 256 * MIB + PREFILL_HEADROOM_MARGIN_BYTES
+    assert ctl.prefill_free_target_bytes(None) == GIB + PREFILL_HEADROOM_MARGIN_BYTES
+    assert ctl.prefill_headroom_transition(prefill=True, prefill_pending=True, new_tokens=1000) == "reserve"
+    ctl.reserve_prefill_headroom()
+    assert ledger["free"] >= ctl.prefill_free_target_bytes(1000)
+    assert ledger["free"] < ctl.prefill_free_target_bytes()
+    small_slots = moe.cache_size
+    assert 512 < small_slots < 1024
+    # Another short batch: already covered.
+    assert ctl.prefill_headroom_transition(prefill=True, prefill_pending=True, new_tokens=1024) is None
+    # A full chunk (or an unknown size) needs the full reserve on top.
+    assert ctl.prefill_headroom_transition(prefill=True, prefill_pending=True, new_tokens=1025) == "reserve"
+    ctl.reserve_prefill_headroom()
+    assert ledger["free"] >= ctl.prefill_free_target_bytes()
+    assert moe.cache_size < small_slots
+    # The full level covers everything, short or not.
+    for n in (1, 1024, 8192, None):
+        assert ctl.prefill_headroom_transition(prefill=True, prefill_pending=True, new_tokens=n) is None
+    # Decode takes it all back; the next short batch reserves the short level again.
+    assert ctl.prefill_headroom_transition(prefill=False, prefill_pending=False) == "release"
+    ctl.release_prefill_headroom()
+    assert ctl.prefill_headroom_transition(prefill=True, prefill_pending=True, new_tokens=None) == "reserve"
+    ctl.reserve_prefill_headroom()
+    assert ledger["free"] >= ctl.prefill_free_target_bytes()
+
+
+def test_no_small_measurement_prices_the_full_chunk():
+    ctl, engine, *_ = _controller()
+    assert ctl.prefill_free_target_bytes(10) == ctl.prefill_free_target_bytes()
+    # A small measurement above the full one is not trusted either.
+    _small(ctl, engine, gib=2.0)
+    assert ctl.prefill_free_target_bytes(10) == ctl.prefill_free_target_bytes()
+    _small(ctl, engine, tokens=0)
+    assert ctl.prefill_free_target_bytes(10) == ctl.prefill_free_target_bytes()

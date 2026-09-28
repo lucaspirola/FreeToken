@@ -439,7 +439,7 @@ class OffloadMoELayer(MoELayer):
         if cached:
             return self._cached_extend_routed(cache, hidden_states, topk_weights, topk_ids)
         if cache.prefill_overlap:
-            views = self._wait_prefill_overlap(cache)
+            views = self._wait_prefill_overlap(cache, hidden_states.shape[0])
             out = self._expert_gemm(
                 cache,
                 hidden_states,
@@ -495,14 +495,16 @@ class OffloadMoELayer(MoELayer):
         assert cache.quant_format.startswith("nvfp4"), cache.quant_format
         return self._decode_routed(hidden_states, topk_weights, topk_ids)
 
-    def _wait_prefill_overlap(self, cache: OffloadMoeCache) -> tuple[torch.Tensor, ...]:
+    def _wait_prefill_overlap(
+        self, cache: OffloadMoeCache, num_tokens: int | None = None
+    ) -> tuple[torch.Tensor, ...]:
         """Double-buffer choreography for this layer's overlap prefill: kick off the
         next layer's full-layer H2D copy, then return this layer's bank views (in
         bank registration order; buffer position == expert id, so routing ids pass
         through unmapped). The caller runs ``release_prefill_layer`` after its GEMMs.
         """
-        if self.layer_id == 0:
-            cache.begin_prefill()
+        if self.layer_id == 0 and not cache.take_primed_prefill(num_tokens):
+            cache.begin_prefill(num_tokens)
         cache.prefetch_prefill_layer(self.layer_id)
         cache.prefetch_prefill_layer(self.layer_id + 1)
         return cache.wait_prefill_layer(self.layer_id)

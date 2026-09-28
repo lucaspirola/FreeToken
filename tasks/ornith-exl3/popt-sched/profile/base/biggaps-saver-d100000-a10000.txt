@@ -1,0 +1,6 @@
+@  2138.1 ms gap  178.5 ms  memcpy19517440 -> _shared_expert_add_kernel | api: cuModuleLoadData 0.1, cuLaunchKernelEx 0.0 | other streams: []
+@  3666.9 ms gap   46.9 ms  index_elementwise_kernel -> index_elementwise_kernel | api: cuMemCreate 15.2, cuMemSetAccess 14.3, cuMemRelease 6.7, cuMemUnmap 6.2 | other streams: []
+@  3714.0 ms gap    8.7 ms  memcpy4 -> reduce_kernel | api: cudaEventSynchronize_v3020 6.7, cudaGraphLaunch_v10000 0.6, cudaMemcpyAsync_v3020 0.2, cudaLaunchKernel_v7000 0.1 | other streams: []
+@  3730.3 ms gap    8.8 ms  memcpy4 -> reduce_kernel | api: cudaEventSynchronize_v3020 6.8, cudaGraphLaunch_v10000 0.3, cudaMemcpyAsync_v3020 0.3, cudaLaunchKernel_v7000 0.1 | other streams: []
+@  3739.3 ms gap    8.4 ms  memcpy4 -> reduce_kernel | api: cudaEventSynchronize_v3020 6.8, cudaGraphLaunch_v10000 0.3, cudaMemcpyAsync_v3020 0.2, cudaLaunchKernel_v7000 0.1 | other streams: []
+@  3763.8 ms gap    9.2 ms  memcpy4 -> reduce_kernel | api: cudaEventSynchronize_v3020 7.5, cudaGraphLaunch_v10000 0.3, cudaMemcpyAsync_v3020 0.2, cudaLaunchKernel_v7000 0.1 | other streams: []

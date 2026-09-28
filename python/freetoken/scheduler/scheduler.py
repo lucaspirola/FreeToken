@@ -2860,9 +2860,13 @@ class Scheduler(SchedulerIOMixin):
         if ask is None:
             return
         pm = getattr(self, "prefill_manager", None)
+        prefill = bool(getattr(batch, "is_prefill", False))
+        # The batch's forwarded tokens size the reserve: a short prompt or extend only
+        # needs a short chunk's transient (engine/growable_kv.py ``_headroom_for``).
         kind = ask(
-            prefill=bool(getattr(batch, "is_prefill", False)),
+            prefill=prefill,
             prefill_pending=bool(getattr(pm, "runnable", False)),
+            new_tokens=int(getattr(batch, "log_new_tokens", 0) or 0) or None if prefill else None,
         )
         if kind is None:
             return

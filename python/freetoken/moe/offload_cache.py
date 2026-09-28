@@ -194,6 +194,13 @@ class OffloadMoeCache:
     # coalesced runs). Requires prefill_overlap, cache_size > 2 * num_experts and
     # the fused copy plan; silently falls back to the full-layer copy otherwise.
     prefill_hit_d2d: bool = False
+    # Chunks of at most this many tokens take the hit/miss split even without
+    # prefill_hit_d2d (0 = only the flag). A short chunk's GPU work cannot hide a
+    # full-layer H2D (Ornith EXL3, RTX 5080: 300/1000-token TTFT 0.46/0.40 s full
+    # layer vs 0.31/0.30 s split); a long chunk hides it, and there the split's
+    # device-side gather is a cost on the compute stream, which is why an 8K+
+    # chunk keeps the full-layer copy unless the flag asks for the split.
+    prefill_hit_d2d_tokens: int = 0
     # "bf16" (default, dense expert weights) or one of the NVFP4 bank layouts:
     # "nvfp4" (native ModelOpt rows, FreeToken Triton kernels), "nvfp4_marlin"
     # (Marlin-tiled, vLLM W4A16 GEMM, sm_80-99) or "nvfp4_b12x" (flashinfer SM12x
@@ -582,6 +589,7 @@ class OffloadMoeCache:
         # binds the bounded host mirror.
         self.residency = WholeModelResidency()
         self._prefill_hit_d2d_active = False
+        self._primed_prefill_tokens: int | None = None
         self._hit_d2d_fallback_logged = False
         self._batch_memcpy = None
         self.prefill_hit_rows = 0
@@ -2265,7 +2273,7 @@ class OffloadMoeCache:
             self.prefill_begin_event = torch.cuda.Event()
         if self.residency.init_prefill_buffers():
             pass  # the residency allocated its own prefill assembly buffers
-        elif self.prefill_hit_d2d and self.device.type == "cuda":
+        elif (self.prefill_hit_d2d or self.prefill_hit_d2d_tokens > 0) and self.device.type == "cuda":
             self._prefill_slot_snapshot = torch.empty(
                 (self.num_layers, self.num_experts), dtype=torch.int32, pin_memory=True
             )
@@ -2297,7 +2305,7 @@ class OffloadMoeCache:
         # ensure_experts evicts them first.
         self.usage[slot_start:slot_end].zero_()
 
-    def begin_prefill(self) -> None:
+    def begin_prefill(self, num_tokens: int | None = None) -> None:
         if not self.prefill_overlap:
             return
         self._prefill_buffer_layer = [None, None]
@@ -2313,7 +2321,12 @@ class OffloadMoeCache:
             self.prefill_copy_stream.wait_event(self.prefill_begin_event)
         if self.residency.begin_prefill():
             return
-        self._prefill_hit_d2d_active = self.prefill_hit_d2d and self._hit_d2d_usable()
+        auto = (
+            num_tokens is not None and 0 < num_tokens <= self.prefill_hit_d2d_tokens
+        )
+        self._prefill_hit_d2d_active = (
+            self.prefill_hit_d2d or auto
+        ) and self._hit_d2d_usable(requested=self.prefill_hit_d2d)
         if self._prefill_hit_d2d_active:
             # The copy stream is fenced behind the previous decode, so the snapshot
             # observes its final slot map; one host sync per chunk, then per-layer
@@ -2321,6 +2334,49 @@ class OffloadMoeCache:
             with torch.cuda.stream(self.prefill_copy_stream):
                 self._prefill_slot_snapshot.copy_(self.slot_for_id, non_blocking=True)
             self.prefill_copy_stream.synchronize()
+
+    def prime_prefill(self, num_tokens: int) -> None:
+        """Start a prefill forward's first expert-layer copy before the forward runs.
+
+        Layer 0's copy used to be issued by layer 0's own MoE block, after that
+        layer's attention/GDN and router, and its GEMMs then waited for the whole
+        copy (Ornith EXL3 whole mode: ~8 ms of a 0.3 s 1000-token TTFT, once per
+        chunk forward; later layers are hidden behind the previous layer's work).
+        Called by the engine right before an eager prefill forward; layer 0 then
+        finds its buffer already filling (``take_primed_prefill``). Skipped when
+        layer 0 would not stream (the short-extend cached path) -- the same gate
+        ``_prefill_routed`` applies.
+
+        Also skipped when the setup would wait on the host (the saver's per-chunk
+        snapshot sync, the hit/miss split's) while the GPU is still busy -- a
+        continuation chunk behind the previous one: waiting there, before any of
+        this forward is enqueued, drains the GPU (saver 32K/80K prefill -3-4%,
+        results/ab2). On an idle GPU (the first chunk after decode) it costs nothing.
+        """
+        self._primed_prefill_tokens = None
+        if (
+            not self.prefill_overlap
+            or num_tokens <= 0
+            or self._size_class_enabled
+            or self.use_cached_extend(0, num_tokens)
+        ):
+            return
+        blocks = (
+            self.residency.prefill_begin_blocks_host()
+            or self.prefill_hit_d2d
+            or 0 < num_tokens <= self.prefill_hit_d2d_tokens
+        )
+        if blocks and not torch.cuda.current_stream(self.device).query():
+            return
+        self.begin_prefill(num_tokens)
+        self.prefetch_prefill_layer(0)
+        self._primed_prefill_tokens = num_tokens
+
+    def take_primed_prefill(self, num_tokens: int | None) -> bool:
+        """Whether ``prime_prefill`` already began this forward's prefill (consumes it)."""
+        primed = num_tokens is not None and self._primed_prefill_tokens == num_tokens
+        self._primed_prefill_tokens = None
+        return primed
 
     def prefetch_prefill_layer(self, layer_id: int) -> None:
         if not self.prefill_overlap or layer_id >= self.num_layers:
@@ -2366,7 +2422,7 @@ class OffloadMoeCache:
         self._prefill_buffer_layer[buffer_id] = layer_id
         self._prefill_buffer_released[buffer_id] = False
 
-    def _hit_d2d_usable(self) -> bool:
+    def _hit_d2d_usable(self, requested: bool = True) -> bool:
         """Whether the hit-D2D split can serve this prefill; logs the first fallback.
 
         The flag is an auto-fallback optional: any unusable condition must degrade
@@ -2395,9 +2451,10 @@ class OffloadMoeCache:
         else:
             return True
         if not self._hit_d2d_fallback_logged:
-            logger.warning(
-                f"MoE prefill hit-D2D requested but unavailable ({reason}); "
-                "falling back to full-layer copies"
+            # The short-chunk auto split is not a request: its fallback is ordinary.
+            (logger.warning if requested else logger.info)(
+                f"MoE prefill hit-D2D {'requested' if requested else 'for short chunks'} "
+                f"but unavailable ({reason}); falling back to full-layer copies"
             )
             self._hit_d2d_fallback_logged = True
         return False

@@ -1,0 +1,8 @@
+ninja: no work to do.
+base {"ranges": 55, "commit_ms": 12.51, "uncommit_ms": 11.8}
+ninja: no work to do.
+new {"ranges": 55, "commit_ms": 9.31, "uncommit_ms": 10.62}
+ninja: no work to do.
+base {"ranges": 55, "commit_ms": 10.31, "uncommit_ms": 10.36}
+ninja: no work to do.
+new {"ranges": 55, "commit_ms": 9.67, "uncommit_ms": 10.88}

@@ -1,0 +1,4 @@
+ck9s-nat-whole-1-natural.json   168.7 tok/s  100.0%  md5 same as ref 5/5  same as ck8o-nat-whole-1 5/5
+ck9s-nat-mirror-1-natural.json   154.9 tok/s   91.8%  md5 same as ref 5/5  same as ck8o-nat-whole-1 5/5
+ck9s-nat-whole-2-natural.json   169.0 tok/s  100.1%  md5 same as ref 5/5  same as ck8o-nat-whole-1 5/5
+ck9s-nat-mirror-2-natural.json   155.5 tok/s   92.2%  md5 same as ref 5/5  same as ck8o-nat-whole-1 5/5

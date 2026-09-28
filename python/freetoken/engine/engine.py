@@ -357,6 +357,15 @@ def _prefill_transient_measure_enabled() -> bool:
     )
 
 
+def _small_prefill_tokens(length: int) -> int:
+    """Tokens of the short chunk ``_measure_prefill_transient`` also measures:
+    ``FREETOKEN_SMALL_PREFILL_TOKENS`` (default 1024, 0 = off), and only when it is
+    below a quarter of the full chunk (otherwise the two levels barely differ)."""
+    raw = os.environ.get("FREETOKEN_SMALL_PREFILL_TOKENS", "").strip()
+    small = int(raw) if raw else 1024
+    return small if 2 <= small <= length // 4 else 0
+
+
 def _page_table_width(max_seq_len: int, page_size: int) -> int:
     """Column count for the page table. ``_write_page_table`` writes WHOLE trailing pages, so the
     highest column touched is ``align_ceil(max_seq_len, page_size) - 1`` -- which the 32-alignment
@@ -806,6 +815,9 @@ class Engine:
         # compares it with the measurement).
         self.prefill_transient_sized = self.prefill_transient_bytes
         self.prefill_transient_measured = False
+        # (tokens, bytes) of a short chunk's measured transient, or None (see
+        # _measure_prefill_transient): sizes the dynamic prefill headroom for short batches.
+        self.prefill_transient_small = None
         self._growable_live_budget = None
         self._arena_parked_bytes = 0
         if is_offload_moe_strategy(config.moe_strategy):
@@ -1361,6 +1373,7 @@ class Engine:
                 cache_policy=config.moe_cache_policy,
                 prefill_overlap=config.moe_prefill_overlap,
                 prefill_hit_d2d=config.moe_prefill_hit_d2d,
+                prefill_hit_d2d_tokens=config.moe_prefill_hit_d2d_tokens,
                 extend_cache_tokens=config.moe_extend_cache_tokens,
                 quant_format=banks.quant_format,
                 decode_target=decode_target,
@@ -1749,9 +1762,11 @@ class Engine:
 
     # Dynamic prefill headroom (engine/growable_kv.py): the scheduler asks before each
     # batch whether the arena must give up / take back the prefill transient.
-    def prefill_headroom_transition(self, *, prefill: bool, prefill_pending: bool) -> "str | None":
+    def prefill_headroom_transition(
+        self, *, prefill: bool, prefill_pending: bool, new_tokens: "int | None" = None
+    ) -> "str | None":
         return self.growable_kv.prefill_headroom_transition(
-            prefill=prefill, prefill_pending=prefill_pending
+            prefill=prefill, prefill_pending=prefill_pending, new_tokens=new_tokens
         )
 
     def apply_prefill_headroom(self, kind: str) -> tuple[int, int]:
@@ -1803,10 +1818,15 @@ class Engine:
         self.ctx.hidden_state_sink = self.hidden_states.begin_batch(batch)
         try:
             use_graph = self.graph_runner.can_use_cuda_graph(batch)
+            moe = self.moe_offload_cache
+            if moe is not None and batch.is_prefill and not use_graph:
+                moe.prime_prefill(int(batch.input_ids.shape[0]))
             with self.ctx.forward_batch(batch), self.model.forward_host_ctx(batch, use_graph):
                 logits = self.graph_runner.replay(batch) if use_graph else self.model.forward()
         finally:
             self.ctx.hidden_state_sink = None
+            if self.moe_offload_cache is not None:
+                self.moe_offload_cache.take_primed_prefill(None)  # never outlives its forward
         if self.cpu_moe_executor is not None:
             # One pinned read: surfaces a fired flag-handshake watchdog (dead coordinator
             # -> stale expert outputs) as a loud error instead of silent corruption.
@@ -1999,6 +2019,27 @@ class Engine:
                     torch.cuda.memory._record_memory_history(enabled=None)
                 alloc_peaks.append(int(allocated_rise))
                 peaks.append(int(max(reserved_rise, allocated_rise)))
+            # The same measurement on a short chunk (FREETOKEN_SMALL_PREFILL_TOKENS,
+            # default 1024; 0 = off): the dynamic prefill headroom reserves only this
+            # much before a batch that forwards no more tokens (a short prompt, a tool
+            # result), instead of shrinking the arena for a full chunk
+            # (GrowableKvController._headroom_for). Same prefixes as above, so the
+            # prefix path's fixed buffers are in it.
+            small = _small_prefill_tokens(length)
+            small_peaks: list[int] = []
+            if small:
+                for cached_len in prefixes:
+                    torch.cuda.synchronize(self.device)
+                    torch.cuda.empty_cache()
+                    reserved0 = torch.cuda.memory_reserved(self.device)
+                    allocated0 = torch.cuda.memory_allocated(self.device)
+                    torch.cuda.reset_peak_memory_stats(self.device)
+                    self._prefill_forward(small, cached_len)
+                    torch.cuda.synchronize(self.device)
+                    small_peaks.append(int(max(
+                        torch.cuda.max_memory_reserved(self.device) - reserved0,
+                        torch.cuda.max_memory_allocated(self.device) - allocated0,
+                    )))
             # Experiment: FREETOKEN_PREFILL_WORKSPACE_TEST=<pad MiB> repeats each run
             # after caching ONE free segment of (allocator peak + pad) -- the chunk's
             # blocks are then carved from it -- and logs the reservation it needed.
@@ -2075,13 +2116,17 @@ class Engine:
                 self.moe_offload_cache.reset()
         torch.cuda.synchronize(self.device)
         torch.cuda.empty_cache()
-        transient = torch.tensor([max(peaks)], dtype=torch.int64, device="cpu")
+        transient = torch.tensor(
+            [max(peaks), max(small_peaks, default=-1)], dtype=torch.int64, device="cpu"
+        )
         torch.distributed.all_reduce(
             transient, op=torch.distributed.ReduceOp.MAX, group=self.tp_cpu_group
         )
         return {
             "length": length,
-            "transient": int(transient.item()),
+            "transient": int(transient[0].item()),
+            "small_length": small if small_peaks else 0,
+            "small_transient": int(transient[1].item()),
             "first": peaks[0],
             "prefix": peaks[1] if len(peaks) > 1 else -1,
             "allocated": max(alloc_peaks),
@@ -2125,6 +2170,10 @@ class Engine:
         if measured is not None:
             self.prefill_transient_bytes = measured["transient"]
             self.prefill_transient_measured = True
+            if measured.get("small_length"):
+                self.prefill_transient_small = (
+                    int(measured["small_length"]), int(measured["small_transient"])
+                )
             if config.tp_info.rank == 0:
                 _record_prefill_transient(config, self.prefill_transient_bytes)
         headroom = growable_headroom_bytes(self.prefill_transient_bytes)
@@ -2179,6 +2228,12 @@ class Engine:
                     else ""
                 )
                 + f"allocator peak {mem_GB(measured['allocated'])})"
+                + (
+                    f"; a {measured['small_length']}-token chunk "
+                    f"{mem_GB(measured['small_transient'])}"
+                    if measured.get("small_length")
+                    else ""
+                )
             )
         else:
             source = "estimated, not measured"
@@ -2730,6 +2785,7 @@ _DENSE_MOE_SETTINGS = {
     "moe_hybrid_max_fetch": -1,
     "moe_prefill_overlap": True,
     "moe_prefill_hit_d2d": False,
+    "moe_prefill_hit_d2d_tokens": 2048,
     "moe_extend_cache_tokens": 64,
     "expert_load": "auto",
 }

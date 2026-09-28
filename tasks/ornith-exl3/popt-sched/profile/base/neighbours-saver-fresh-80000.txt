@@ -1,0 +1,61 @@
+elementwise: 1135.6 ms total
+   279.4 ms    300x grid~ 128046    931.3 us  st13 Kernel2 -> [elementwise_kernel] -> unrolled_elementwise_kernel
+           void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[la
+   207.4 ms   1900x grid~  32011    109.2 us  st13 Kernel2 -> [elementwise_kernel] -> _reconstruct_folded_kernel
+           void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() 
+   129.8 ms    300x grid~  64023    432.6 us  st13 elementwise_kernel -> [elementwise_kernel] -> l2norm_fwd_kernel
+           void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[la
+   103.0 ms    600x grid~  38680    171.7 us  st13 elementwise_kernel -> [elementwise_kernel] -> elementwise_kernel
+           void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[la
+    59.1 ms    270x grid~  31927    218.9 us  st13 unrolled_elementwise_kernel -> [elementwise_kernel] -> elementwise_kernel
+           void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[la
+    49.4 ms    300x grid~  64023    164.7 us  st13 _layer_norm_fwd_1pass_kernel -> [unrolled_elementwise_kernel] -> _reconstruct_folded_kernel
+           void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambd
+    46.6 ms    300x grid~  64023    155.2 us  st13 index_elementwise_kernel -> [elementwise_kernel] -> _layer_norm_fwd_1pass_kernel
+           void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[la
+    29.2 ms    400x grid~  32011     73.1 us  st13 kernel -> [unrolled_elementwise_kernel] -> _reconstruct_folded_kernel
+           void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambd
+    29.0 ms    300x grid~  32011     96.6 us  st13 Kernel2 -> [elementwise_kernel] -> Kernel2
+           void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() 
+    28.1 ms    400x grid~  32011     70.3 us  st13 Kernel2 -> [unrolled_elementwise_kernel] -> kernel_cutlass_kernel_flashinfernormkern
+           void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambd
+    21.4 ms    100x grid~  32011    214.0 us  st13 vectorized_elementwise_kernel -> [vectorized_elementwise_kerne] -> unrolled_elementwise_kernel
+           void at::native::vectorized_elementwise_kernel<(int)4, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFu
+    20.0 ms    400x grid~  32011     49.9 us  st13 Kernel2 -> [unrolled_elementwise_kernel] -> _router_triton_kernel
+           void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambd
+    19.9 ms    400x grid~  32011     49.7 us  st13 kernel_cutlass_kernel_flashinfernormkern -> [unrolled_elementwise_kernel] -> _reconstruct_folded_kernel
+           void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambd
+    16.5 ms    100x grid~  64023    165.1 us  st13 vectorized_elementwise_kernel -> [unrolled_elementwise_kernel] -> _reconstruct_folded_kernel
+           void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambd
+    16.1 ms    300x grid~  32011     53.7 us  st13 chunk_gated_delta_rule_fwd_kernel_h_bloc -> [vectorized_elementwise_kerne] -> chunk_fwd_kernel_o
+           void at::native::vectorized_elementwise_kernel<(int)4, at::native::FillFunctor<c10::BFloat16>, std::array<char *, (unsigned long)1>>(int, T2, T3)
+    12.9 ms     90x grid~  31927    143.6 us  st13 MergeStateInPlaceKernel -> [vectorized_elementwise_kerne] -> vectorized_elementwise_kernel
+           void at::native::vectorized_elementwise_kernel<(int)4, at::native::sigmoid_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 2)]::operator ()() const::
+     9.7 ms    400x grid~  16005     24.3 us  st13 Kernel2 -> [unrolled_elementwise_kernel] -> act_and_mul_kernel
+           void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambd
+     7.8 ms    300x grid~  16005     26.0 us  st13 chunk_local_cumsum_scalar_kernel -> [vectorized_elementwise_kerne] -> chunk_gated_delta_rule_fwd_kkt_solve_ker
+           void at::native::vectorized_elementwise_kernel<(int)4, at::native::FillFunctor<c10::BFloat16>, std::array<char *, (unsigned long)1>>(int, T2, T3)
+     6.6 ms     30x grid~  32768    220.0 us  st13 index_elementwise_kernel -> [elementwise_kernel] -> elementwise_kernel
+           void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[la
+     5.1 ms    100x grid~  16005     51.1 us  st13 Kernel2 -> [elementwise_kernel] -> elementwise_kernel
+           void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() 
+     4.5 ms    400x grid~   8002     11.2 us  st13 act_and_mul_kernel -> [unrolled_elementwise_kernel] -> _reconstruct_folded_kernel
+           void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambd
+     3.5 ms    100x grid~   8002     34.8 us  st13 elementwise_kernel -> [elementwise_kernel] -> kernel_cutlass_kernel_flashinfernormkern
+           void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[la
+     2.9 ms    300x grid~    500      9.5 us  st13 causal_conv1d_fwd_kernel -> [elementwise_kernel] -> vectorized_elementwise_kernel
+           void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl_nocast<at::native::sigmoid_kernel_cuda(at::TensorIteratorBase &)::[lambda
+     2.8 ms    300x grid~    500      9.3 us  st13 vectorized_elementwise_kernel -> [elementwise_kernel] -> elementwise_kernel
+           void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() 
+     2.6 ms    300x grid~   1024      8.7 us  st13 chunk_fwd_kernel_o -> [index_elementwise_kernel] -> unrolled_elementwise_kernel
+           void at::native::index_elementwise_kernel<(int)128, (int)4, void at::native::gpu_index_kernel<void at::native::index_kernel_impl<at::native::OpaqueType<(int)2>>
+     2.5 ms    300x grid~   1000      8.4 us  st13 elementwise_kernel -> [elementwise_kernel] -> vectorized_elementwise_kernel
+           void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<float>>(at::TensorIteratorBase &, cons
+     2.4 ms    300x grid~   1000      8.0 us  st13 vectorized_elementwise_kernel -> [elementwise_kernel] -> unrolled_elementwise_kernel
+           void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_
+     2.3 ms    300x grid~    250      7.7 us  st13 elementwise_kernel -> [vectorized_elementwise_kerne] -> elementwise_kernel
+           void at::native::vectorized_elementwise_kernel<(int)4, at::native::<unnamed>::softplus_kernel(at::TensorIteratorBase &, const c10::Scalar &, const c10::Scalar &
+     2.3 ms    300x grid~      1      7.5 us  st13 elementwise_kernel -> [unrolled_elementwise_kernel] -> causal_conv1d_fwd_kernel
+           void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambd
+     2.1 ms    270x grid~    498      7.9 us  st13 elementwise_kernel -> [unrolled_elementwise_kernel] -> elementwise_kernel
+           void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambd

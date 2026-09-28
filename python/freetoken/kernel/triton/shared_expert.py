@@ -13,7 +13,7 @@ def _shared_expert_add_kernel(
     shared_ptr,
     gate_ptr,
     hidden: tl.constexpr,
-    n_elements: tl.constexpr,
+    n_elements,  # runtime: a constexpr token count compiled a new kernel per prompt length
     BLOCK: tl.constexpr,
 ):
     offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
@@ -61,7 +61,7 @@ def _shared_route_reduce_kernel(
     hidden: tl.constexpr,
     routed_top_k: tl.constexpr,
     total_top_k: tl.constexpr,
-    n_elements: tl.constexpr,
+    n_elements,  # runtime: a constexpr token count compiled a new kernel per prompt length
     BLOCK: tl.constexpr,
 ):
     offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
