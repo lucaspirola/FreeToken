@@ -1211,6 +1211,19 @@ def parse_args(
             "--moe-cache-size > 2 * num_experts."
         ),
     )
+    parser.add_argument(
+        "--moe-prefill-hit-d2d-tokens",
+        type=int,
+        dest="moe_prefill_hit_d2d_tokens",
+        default=ServerArgs.moe_prefill_hit_d2d_tokens,
+        help=(
+            "Prefill chunks of at most this many tokens take the hit/miss split "
+            "automatically: their GPU work cannot hide a full-layer H2D (Ornith EXL3 on "
+            "an RTX 5080: 300/1000-token TTFT -34%%/-26%%, byte-identical output). "
+            "Longer chunks keep the full-layer copy unless --moe-prefill-hit-d2d. "
+            "0 = only the flag."
+        ),
+    )
 
     parser.add_argument(
         "--moe-extend-cache-tokens",

@@ -95,6 +95,9 @@ class ExpertResidency(Protocol):
     def begin_prefill(self) -> bool:
         """Per-chunk prefill setup; True: the cache's own setup is replaced."""
 
+    def prefill_begin_blocks_host(self) -> bool:
+        """Does this residency's prefill setup/prefetch wait on the host for the copy stream?"""
+
     def copy_missing(self) -> bool:
         """Issue this step's copies; True: the cache's own copy is replaced."""
 
@@ -151,6 +154,9 @@ class WholeModelResidency:
         return False
 
     def begin_prefill(self) -> bool:
+        return False
+
+    def prefill_begin_blocks_host(self) -> bool:
         return False
 
     def copy_missing(self) -> bool:
@@ -356,6 +362,10 @@ class MirrorResidency:
             self.cache.prefill_copy_stream.synchronize()
             return True
         return False
+
+    def prefill_begin_blocks_host(self) -> bool:
+        # begin_prefill above and _mirror_writeback_buffer both synchronize the copy stream
+        return getattr(self, "_mirror", None) is not None
 
     def copy_missing(self) -> bool:
         self.copy_missing_mirror()

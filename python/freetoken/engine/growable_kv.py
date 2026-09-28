@@ -542,10 +542,36 @@ class GrowableKvController:
         cov_floor = -(-need // cov_step) * cov_step
         return max(floor, cov_floor)
 
-    def prefill_free_target_bytes(self) -> int:
+    def prefill_free_target_bytes(self, new_tokens: "int | None" = None) -> int:
         """Live free VRAM a prefill chunk needs: the growable headroom (VMM cushion
-        or the measured transient, whichever is larger) plus the margin."""
-        return self.headroom_bytes() + PREFILL_HEADROOM_MARGIN_BYTES
+        or the measured transient, whichever is larger) plus the margin.
+
+        ``new_tokens`` sizes it for a batch that forwards at most that many tokens:
+        at or below the small measured chunk (``Engine.prefill_transient_small``,
+        measured at startup like the full chunk) the small chunk's transient is
+        enough; anything else, or no small measurement, prices the full chunk."""
+        return self._headroom_for(new_tokens) + PREFILL_HEADROOM_MARGIN_BYTES
+
+    def _small_prefill(self) -> "tuple[int, int] | None":
+        """(tokens, transient bytes) of the small startup measurement, or None."""
+        small = getattr(self.engine, "prefill_transient_small", None)
+        if not small or small[0] <= 0 or small[1] > int(getattr(self.engine, "prefill_transient_bytes", 0) or 0):
+            return None
+        return int(small[0]), int(small[1])
+
+    def _headroom_for(self, new_tokens: "int | None") -> int:
+        small = self._small_prefill()
+        if new_tokens is not None and small is not None and 0 < int(new_tokens) <= small[0]:
+            return growable_headroom_bytes(small[1])
+        return self.headroom_bytes()
+
+    def _prefill_level_tokens(self, new_tokens: "int | None") -> int:
+        """The prefill level a batch of ``new_tokens`` needs: the small chunk's size, or
+        0 for the full chunk (which covers every batch)."""
+        small = self._small_prefill()
+        if new_tokens is not None and small is not None and 0 < int(new_tokens) <= small[0]:
+            return small[0]
+        return 0
 
     @staticmethod
     def decode_free_target_bytes() -> int:
@@ -636,20 +662,30 @@ class GrowableKvController:
             return False
         return self.prefill_free_target_bytes() > self.decode_free_target_bytes()
 
-    def prefill_headroom_transition(self, *, prefill: bool, prefill_pending: bool) -> "str | None":
+    def prefill_headroom_transition(
+        self, *, prefill: bool, prefill_pending: bool, new_tokens: "int | None" = None
+    ) -> "str | None":
         """What the scheduler must do before the batch it just picked: ``"reserve"``
-        (a prefill batch while decode holds the arena full), ``"release"`` (a
-        decode batch with no prefill waiting while the arena is still held at the
-        prefill level), or ``None``. Pure bookkeeping; the scheduler drains the
-        in-flight forward and then calls ``reserve_prefill_headroom`` /
+        (a prefill batch while decode holds the arena full, or while the arena is held
+        at a small-chunk level this batch exceeds), ``"release"`` (a decode batch with
+        no prefill waiting while the arena is still held at a prefill level), or
+        ``None``. ``new_tokens`` is the prefill batch's forwarded token count (None =
+        assume a full chunk). Pure bookkeeping; the scheduler drains the in-flight
+        forward and then calls ``reserve_prefill_headroom`` /
         ``release_prefill_headroom``."""
         if not self.dynamic_enabled():
             return None
         full = bool(getattr(self, "_decode_level", False))
         if full and not prefill:
             self._sample_decode_memory()
-        if prefill and full:
-            return "reserve"
+        if prefill:
+            need = self._prefill_level_tokens(new_tokens)
+            held = getattr(self, "_prefill_level", 0)
+            # held 0 = the full chunk, which covers every batch; a small level covers
+            # batches up to its size only.
+            if full or (held and (need == 0 or need > held)):
+                self._pending_prefill_level = need
+                return "reserve"
         if not prefill and not prefill_pending and not full:
             return "release"
         return None
@@ -686,7 +722,9 @@ class GrowableKvController:
         moe = self.moe
         assert moe is not None
         old_moe = moe.cache_size
-        target_free = self.prefill_free_target_bytes()
+        level = int(getattr(self, "_pending_prefill_level", 0) or 0)
+        self._pending_prefill_level = 0
+        target_free = self.prefill_free_target_bytes(level or None)
         t0 = time.perf_counter()
         torch.cuda.synchronize(self.engine.device)
         self._log_decode_window(moe)
@@ -714,11 +752,13 @@ class GrowableKvController:
             if self.engine.config.tp_info.size > 1:
                 self.engine.sync_all_ranks()
         self._decode_level = False
+        self._prefill_level = level
         logger.info_rank0(
             "Prefill headroom reserved: MoE slots %d -> %d (%s released, %s free, "
-            "target %s, %.1f ms)",
+            "target %s for %s, %.1f ms)",
             old_moe, target_moe, mem_GB(released),
             mem_GB(live_free + released), mem_GB(target_free),
+            f"<= {level} tokens" if level else "a full chunk",
             (time.perf_counter() - t0) * 1e3,
         )
         return old_moe, target_moe
@@ -753,6 +793,7 @@ class GrowableKvController:
             if self.engine.config.tp_info.size > 1:
                 self.engine.sync_all_ranks()
         self._decode_level = True
+        self._prefill_level = 0
         self._release_decode_totals = self._decode_totals(moe)
         self._open_decode_memory_window()
         logger.info_rank0(
@@ -961,8 +1002,10 @@ class GrowableKvController:
             "expert-arena resize must never replace the decode graphs"
         )
         # The grow left the prefill headroom free; decode takes it back at the
-        # next decode-only boundary (release_prefill_headroom).
+        # next decode-only boundary (release_prefill_headroom). It is the full
+        # chunk's headroom, so no batch needs a further reserve.
         self._decode_level = False
+        self._prefill_level = 0
         self._log_decode_memory_window(closing=True, why="KV grow")
         logger.info_rank0(
             "Committed growable KV through %d tokens (%s physical); MoE slots %d -> %d",

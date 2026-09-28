@@ -105,6 +105,9 @@ class EngineConfig:
     # prefetch instead of re-streaming the full layer over PCIe. Needs CUDA >= 12.8
     # (cudaMemcpyBatchAsync); no-op unless moe_cache_size > 2 * num_experts.
     moe_prefill_hit_d2d: bool = False
+    # Prefill chunks of at most this many tokens take the hit/miss split automatically
+    # (they cannot hide a full-layer H2D behind their GPU work); 0 = only the flag above.
+    moe_prefill_hit_d2d_tokens: int = 2048
     # Extend (prefill-path) forwards carrying at most this many tokens take the DECODE
     # expert cache instead of streaming every expert of every layer over PCIe. The
     # prefill stream costs num_experts rows per layer per forward regardless of token
