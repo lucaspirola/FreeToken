@@ -236,3 +236,8 @@ benchmarks/decode16/runs/
 benchmarks/extend_moe/runs/
 benchmarks/spec_k/runs/
 scratchpad/
+
+# Profiler captures record the full process environment (API keys): never commit them.
+*.nsys-rep
+*.ncu-rep
+*.sqlite
