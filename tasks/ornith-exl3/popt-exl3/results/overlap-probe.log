@@ -1,0 +1,7 @@
+start 2026-09-27T22:01:45+04:00 load 1.13 2.39 2.60 tree /home/lucas/ai/FreeToken-wt/popt-exl3 757caee Merge exp/exl3-kfix: EXL3 expert kernels, 
+gemm-only 32 experts x8 (no reconstruct): 5.913 ms
+reconstruct-only 32 x8: 1.913 ms
+group 8: serial 5.586 ms  overlapped 6.088 ms  equal=True
+group 16: serial 5.143 ms  overlapped 5.359 ms  equal=True
+group 32: serial 5.377 ms  overlapped 5.490 ms  equal=True
+rc=0 end 2026-09-27T22:01:53+04:00

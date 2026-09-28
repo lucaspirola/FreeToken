@@ -1,0 +1,256 @@
+{
+ "url": "http://127.0.0.1:1920",
+ "model": "ornith",
+ "max_tokens": 1024,
+ "think_max_tokens": 65536,
+ "sizes": [
+  {
+   "target": 21000,
+   "questions": {
+    "codes": {
+     "thinking": false,
+     "correct": true,
+     "seconds": 0.78,
+     "cached_tokens": 17600,
+     "completion_tokens": 25,
+     "reasoning_chars": 0,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "ROMEO-5324, TANGO-3579, ZULU-1956"
+    },
+    "multihop": {
+     "thinking": true,
+     "correct": true,
+     "seconds": 0.99,
+     "cached_tokens": 17600,
+     "completion_tokens": 93,
+     "reasoning_chars": 190,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "**Braunfels**\n\nThe text states that \"Delia Marsh's manager is Ov Petran,\" and separately notes that \"Ov Petran's office is in Braunfels.\""
+    },
+    "counting": {
+     "thinking": true,
+     "correct": true,
+     "seconds": 2.67,
+     "cached_tokens": 17600,
+     "completion_tokens": 399,
+     "reasoning_chars": 1551,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "7"
+    },
+    "ordering": {
+     "thinking": true,
+     "correct": false,
+     "seconds": 343.02,
+     "cached_tokens": 17600,
+     "completion_tokens": 65535,
+     "reasoning_chars": 168176,
+     "finish_reason": "length",
+     "truncated": true,
+     "answer": "Let me find the five events with dates in the text.\n\n1. \"The ostrey merger was concluded on 1987-11-02.\"\n2. \"The innsmouth filing was concluded on 1979-01-30.\"\n3. \"The Calloway account total is 48,200 units.\" (no date, but later amended)\n4. \"The pellow recall was concluded on 2003-07-19.\"\n5. \"The verrick settlement was concluded on 2011-09-08.\"\n\nLet me find the dates:\n- ostrey merger: 1987-11-02\n-"
+    },
+    "contradiction": {
+     "thinking": true,
+     "correct": true,
+     "seconds": 1.45,
+     "cached_tokens": 17600,
+     "completion_tokens": 174,
+     "reasoning_chars": 432,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "The current total for the Calloway account is **51,750 units**, and yes, that figure changed in the text (it was originally stated as 48,200 units, then amended)."
+    },
+    "arithmetic": {
+     "thinking": true,
+     "correct": true,
+     "seconds": 2.13,
+     "cached_tokens": 17600,
+     "completion_tokens": 299,
+     "reasoning_chars": 809,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "3878"
+    },
+    "negative": {
+     "thinking": false,
+     "correct": true,
+     "seconds": 0.92,
+     "cached_tokens": 17600,
+     "completion_tokens": 82,
+     "reasoning_chars": 0,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "I need to search the text for the authorization code OSCAR-6621.\n\nLet me identify the authorization codes that do appear in the text:\n- ROMEO-5324\n- TANGO-3579\n- ZULU-1956\n\nThe authorization code **OSCAR-6621** does not appear anywhere in the text."
+    }
+   },
+   "prompt_tokens": 17647,
+   "prefill_seconds": 2.08,
+   "prefill_cached_tokens": 0,
+   "truth": {
+    "codes": [
+     "ROMEO-5324",
+     "TANGO-3579",
+     "ZULU-1956"
+    ],
+    "multihop": {
+     "person": "Delia Marsh",
+     "manager": "Ov Petran",
+     "city": "Braunfels"
+    },
+    "counting": {
+     "phrase": "crimson ledger",
+     "n": 7
+    },
+    "ordering": [
+     "the Innsmouth filing",
+     "the Ostrey merger",
+     "the Halberd audit",
+     "the Pellow recall",
+     "the Verrick settlement"
+    ],
+    "contradiction": {
+     "first": "48,200",
+     "revised": "51,750"
+    },
+    "arithmetic": {
+     "parts": [
+      1420,
+      385,
+      2073
+     ],
+     "sum": 3878
+    },
+    "negative": {
+     "code": "OSCAR-6621"
+    }
+   },
+   "score": 6
+  },
+  {
+   "target": 120000,
+   "questions": {
+    "codes": {
+     "thinking": false,
+     "correct": true,
+     "seconds": 8.76,
+     "cached_tokens": 57280,
+     "completion_tokens": 24,
+     "reasoning_chars": 0,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "KILO-8972, KILO-6305, KILO-7431"
+    },
+    "multihop": {
+     "thinking": true,
+     "correct": true,
+     "seconds": 9.37,
+     "cached_tokens": 57280,
+     "completion_tokens": 118,
+     "reasoning_chars": 286,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "**Braunfels**\n\nThe text states that \"Delia Marsh's manager is Ov Petran\" and that \"Ov Petran's office is in Braunfels.\""
+    },
+    "counting": {
+     "thinking": true,
+     "correct": true,
+     "seconds": 403.84,
+     "cached_tokens": 57280,
+     "completion_tokens": 65535,
+     "reasoning_chars": 392369,
+     "finish_reason": "length",
+     "truncated": true,
+     "answer": "The user wants me to count how many times the phrase \"crimson ledger\" appears in the text.\n\nLet me search through the text carefully.\n\n1. \"The crimson ledger, finally, was returned to the vault.\"\n2. \"The crimson ledger listed no remittance at all.\"\n3. \"Someone had annotated the crimson ledger in pencil.\"\n4. \"They filed the crimson ledger with the clerk.\"\n5. \"The crimson ledger was sealed that even"
+    },
+    "ordering": {
+     "thinking": true,
+     "correct": false,
+     "seconds": 512.63,
+     "cached_tokens": 57280,
+     "completion_tokens": 65535,
+     "reasoning_chars": 209270,
+     "finish_reason": "length",
+     "truncated": true,
+     "answer": "Let me find all the events with dates in the text.\n\n1. \"The authorization code for this section is KILO-8972.\" - no date\n2. \"The ostrey merger was concluded on 1987-11-02.\" - ostrey merger, 1987-11-02\n3. \"The crimson ledger, finally, was returned to the vault.\" - no date\n4. \"The Harrow depot received 1420 units.\" - no date\n5. \"The innsmouth filing was concluded on 1979-01-30.\" - innsmouth filing, "
+    },
+    "contradiction": {
+     "thinking": true,
+     "correct": true,
+     "seconds": 9.95,
+     "cached_tokens": 57280,
+     "completion_tokens": 185,
+     "reasoning_chars": 435,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "The current total for the Calloway account is **51,750 units**, and yes, the figure changed (it was originally stated as 48,200 units, but an amended figure corrected it to 51,750 units)."
+    },
+    "arithmetic": {
+     "thinking": true,
+     "correct": true,
+     "seconds": 9.69,
+     "cached_tokens": 57280,
+     "completion_tokens": 150,
+     "reasoning_chars": 335,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "3878"
+    },
+    "negative": {
+     "thinking": false,
+     "correct": true,
+     "seconds": 9.56,
+     "cached_tokens": 57280,
+     "completion_tokens": 140,
+     "reasoning_chars": 0,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "I need to search the text for the authorization code \"OSCAR-6621\".\n\nLet me check what authorization codes do appear in the text:\n\n1. **\"KILO-8972\"** - \"The authorization code for this section is KILO-8972.\"\n2. **\"KILO-6305\"** - \"The authorization code for this section is KILO-6305.\"\n3. **\"KILO-7431\"** - \"The authorization code for this section is KILO-7431.\"\n\nThe code **OSCAR-6621** does not appea"
+    }
+   },
+   "prompt_tokens": 99207,
+   "prefill_seconds": 15.79,
+   "prefill_cached_tokens": 0,
+   "truth": {
+    "codes": [
+     "KILO-8972",
+     "KILO-6305",
+     "KILO-7431"
+    ],
+    "multihop": {
+     "person": "Delia Marsh",
+     "manager": "Ov Petran",
+     "city": "Braunfels"
+    },
+    "counting": {
+     "phrase": "crimson ledger",
+     "n": 7
+    },
+    "ordering": [
+     "the Innsmouth filing",
+     "the Ostrey merger",
+     "the Halberd audit",
+     "the Pellow recall",
+     "the Verrick settlement"
+    ],
+    "contradiction": {
+     "first": "48,200",
+     "revised": "51,750"
+    },
+    "arithmetic": {
+     "parts": [
+      1420,
+      385,
+      2073
+     ],
+     "sum": 3878
+    },
+    "negative": {
+     "code": "OSCAR-6621"
+    }
+   },
+   "score": 6
+  }
+ ]
+}

@@ -155,6 +155,7 @@ def _layer_norm_fwd(
     norm_before_gate=True,
     is_rms_norm=False,
     activation: str = "swish",
+    rows_per_block=None,
 ):
     M, N = x.shape
     if group_size is None:
@@ -190,7 +191,8 @@ def _layer_norm_fwd(
     # heuristics for number of warps
     num_warps = min(max(BLOCK_N // 256, 1), 8)
     # Calculate rows per block based on SM count
-    rows_per_block = calc_rows_per_block(M, x.device)
+    if rows_per_block is None:
+        rows_per_block = calc_rows_per_block(M, x.device)
     # Update grid to use rows_per_block
     grid = (triton.cdiv(M, rows_per_block), ngroups)
     with _device_context(x.device):
@@ -261,4 +263,23 @@ def rms_norm_gated(
     return y.reshape(x_shape_og)
 
 
-__all__ = ["rms_norm_gated"]
+def rms_norm_gated_heads(*, x, weight, z, eps=1e-6, activation: str = "swish"):
+    """``rms_norm_gated`` over the last dim of ``x [T, H, D]`` (contiguous) with ``z [T, H, D]`` read
+    in place through its strides (``z.stride(-2) == D``, any token stride: the GDN z slice of the fused
+    in_proj output), instead of the row-per-head 2-D view that forces a contiguous copy of z. The rows
+    become tokens and the heads the kernel's column groups (group_size = D, the weight repeated per
+    head); rows per block are those of the [T*H, D] launch, so every head row is reduced by the same
+    [rows, D] tile and the output is bitwise equal."""
+    T, H, D = x.shape
+    assert x.is_contiguous() and z.shape == x.shape and z.stride(-1) == 1 and z.stride(-2) == D
+    x2 = x.view(T, H * D)
+    z2 = z.as_strided((T, H * D), (z.stride(0), 1))
+    y, _, _ = _layer_norm_fwd(
+        x2, weight.contiguous().repeat(H), None, eps, z=z2, group_size=D,
+        norm_before_gate=True, is_rms_norm=True, activation=activation,
+        rows_per_block=calc_rows_per_block(T * H, x.device),
+    )
+    return y.view(T, H, D)
+
+
+__all__ = ["rms_norm_gated", "rms_norm_gated_heads"]

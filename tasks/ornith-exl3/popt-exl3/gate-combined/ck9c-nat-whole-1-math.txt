@@ -1,0 +1,281 @@
+Let me carefully work through this problem.
+
+We have:
+- Pipe A fills the tank in 6 hours, so rate = 1/6 per hour.
+- Pipe B fills the tank in 9 hours, so rate = 1/9 per hour.
+- Drain empties the tank in 12 hours, so rate = -1/12 per hour.
+
+Timeline:
+- 8:00: A and drain opened. Tank starts empty.
+- 9:30: B opened.
+- 11:00: A closed.
+- Find when tank is full.
+
+Let me set up. Let t be time in hours after 8:00.
+
+Phase 1: 8:00 to 9:30 (1.5 hours): A and drain open.
+Net rate = 1/6 - 1/12 = 2/12 - 1/12 = 1/12 per hour.
+Amount filled in 1.5 hours = 1.5 × 1/12 = 1.5/12 = 1/8.
+
+Phase 2: 9:30 to 11:00 (1.5 hours): A, B, and drain open.
+Net rate = 1/6 + 1/9 - 1/12.
+Let me compute: LCD of 6, 9, 12 = 36.
+1/6 = 6/36, 1/9 = 4/36, 1/12 = 3/36.
+Net rate = 6/36 + 4/36 - 3/36 = 7/36 per hour.
+Amount filled in 1.5 hours = 1.5 × 7/36 = 10.5/36 = 21/72 = 7/24.
+
+After phase 2 (at 11:00), total amount = 1/8 + 7/24.
+1/8 = 3/24. So total = 3/24 + 7/24 = 10/24 = 5/12.
+
+Phase 3: after 11:00: only B and drain open (A closed).
+Net rate = 1/9 - 1/12.
+LCD of 9, 12 = 36. 1/9 = 4/36, 1/12 = 3/36.
+Net rate = 4/36 - 3/36 = 1/36 per hour.
+
+Remaining to fill = 1 - 5/12 = 7/12.
+Time needed = (7/12) / (1/36) = (7/12) × 36 = 7 × 3 = 21 hours.
+
+So 21 hours after 11:00.
+
+11:00 + 21 hours = 8:00 next day.
+
+Wait, let me double check. 11:00 + 21 hours. 11:00 + 13 hours = 24:00 = midnight. Then + 8 more hours = 8:00. So 8:00 the next day.
+
+Hmm, that's a long time. Let me verify.
+
+Actually let me reconsider. The net rate in phase 3 is only 1/36 per hour, which is very slow. So it takes a long time. Let me verify the arithmetic.
+
+Remaining = 7/12. Rate = 1/36. Time = 7/12 ÷ 1/36 = 7/12 × 36/1 = 7 × 3 = 21 hours. Yes.
+
+So the tank is full at 8:00 the next day.
+
+Let me double-check the amounts.
+
+Phase 1: 1.5 hours at 1/12 = 1.5/12 = 0.125 = 1/8. ✓
+Phase 2: 1.5 hours at 7/36 = 10.5/36 = 0.29166... = 7/24. ✓ (7/24 = 0.29166...)
+Total after phase 2 = 1/8 + 7/24 = 3/24 + 7/24 = 10/24 = 5/12 ≈ 0.4167. ✓
+Remaining = 7/12 ≈ 0.5833.
+Phase 3 rate = 1/36 ≈ 0.02778.
+Time = 0.5833/0.02778 = 21.0 hours. ✓
+
+So the answer is 8:00 the next day.
+
+Now, the problem asks to "generalise the method and prove that it always gives the right answer."
+
+Let me think about the general method.
+
+General method:
+- We have multiple "events" at various times, each changing the set of active pipes/drains.
+- Between consecutive events, the net rate is constant.
+- The amount of water is the integral of the rate over time, which is a piecewise linear function.
+- We compute cumulative amounts at each event time.
+- We find the phase where the cumulative amount crosses 1 (full tank).
+- Within that phase, since rate is constant, we solve linearly for the exact time.
+
+This is essentially the principle of superposition / additivity of rates, and the fact that the amount function is piecewise linear.
+
+Let me formalize and prove.
+
+Setup:
+Let the tank capacity be 1 (unit). Let there be a set of sources and drains with constant rates $r_1, r_2, \ldots, r_n$ (positive for filling, negative for draining). Pipe $i$ alone fills/empties the tank in time $T_i$, so $r_i = 1/T_i$ (with sign).
+
+Actually, let me be careful. The rate of pipe $i$ is $r_i$ (volume per unit time). If we normalize tank capacity to 1, then $r_i = \pm 1/T_i$ where $T_i$ is the time to fill (positive) or empty (for drain, negative rate).
+
+Events occur at times $0 = t_0 < t_1 < t_2 < \cdots < t_m$. At each event, the set of active pipes changes. Between $t_{k-1}$ and $t_k$, the set of active pipes is fixed, so the net rate $R_k$ is constant.
+
+The amount of water $V(t)$ satisfies:
+- $V(0) = V_0$ (initial amount, here 0).
+- $V'(t) = R_k$ for $t \in (t_{k-1}, t_k)$.
+
+So $V$ is continuous and piecewise linear.
+
+$V(t_k) = V(t_{k-1}) + R_k (t_k - t_{k-1})$.
+
+By induction, $V(t) = V_0 + \sum_{j=1}^{k} R_j (t_j - t_{j-1}) + R_{k+1}(t - t_k)$ for $t \in [t_k, t_{k+1}]$.
+
+We want to find $t^*$ such that $V(t^*) = 1$ (full tank).
+
+Method:
+1. Compute cumulative amounts $C_k = V(t_k)$ for $k = 0, 1, \ldots$.
+2. Find the first $k$ such that $C_k \geq 1$ (assuming rates eventually positive; if the tank never fills, handle separately). Actually we need to be careful: we need the phase where the crossing happens. Since $V$ is continuous and increasing during the crossing phase (rate must be positive at crossing), we find the phase $k$ where $C_{k-1} < 1 \leq C_k$ and $R_k > 0$.
+
+Wait, but we need $R_k > 0$ for the tank to be filling in that phase. If $R_k \leq 0$ and $C_{k-1} < 1$, then $C_k \leq C_{k-1} < 1$, so we won't reach 1 in this phase. So the first phase where $C_k \geq 1$ must have $R_k > 0$ (assuming the tank does fill).
+
+3. In phase $k$, solve $C_{k-1} + R_k (t^* - t_{k-1}) = 1$ for $t^*$:
+$t^* = t_{k-1} + \frac{1 - C_{k-1}}{R_k}$.
+
+This gives the exact time.
+
+Proof of correctness:
+- The amount function $V$ is well-defined and continuous (water amount can't jump discontinuously; rate is finite).
+- $V$ is piecewise linear with the slopes given.
+- The method computes $V$ at event points exactly (by the recurrence), and within the crossing phase solves the linear equation exactly.
+- By the intermediate value theorem (V is continuous), there's a unique crossing time in the phase where $C_{k-1} < 1 < C_k$ (strictly, if $C_{k-1} < 1 < C_k$; if $C_{k-1} = 1$ exactly, then $t^* = t_{k-1}$).
+- The linear equation gives the unique solution in that phase.
+
+Hence the method gives the correct answer.
+
+Let me also discuss the subtlety: what if the tank fills exactly at an event time? Then $C_k = 1$ and $t^* = t_k$. The formula still works: if $C_{k-1} < 1 = C_k$, then $t^* = t_{k-1} + (1 - C_{k-1})/R_k = t_{k-1} + (C_k - C_{k-1})/R_k = t_{k-1} + R_k(t_k - t_{k-1})/R_k = t_k$. Good.
+
+Also, we should note the assumption that the tank doesn't overflow before we consider it "full" — but "full" means reaching capacity 1, which is exactly what we solve for.
+
+Also, we should consider whether the tank could be full at some point and then... no, once it reaches 1 we stop. But actually, could the rate be negative and the tank be "full"? If at some event the amount is exactly 1 and then drain opens, the tank is full at that instant. But typically we want the first time it reaches 1.
+
+Hmm, but there's a subtlety: what if the amount exceeds 1 during a phase? That would mean it overflowed. But we assume the tank stops at 1 (full). So the first time it hits 1 is the answer. If a phase has $R_k > 0$ and $C_{k-1} < 1 < C_k$, the crossing is within the phase. If $C_{k-1} < 1$ and $C_k > 1$... wait that's the same thing. Let me restate: we find the first phase where $C_k \geq 1$. Since $C$ is... hmm, $C$ isn't necessarily monotonic because rates can be negative. But the first time $C$ reaches 1: we look for the smallest $k$ such that $C_k \geq 1$. But we need to make sure the crossing actually happens in phase $k$ and not earlier.
+
+Actually, let me think again. $V$ is continuous. We want the first $t$ with $V(t) = 1$. Consider the values $C_0, C_1, \ldots$. If $C_0 \geq 1$ (initially full), then $t^* = 0$. Otherwise, find the first $k \geq 1$ such that $C_k \geq 1$. Then in the interval $[t_{k-1}, t_k]$, we have $V(t_{k-1}) = C_{k-1} < 1$ and $V(t_k) = C_k \geq 1$. By IVT, there's a crossing in $[t_{k-1}, t_k]$. Moreover, since $C_{k-1} < 1$ and this is the first time $C \geq 1$, and $V$ is continuous... we need to ensure $V$ doesn't reach 1 earlier within $[t_{k-1}, t_k]$ before... no, it's monotonic within the phase (linear), so it crosses exactly once. And it doesn't reach 1 before $t_{k-1}$ because... hmm, actually it could oscillate. Let me think.
+
+Wait, could $V$ reach 1 during an earlier phase and then drop below 1, and we'd miss it? Let's see: we're looking for the FIRST time $V = 1$. Suppose $V$ reaches 1 at some time $\tau$ in phase $j < k$. Then $V(\tau) = 1$. If $V$ is increasing through $\tau$, then $C_j = V(t_j) \geq V(\tau) = 1$ (since after $\tau$, if still increasing, $V(t_j) \geq 1$; if it decreases after, then $C_j$ could be less than 1). Hmm, this is getting complicated.
+
+Let me reconsider. Actually, the cleanest statement: We want the first time the tank is full. The tank is full at time $t$ iff $V(t) = 1$ (assuming it starts empty and we consider it full when it reaches capacity; once full it might overflow but we stop). Actually, physically, once the tank is full, if inflow continues it overflows, but the question "when is the tank full" asks for the first time $V(t) = 1$.
+
+To find the first crossing time rigorously: Since $V$ is continuous with $V(0) = 0 < 1$, the first crossing time is $\tau^* = \inf\{t : V(t) = 1\}$. 
+
+The method: compute $C_k$. Find first $k$ with $C_k \geq 1$. Claim: the first crossing is in phase $k$.
+
+Hmm, but consider: what if in phase $j < k$, $V$ rises to 1 and falls back, so $C_j < 1$, but it did cross 1. Then the first crossing is in phase $j$, not $k$. But then $C_j$ might be $< 1$. So the method as stated (first $k$ with $C_k \geq 1$) would miss it.
+
+But wait — for this to happen, in phase $j$, $V$ must rise above 1 and come back down within the same phase. But within a single phase, $V$ is linear (monotonic)! It can't rise and fall within one phase. So within phase $j$, $V$ goes from $C_{j-1}$ to $C_j$ monotonically. If it crosses 1, then either $C_{j-1} < 1 \leq C_j$ (rising) or $C_{j-1} \geq 1 > C_j$ (falling). 
+
+Case rising: $C_{j-1} < 1 \le
+<<content>>
+Let me carefully work through this problem.
+
+We have:
+- Pipe A fills the tank in 6 hours, so rate = 1/6 per hour.
+- Pipe B fills the tank in 9 hours, so rate = 1/9 per hour.
+- Drain empties the tank in 12 hours, so rate = -1/12 per hour.
+
+Timeline:
+- 8:00: A and drain opened. Tank starts empty.
+- 9:30: B opened.
+- 11:00: A closed.
+- Find when tank is full.
+
+Let me set up. Let t be time in hours after 8:00.
+
+Phase 1: 8:00 to 9:30 (1.5 hours): A and drain open.
+Net rate = 1/6 - 1/12 = 2/12 - 1/12 = 1/12 per hour.
+Amount filled in 1.5 hours = 1.5 × 1/12 = 1.5/12 = 1/8.
+
+Phase 2: 9:30 to 11:00 (1.5 hours): A, B, and drain open.
+Net rate = 1/6 + 1/9 - 1/12.
+Let me compute: LCD of 6, 9, 12 = 36.
+1/6 = 6/36, 1/9 = 4/36, 1/12 = 3/36.
+Net rate = 6/36 + 4/36 - 3/36 = 7/36 per hour.
+Amount filled in 1.5 hours = 1.5 × 7/36 = 10.5/36 = 21/72 = 7/24.
+
+After phase 2 (at 11:00), total amount = 1/8 + 7/24.
+1/8 = 3/24. So total = 3/24 + 7/24 = 10/24 = 5/12.
+
+Phase 3: after 11:00: only B and drain open (A closed).
+Net rate = 1/9 - 1/12.
+LCD of 9, 12 = 36. 1/9 = 4/36, 1/12 = 3/36.
+Net rate = 4/36 - 3/36 = 1/36 per hour.
+
+Remaining to fill = 1 - 5/12 = 7/12.
+Time needed = (7/12) / (1/36) = (7/12) × 36 = 7 × 3 = 21 hours.
+
+So 21 hours after 11:00.
+
+11:00 + 21 hours = 8:00 next day.
+
+Wait, let me double check. 11:00 + 21 hours. 11:00 + 13 hours = 24:00 = midnight. Then + 8 more hours = 8:00. So 8:00 the next day.
+
+Hmm, that's a long time. Let me verify.
+
+Actually let me reconsider. The net rate in phase 3 is only 1/36 per hour, which is very slow. So it takes a long time. Let me verify the arithmetic.
+
+Remaining = 7/12. Rate = 1/36. Time = 7/12 ÷ 1/36 = 7/12 × 36/1 = 7 × 3 = 21 hours. Yes.
+
+So the tank is full at 8:00 the next day.
+
+Let me double-check the amounts.
+
+Phase 1: 1.5 hours at 1/12 = 1.5/12 = 0.125 = 1/8. ✓
+Phase 2: 1.5 hours at 7/36 = 10.5/36 = 0.29166... = 7/24. ✓ (7/24 = 0.29166...)
+Total after phase 2 = 1/8 + 7/24 = 3/24 + 7/24 = 10/24 = 5/12 ≈ 0.4167. ✓
+Remaining = 7/12 ≈ 0.5833.
+Phase 3 rate = 1/36 ≈ 0.02778.
+Time = 0.5833/0.02778 = 21.0 hours. ✓
+
+So the answer is 8:00 the next day.
+
+Now, the problem asks to "generalise the method and prove that it always gives the right answer."
+
+Let me think about the general method.
+
+General method:
+- We have multiple "events" at various times, each changing the set of active pipes/drains.
+- Between consecutive events, the net rate is constant.
+- The amount of water is the integral of the rate over time, which is a piecewise linear function.
+- We compute cumulative amounts at each event time.
+- We find the phase where the cumulative amount crosses 1 (full tank).
+- Within that phase, since rate is constant, we solve linearly for the exact time.
+
+This is essentially the principle of superposition / additivity of rates, and the fact that the amount function is piecewise linear.
+
+Let me formalize and prove.
+
+Setup:
+Let the tank capacity be 1 (unit). Let there be a set of sources and drains with constant rates $r_1, r_2, \ldots, r_n$ (positive for filling, negative for draining). Pipe $i$ alone fills/empties the tank in time $T_i$, so $r_i = 1/T_i$ (with sign).
+
+Actually, let me be careful. The rate of pipe $i$ is $r_i$ (volume per unit time). If we normalize tank capacity to 1, then $r_i = \pm 1/T_i$ where $T_i$ is the time to fill (positive) or empty (for drain, negative rate).
+
+Events occur at times $0 = t_0 < t_1 < t_2 < \cdots < t_m$. At each event, the set of active pipes changes. Between $t_{k-1}$ and $t_k$, the set of active pipes is fixed, so the net rate $R_k$ is constant.
+
+The amount of water $V(t)$ satisfies:
+- $V(0) = V_0$ (initial amount, here 0).
+- $V'(t) = R_k$ for $t \in (t_{k-1}, t_k)$.
+
+So $V$ is continuous and piecewise linear.
+
+$V(t_k) = V(t_{k-1}) + R_k (t_k - t_{k-1})$.
+
+By induction, $V(t) = V_0 + \sum_{j=1}^{k} R_j (t_j - t_{j-1}) + R_{k+1}(t - t_k)$ for $t \in [t_k, t_{k+1}]$.
+
+We want to find $t^*$ such that $V(t^*) = 1$ (full tank).
+
+Method:
+1. Compute cumulative amounts $C_k = V(t_k)$ for $k = 0, 1, \ldots$.
+2. Find the first $k$ such that $C_k \geq 1$ (assuming rates eventually positive; if the tank never fills, handle separately). Actually we need to be careful: we need the phase where the crossing happens. Since $V$ is continuous and increasing during the crossing phase (rate must be positive at crossing), we find the phase $k$ where $C_{k-1} < 1 \leq C_k$ and $R_k > 0$.
+
+Wait, but we need $R_k > 0$ for the tank to be filling in that phase. If $R_k \leq 0$ and $C_{k-1} < 1$, then $C_k \leq C_{k-1} < 1$, so we won't reach 1 in this phase. So the first phase where $C_k \geq 1$ must have $R_k > 0$ (assuming the tank does fill).
+
+3. In phase $k$, solve $C_{k-1} + R_k (t^* - t_{k-1}) = 1$ for $t^*$:
+$t^* = t_{k-1} + \frac{1 - C_{k-1}}{R_k}$.
+
+This gives the exact time.
+
+Proof of correctness:
+- The amount function $V$ is well-defined and continuous (water amount can't jump discontinuously; rate is finite).
+- $V$ is piecewise linear with the slopes given.
+- The method computes $V$ at event points exactly (by the recurrence), and within the crossing phase solves the linear equation exactly.
+- By the intermediate value theorem (V is continuous), there's a unique crossing time in the phase where $C_{k-1} < 1 < C_k$ (strictly, if $C_{k-1} < 1 < C_k$; if $C_{k-1} = 1$ exactly, then $t^* = t_{k-1}$).
+- The linear equation gives the unique solution in that phase.
+
+Hence the method gives the correct answer.
+
+Let me also discuss the subtlety: what if the tank fills exactly at an event time? Then $C_k = 1$ and $t^* = t_k$. The formula still works: if $C_{k-1} < 1 = C_k$, then $t^* = t_{k-1} + (1 - C_{k-1})/R_k = t_{k-1} + (C_k - C_{k-1})/R_k = t_{k-1} + R_k(t_k - t_{k-1})/R_k = t_k$. Good.
+
+Also, we should note the assumption that the tank doesn't overflow before we consider it "full" — but "full" means reaching capacity 1, which is exactly what we solve for.
+
+Also, we should consider whether the tank could be full at some point and then... no, once it reaches 1 we stop. But actually, could the rate be negative and the tank be "full"? If at some event the amount is exactly 1 and then drain opens, the tank is full at that instant. But typically we want the first time it reaches 1.
+
+Hmm, but there's a subtlety: what if the amount exceeds 1 during a phase? That would mean it overflowed. But we assume the tank stops at 1 (full). So the first time it hits 1 is the answer. If a phase has $R_k > 0$ and $C_{k-1} < 1 < C_k$, the crossing is within the phase. If $C_{k-1} < 1$ and $C_k > 1$... wait that's the same thing. Let me restate: we find the first phase where $C_k \geq 1$. Since $C$ is... hmm, $C$ isn't necessarily monotonic because rates can be negative. But the first time $C$ reaches 1: we look for the smallest $k$ such that $C_k \geq 1$. But we need to make sure the crossing actually happens in phase $k$ and not earlier.
+
+Actually, let me think again. $V$ is continuous. We want the first $t$ with $V(t) = 1$. Consider the values $C_0, C_1, \ldots$. If $C_0 \geq 1$ (initially full), then $t^* = 0$. Otherwise, find the first $k \geq 1$ such that $C_k \geq 1$. Then in the interval $[t_{k-1}, t_k]$, we have $V(t_{k-1}) = C_{k-1} < 1$ and $V(t_k) = C_k \geq 1$. By IVT, there's a crossing in $[t_{k-1}, t_k]$. Moreover, since $C_{k-1} < 1$ and this is the first time $C \geq 1$, and $V$ is continuous... we need to ensure $V$ doesn't reach 1 earlier within $[t_{k-1}, t_k]$ before... no, it's monotonic within the phase (linear), so it crosses exactly once. And it doesn't reach 1 before $t_{k-1}$ because... hmm, actually it could oscillate. Let me think.
+
+Wait, could $V$ reach 1 during an earlier phase and then drop below 1, and we'd miss it? Let's see: we're looking for the FIRST time $V = 1$. Suppose $V$ reaches 1 at some time $\tau$ in phase $j < k$. Then $V(\tau) = 1$. If $V$ is increasing through $\tau$, then $C_j = V(t_j) \geq V(\tau) = 1$ (since after $\tau$, if still increasing, $V(t_j) \geq 1$; if it decreases after, then $C_j$ could be less than 1). Hmm, this is getting complicated.
+
+Let me reconsider. Actually, the cleanest statement: We want the first time the tank is full. The tank is full at time $t$ iff $V(t) = 1$ (assuming it starts empty and we consider it full when it reaches capacity; once full it might overflow but we stop). Actually, physically, once the tank is full, if inflow continues it overflows, but the question "when is the tank full" asks for the first time $V(t) = 1$.
+
+To find the first crossing time rigorously: Since $V$ is continuous with $V(0) = 0 < 1$, the first crossing time is $\tau^* = \inf\{t : V(t) = 1\}$. 
+
+The method: compute $C_k$. Find first $k$ with $C_k \geq 1$. Claim: the first crossing is in phase $k$.
+
+Hmm, but consider: what if in phase $j < k$, $V$ rises to 1 and falls back, so $C_j < 1$, but it did cross 1. Then the first crossing is in phase $j$, not $k$. But then $C_j$ might be $< 1$. So the method as stated (first $k$ with $C_k \geq 1$) would miss it.
+
+But wait — for this to happen, in phase $j$, $V$ must rise above 1 and come back down within the same phase. But within a single phase, $V$ is linear (monotonic)! It can't rise and fall within one phase. So within phase $j$, $V$ goes from $C_{j-1}$ to $C_j$ monotonically. If it crosses 1, then either $C_{j-1} < 1 \leq C_j$ (rising) or $C_{j-1} \geq 1 > C_j$ (falling). 
+
+Case rising: $C_{j-1} < 1 \le

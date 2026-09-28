@@ -1,0 +1,16 @@
+cb-s1 8K p1: 178.2 8K p2: 166.5 256K p1: 107.7 256K p2: 107.0
+cb-s2 8K p1: 176.0 8K p2: 168.8 256K p1: 108.0 256K p2: 107.2
+cb-w1 8K p1: 181.6 8K p2: 177.1 256K p1: 112.0 256K p2: 114.0
+cb-w2 8K p1: 178.9 8K p2: 176.7 256K p1: 111.2 256K p2: 111.6
+cn-s1 8K p1: 179.6 8K p2: 227.1 256K p1: 108.2 256K p2: 105.5
+cn-s2 8K p1: 182.1 8K p2: 167.7 256K p1: 106.3 256K p2: 105.3
+cn-w1 8K p1: 186.1 8K p2: 176.4 256K p1: 110.2 256K p2: 110.0
+cn-w2 8K p1: 185.9 8K p2: 88.1 256K p1: 114.7 256K p2: 111.8
+cn 8K p1: saver 180.8 whole 186.0 = 97.2%  (saver arms [179.6, 182.1], whole arms [186.1, 185.9])
+cn 8K p2: saver 197.4 whole 132.2 = 149.3%  (saver arms [227.1, 167.7], whole arms [176.4, 88.1])
+cn 256K p1: saver 107.2 whole 112.5 = 95.4%  (saver arms [108.2, 106.3], whole arms [110.2, 114.7])
+cn 256K p2: saver 105.4 whole 110.9 = 95.0%  (saver arms [105.5, 105.3], whole arms [110.0, 111.8])
+cb 8K p1: saver 177.1 whole 180.2 = 98.3%  (saver arms [178.2, 176.0], whole arms [181.6, 178.9])
+cb 8K p2: saver 167.7 whole 176.9 = 94.8%  (saver arms [166.5, 168.8], whole arms [177.1, 176.7])
+cb 256K p1: saver 107.8 whole 111.6 = 96.6%  (saver arms [107.7, 108.0], whole arms [112.0, 111.2])
+cb 256K p2: saver 107.1 whole 112.8 = 94.9%  (saver arms [107.0, 107.2], whole arms [114.0, 111.6])

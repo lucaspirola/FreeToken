@@ -1,0 +1,4 @@
+shape                                         b-q1                    n-q1                    n-q2                    b-q2  identical
+probe 8000                    1.008s   7944  193.3    0.819s   9786  207.8    0.819s   9783  209.2    0.920s   8706  212.5  yes
+probe 32000                   4.393s   7290  180.6    3.631s   8819  195.9    3.630s   8821  197.1    4.140s   7736  180.6  yes
+cells: TTFT s, prefill/extend tok/s, decode tok/s

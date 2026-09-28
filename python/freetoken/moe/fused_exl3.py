@@ -30,6 +30,7 @@ from freetoken.kernel.triton.exl3 import (
     exl3_gemm,
     exl3_gemv,
     gemv_pre_rot,
+    group_blocks,
     had_rows,
     reconstruct_experts,
     f16acc_enabled,
@@ -51,9 +52,35 @@ PREFILL_CHUNK_TOKENS = 8192
 # to ~1100 tokens (Ornith), but moving the switch there did not shorten the server's 300 / 1000-token
 # TTFT, where the prefill layer stream dominates (tasks/ornith-exl3/kfix/README.md), so it stays.
 PREFILL_DECODED_MIN_TOKENS = 256
-# experts per decoded scratch group: gate_up + down W_hat are 3 * H * I * 2 bytes per expert
-# (6 MiB for Ornith), so 32 experts hold 192 MiB
+# experts per decoded scratch group, per projection: as many as fit in PREFILL_DECODE_L2_FRACTION of
+# the GPU's L2, so the GEMM reads W_hat back from L2 instead of DRAM (RTX 5080, 64 MB L2, Ornith:
+# gate_up 4 MiB per expert -> 8, down 2 MiB -> 16; the fused MoE at 8192 tokens 11.39 -> ~10 ms,
+# tasks/ornith-exl3/popt-exl3/README.md). A GPU whose L2 holds fewer than PREFILL_DECODE_GROUP_MIN
+# experts gains nothing from residency and keeps PREFILL_DECODE_GROUP (fewer launches).
+# PREFILL_DECODE_GROUP_OVERRIDE (int) forces one size for both (sweeps).
 PREFILL_DECODE_GROUP = 32
+PREFILL_DECODE_L2_FRACTION = 0.5
+PREFILL_DECODE_GROUP_MIN = 4
+PREFILL_DECODE_GROUP_OVERRIDE: int | None = None
+# decoded GEMM launches cover only their group's row blocks (``exl3_gemm(mb_range=...)``) instead of
+# every expert's blocks with all but the group's returning at once (~60 us per launch at 8192
+# tokens). A/B switch.
+PREFILL_RANGED = True
+
+
+@functools.lru_cache(maxsize=None)
+def _l2_bytes(index: int) -> int:
+    return int(getattr(torch.cuda.get_device_properties(index), "L2_cache_size", 0) or 0)
+
+
+def _decode_group(parts: Exl3Parts, num_experts: int, device: torch.device) -> int:
+    if PREFILL_DECODE_GROUP_OVERRIDE:
+        return min(PREFILL_DECODE_GROUP_OVERRIDE, num_experts)
+    per_expert = parts.k * parts.n * 2
+    fit = int(_l2_bytes(device.index or 0) * PREFILL_DECODE_L2_FRACTION) // per_expert
+    return min(fit if fit >= PREFILL_DECODE_GROUP_MIN else PREFILL_DECODE_GROUP, PREFILL_DECODE_GROUP, num_experts)
+
+
 # the gate/up output and the activation between the two GEMMs: fp16, as in exllamav3 (whose
 # fp16 forward the checkpoint was quantized and calibrated against); bf16 here cost 8x the
 # rounding error for nothing, since the down projection rounds its rotated input to fp16 anyway
@@ -161,6 +188,21 @@ def _prefill_gemm(routes: int, num_experts: int) -> dict:
     return cfg
 
 
+def _decoded_gemms(xin, tr, suh, svh, parts, out, w, group, sort, gemm_args, num_experts, fold, src_div):
+    """Every expert group: decode its W_hat into ``w`` (``fold``: with the input rotation folded in),
+    then the grouped GEMM over the group's row blocks."""
+    gb = group_blocks(sort["expert_ids"], sort["num_post_pad"], sort["block_m"], num_experts, group) if PREFILL_RANGED else None
+    for lo in range(0, num_experts, group):
+        hi = min(lo + group, num_experts)
+        if fold:
+            reconstruct_folded(tr, suh, svh, parts, lo=lo, hi=hi, suh_expert_stride=suh.stride(0),
+                               svh_expert_stride=svh.stride(0), out=w, fold_out=False)
+        else:
+            reconstruct_experts(tr, parts, lo, hi, out=w)
+        rng = dict(mb_range=gb[lo // group : lo // group + 2], num_experts=num_experts) if gb is not None else {}
+        exl3_gemm(xin, tr, svh, parts, out=out, decoded=w, expert_range=(lo, hi), src_div=src_div, **gemm_args, **sort, **rng)
+
+
 def _prefill(x, banks, topk_weights, topk_ids, top_k, parts, activation, alpha, limit, num_experts):
     from freetoken.moe.fused import moe_align_block_size
 
@@ -168,10 +210,14 @@ def _prefill(x, banks, topk_weights, topk_ids, top_k, parts, activation, alpha, 
     gu, dn = parts
     out = torch.empty_like(x)
     decoded = x.shape[0] >= PREFILL_DECODED_MIN_TOKENS
+    fold = decoded and PREFILL_FOLD_INPUT
     if decoded:
-        group = min(PREFILL_DECODE_GROUP, num_experts)
-        w_gu = torch.empty((group, gu.k, gu.n), dtype=torch.float16, device=x.device)
-        w_dn = torch.empty((group, dn.k, dn.n), dtype=torch.float16, device=x.device)
+        g_gu = _decode_group(gu, num_experts, x.device)
+        g_dn = _decode_group(dn, num_experts, x.device)
+        w_gu = torch.empty((g_gu, gu.k, gu.n), dtype=torch.float16, device=x.device)
+        w_dn = torch.empty((g_dn, dn.k, dn.n), dtype=torch.float16, device=x.device)
+    gu_args = dict(tr_expert_stride=gu_tr.stride(0) // 2, svh_expert_stride=gu_svh.stride(0))
+    dn_args = dict(tr_expert_stride=dn_tr.stride(0) // 2, svh_expert_stride=dn_svh.stride(0))
     for t0 in range(0, x.shape[0], PREFILL_CHUNK_TOKENS):
         t1 = min(t0 + PREFILL_CHUNK_TOKENS, x.shape[0])
         xc = x[t0:t1]
@@ -181,26 +227,17 @@ def _prefill(x, banks, topk_weights, topk_ids, top_k, parts, activation, alpha, 
         cfg = _prefill_gemm(routes, num_experts) if decoded else dict(block_m=_prefill_block_m(routes, num_experts))
         sorted_ids, expert_ids, npad = moe_align_block_size(ids2.contiguous(), cfg["block_m"], num_experts)
         sort = dict(sorted_ids=sorted_ids, expert_ids=expert_ids, num_post_pad=npad, **cfg)
-        fold = decoded and PREFILL_FOLD_INPUT
         g = torch.empty((routes, gu.n), dtype=ACT_DTYPE, device=x.device)
-        gu_args = dict(tr_expert_stride=gu_tr.stride(0) // 2, svh_expert_stride=gu_svh.stride(0), **sort)
         if fold:
             xs = xc.to(torch.float16)
-            for lo in range(0, num_experts, group):
-                hi = min(lo + group, num_experts)
-                reconstruct_folded(gu_tr, gu_suh, gu_svh, gu, lo=lo, hi=hi, suh_expert_stride=gu_suh.stride(0),
-                                   svh_expert_stride=gu_svh.stride(0), out=w_gu, fold_out=False)
-                exl3_gemm(xs, gu_tr, gu_svh, gu, out=g, decoded=w_gu, expert_range=(lo, hi), src_div=top_k, **gu_args)
+            _decoded_gemms(xs, gu_tr, gu_suh, gu_svh, gu, g, w_gu, g_gu, sort, gu_args, num_experts, True, top_k)
             del xs
         else:
             xh = had_rows(xc, gu_suh, gu, src_div=top_k, experts=ids, suh_expert_stride=gu_suh.stride(0))
             if decoded:
-                for lo in range(0, num_experts, group):
-                    hi = min(lo + group, num_experts)
-                    reconstruct_experts(gu_tr, gu, lo, hi, out=w_gu)
-                    exl3_gemm(xh, gu_tr, gu_svh, gu, out=g, decoded=w_gu, expert_range=(lo, hi), **gu_args)
+                _decoded_gemms(xh, gu_tr, gu_suh, gu_svh, gu, g, w_gu, g_gu, sort, gu_args, num_experts, False, 0)
             else:
-                exl3_gemm(xh, gu_tr, gu_svh, gu, out=g, **gu_args)
+                exl3_gemm(xh, gu_tr, gu_svh, gu, out=g, **gu_args, **sort)
             del xh
         a = _act(g, activation, alpha, limit)
         del g
@@ -208,22 +245,14 @@ def _prefill(x, banks, topk_weights, topk_ids, top_k, parts, activation, alpha, 
         # combine then reads half the bytes (it sums in fp32 either way)
         o_dtype = torch.float16 if f16acc_enabled() else torch.float32
         o = torch.empty((routes, dn.n), dtype=o_dtype, device=x.device)
-        dn_args = dict(tr_expert_stride=dn_tr.stride(0) // 2, svh_expert_stride=dn_svh.stride(0), **sort)
         if fold:
-            for lo in range(0, num_experts, group):
-                hi = min(lo + group, num_experts)
-                reconstruct_folded(dn_tr, dn_suh, dn_svh, dn, lo=lo, hi=hi, suh_expert_stride=dn_suh.stride(0),
-                                   svh_expert_stride=dn_svh.stride(0), out=w_dn, fold_out=False)
-                exl3_gemm(a, dn_tr, dn_svh, dn, out=o, decoded=w_dn, expert_range=(lo, hi), src_div=1, **dn_args)
+            _decoded_gemms(a, dn_tr, dn_suh, dn_svh, dn, o, w_dn, g_dn, sort, dn_args, num_experts, True, 1)
         else:
             ah = had_rows(a, dn_suh, dn, experts=ids, suh_expert_stride=dn_suh.stride(0))
             if decoded:
-                for lo in range(0, num_experts, group):
-                    hi = min(lo + group, num_experts)
-                    reconstruct_experts(dn_tr, dn, lo, hi, out=w_dn)
-                    exl3_gemm(ah, dn_tr, dn_svh, dn, out=o, decoded=w_dn, expert_range=(lo, hi), **dn_args)
+                _decoded_gemms(ah, dn_tr, dn_suh, dn_svh, dn, o, w_dn, g_dn, sort, dn_args, num_experts, False, 0)
             else:
-                exl3_gemm(ah, dn_tr, dn_svh, dn, out=o, **dn_args)
+                exl3_gemm(ah, dn_tr, dn_svh, dn, out=o, **dn_args, **sort)
             del ah
         # one kernel, fixed k order, no [routes, H] fp32 temporaries (was: cast, mul, sum)
         out[t0:t1] = splitk_combine(o.unsqueeze(0), topk_weights[t0:t1], t1 - t0, top_k, x.dtype)

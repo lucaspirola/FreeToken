@@ -1,0 +1,9 @@
+start 2026-09-27T22:08:35+04:00 load 0.68 1.33 2.06 tree /home/lucas/ai/FreeToken-wt/popt-exl3 757caee Merge exp/exl3-kfix: EXL3 expert kernels, 
+M= 8192 unif plain 11.335 ms (+0.0%)  ranged 10.916 ms (-3.7%)
+M= 8192 skew plain 11.543 ms (+0.0%)  ranged 11.055 ms (-4.2%)
+M= 2048 unif plain 5.410 ms (+0.0%)  ranged 5.374 ms (-0.7%)
+M= 2048 skew plain 5.451 ms (+0.0%)  ranged 5.450 ms (-0.0%)
+M=  512 unif plain 4.327 ms (+0.0%)  ranged 4.349 ms (+0.5%)
+M=  512 skew plain 4.309 ms (+0.0%)  ranged 4.326 ms (+0.4%)
+all outputs bitwise equal
+rc=0 end 2026-09-27T22:08:48+04:00

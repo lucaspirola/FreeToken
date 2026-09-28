@@ -1,0 +1,27 @@
+start 2026-09-27T22:04:44+04:00 load 1.03 1.98 2.42 tree /home/lucas/ai/FreeToken-wt/popt-exl3 757caee Merge exp/exl3-kfix: EXL3 expert kernels, 
+gu production reconstruct+decoded 5.289 ms
+gu {'block_m': 64, 'block_k': 16, 'num_stages': 1, 'num_warps': 4} 32.139 ms equal
+gu {'block_m': 64, 'block_k': 16, 'num_stages': 1, 'num_warps': 8} 13.879 ms equal
+gu {'block_m': 64, 'block_k': 16, 'num_stages': 2, 'num_warps': 4} 28.763 ms equal
+gu {'block_m': 64, 'block_k': 16, 'num_stages': 2, 'num_warps': 8} 31.054 ms equal
+gu {'block_m': 64, 'block_k': 32, 'num_stages': 1, 'num_warps': 4} 19.246 ms equal
+gu {'block_m': 64, 'block_k': 32, 'num_stages': 1, 'num_warps': 8} 12.281 ms equal
+gu {'block_m': 64, 'block_k': 32, 'num_stages': 2, 'num_warps': 4} 35.436 ms equal
+gu {'block_m': 64, 'block_k': 32, 'num_stages': 2, 'num_warps': 8} 29.068 ms equal
+gu {'block_m': 64, 'block_k': 64, 'num_stages': 1, 'num_warps': 4} 15.130 ms equal
+gu {'block_m': 64, 'block_k': 64, 'num_stages': 1, 'num_warps': 8} 13.785 ms equal
+gu {'block_m': 64, 'block_k': 64, 'num_stages': 2, 'num_warps': 4} 48.552 ms equal
+gu {'block_m': 64, 'block_k': 64, 'num_stages': 2, 'num_warps': 8} 48.098 ms equal
+gu {'block_m': 128, 'block_k': 16, 'num_stages': 1, 'num_warps': 4} 14.491 ms equal
+gu {'block_m': 128, 'block_k': 16, 'num_stages': 1, 'num_warps': 8} 11.146 ms equal
+gu {'block_m': 128, 'block_k': 16, 'num_stages': 2, 'num_warps': 4} 16.921 ms equal
+gu {'block_m': 128, 'block_k': 16, 'num_stages': 2, 'num_warps': 8} 19.258 ms equal
+gu {'block_m': 128, 'block_k': 32, 'num_stages': 1, 'num_warps': 4} 14.204 ms equal
+gu {'block_m': 128, 'block_k': 32, 'num_stages': 1, 'num_warps': 8} 10.356 ms equal
+gu {'block_m': 128, 'block_k': 32, 'num_stages': 2, 'num_warps': 4} 21.136 ms equal
+gu {'block_m': 128, 'block_k': 32, 'num_stages': 2, 'num_warps': 8} 17.527 ms equal
+gu {'block_m': 128, 'block_k': 64, 'num_stages': 1, 'num_warps': 4} 11.616 ms equal
+gu {'block_m': 128, 'block_k': 64, 'num_stages': 1, 'num_warps': 8} 9.317 ms equal
+gu {'block_m': 128, 'block_k': 64, 'num_stages': 2, 'num_warps': 4} 29.816 ms equal
+gu {'block_m': 128, 'block_k': 64, 'num_stages': 2, 'num_warps': 8} 27.192 ms equal
+rc=0 end 2026-09-27T22:05:06+04:00

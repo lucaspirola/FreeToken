@@ -1,0 +1,21 @@
+    430764 KiB anon     430764 KiB rss  [anon-unnamed]
+    154532 KiB anon     154532 KiB rss  [heap]
+      4916 KiB anon      53792 KiB rss  /home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13
+      3444 KiB anon      19928 KiB rss  /home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/nvidia/cu13/lib/libnvrtc.so.13
+      3204 KiB anon      24848 KiB rss  /home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so
+      2616 KiB anon      18196 KiB rss  /home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/nvidia/cu13/lib/libnvJitLink.so.13
+      1404 KiB anon      25444 KiB rss  /home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/triton/_C/libtriton.so
+      1252 KiB anon       5680 KiB rss  /usr/bin/python3.12
+--- largest single mappings by Anonymous
+    154532 KiB  310b4000-3a8c5000 [heap]
+     83756 KiB  7ae565228000-7ae56a663000 
+     61708 KiB  7ae468000000-7ae46bc43000 
+     59356 KiB  7ae464000000-7ae467a97000 
+     46044 KiB  7ae46c300000-7ae46f200000 
+     31228 KiB  7ae491355000-7ae493200000 
+     25572 KiB  7ae484d00000-7ae486e00000 
+     22176 KiB  7ae47c1fb000-7ae47d7fb000 
+     19456 KiB  7ae495900000-7ae496c00000 
+     16132 KiB  7ae494829000-7ae49582a000 
+     13312 KiB  7ae487900000-7ae488600000 
+     13104 KiB  7ae4939c2000-7ae4946c2000 

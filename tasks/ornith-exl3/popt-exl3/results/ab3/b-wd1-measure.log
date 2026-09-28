@@ -1,0 +1,61 @@
+[b-wd1] starting: model=Ornith-1.5-35B-A3B-exl3-5.0bpw-hq rows=0 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/pbase-exl3@757caee venv=/home/lucas/ai/FreeToken/.venv launcher=systemd
+Running as unit: ft-measure-b-wd1.service; invocation ID: 1c075111747e411dbde7ef1bd3448d67
+[b-wd1] ready after 47s
+Sep 28 03:15:14 TESSERACT serve-default.sh[130626]: [2026-09-28|03:15:14|core|rank=0] INFO     Allocating 262144 tokens for KV cache, K + V = 2.66 GiB
+Sep 28 03:15:19 TESSERACT serve-default.sh[130626]: [2026-09-28|03:15:19|core|rank=0] INFO     Prefill headroom: transient 1.10 GiB measured on a 8192-token chunk (empty prefix 1.10 GiB, after a 8192-token prefix 1.10 GiB, allocator peak 0.97 GiB); headroom 1.10 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 512 -> 4928 of 5623 slots, 1.24 GiB free (target 1.22 GiB), 695 slots below the ratio plan
+Sep 28 03:15:19 TESSERACT serve-default.sh[130626]: [2026-09-28|03:15:19|core|rank=0] INFO     Startup geometry: memory ratio 1.00, runtime reserve 0.00 GiB; expert arena 4928 slots; KV 65536 tokens mapped of 262144 (0.74 GiB); 1.24 GiB free
+[b-wd1] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8009, "ttft_s": 0.39, "prefill_tok_s": 20292.0, "gen_tokens": 127, "decode_tok_s": 193.5, "decode_tok_s_wall": 193.5, "total_s": 1.0, "ttft_mono_s": 0.395, "prefill_tok_s_mono": 20292.0, "total_mono_s": 1.05, "t_start_wall": 1790550949.207, "out_sha1": "7c7bbef7104024cf84e16afc868a7dfeec84af54", "gap1_ms": 46.0, "max_gap_ms": 46.0, "median_gap_ms": 4.7, "decode_tok_s_after_gap1": 206.6, "mirror_delta": {}, "decode_delta": {}}
+{"target": 80000, "pass": 1, "prompt_tokens": 80023, "ttft_s": 15.45, "prefill_tok_s": 5181.0, "gen_tokens": 127, "decode_tok_s": 162.5, "decode_tok_s_wall": 162.5, "total_s": 16.2, "ttft_mono_s": 12.716, "prefill_tok_s_mono": 6293.0, "total_mono_s": 13.49, "t_start_wall": 1790550950.257, "out_sha1": "3ce8c390eaaf88ff2d7800a45803920dbc840b2c", "gap1_ms": 49.3, "max_gap_ms": 49.3, "median_gap_ms": 5.7, "decode_tok_s_after_gap1": 172.2, "mirror_delta": {}, "decode_delta": {}}
+{"target": 256000, "pass": 1, "prompt_tokens": 256020, "ttft_s": 77.77, "prefill_tok_s": 3292.0, "gen_tokens": 127, "decode_tok_s": 119.3, "decode_tok_s_wall": 119.3, "total_s": 78.8, "ttft_mono_s": 72.285, "prefill_tok_s_mono": 3542.0, "total_mono_s": 73.34, "t_start_wall": 1790550966.484, "out_sha1": "0bf2423e5b75bc1e1ecd2c19d8374ca33ab0ade3", "gap1_ms": 61.6, "max_gap_ms": 61.6, "median_gap_ms": 7.8, "decode_tok_s_after_gap1": 125.6, "mirror_delta": {}, "decode_delta": {}}
+{"target": 8000, "pass": 2, "prompt_tokens": 8011, "ttft_s": 0.95, "prefill_tok_s": 8404.0, "gen_tokens": 127, "decode_tok_s": 187.0, "decode_tok_s_wall": 187.0, "total_s": 1.6, "ttft_mono_s": 0.953, "prefill_tok_s_mono": 8404.0, "total_mono_s": 1.63, "t_start_wall": 1790551045.318, "out_sha1": "04aaba34dd9eb36497fad2e1977370001365b701", "gap1_ms": 59.9, "max_gap_ms": 59.9, "median_gap_ms": 4.8, "decode_tok_s_after_gap1": 203.6, "mirror_delta": {}, "decode_delta": {}}
+{"target": 80000, "pass": 2, "prompt_tokens": 80025, "ttft_s": 12.79, "prefill_tok_s": 6257.0, "gen_tokens": 127, "decode_tok_s": 155.9, "decode_tok_s_wall": 155.9, "total_s": 13.6, "ttft_mono_s": 12.79, "prefill_tok_s_mono": 6257.0, "total_mono_s": 13.6, "t_start_wall": 1790551046.948, "out_sha1": "d2d17074574eb35b02199a044e284184011910cb", "gap1_ms": 81.3, "max_gap_ms": 81.3, "median_gap_ms": 5.7, "decode_tok_s_after_gap1": 172.0, "mirror_delta": {}, "decode_delta": {}}
+{"target": 256000, "pass": 2, "prompt_tokens": 256022, "ttft_s": 80.49, "prefill_tok_s": 3181.0, "gen_tokens": 127, "decode_tok_s": 118.4, "decode_tok_s_wall": 118.4, "total_s": 81.6, "ttft_mono_s": 71.795, "prefill_tok_s_mono": 3566.0, "total_mono_s": 72.86, "t_start_wall": 1790551060.553, "out_sha1": "5081f43963a50e90e09e91734befbf0276f00c6d", "gap1_ms": 65.3, "max_gap_ms": 65.3, "median_gap_ms": 7.9, "decode_tok_s_after_gap1": 125.2, "mirror_delta": {}, "decode_delta": {}}
+{
+  "arm": "b-wd1",
+  "model": "Ornith-1.5-35B-A3B-exl3-5.0bpw-hq",
+  "rows": "0",
+  "commit": "757caee",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 22.15,
+  "rss_ready_gib": 22.81,
+  "devzero_gib": 18.98,
+  "ram_after_80k_gib": 22.31,
+  "rss_gib": 23.07,
+  "locked_gib": 0.0,
+  "anon_gib": 3.3,
+  "file_gib": 20.03,
+  "unevict_gib": 0.0,
+  "shmem_gib": 18.98,
+  "current_gib": 23.48,
+  "peak_current_gib": 23.93,
+  "gpu_mib": "13980",
+  "decode_8k_p1": 193.5,
+  "ttft_8k_p1": 0.39,
+  "total_8k_p1": 1.0,
+  "ttft_mono_8k_p1": 0.4,
+  "decode_80k_p1": 162.5,
+  "ttft_80k_p1": 15.45,
+  "total_80k_p1": 16.2,
+  "ttft_mono_80k_p1": 12.72,
+  "decode_256k_p1": 119.3,
+  "ttft_256k_p1": 77.77,
+  "total_256k_p1": 78.8,
+  "ttft_mono_256k_p1": 72.28,
+  "decode_8k": 187.0,
+  "ttft_8k": 0.95,
+  "total_8k": 1.6,
+  "ttft_mono_8k": 0.95,
+  "decode_80k": 155.9,
+  "ttft_80k": 12.79,
+  "total_80k": 13.6,
+  "ttft_mono_80k": 12.79,
+  "decode_256k": 118.4,
+  "ttft_256k": 80.49,
+  "total_256k": 81.6,
+  "ttft_mono_256k": 71.8
+}
+74 arms -> /home/lucas/ai/FreeToken-wt/pbase-exl3/tasks/exclusive-expert-ram/results/sweep.tsv
+[b-wd1] stopping

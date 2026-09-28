@@ -1,0 +1,8 @@
+== ck9c-mirror-256k vs ck9c-whole-256k (bar 91%)
+     8K p1:   168.7 vs   185.1    91.1%  gap 5.6 vs 5.2 ms  ttft 0.31 vs 0.3 s  ok
+     8K p2:   165.4 vs   174.1    95.0%  gap 5.6 vs 5.2 ms  ttft 0.96 vs 0.94 s  ok
+   256K p1:    98.8 vs   110.4    89.5%  gap 9.2 vs 8.5 ms  ttft 75.65 vs 74.51 s  BELOW
+   256K p2:   104.4 vs   109.2    95.6%  gap 8.9 vs 8.6 ms  ttft 75.57 vs 74.46 s  ok
+  ck9c-whole-256k: ram_gib=21.99, rss_ready_gib=22.78, anon_gib=3.25, coverage_faults=None, starved=None, code=None
+  ck9c-mirror-256k: ram_gib=16.64, rss_ready_gib=17.59, anon_gib=16.77, coverage_faults=0, starved=0, code=None
+1 point(s) outside the band

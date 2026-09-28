@@ -1,0 +1,3 @@
+suite start 2026-09-28T08:48:10+04:00 gpu=0  08:48:10 up 1 day, 20:21,  1 user,  load average: 0.72, 2.90, 3.49
+tree f99bad5 GDN prefill: gated output norm reads the strided z slice in place
+suite rc=0 3511 passed, 27 skipped, 3 warnings, 2 subtests passed in 500.80s (0:08:20) | illegal: 0 | failed-lines: 0

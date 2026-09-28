@@ -37,6 +37,12 @@ RECONSTRUCT_SLAB = 2048
 # the per-token had_rows + had_cols passes cost 36-60% of every dense prefill projection at 8K rows
 # (tasks/ornith-exl3/perf/RESEARCH.md). FREETOKEN_EXL3_FOLD=0 keeps the rotate-activations path.
 FOLD_MIN_ROWS = 1024
+# From this many rows on, the folded product runs in gemm_cast (Triton, fp32 accumulation) with the
+# bf16 -> fp16 input cast and the fp16 -> bf16 output cast fused, instead of a host cast, cuBLAS and a
+# copy-cast per slab. Bitwise the cuBLAS path wherever cuBLAS keeps one k pass: on the RTX 5080 cuBLAS
+# splits K only for o_proj/out_proj (K 4096) at 1024 and 1059-1088 rows among the Ornith shapes at
+# >= 1024 rows (tasks/ornith-exl3/popt-exl3/results/split-map2.log), hence 1152.
+FUSED_CAST_MIN_ROWS = 1152
 
 
 def fold_enabled() -> bool:
@@ -128,6 +134,15 @@ def _forward_folded(x2: torch.Tensor, trellis: torch.Tensor, suh: torch.Tensor, 
         for c0 in range(0, n, RECONSTRUCT_SLAB):
             c1 = min(c0 + RECONSTRUCT_SLAB, n)
             gemm_f16acc(x2, reconstruct_folded(trellis, suh, svh, parts, cols=(c0, c1))[0], out=out[:, c0:c1])
+        return out
+    if (x2.shape[0] >= FUSED_CAST_MIN_ROWS and x2.dtype in (torch.float16, torch.bfloat16) and x2.stride(1) == 1
+            and parts.k % 64 == 0):
+        from freetoken.kernel.triton.exl3 import gemm_cast
+
+        out = torch.empty((x2.shape[0], n), dtype=out_dtype, device=x2.device)
+        for c0 in range(0, n, RECONSTRUCT_SLAB):
+            c1 = min(c0 + RECONSTRUCT_SLAB, n)
+            gemm_cast(x2, reconstruct_folded(trellis, suh, svh, parts, cols=(c0, c1))[0], out[:, c0:c1])
         return out
     xf = x2 if x2.dtype == torch.float16 else x2.to(torch.float16)
     if out_dtype == torch.float16 and n <= RECONSTRUCT_SLAB:

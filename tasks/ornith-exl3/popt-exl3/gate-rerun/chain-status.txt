@@ -1,0 +1,8 @@
+chain start f99bad5 GDN prefill: gated output norm reads the strided z s 2026-09-28T08:58:00+04:00
+ck9e2-whole-256k start 09:05:28 1.12 3.58 3.50 gpu=0 MiB avail=31.0 code=f99bad5 
+ck9e2-whole-256k done: captures=1 kv_grows=21 tracebacks=0 2026-09-28T09:35:11+04:00
+QUIET at poll 0 2026-09-28T09:35:44+04:00
+ck9e2-mirror-256k start 09:48:01 1.23 4.25 3.78 gpu=0 MiB avail=30.5 code=f99bad5 
+ck9e2-mirror-256k done: captures=1 kv_grows=21 tracebacks=0 2026-09-28T10:20:00+04:00
+256k compared: 0 difference(s); 2 point(s) outside the band 2026-09-28T10:20:33+04:00
+RERUNDONE 2026-09-28T10:20:33+04:00

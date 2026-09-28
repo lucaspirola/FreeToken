@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 from freetoken.core import get_global_ctx
 from freetoken.kernel.causal_conv1d import causal_conv1d_decode, causal_conv1d_varlen
+from freetoken.kernel.triton.transpose import transpose
 from freetoken.layers import BaseOP, GatedRMSNorm, LinearColParallelMerged, LinearReplicated
 from freetoken.layers.quantization import QuantConfig
 
@@ -90,15 +91,20 @@ class Qwen3_5GatedDeltaNet(BaseOP):
     def _conv_weight(self) -> torch.Tensor:
         return self.conv1d.weight.squeeze(1)  # [conv_dim, kernel] for the fused kernel
 
-    def _conv_prefill(self, conv_in, pool, cu_seqlens, cache_indices, has_initial_state) -> torch.Tensor:
+    def _conv_prefill(self, conv_in, pool, cu_seqlens, cache_indices, has_initial_state):
         """Varlen causal conv (fused sgl_kernel) with silu; reads/updates each request's
         conv state in place by ``cache_indices`` slot. ``conv_in`` [total, conv_dim].
-        ``cu_seqlens`` / ``cache_indices`` / ``has_initial_state`` come from FLAMetadata."""
+        ``cu_seqlens`` / ``cache_indices`` / ``has_initial_state`` come from FLAMetadata.
+        Returns contiguous q [total, key_dim], k [total, key_dim], v [total, value_dim]: the
+        chunk kernel's input_guard would otherwise make the transposed views contiguous with
+        torch's strided copy, which (like the one into the conv) is ~2.6x slower than the tiled
+        transpose. Both are pure copies."""
         li = pool.local_index(self.layer_id)
-        x = conv_in.transpose(0, 1).contiguous()  # [conv_dim, total]
+        x = transpose(conv_in)  # [conv_dim, total]
         out = causal_conv1d_varlen(x, self._conv_weight(), pool.conv_states[li],
                                    cu_seqlens, cache_indices, has_initial_state)
-        return out.transpose(0, 1)  # [total, conv_dim]
+        kd = self.key_dim
+        return transpose(out[:kd]), transpose(out[kd:2 * kd]), transpose(out[2 * kd:])
 
     def _conv_decode(self, conv_in: torch.Tensor, table_idx: torch.Tensor, pool) -> torch.Tensor:
         """Single-token causal conv update (fused sgl_kernel) by ``table_idx`` slot;
@@ -165,10 +171,9 @@ class Qwen3_5GatedDeltaNet(BaseOP):
                 cu_seqlens=fla.cu_seqlens, scale=self.head_k_dim ** -0.5,
             )
         else:
-            mixed = self._conv_prefill(
+            qf, kf, vf = self._conv_prefill(
                 conv_in, pool, fla.cu_seqlens, fla.cache_indices, fla.has_initial_state)
             # fla chunk handles GQA in-kernel: q/k stay at num_k_heads, v at num_v_heads.
-            qf, kf, vf = torch.split(mixed, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
             q = qf.reshape(1, total, self.num_k_heads, self.head_k_dim).to(dtype)
             k = kf.reshape(1, total, self.num_k_heads, self.head_k_dim).to(dtype)
             v = vf.reshape(1, total, self.num_v_heads, self.head_v_dim).to(dtype)
@@ -199,6 +204,10 @@ class Qwen3_5GatedDeltaNet(BaseOP):
             else:
                 core_out = result
 
+        if not batch.is_decode and core_out.is_contiguous() and z.stride(-2) == self.head_v_dim:
+            # z is a column slice of the in_proj output: read it through its strides (no copy)
+            out = self.norm.forward_heads(core_out.view(total, self.num_v_heads, self.head_v_dim), z)
+            return self.out_proj.forward(out.view(total, -1))
         core_out = core_out.reshape(-1, self.head_v_dim)
         z = z.reshape(-1, self.head_v_dim)
         if batch.is_decode and hasattr(self.out_proj, "forward_gdn_norm"):

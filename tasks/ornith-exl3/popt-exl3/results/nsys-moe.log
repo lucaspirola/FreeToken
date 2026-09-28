@@ -1,0 +1,9 @@
+start 2026-09-27T23:26:25+04:00 load 7.43 4.75 4.21 tree /home/lucas/ai/FreeToken-wt/popt-exl3 757caee Merge exp/exl3-kfix: EXL3 expert kernels, 
+Capture range started in the application.
+Capture range ended in the application.
+Generating '/tmp/nsys-report-694d.qdstrm'
+[1/1] [0%                          ] nsys-moe8192.nsys-repProcessing events...
+[1/1] [0%                          ] nsys-moe8192.nsys-rep[1/1] [5%                          ] nsys-moe8192.nsys-rep[1/1] [6%                          ] nsys-moe8192.nsys-rep[1/1] [=====31%                    ] nsys-moe8192.nsys-rep[1/1] [============56%             ] nsys-moe8192.nsys-rep[1/1] [=================74%        ] nsys-moe8192.nsys-rep[1/1] [==================75%       ] nsys-moe8192.nsys-rep[1/1] [==================76%       ] nsys-moe8192.nsys-rep[1/1] [==================77%       ] nsys-moe8192.nsys-rep[1/1] [==================78%       ] nsys-moe8192.nsys-rep[1/1] [===================79%      ] nsys-moe8192.nsys-rep[1/1] [===================80%      ] nsys-moe8192.nsys-rep[1/1] [===================81%      ] nsys-moe8192.nsys-rep[1/1] [===================82%      ] nsys-moe8192.nsys-rep[1/1] [====================84%     ] nsys-moe8192.nsys-rep[1/1] [========================100%] nsys-moe8192.nsys-rep[1/1] [========================100%] nsys-moe8192.nsys-rep
+Generated:
+	/home/lucas/ai/FreeToken-wt/popt-exl3/tasks/ornith-exl3/popt-exl3/profile/nsys-moe8192.nsys-rep
+rc=143 end 2026-09-27T23:26:43+04:00

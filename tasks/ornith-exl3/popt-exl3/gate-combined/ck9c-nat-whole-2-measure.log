@@ -1,0 +1,47 @@
+[ck9c-nat-whole-2] starting: model=Ornith-1.5-35B-A3B-exl3-5.0bpw-hq rows=0 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/pcomb-exl3@f732f5a6 venv=/home/lucas/ai/FreeToken/.venv launcher=systemd
+Running as unit: ft-measure-ck9c-nat-whole-2.service; invocation ID: 8231fc8eb52a4f81a50b98d7fc74f363
+[ck9c-nat-whole-2] ready after 46s
+Sep 28 13:10:24 TESSERACT serve-default.sh[3024827]: [2026-09-28|13:10:24|core|rank=0] INFO     Allocating 262144 tokens for KV cache, K + V = 2.66 GiB
+Sep 28 13:10:30 TESSERACT serve-default.sh[3024827]: [2026-09-28|13:10:30|core|rank=0] INFO     Prefill headroom: transient 0.94 GiB measured on a 8192-token chunk (empty prefix 0.94 GiB, after a 8192-token prefix 0.94 GiB, allocator peak 0.85 GiB); a 1024-token chunk 0.16 GiB; headroom 0.94 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 512 -> 5016 of 5623 slots, 1.08 GiB free (target 1.07 GiB), 607 slots below the ratio plan
+Sep 28 13:10:30 TESSERACT serve-default.sh[3024827]: [2026-09-28|13:10:30|core|rank=0] INFO     Startup geometry: memory ratio 1.00, runtime reserve 0.00 GiB; expert arena 5016 slots; KV 65536 tokens mapped of 262144 (0.74 GiB); 1.08 GiB free
+[ck9c-nat-whole-2] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8009, "ttft_s": 0.3, "prefill_tok_s": 26761.0, "gen_tokens": 127, "decode_tok_s": 186.6, "decode_tok_s_wall": 186.6, "total_s": 1.0, "ttft_mono_s": 0.299, "prefill_tok_s_mono": 26761.0, "total_mono_s": 0.97, "t_start_wall": 1790586658.861, "out_sha1": "7c7bbef7104024cf84e16afc868a7dfeec84af54", "gap1_ms": 26.4, "max_gap_ms": 26.4, "median_gap_ms": 5.1, "decode_tok_s_after_gap1": 192.7}
+{"target": 8000, "pass": 2, "prompt_tokens": 8011, "ttft_s": 0.85, "prefill_tok_s": 9373.0, "gen_tokens": 127, "decode_tok_s": 178.8, "decode_tok_s_wall": 178.8, "total_s": 1.6, "ttft_mono_s": 0.855, "prefill_tok_s_mono": 9373.0, "total_mono_s": 1.56, "t_start_wall": 1790586659.835, "out_sha1": "04aaba34dd9eb36497fad2e1977370001365b701", "gap1_ms": 47.8, "max_gap_ms": 47.8, "median_gap_ms": 5.2, "decode_tok_s_after_gap1": 190.3}
+[ck9c-nat-whole-2] post: python3 /home/lucas/ai/FreeToken-wt/harvest/tasks/harvest/belady/natural_gen.py --doc /home/lucas/ai/FreeToken-wt/pcomb-exl3/docs/nemotron.md --doc /home/lucas/ai/FreeToken-wt/pcomb-exl3/docs/cli.md --max-tokens 3500 --out /home/lucas/ai/FreeToken-wt/popt-exl3/tasks/ornith-exl3/popt-exl3/gate-combined/ck9c-nat-whole-2-natural.json --texts /home/lucas/ai/FreeToken-wt/popt-exl3/tasks/ornith-exl3/popt-exl3/gate-combined/ck9c-nat-whole-2
+{"task": "code", "prompt_tokens": 61, "completion_tokens": 3499, "finish": "length", "s": 20.86, "md5": "8a3ec4b317c581a4c140b638ff8695b9"}
+{"task": "essay", "prompt_tokens": 58, "completion_tokens": 3499, "finish": "length", "s": 18.93, "md5": "ef957d712ca24ccf9e2df433fd333216"}
+{"task": "math", "prompt_tokens": 113, "completion_tokens": 3499, "finish": "length", "s": 20.35, "md5": "1c460027072a785e8a4ca162e6f8f0f7"}
+{"task": "translate", "prompt_tokens": 81, "completion_tokens": 3482, "finish": "stop", "s": 19.61, "md5": "e243f5b3a51207a118f15f84f66bbacc"}
+{"task": "summary", "prompt_tokens": 20030, "completion_tokens": 3499, "finish": "length", "s": 23.33, "md5": "a450eb534235cee9a868bf8b572acc8e"}
+{
+  "arm": "ck9c-nat-whole-2",
+  "model": "Ornith-1.5-35B-A3B-exl3-5.0bpw-hq",
+  "rows": "0",
+  "commit": "f732f5a6",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 22.03,
+  "rss_ready_gib": 22.89,
+  "devzero_gib": 18.98,
+  "ram_after_80k_gib": 22.02,
+  "rss_gib": 22.85,
+  "locked_gib": 0.0,
+  "anon_gib": 3.04,
+  "file_gib": 20.41,
+  "unevict_gib": 0.0,
+  "shmem_gib": 18.98,
+  "current_gib": 23.57,
+  "peak_current_gib": 25.39,
+  "gpu_mib": "15078",
+  "decode_8k_p1": 186.6,
+  "ttft_8k_p1": 0.3,
+  "total_8k_p1": 1.0,
+  "ttft_mono_8k_p1": 0.3,
+  "decode_8k": 178.8,
+  "ttft_8k": 0.85,
+  "total_8k": 1.6,
+  "ttft_mono_8k": 0.85
+}
+74 arms -> /home/lucas/ai/FreeToken-wt/pcomb-exl3/tasks/exclusive-expert-ram/results/sweep.tsv
+[ck9c-nat-whole-2] stopping

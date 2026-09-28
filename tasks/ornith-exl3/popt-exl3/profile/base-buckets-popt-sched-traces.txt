@@ -1,0 +1,69 @@
+ext-saver-d100000-a30000.sqlite: span 8353.4 ms, kernel sum 9028.5 ms
+  attention                                   4817.7 ms
+  moe/exl3-routed                             1512.8 ms
+  layer stream (side)                         1252.0 ms
+  dense (cuBLAS + folded reconstruct)          818.1 ms
+  copies/casts                                 387.6 ms
+  GDN + conv                                   174.2 ms
+  norms                                         50.4 ms
+  other                                         15.9 ms
+        4745.0 ms  x  360  void flashinfer::SinglePrefillWithKVCacheKernel<flashinfer::KernelTrai
+        1245.1 ms  x  482  void fast_index_copy_multi<int, (unsigned long)1024, (unsigned long)8>
+         848.4 ms  x 2560  _exl3_gemm_kernel
+         558.9 ms  x 1280  void cutlass::Kernel2<cutlass_80_tensorop_f16_s16816gemm_relu_f16_64x6
+         367.0 ms  x 2560  _reconstruct_experts_kernel
+         294.8 ms  x 2041  void at::native::elementwise_kernel<(int)128, (int)4, void at::native:
+         190.0 ms  x  324  _had_rows_kernel
+         138.1 ms  x  120  void cutlass::Kernel2<cutlass_80_tensorop_f16_s16816gemm_relu_f16_128x
+         101.3 ms  x 1400  _reconstruct_folded_kernel
+          78.4 ms  x  160  _splitk_combine_kernel
+          63.6 ms  x 1526  void at::native::unrolled_elementwise_kernel<at::native::direct_copy_k
+          47.8 ms  x  320  void flashinfer::MergeStateInPlaceKernel<(unsigned int)8, __nv_bfloat1
+          44.8 ms  x  120  chunk_gated_delta_rule_fwd_kernel_h_blockdim64
+          36.6 ms  x  120  chunk_fwd_kernel_o
+ext-saver-d200000-a30000.sqlite: span 17180.7 ms, kernel sum 18499.2 ms
+  attention                                  12371.2 ms
+  moe/exl3-routed                             2117.0 ms
+  layer stream (side)                         1866.4 ms
+  dense (cuBLAS + folded reconstruct)         1193.1 ms
+  copies/casts                                 583.7 ms
+  GDN + conv                                   268.7 ms
+  norms                                         76.6 ms
+  other                                         22.4 ms
+       12190.5 ms  x  740  void flashinfer::SinglePrefillWithKVCacheKernel<flashinfer::KernelTrai
+        1856.9 ms  x  600  void fast_index_copy_multi<int, (unsigned long)1024, (unsigned long)8>
+        1228.1 ms  x 3200  _exl3_gemm_kernel
+         813.0 ms  x 1550  void cutlass::Kernel2<cutlass_80_tensorop_f16_s16816gemm_relu_f16_64x6
+         451.0 ms  x 3200  _reconstruct_experts_kernel
+         445.1 ms  x 2551  void at::native::elementwise_kernel<(int)128, (int)4, void at::native:
+         279.1 ms  x  405  _had_rows_kernel
+         226.6 ms  x  200  void cutlass::Kernel2<cutlass_80_tensorop_f16_s16816gemm_relu_f16_128x
+         130.4 ms  x  690  void flashinfer::MergeStateInPlaceKernel<(unsigned int)8, __nv_bfloat1
+         125.2 ms  x 1750  _reconstruct_folded_kernel
+         117.2 ms  x  200  _splitk_combine_kernel
+          94.7 ms  x 1871  void at::native::unrolled_elementwise_kernel<at::native::direct_copy_k
+          68.2 ms  x  150  chunk_gated_delta_rule_fwd_kernel_h_blockdim64
+          56.4 ms  x  150  chunk_fwd_kernel_o
+ext-saver-fresh-80000.sqlite: span 13438.1 ms, kernel sum 16021.6 ms
+  attention                                   4560.9 ms
+  moe/exl3-routed                             4182.9 ms
+  layer stream (side)                         3053.2 ms
+  dense (cuBLAS + folded reconstruct)         2373.9 ms
+  copies/casts                                1136.2 ms
+  GDN + conv                                   518.2 ms
+  norms                                        151.7 ms
+  other                                         44.6 ms
+        4482.6 ms  x  350  void flashinfer::SinglePrefillWithKVCacheKernel<flashinfer::KernelTrai
+        3034.0 ms  x 1201  void fast_index_copy_multi<int, (unsigned long)1024, (unsigned long)8>
+        2389.9 ms  x 6400  _exl3_gemm_kernel
+        1504.3 ms  x 2880  void cutlass::Kernel2<cutlass_80_tensorop_f16_s16816gemm_relu_f16_64x6
+         909.7 ms  x 6400  _reconstruct_experts_kernel
+         875.7 ms  x 5100  void at::native::elementwise_kernel<(int)128, (int)4, void at::native:
+         564.9 ms  x  620  void cutlass::Kernel2<cutlass_80_tensorop_f16_s16816gemm_relu_f16_128x
+         561.9 ms  x  810  _had_rows_kernel
+         251.3 ms  x 3500  _reconstruct_folded_kernel
+         236.2 ms  x  400  _splitk_combine_kernel
+         183.2 ms  x 3765  void at::native::unrolled_elementwise_kernel<at::native::direct_copy_k
+         134.5 ms  x  300  chunk_gated_delta_rule_fwd_kernel_h_blockdim64
+         108.6 ms  x  300  chunk_fwd_kernel_o
+         100.5 ms  x  300  void causal_conv1d_fwd_kernel<Causal_conv1d_fwd_kernel_traits<(int)128

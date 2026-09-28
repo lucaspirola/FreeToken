@@ -1,0 +1,24 @@
+   1484140 KiB anon    1484140 KiB rss  [heap]
+    470956 KiB anon     470956 KiB rss  [anon-unnamed]
+      5288 KiB anon     128464 KiB rss  /home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/_mlir_libs/_cutlass_ir.cu13.cpython-312-x86_64-linux-gnu.so
+      4984 KiB anon      81572 KiB rss  /home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/nvidia/cu13/lib/libcublasLt.so.13
+      3444 KiB anon      26944 KiB rss  /home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/nvidia/cu13/lib/libnvrtc.so.13
+      3204 KiB anon      54852 KiB rss  /home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so
+      2616 KiB anon      24056 KiB rss  /home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/nvidia/cu13/lib/libnvJitLink.so.13
+      1948 KiB anon      23676 KiB rss  /home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/llvmlite/binding/libllvmlite.so
+      1540 KiB anon       7292 KiB rss  /usr/lib/wsl/drivers/nv_dispi.inf_amd64_b20cc8aeaed64fc2/libcuda.so.1.1
+      1404 KiB anon      28176 KiB rss  /home/lucas/ai/FreeToken/.venv/lib/python3.12/site-packages/triton/_C/libtriton.so
+      1252 KiB anon       6076 KiB rss  /usr/bin/python3.12
+--- largest single mappings by Anonymous
+   1484140 KiB  01094000-5ebd5000 [heap]
+     83936 KiB  7d0862228000-7d0867663000 
+     44072 KiB  7d0064d00000-7d0068021000 
+     31228 KiB  7d078e355000-7d0790200000 
+     21196 KiB  7d0565255000-7d0566f55000 
+     21180 KiB  7d056c0fc000-7d056d5ff000 
+     19460 KiB  7d07928fe000-7d0793c00000 
+     18868 KiB  7d0782c97000-7d0783f05000 
+     16396 KiB  7d0558400000-7d0559c00000 
+     16132 KiB  7d0791829000-7d079282a000 
+     14340 KiB  7d0567200000-7d0568021000 
+     14336 KiB  7d05624fc000-7d05632fc000 
