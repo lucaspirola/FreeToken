@@ -1,0 +1,17 @@
+cn-w1 start 2026-09-28T08:07:34+04:00 load=2.32 2.68 2.57 gpu=0MiB avail=30.8 sm=277 MHz ceil=262144 yarn= kv=q8q8 rows=0 code=4a1bb45 
+cn-w1 done 2026-09-28T08:11:38+04:00 load=1.45 2.57 2.61: captures=1 kv_grows=6 tracebacks=0
+cn-s1 start 2026-09-28T08:19:28+04:00 load=1.15 2.20 2.59 gpu=0MiB avail=31.0 sm=277 MHz ceil=262144 yarn= kv=q8q8 rows=-1 code=4a1bb45 
+cn-s1 done 2026-09-28T08:24:02+04:00 load=1.79 1.97 2.41: captures=1 kv_grows=6 tracebacks=0
+cb-s1 start 2026-09-28T08:31:29+04:00 load=2.21 2.39 2.41 gpu=0MiB avail=31.0 sm=277 MHz ceil=262144 yarn= kv=q8q8 rows=-1 code=757caee 
+cb-s1 done 2026-09-28T08:36:03+04:00 load=2.74 2.29 2.35: captures=1 kv_grows=6 tracebacks=0
+cb-w1 start 2026-09-28T08:43:35+04:00 load=1.37 4.46 3.95 gpu=0MiB avail=30.9 sm=277 MHz ceil=262144 yarn= kv=q8q8 rows=0 code=757caee 
+cb-w1 done 2026-09-28T08:47:36+04:00 load=1.20 3.21 3.60: captures=1 kv_grows=6 tracebacks=0
+cn-s2 start 2026-09-28T09:00:12+04:00 load=6.70 3.75 3.27 gpu=0MiB avail=30.8 sm=277 MHz ceil=262144 yarn= kv=q8q8 rows=-1 code=4a1bb45 
+cn-s2 done 2026-09-28T09:04:54+04:00 load=1.85 3.96 3.61: captures=1 kv_grows=6 tracebacks=0
+cn-w2 start 2026-09-28T09:41:12+04:00 load=7.58 3.99 2.87 gpu=0MiB avail=30.6 sm=277 MHz ceil=262144 yarn= kv=q8q8 rows=0 code=4a1bb45 
+cn-w2 done 2026-09-28T09:47:28+04:00 load=1.64 4.63 3.89: captures=1 kv_grows=6 tracebacks=0
+cb-w2 start 2026-09-28T10:20:00+04:00 load=1.22 2.10 2.68 gpu=0MiB avail=29.5 sm=277 MHz ceil=262144 yarn= kv=q8q8 rows=0 code=757caee 
+cb-w2 done 2026-09-28T10:24:28+04:00 load=1.62 2.82 2.95: captures=1 kv_grows=6 tracebacks=0
+cb-s2 start 2026-09-28T10:55:06+04:00 load=1.87 3.26 3.55 gpu=0MiB avail=29.2 sm=277 MHz ceil=262144 yarn= kv=q8q8 rows=-1 code=757caeeb
+cb-s2 done 2026-09-28T10:59:48+04:00 load=2.98 3.25 3.50: captures=1 kv_grows=6 tracebacks=0
+CTRLDONE

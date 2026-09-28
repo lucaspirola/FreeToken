@@ -1,0 +1,24 @@
+chain start c756c4e popt-sched: revert the batched cuMemSetAccess (no in 2026-09-28T05:07:19+04:00
+ck9s-warm-whole start 05:09:10 3.08 3.19 3.65 gpu=0 MiB avail=30.0 code=4a1bb45 
+ck9s-warm-whole done: captures=1 kv_grows=0 tracebacks=0 2026-09-28T05:10:43+04:00
+ck9s-warm-mirror start 05:12:41 2.27 3.53 3.76 gpu=0 MiB avail=30.2 code=4a1bb45 
+ck9s-warm-mirror done: captures=1 kv_grows=0 tracebacks=0 2026-09-28T05:14:38+04:00
+8k/80k done 2026-09-28T05:51:37+04:00
+ck9s-whole-256k start 06:20:34 1.27 1.64 2.65 gpu=0 MiB avail=30.8 code=4a1bb45 
+ck9s-whole-256k done: captures=1 kv_grows=21 tracebacks=0 2026-09-28T06:51:10+04:00
+QUIET at poll 11 2026-09-28T07:28:17+04:00
+ck9s-mirror-256k start 07:28:17 1.22 2.07 1.83 gpu=0 MiB avail=31.1 code=4a1bb45 
+ck9s-mirror-256k done: captures=1 kv_grows=21 tracebacks=0 2026-09-28T08:00:29+04:00
+256k compared: 0 difference(s); 1 point(s) outside the band 2026-09-28T08:01:03+04:00
+ck9s-nat-whole-1 start 08:04:16 1.29 1.96 2.30 gpu=0 MiB avail=30.9 code=4a1bb45 
+ck9s-nat-whole-1 done: captures=1 kv_grows=0 tracebacks=0 2026-09-28T08:07:34+04:00
+ck9s-nat-mirror-1 start 08:15:38 2.22 3.29 2.97 gpu=0 MiB avail=31.0 code=4a1bb45 
+ck9s-nat-mirror-1 done: captures=1 kv_grows=0 tracebacks=0 2026-09-28T08:19:28+04:00
+ck9s-nat-whole-2 start 08:28:19 1.50 1.66 2.17 gpu=0 MiB avail=30.8 code=4a1bb45 
+ck9s-nat-whole-2 done: captures=1 kv_grows=0 tracebacks=0 2026-09-28T08:31:29+04:00
+ck9s-nat-mirror-2 start 08:39:44 8.69 7.70 4.63 gpu=0 MiB avail=30.9 code=4a1bb45 
+ck9s-nat-mirror-2 done: captures=1 kv_grows=0 tracebacks=0 2026-09-28T08:43:35+04:00
+ck9s-replay start 08:57:30 1.78 1.93 2.71 gpu=0 MiB avail=30.9 code=4a1bb45 
+ck9s-replay done: captures=1 kv_grows=1 tracebacks=0 2026-09-28T09:00:12+04:00
+GATEDONE 2026-09-28T09:00:45+04:00
+ALLDONE 2026-09-28T09:41:12+04:00
