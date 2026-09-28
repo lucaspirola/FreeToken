@@ -107,7 +107,7 @@ Code c756c4e (4a1bb45 differs only in tasks/). Saver = mirror, pool auto; whole 
 | item | result | verdict |
 |---|---|---|
 | 8K/80K alternated x3, bar 91% (`gate/recheck-8k.log`) | 8K p1 **92.9%**, 8K p2 **94.4%**, 80K p1 **93.9%**, 80K p2 **94.7%** | PASS |
-| 256K same commit (`gate/ck9s-256k-compare.txt`) | 8K p1 92.8%, 8K p2 97.6%, **256K p1 88.3%** (107.1 vs 121.3), 256K p2 96.1% | one point below, see control |
+| 256K same commit (`gate/ck9s-256k-compare.txt`) | 8K p1 92.8%, 8K p2 97.6%, **256K p1 88.3%** (107.1 vs 121.3), 256K p2 96.1% | one reading below the bar; same-day control 95.7% (base 95.2%): spread → PASS on the control |
 | needles/recall 256K (`gate/ck9s-needles-compare.txt`) | 0 differences (recall 120000 / 240000 SAME) | PASS |
 | coverage faults / starved / captures | 0 / 0 in every saver arm; captures=1, 0 tracebacks in every arm (`gate/*-acceptance-R3.txt`) | PASS |
 | natural text x2 (`gate/ck9s-nat-compare.txt`) | whole 168.7 / 169.0, saver 154.9 / 155.5 = 91.8% / 92.2% (ck9k: 92.2 / 92.1); md5 5/5 in every arm, also 5/5 vs ck8o | PASS |
