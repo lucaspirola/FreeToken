@@ -1,0 +1,24 @@
+chain start f732f5a6 Merge exp/reorg (popt-sched) into exp/popt-exl3 for 2026-09-28T11:35:10+04:00
+ck9c-warm-whole start 11:35:10 0.68 1.79 2.87 gpu=0 MiB avail=29.6 code=f732f5a6
+ck9c-warm-whole done: captures=1 kv_grows=0 tracebacks=0 2026-09-28T11:37:23+04:00
+ck9c-warm-mirror start 11:37:53 2.79 3.16 3.29 gpu=0 MiB avail=29.8 code=f732f5a6
+ck9c-warm-mirror done: captures=1 kv_grows=0 tracebacks=0 2026-09-28T11:39:47+04:00
+8k/80k done 2026-09-28T11:59:28+04:00
+ck9c-whole-256k start 11:59:28 1.66 5.33 6.04 gpu=0 MiB avail=30.2 code=f732f5a6
+ck9c-whole-256k done: captures=1 kv_grows=21 tracebacks=0 2026-09-28T12:29:00+04:00
+QUIET at poll 0 2026-09-28T12:29:30+04:00
+ck9c-mirror-256k start 12:29:30 0.65 1.23 2.28 gpu=0 MiB avail=30.4 code=f732f5a6
+ck9c-mirror-256k done: captures=1 kv_grows=21 tracebacks=0 2026-09-28T13:01:18+04:00
+256k compared: 0 difference(s); 1 point(s) outside the band 2026-09-28T13:01:48+04:00
+ck9c-nat-whole-1 start 13:01:48 1.00 4.18 4.45 gpu=0 MiB avail=30.2 code=f732f5a6
+ck9c-nat-whole-1 done: captures=1 kv_grows=0 tracebacks=0 2026-09-28T13:04:56+04:00
+ck9c-nat-mirror-1 start 13:05:26 1.71 3.40 4.14 gpu=0 MiB avail=30.2 code=f732f5a6
+ck9c-nat-mirror-1 done: captures=1 kv_grows=0 tracebacks=0 2026-09-28T13:09:14+04:00
+ck9c-nat-whole-2 start 13:09:44 1.88 2.36 3.50 gpu=0 MiB avail=30.2 code=f732f5a6
+ck9c-nat-whole-2 done: captures=1 kv_grows=0 tracebacks=0 2026-09-28T13:12:52+04:00
+ck9c-nat-mirror-2 start 13:13:23 3.99 3.86 3.92 gpu=0 MiB avail=30.3 code=f732f5a6
+ck9c-nat-mirror-2 done: captures=1 kv_grows=0 tracebacks=0 2026-09-28T13:17:06+04:00
+ck9c-replay start 13:17:36 1.82 2.85 3.49 gpu=0 MiB avail=30.2 code=f732f5a6
+ck9c-replay done: captures=1 kv_grows=1 tracebacks=0 2026-09-28T13:19:57+04:00
+GATEDONE 2026-09-28T13:20:27+04:00
+ALLDONE 2026-09-28T13:26:55+04:00

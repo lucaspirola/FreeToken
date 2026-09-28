@@ -1,0 +1,2204 @@
+--- 2026-09-28T11:35:10+04:00 tick
+ 11:35:10 up 1 day, 22:55,  1 user,  load average: 0.68, 1.79, 2.87
+MemAvailable:   31017268 kB
+Cached:          9105696 kB
+0 MiB, 277 MHz, 0 %, 41
+top CPU:
+ 100 2170773 python
+ 2.6  704990 codex
+ 2.2 1508204 claude
+ 2.1 1675160 claude
+ 1.9 1488603 claude
+ 1.9 1858352 piro-board-mcp
+top RSS (KiB):
+362876 1675160 claude
+334240 1508204 claude
+304924 1488603 claude
+283584 280711 claude
+256616 287390 claude
+254164  87554 claude
+--- 2026-09-28T11:35:10+04:00 ck9c-warm-whole start
+ 11:35:10 up 1 day, 22:55,  1 user,  load average: 0.68, 1.79, 2.87
+MemAvailable:   30975400 kB
+Cached:          9105616 kB
+0 MiB, 277 MHz, 0 %, 41
+top CPU:
+ 2.6  704990 codex
+ 2.2 1508204 claude
+ 2.1 1675160 claude
+ 1.9 1488603 claude
+ 1.9 1858352 piro-board-mcp
+ 1.5 1378076 codex
+top RSS (KiB):
+362876 1675160 claude
+334240 1508204 claude
+304924 1488603 claude
+283584 280711 claude
+260044  87554 claude
+256616 287390 claude
+--- 2026-09-28T11:36:10+04:00 tick
+ 11:36:10 up 1 day, 22:56,  1 user,  load average: 8.48, 3.69, 3.45
+MemAvailable:   10605832 kB
+Cached:         27923980 kB
+3028 MiB, 277 MHz, 0 %, 42
+top CPU:
+1215 2172008 python3
+ 6.8 2171531 ft
+ 5.2 2172009 python3
+ 2.6  704990 codex
+ 2.2 1508204 claude
+ 2.1 1675160 claude
+top RSS (KiB):
+19905096 2172008 python3
+857864 2172009 python3
+682664 2171531 ft
+321908 1508204 claude
+318496 1675160 claude
+297748 1488603 claude
+--- 2026-09-28T11:37:10+04:00 tick
+ 11:37:10 up 1 day, 22:57,  1 user,  load average: 4.32, 3.44, 3.38
+MemAvailable:    6729728 kB
+Cached:         25719444 kB
+15078 MiB, 277 MHz, 0 %, 44
+top CPU:
+ 624 2172008 python3
+95.2 2186301 rustc
+ 3.7 2171531 ft
+ 2.6  704990 codex
+ 2.4 2172009 python3
+ 2.2 1508204 claude
+top RSS (KiB):
+22349196 2172008 python3
+1581596 2186301 rustc
+843016 2172009 python3
+756324 2171531 ft
+383488 1675160 claude
+315380 1508204 claude
+--- 2026-09-28T11:37:53+04:00 ck9c-warm-mirror start
+ 11:37:53 up 1 day, 22:58,  1 user,  load average: 2.79, 3.16, 3.29
+MemAvailable:   31256308 kB
+Cached:          5355400 kB
+0 MiB, 277 MHz, 0 %, 44
+top CPU:
+ 2.6  704990 codex
+ 2.2 1508204 claude
+ 2.1 1675160 claude
+ 1.9 1488603 claude
+ 1.7 1858352 piro-board-mcp
+ 1.4 1378076 codex
+top RSS (KiB):
+342704 1675160 claude
+313632 1508204 claude
+293592 1488603 claude
+276896 280711 claude
+241848 287390 claude
+219180  87554 claude
+--- 2026-09-28T11:38:10+04:00 tick
+ 11:38:10 up 1 day, 22:58,  1 user,  load average: 2.29, 3.02, 3.24
+MemAvailable:   14261360 kB
+Cached:          9837140 kB
+3028 MiB, 2610 MHz, 3 %, 45
+top CPU:
+ 252 2195100 python3
+32.7 2195101 python3
+31.6 2194604 ft
+ 2.6  704990 codex
+ 2.1 1508204 claude
+ 2.1 1675160 claude
+top RSS (KiB):
+17030596 2195100 python3
+861724 2195101 python3
+685564 2194604 ft
+342892 1675160 claude
+314720 1508204 claude
+288024 1488603 claude
+--- 2026-09-28T11:39:11+04:00 tick
+ 11:39:11 up 1 day, 22:59,  1 user,  load average: 1.77, 2.73, 3.12
+MemAvailable:   12918920 kB
+Cached:          8443772 kB
+11952 MiB, 540 MHz, 0 %, 46
+top CPU:
+96.9 2203173 rustc
+72.0 2195100 python3
+ 5.3 2194604 ft
+ 3.9 2195101 python3
+ 2.6  704990 codex
+ 2.1 1508204 claude
+top RSS (KiB):
+16472648 2195100 python3
+1478404 2203173 rustc
+861724 2195101 python3
+685564 2194604 ft
+341524 1675160 claude
+313196 1508204 claude
+--- 2026-09-28T11:40:11+04:00 tick
+ 11:40:11 up 1 day, 23:00,  1 user,  load average: 0.92, 2.33, 2.96
+MemAvailable:   31291552 kB
+Cached:          8363388 kB
+0 MiB, 277 MHz, 0 %, 40
+top CPU:
+ 2.6  704990 codex
+ 2.1 1508204 claude
+ 2.0 1675160 claude
+ 1.8 1488603 claude
+ 1.6 1858352 piro-board-mcp
+ 1.4 1378076 codex
+top RSS (KiB):
+328840 1675160 claude
+303072 1508204 claude
+299420 1488603 claude
+272816 280711 claude
+261908 287390 claude
+222040  87554 claude
+--- 2026-09-28T11:41:11+04:00 tick
+ 11:41:11 up 1 day, 23:01,  1 user,  load average: 5.06, 3.24, 3.23
+MemAvailable:    8224216 kB
+Cached:         26949016 kB
+15078 MiB, 2910 MHz, 0 %, 56
+top CPU:
+ 932 2214876 python3
+ 7.8 2214548 ft
+ 5.9 2214877 python3
+ 2.6  704990 codex
+ 2.1 1508204 claude
+ 2.1 1675160 claude
+top RSS (KiB):
+22309496 2214876 python3
+855808 2214548 ft
+837160 2214877 python3
+347512 1675160 claude
+293032 1508204 claude
+286832 1488603 claude
+--- 2026-09-28T11:42:11+04:00 tick
+ 11:42:11 up 1 day, 23:02,  1 user,  load average: 2.53, 2.83, 3.08
+MemAvailable:    7927312 kB
+Cached:         27060396 kB
+14402 MiB, 2932 MHz, 0 %, 53
+top CPU:
+ 440 2214876 python3
+ 100 2230089 git
+98.6 2229933 python
+50.0 2230083 python3
+50.0 2230086 python3
+ 4.7 2214548 ft
+top RSS (KiB):
+22354208 2214876 python3
+940072 2214548 ft
+837544 2214877 python3
+370996 1675160 claude
+299412 1508204 claude
+287952 1488603 claude
+--- 2026-09-28T11:43:11+04:00 tick
+ 11:43:11 up 1 day, 23:03,  1 user,  load average: 1.39, 2.44, 2.93
+MemAvailable:   13466064 kB
+Cached:         10078928 kB
+13778 MiB, 2947 MHz, 0 %, 43
+top CPU:
+ 145 2236459 python3
+ 100 2238570 git
+90.0 2238559 python
+25.0 2238567 python3
+20.2 2235982 ft
+18.4 2236460 python3
+top RSS (KiB):
+17147896 2236459 python3
+861388 2236460 python3
+686224 2235982 ft
+364212 1675160 claude
+345856 1508204 claude
+288084 1488603 claude
+--- 2026-09-28T11:44:11+04:00 tick
+ 11:44:11 up 1 day, 23:04,  1 user,  load average: 2.49, 2.56, 2.94
+MemAvailable:   13900724 kB
+Cached:          9017648 kB
+15080 MiB, 2947 MHz, 0 %, 49
+top CPU:
+63.0 2236459 python3
+ 5.2 2235982 ft
+ 3.6 2236460 python3
+ 2.6  704990 codex
+ 2.1 1675160 claude
+ 2.1 1508204 claude
+top RSS (KiB):
+16676664 2236459 python3
+884832 2235982 ft
+864972 2236460 python3
+354652 1675160 claude
+344804 1508204 claude
+289920 1488603 claude
+--- 2026-09-28T11:45:11+04:00 tick
+ 11:45:11 up 1 day, 23:05,  1 user,  load average: 2.85, 2.59, 2.92
+MemAvailable:   13820776 kB
+Cached:          9021676 kB
+15076 MiB, 2902 MHz, 97 %, 65
+top CPU:
+64.7 2236459 python3
+ 3.6 2235982 ft
+ 2.6  704990 codex
+ 2.5 2236460 python3
+ 2.1 1675160 claude
+ 2.1 1508204 claude
+top RSS (KiB):
+16719684 2236459 python3
+888324 2235982 ft
+865356 2236460 python3
+358520 1675160 claude
+354012 1508204 claude
+289496 1488603 claude
+--- 2026-09-28T11:46:11+04:00 tick
+ 11:46:11 up 1 day, 23:06,  1 user,  load average: 8.99, 4.03, 3.38
+MemAvailable:   26714352 kB
+Cached:         13237508 kB
+3028 MiB, 277 MHz, 0 %, 41
+top CPU:
+ 644 2263992 python3
+ 617 2262697 piro_agentd-b05
+19.0 2263138 ft
+18.5 2263993 python3
+ 2.6  704990 codex
+ 2.1 1508204 claude
+top RSS (KiB):
+3904244 2263992 python3
+866032 2263993 python3
+686524 2263138 ft
+346400 1508204 claude
+322568 1675160 claude
+287732 1488603 claude
+--- 2026-09-28T11:47:11+04:00 tick
+ 11:47:11 up 1 day, 23:07,  1 user,  load average: 21.57, 8.69, 5.03
+MemAvailable:   13919140 kB
+Cached:         28556616 kB
+3028 MiB, 277 MHz, 0 %, 41
+top CPU:
+1073 2263992 python3
+39.7 2280683 piro_install-ce
+ 4.4 2263138 ft
+ 3.7 2263993 python3
+ 2.6  704990 codex
+ 2.1 1508204 claude
+top RSS (KiB):
+16722676 2263992 python3
+866032 2263993 python3
+686524 2263138 ft
+348136 1508204 claude
+321536 1675160 claude
+296900 1488603 claude
+--- 2026-09-28T11:48:11+04:00 tick
+ 11:48:11 up 1 day, 23:08,  1 user,  load average: 16.30, 9.85, 5.68
+MemAvailable:    8181300 kB
+Cached:         25933544 kB
+15078 MiB, 277 MHz, 0 %, 42
+top CPU:
+1306 2291787 piro_relayd-ba2
+ 925 2263992 python3
+ 100 2292130 awk
+40.0 2292134 python3
+23.3 2289326 find
+ 2.8 2263138 ft
+top RSS (KiB):
+22235072 2263992 python3
+753396 2263138 ft
+738672 2263993 python3
+358280 1675160 claude
+305732 1508204 claude
+290596 1488603 claude
+--- 2026-09-28T11:49:11+04:00 tick
+ 11:49:11 up 1 day, 23:09,  1 user,  load average: 12.15, 10.09, 6.04
+MemAvailable:   31351364 kB
+Cached:          3893460 kB
+0 MiB, 277 MHz, 0 %, 45
+top CPU:
+21.8 2289326 find
+ 2.6  704990 codex
+ 2.1 1675160 claude
+ 2.1 1508204 claude
+ 1.7 1488603 claude
+ 1.4 1378076 codex
+top RSS (KiB):
+349164 1675160 claude
+295056 1508204 claude
+290184 1488603 claude
+246536 280711 claude
+242332 287390 claude
+209436  87554 claude
+--- 2026-09-28T11:50:11+04:00 tick
+ 11:50:11 up 1 day, 23:10,  1 user,  load average: 9.98, 9.58, 6.10
+MemAvailable:   11563192 kB
+Cached:          6417608 kB
+13778 MiB, 315 MHz, 0 %, 42
+top CPU:
+ 366 2307192 python3
+99.7 2310169 rustc
+96.0 2307663 rustc
+21.0 2289326 find
+12.2 2306593 ft
+ 9.8 2307193 python3
+top RSS (KiB):
+17148468 2307192 python3
+1784276 2307663 rustc
+859456 2307193 python3
+758156 2310169 rustc
+679872 2306593 ft
+340296 1675160 claude
+--- 2026-09-28T11:51:11+04:00 tick
+ 11:51:11 up 1 day, 23:11,  1 user,  load average: 10.77, 9.76, 6.37
+MemAvailable:   13657188 kB
+Cached:          4722492 kB
+15080 MiB, 315 MHz, 0 %, 44
+top CPU:
+ 803 2315316 piro_agentd-b05
+ 140 2307192 python3
+21.1 2289326 find
+ 4.7 2306593 ft
+ 3.1 2307193 python3
+ 2.6  704990 codex
+top RSS (KiB):
+16672408 2307192 python3
+878836 2306593 ft
+862656 2307193 python3
+359720 1675160 claude
+296892 1508204 claude
+280920 1488603 claude
+--- 2026-09-28T11:52:11+04:00 tick
+ 11:52:11 up 1 day, 23:12,  1 user,  load average: 9.29, 9.57, 6.52
+MemAvailable:   13482108 kB
+Cached:          4850608 kB
+14398 MiB, 532 MHz, 0 %, 50
+top CPU:
+ 632 2336531 piro_operator_j
+ 110 2307192 python3
+19.3 2289326 find
+ 3.8 2306593 ft
+ 2.6  704990 codex
+ 2.4 2307193 python3
+top RSS (KiB):
+16713972 2307192 python3
+963012 2306593 ft
+864192 2307193 python3
+411916 1675160 claude
+300528 1508204 claude
+278832 1488603 claude
+--- 2026-09-28T11:53:11+04:00 tick
+ 11:53:11 up 1 day, 23:13,  1 user,  load average: 13.75, 10.45, 7.00
+MemAvailable:   27069396 kB
+Cached:          9003180 kB
+3028 MiB, 277 MHz, 0 %, 41
+top CPU:
+1156 2342985 piro_relayd-ba2
+ 288 2344361 python3
+17.1 2343771 ft
+17.0 2289326 find
+16.3 2344362 python3
+ 2.6  704990 codex
+top RSS (KiB):
+3257416 2344361 python3
+864360 2344362 python3
+684612 2343771 ft
+377144 1675160 claude
+299316 1508204 claude
+279608 1488603 claude
+--- 2026-09-28T11:54:11+04:00 tick
+ 11:54:11 up 1 day, 23:14,  1 user,  load average: 15.85, 12.01, 7.77
+MemAvailable:    8946756 kB
+Cached:         24475412 kB
+5746 MiB, 2865 MHz, 29 %, 53
+top CPU:
+ 850 2344361 python3
+15.2 2289326 find
+ 4.4 2343771 ft
+ 3.7 2344362 python3
+ 2.6  704990 codex
+ 2.2 1675160 claude
+top RSS (KiB):
+22082104 2344361 python3
+815080 2344362 python3
+635460 2343771 ft
+339792 1675160 claude
+289264 1508204 claude
+274160 1488603 claude
+--- 2026-09-28T11:55:11+04:00 tick
+ 11:55:11 up 1 day, 23:15,  1 user,  load average: 7.04, 10.16, 7.40
+MemAvailable:    8422016 kB
+Cached:         24473172 kB
+15076 MiB, 2850 MHz, 100 %, 76
+top CPU:
+ 504 2344361 python3
+14.0 2289326 find
+ 3.5 2343771 ft
+ 2.6  704990 codex
+ 2.5 2344362 python3
+ 2.3 1675160 claude
+top RSS (KiB):
+22342600 2344361 python3
+837120 2343771 ft
+819816 2344362 python3
+368460 1508204 claude
+331292 1675160 claude
+273116 1488603 claude
+--- 2026-09-28T11:56:12+04:00 tick
+ 11:56:11 up 1 day, 23:16,  1 user,  load average: 3.72, 8.63, 7.04
+MemAvailable:   28044572 kB
+Cached:          8287048 kB
+3028 MiB, 2677 MHz, 0 %, 43
+top CPU:
+90.0 2372996 python3
+39.2 2372997 python3
+37.5 2372470 ft
+13.2 2289326 find
+ 2.6  704990 codex
+ 2.3 1675160 claude
+top RSS (KiB):
+3006680 2372996 python3
+861716 2372997 python3
+683944 2372470 ft
+333140 1675160 claude
+324944 1508204 claude
+270076 1488603 claude
+--- 2026-09-28T11:57:12+04:00 tick
+ 11:57:12 up 1 day, 23:17,  1 user,  load average: 2.63, 7.43, 6.73
+MemAvailable:   14360188 kB
+Cached:          6796900 kB
+14136 MiB, 277 MHz, 0 %, 43
+top CPU:
+67.3 2372996 python3
+12.6 2289326 find
+ 5.8 2372470 ft
+ 3.9 2372997 python3
+ 2.6  704990 codex
+ 2.3 1675160 claude
+top RSS (KiB):
+16665416 2372996 python3
+861716 2372997 python3
+804216 2372470 ft
+333528 1675160 claude
+323880 1508204 claude
+272512 1488603 claude
+--- 2026-09-28T11:58:12+04:00 tick
+ 11:58:12 up 1 day, 23:18,  1 user,  load average: 2.33, 6.44, 6.43
+MemAvailable:   14211504 kB
+Cached:          6874132 kB
+15076 MiB, 2850 MHz, 98 %, 78
+top CPU:
+66.0 2372996 python3
+12.0 2289326 find
+ 4.0 2372470 ft
+ 2.6  704990 codex
+ 2.5 2372997 python3
+ 2.3 1675160 claude
+top RSS (KiB):
+16711604 2372996 python3
+886504 2372470 ft
+865684 2372997 python3
+334668 1675160 claude
+316164 1508204 claude
+272892 1488603 claude
+--- 2026-09-28T11:59:12+04:00 tick
+ 11:59:12 up 1 day, 23:19,  1 user,  load average: 1.93, 5.57, 6.13
+MemAvailable:   31686400 kB
+Cached:          6974588 kB
+0 MiB, 277 MHz, 0 %, 41
+top CPU:
+ 2.6  704990 codex
+ 2.3 1675160 claude
+ 2.0 1508204 claude
+ 1.6 1488603 claude
+ 1.4 1378076 codex
+ 1.0 1858352 piro-board-mcp
+top RSS (KiB):
+375988 1675160 claude
+318144 1508204 claude
+278908 1488603 claude
+234176 280711 claude
+228248 287390 claude
+217440  87554 claude
+--- 2026-09-28T11:59:28+04:00 ck9c-whole-256k start
+ 11:59:28 up 1 day, 23:19,  1 user,  load average: 1.66, 5.33, 6.04
+MemAvailable:   31687436 kB
+Cached:          6984312 kB
+0 MiB, 277 MHz, 0 %, 41
+top CPU:
+ 2.6  704990 codex
+ 2.3 1675160 claude
+ 2.0 1508204 claude
+ 1.6 1488603 claude
+ 1.4 1378076 codex
+ 1.0 1858352 piro-board-mcp
+top RSS (KiB):
+368388 1675160 claude
+317804 1508204 claude
+279164 1488603 claude
+234304 280711 claude
+228260 287390 claude
+217640  87554 claude
+--- 2026-09-28T12:00:12+04:00 tick
+ 12:00:12 up 1 day, 23:20,  1 user,  load average: 5.58, 5.84, 6.18
+MemAvailable:    8813204 kB
+Cached:         26052560 kB
+14134 MiB, 2947 MHz, 0 %, 46
+top CPU:
+ 937 2402589 python3
+ 9.1 2402153 ft
+ 7.6 2402590 python3
+ 2.6  704990 codex
+ 2.3 1675160 claude
+ 2.0 1508204 claude
+top RSS (KiB):
+22254976 2402589 python3
+785932 2402590 python3
+606496 2402153 ft
+340288 1675160 claude
+302576 1508204 claude
+276348 1488603 claude
+--- 2026-09-28T12:01:12+04:00 tick
+ 12:01:12 up 1 day, 23:21,  1 user,  load average: 2.52, 4.90, 5.83
+MemAvailable:    8489056 kB
+Cached:         26086128 kB
+15080 MiB, 2850 MHz, 100 %, 75
+top CPU:
+ 388 2402589 python3
+25.0 2416027 python3
+ 4.7 2402153 ft
+ 3.6 2402590 python3
+ 2.6  704990 codex
+ 2.3 1675160 claude
+top RSS (KiB):
+22260352 2402589 python3
+877932 2402153 ft
+851384 2402590 python3
+339424 1675160 claude
+298528 1508204 claude
+271180 1488603 claude
+--- 2026-09-28T12:02:12+04:00 tick
+ 12:02:12 up 1 day, 23:22,  1 user,  load average: 1.56, 4.18, 5.52
+MemAvailable:    8433080 kB
+Cached:         26139652 kB
+15080 MiB, 2842 MHz, 100 %, 79
+top CPU:
+ 277 2402589 python3
+ 100 2424475 python3
+ 100 2424478 git
+ 100 2424479 git
+66.6 2424471 python3
+25.0 2424460 python3
+top RSS (KiB):
+22321064 2402589 python3
+878816 2402153 ft
+830448 2402590 python3
+354176 1675160 claude
+304184 1508204 claude
+269596 1488603 claude
+--- 2026-09-28T12:03:12+04:00 tick
+ 12:03:12 up 1 day, 23:23,  1 user,  load average: 1.30, 3.63, 5.25
+MemAvailable:    8385784 kB
+Cached:         26144680 kB
+15076 MiB, 2842 MHz, 99 %, 73
+top CPU:
+ 227 2402589 python3
+ 200 2432877 git
+50.0 2432857 git
+25.0 2432810 python3
+25.0 2432831 python3
+ 2.9 2432735 python3
+top RSS (KiB):
+22329324 2402589 python3
+879072 2402153 ft
+830448 2402590 python3
+354560 1675160 claude
+303536 1508204 claude
+269288 1488603 claude
+--- 2026-09-28T12:04:12+04:00 tick
+ 12:04:12 up 1 day, 23:24,  1 user,  load average: 1.21, 3.18, 4.99
+MemAvailable:    8408736 kB
+Cached:         26161412 kB
+15078 MiB, 2902 MHz, 98 %, 64
+top CPU:
+ 200 2402589 python3
+ 2.6  704990 codex
+ 2.5 2402153 ft
+ 2.2 1675160 claude
+ 1.9 2402590 python3
+ 1.9 1508204 claude
+top RSS (KiB):
+22329836 2402589 python3
+879072 2402153 ft
+830448 2402590 python3
+344548 1675160 claude
+304772 1508204 claude
+269480 1488603 claude
+--- 2026-09-28T12:05:12+04:00 tick
+ 12:05:12 up 1 day, 23:25,  1 user,  load average: 1.13, 2.80, 4.74
+MemAvailable:    8414644 kB
+Cached:         26167100 kB
+15078 MiB, 2902 MHz, 98 %, 65
+top CPU:
+ 182 2402589 python3
+ 2.6  704990 codex
+ 2.5 2402153 ft
+ 2.2 1675160 claude
+ 2.0 2402590 python3
+ 1.9 1508204 claude
+top RSS (KiB):
+22329836 2402589 python3
+879072 2402153 ft
+830448 2402590 python3
+344908 1675160 claude
+305504 1508204 claude
+268300 1488603 claude
+--- 2026-09-28T12:06:12+04:00 tick
+ 12:06:12 up 1 day, 23:26,  1 user,  load average: 1.14, 2.50, 4.52
+MemAvailable:    8442736 kB
+Cached:         26174628 kB
+15078 MiB, 2902 MHz, 98 %, 66
+top CPU:
+ 169 2402589 python3
+ 2.6  704990 codex
+ 2.5 2402153 ft
+ 2.2 1675160 claude
+ 2.0 2402590 python3
+ 1.9 1508204 claude
+top RSS (KiB):
+22329836 2402589 python3
+879072 2402153 ft
+830448 2402590 python3
+345392 1675160 claude
+299608 1508204 claude
+267820 1488603 claude
+--- 2026-09-28T12:07:12+04:00 tick
+ 12:07:12 up 1 day, 23:27,  1 user,  load average: 1.12, 2.24, 4.30
+MemAvailable:    8471044 kB
+Cached:         26178820 kB
+15078 MiB, 2902 MHz, 98 %, 67
+top CPU:
+ 160 2402589 python3
+ 2.6  704990 codex
+ 2.5 2402153 ft
+ 2.2 1675160 claude
+ 2.1 2402590 python3
+ 1.9 1508204 claude
+top RSS (KiB):
+22329836 2402589 python3
+879072 2402153 ft
+830448 2402590 python3
+311848 1675160 claude
+299716 1508204 claude
+268380 1488603 claude
+--- 2026-09-28T12:08:12+04:00 tick
+ 12:08:12 up 1 day, 23:28,  1 user,  load average: 1.11, 2.02, 4.09
+MemAvailable:    8475520 kB
+Cached:         26183948 kB
+15080 MiB, 2902 MHz, 98 %, 67
+top CPU:
+ 153 2402589 python3
+ 2.6  704990 codex
+ 2.4 2402153 ft
+ 2.2 1675160 claude
+ 2.1 2402590 python3
+ 1.9 1508204 claude
+top RSS (KiB):
+22329836 2402589 python3
+879072 2402153 ft
+830448 2402590 python3
+309116 1675160 claude
+305096 1508204 claude
+269400 1488603 claude
+--- 2026-09-28T12:09:12+04:00 tick
+ 12:09:12 up 1 day, 23:29,  1 user,  load average: 1.08, 1.85, 3.90
+MemAvailable:    8477260 kB
+Cached:         26186568 kB
+15080 MiB, 2902 MHz, 98 %, 67
+top CPU:
+ 148 2402589 python3
+ 2.6  704990 codex
+ 2.4 2402153 ft
+ 2.1 1675160 claude
+ 2.1 2402590 python3
+ 1.9 1508204 claude
+top RSS (KiB):
+22330092 2402589 python3
+879072 2402153 ft
+830448 2402590 python3
+305812 1675160 claude
+305044 1508204 claude
+271344 1488603 claude
+--- 2026-09-28T12:10:12+04:00 tick
+ 12:10:12 up 1 day, 23:30,  1 user,  load average: 3.80, 2.38, 3.95
+MemAvailable:    8472752 kB
+Cached:         26203444 kB
+15080 MiB, 2850 MHz, 100 %, 78
+top CPU:
+ 143 2402589 python3
+ 2.6  704990 codex
+ 2.4 2402153 ft
+ 2.1 1675160 claude
+ 2.1 2402590 python3
+ 1.9 1508204 claude
+top RSS (KiB):
+22332076 2402589 python3
+880348 2402153 ft
+830704 2402590 python3
+300396 1508204 claude
+298720 1675160 claude
+272112 1488603 claude
+--- 2026-09-28T12:11:12+04:00 tick
+ 12:11:12 up 1 day, 23:31,  1 user,  load average: 9.55, 4.21, 4.48
+MemAvailable:    6946868 kB
+Cached:         25085712 kB
+15082 MiB, 2910 MHz, 98 %, 65
+top CPU:
+ 139 2402589 python3
+95.3 2497293 rustc
+ 2.6  704990 codex
+ 2.4 2402153 ft
+ 2.1 1675160 claude
+ 2.1 2402590 python3
+top RSS (KiB):
+22307136 2402589 python3
+1738352 2497293 rustc
+870480 2402153 ft
+820592 2402590 python3
+301592 1675160 claude
+300508 1508204 claude
+--- 2026-09-28T12:12:12+04:00 tick
+ 12:12:12 up 1 day, 23:32,  1 user,  load average: 5.33, 4.03, 4.40
+MemAvailable:    7499556 kB
+Cached:         24710544 kB
+15082 MiB, 2910 MHz, 98 %, 65
+top CPU:
+ 136 2402589 python3
+99.3 2506607 rustc
+ 2.6  704990 codex
+ 2.4 2402153 ft
+ 2.1 2402590 python3
+ 2.1 1675160 claude
+top RSS (KiB):
+22297664 2402589 python3
+1180936 2506607 rustc
+864720 2402153 ft
+814960 2402590 python3
+299588 1675160 claude
+298312 1508204 claude
+--- 2026-09-28T12:13:12+04:00 tick
+ 12:13:12 up 1 day, 23:33,  1 user,  load average: 3.48, 3.74, 4.28
+MemAvailable:    8540560 kB
+Cached:         24130000 kB
+15082 MiB, 2910 MHz, 98 %, 66
+top CPU:
+ 134 2402589 python3
+ 2.6  704990 codex
+ 2.4 2402153 ft
+ 2.1 2402590 python3
+ 2.1 1675160 claude
+ 1.8 1508204 claude
+top RSS (KiB):
+22282944 2402589 python3
+847440 2402153 ft
+808688 2402590 python3
+297728 1508204 claude
+294960 1675160 claude
+268360 1488603 claude
+--- 2026-09-28T12:14:12+04:00 tick
+ 12:14:12 up 1 day, 23:34,  1 user,  load average: 1.97, 3.25, 4.07
+MemAvailable:    8558400 kB
+Cached:         24133132 kB
+15078 MiB, 2910 MHz, 98 %, 67
+top CPU:
+ 131 2402589 python3
+ 2.6  704990 codex
+ 2.3 2402153 ft
+ 2.1 2402590 python3
+ 2.1 1675160 claude
+ 1.8 1508204 claude
+top RSS (KiB):
+22283968 2402589 python3
+847440 2402153 ft
+808688 2402590 python3
+295672 1508204 claude
+292156 1675160 claude
+265176 1488603 claude
+--- 2026-09-28T12:15:12+04:00 tick
+ 12:15:12 up 1 day, 23:35,  1 user,  load average: 1.44, 2.87, 3.89
+MemAvailable:    8545180 kB
+Cached:         24135720 kB
+15080 MiB, 2910 MHz, 98 %, 68
+top CPU:
+ 129 2402589 python3
+ 2.6  704990 codex
+ 2.3 2402153 ft
+ 2.1 2402590 python3
+ 2.1 1675160 claude
+ 1.8 1508204 claude
+top RSS (KiB):
+22284352 2402589 python3
+847440 2402153 ft
+808688 2402590 python3
+298032 1508204 claude
+294264 1675160 claude
+266216 1488603 claude
+--- 2026-09-28T12:16:12+04:00 tick
+ 12:16:12 up 1 day, 23:36,  1 user,  load average: 1.76, 2.68, 3.76
+MemAvailable:    5569832 kB
+Cached:         23927112 kB
+15080 MiB, 2910 MHz, 98 %, 68
+top CPU:
+ 127 2402589 python3
+99.7 2534660 rustc
+ 2.6  704990 codex
+ 2.3 2402153 ft
+ 2.1 2402590 python3
+ 2.0 1675160 claude
+top RSS (KiB):
+22281792 2402589 python3
+3279264 2534660 rustc
+806128 2402590 python3
+788688 2402153 ft
+293740 1508204 claude
+293320 1675160 claude
+--- 2026-09-28T12:17:13+04:00 tick
+ 12:17:13 up 1 day, 23:37,  1 user,  load average: 1.51, 2.47, 3.62
+MemAvailable:    8606240 kB
+Cached:         23874080 kB
+15080 MiB, 2910 MHz, 98 %, 68
+top CPU:
+ 126 2402589 python3
+ 2.6  704990 codex
+ 2.3 2402153 ft
+ 2.1 2402590 python3
+ 2.0 1675160 claude
+ 1.8 1508204 claude
+top RSS (KiB):
+22282560 2402589 python3
+806128 2402590 python3
+788688 2402153 ft
+296484 1508204 claude
+293572 1675160 claude
+271888 1488603 claude
+--- 2026-09-28T12:18:13+04:00 tick
+ 12:18:13 up 1 day, 23:38,  1 user,  load average: 1.28, 2.23, 3.46
+MemAvailable:    8578072 kB
+Cached:         23900716 kB
+15082 MiB, 2902 MHz, 99 %, 63
+top CPU:
+ 124 2402589 python3
+ 2.6  704990 codex
+ 2.3 2402153 ft
+ 2.1 2402590 python3
+ 2.0 1675160 claude
+ 1.8 1508204 claude
+top RSS (KiB):
+22285660 2402589 python3
+806128 2402590 python3
+790384 2402153 ft
+296916 1508204 claude
+296564 1675160 claude
+272660 1488603 claude
+--- 2026-09-28T12:19:13+04:00 tick
+ 12:19:13 up 1 day, 23:39,  1 user,  load average: 1.14, 2.02, 3.31
+MemAvailable:    8579616 kB
+Cached:         23903028 kB
+15082 MiB, 2902 MHz, 99 %, 62
+top CPU:
+ 123 2402589 python3
+ 2.6  704990 codex
+ 2.3 2402153 ft
+ 2.1 2402590 python3
+ 2.0 1675160 claude
+ 1.8 1508204 claude
+top RSS (KiB):
+22285660 2402589 python3
+806128 2402590 python3
+790384 2402153 ft
+295736 1508204 claude
+294180 1675160 claude
+273560 1488603 claude
+--- 2026-09-28T12:20:13+04:00 tick
+ 12:20:13 up 1 day, 23:40,  1 user,  load average: 1.12, 1.85, 3.17
+MemAvailable:    8591964 kB
+Cached:         23906144 kB
+15082 MiB, 2902 MHz, 99 %, 62
+top CPU:
+ 122 2402589 python3
+ 2.6  704990 codex
+ 2.2 2402153 ft
+ 2.1 2402590 python3
+ 2.0 1675160 claude
+ 1.8 1508204 claude
+top RSS (KiB):
+22285660 2402589 python3
+806128 2402590 python3
+790384 2402153 ft
+296532 1508204 claude
+293820 1675160 claude
+273812 1488603 claude
+--- 2026-09-28T12:21:13+04:00 tick
+ 12:21:13 up 1 day, 23:41,  1 user,  load average: 1.29, 1.77, 3.06
+MemAvailable:    8577416 kB
+Cached:         23925324 kB
+15082 MiB, 2902 MHz, 99 %, 63
+top CPU:
+ 121 2402589 python3
+ 2.6  704990 codex
+ 2.2 2402153 ft
+ 2.1 2402590 python3
+ 2.0 1675160 claude
+ 1.8 1508204 claude
+top RSS (KiB):
+22285916 2402589 python3
+806128 2402590 python3
+790384 2402153 ft
+304132 1508204 claude
+292640 1675160 claude
+271784 1488603 claude
+--- 2026-09-28T12:22:13+04:00 tick
+ 12:22:13 up 1 day, 23:42,  1 user,  load average: 1.10, 1.62, 2.92
+MemAvailable:    8559228 kB
+Cached:         23926732 kB
+15082 MiB, 2902 MHz, 99 %, 64
+top CPU:
+ 120 2402589 python3
+ 2.6  704990 codex
+ 2.2 2402153 ft
+ 2.1 2402590 python3
+ 2.0 1675160 claude
+ 1.8 1508204 claude
+top RSS (KiB):
+22286428 2402589 python3
+806128 2402590 python3
+790384 2402153 ft
+304252 1508204 claude
+296376 1675160 claude
+273420 1488603 claude
+--- 2026-09-28T12:23:13+04:00 tick
+ 12:23:13 up 1 day, 23:43,  1 user,  load average: 1.64, 1.68, 2.86
+MemAvailable:    5659348 kB
+Cached:         24048676 kB
+15080 MiB, 2902 MHz, 99 %, 64
+top CPU:
+ 119 2402589 python3
+99.7 2592848 rustc
+ 2.6  704990 codex
+ 2.2 2402153 ft
+ 2.1 2402590 python3
+ 2.0 1675160 claude
+top RSS (KiB):
+22286044 2402589 python3
+3142528 2592848 rustc
+805616 2402590 python3
+789744 2402153 ft
+299860 1508204 claude
+293576 1675160 claude
+--- 2026-09-28T12:24:13+04:00 tick
+ 12:24:13 up 1 day, 23:44,  1 user,  load average: 1.37, 1.60, 2.76
+MemAvailable:    8570272 kB
+Cached:         23868096 kB
+15080 MiB, 2902 MHz, 99 %, 65
+top CPU:
+ 119 2402589 python3
+ 2.6  704990 codex
+ 2.2 2402153 ft
+ 2.0 2402590 python3
+ 1.9 1675160 claude
+ 1.7 1508204 claude
+top RSS (KiB):
+22286556 2402589 python3
+805616 2402590 python3
+789744 2402153 ft
+301200 1508204 claude
+293312 1675160 claude
+275892 1488603 claude
+--- 2026-09-28T12:25:13+04:00 tick
+ 12:25:13 up 1 day, 23:45,  1 user,  load average: 1.74, 1.69, 2.72
+MemAvailable:    8568884 kB
+Cached:         23870008 kB
+15080 MiB, 2902 MHz, 99 %, 65
+top CPU:
+ 118 2402589 python3
+ 2.6  704990 codex
+ 2.2 2402153 ft
+ 2.0 2402590 python3
+ 1.9 1675160 claude
+ 1.7 1508204 claude
+top RSS (KiB):
+22287068 2402589 python3
+805616 2402590 python3
+789744 2402153 ft
+302040 1508204 claude
+294040 1675160 claude
+273272 1488603 claude
+--- 2026-09-28T12:26:13+04:00 tick
+ 12:26:13 up 1 day, 23:46,  1 user,  load average: 1.39, 1.60, 2.62
+MemAvailable:    8571664 kB
+Cached:         23871232 kB
+15080 MiB, 2902 MHz, 99 %, 66
+top CPU:
+ 117 2402589 python3
+ 2.6  704990 codex
+ 2.1 2402153 ft
+ 2.0 2402590 python3
+ 1.9 1675160 claude
+ 1.7 1508204 claude
+top RSS (KiB):
+22287580 2402589 python3
+805616 2402590 python3
+789744 2402153 ft
+300620 1508204 claude
+294360 1675160 claude
+274080 1488603 claude
+--- 2026-09-28T12:27:13+04:00 tick
+ 12:27:13 up 1 day, 23:47,  1 user,  load average: 1.18, 1.50, 2.52
+MemAvailable:    8554272 kB
+Cached:         23872512 kB
+15080 MiB, 2842 MHz, 100 %, 79
+top CPU:
+ 116 2402589 python3
+ 2.6  704990 codex
+ 2.1 2402153 ft
+ 2.0 2402590 python3
+ 1.9 1675160 claude
+ 1.7 1508204 claude
+top RSS (KiB):
+22289800 2402589 python3
+805616 2402590 python3
+790540 2402153 ft
+301684 1508204 claude
+295076 1675160 claude
+274592 1488603 claude
+--- 2026-09-28T12:28:13+04:00 tick
+ 12:28:13 up 1 day, 23:48,  1 user,  load average: 1.06, 1.41, 2.42
+MemAvailable:    8539936 kB
+Cached:         23911444 kB
+15080 MiB, 2842 MHz, 100 %, 76
+top CPU:
+ 116 2402589 python3
+ 2.6  704990 codex
+ 2.1 2402153 ft
+ 2.0 2402590 python3
+ 1.9 1675160 claude
+ 1.7 1508204 claude
+top RSS (KiB):
+22289932 2402589 python3
+822584 2402153 ft
+804872 2402590 python3
+298636 1508204 claude
+294660 1675160 claude
+273748 1488603 claude
+--- 2026-09-28T12:29:13+04:00 tick
+ 12:29:13 up 1 day, 23:49,  1 user,  load average: 0.83, 1.29, 2.32
+MemAvailable:   31865024 kB
+Cached:          4057784 kB
+0 MiB, 277 MHz, 0 %, 44
+top CPU:
+ 2.6  704990 codex
+ 1.9 1675160 claude
+ 1.7 1508204 claude
+ 1.4 1488603 claude
+ 1.3 1378076 codex
+ 0.8  280711 claude
+top RSS (KiB):
+301532 1508204 claude
+294320 1675160 claude
+277304 1488603 claude
+245144 280711 claude
+234488 287390 claude
+234236  87554 claude
+--- 2026-09-28T12:29:30+04:00 quiet poll 0
+ 12:29:30 up 1 day, 23:49,  1 user,  load average: 0.65, 1.23, 2.28
+MemAvailable:   31859196 kB
+Cached:          4058152 kB
+0 MiB, 277 MHz, 0 %, 42
+top CPU:
+ 2.6  704990 codex
+ 1.9 1675160 claude
+ 1.7 1508204 claude
+ 1.4 1488603 claude
+ 1.4 1378076 codex
+ 0.8  280711 claude
+top RSS (KiB):
+301736 1508204 claude
+294676 1675160 claude
+277256 1488603 claude
+245508 280711 claude
+234568 287390 claude
+234448  87554 claude
+--- 2026-09-28T12:29:30+04:00 ck9c-mirror-256k start
+ 12:29:30 up 1 day, 23:49,  1 user,  load average: 0.65, 1.23, 2.28
+MemAvailable:   31855272 kB
+Cached:          4057872 kB
+0 MiB, 277 MHz, 0 %, 42
+top CPU:
+ 2.6  704990 codex
+ 1.9 1675160 claude
+ 1.7 1508204 claude
+ 1.4 1488603 claude
+ 1.4 1378076 codex
+ 0.8  280711 claude
+top RSS (KiB):
+301736 1508204 claude
+294676 1675160 claude
+277256 1488603 claude
+245508 280711 claude
+234568 287390 claude
+234448  87554 claude
+--- 2026-09-28T12:30:13+04:00 tick
+ 12:30:13 up 1 day, 23:50,  1 user,  load average: 1.77, 1.47, 2.31
+MemAvailable:   15304080 kB
+Cached:          6764716 kB
+11786 MiB, 465 MHz, 0 %, 43
+top CPU:
+ 104 2652146 python3
+ 9.4 2651562 ft
+ 7.5 2652147 python3
+ 2.6  704990 codex
+ 1.9 1675160 claude
+ 1.7 1508204 claude
+top RSS (KiB):
+15949448 2652146 python3
+858012 2652147 python3
+680732 2651562 ft
+302152 1508204 claude
+294896 1675160 claude
+272932 1488603 claude
+--- 2026-09-28T12:31:13+04:00 tick
+ 12:31:13 up 1 day, 23:51,  1 user,  load average: 3.07, 1.81, 2.37
+MemAvailable:   14308872 kB
+Cached:          6773936 kB
+14884 MiB, 1185 MHz, 100 %, 46
+top CPU:
+ 993 2664548 piro_agentd-d7a
+58.6 2652146 python3
+50.0 2665659 python3
+ 6.2 2665651 python3
+ 4.1 2651562 ft
+ 2.8 2652147 python3
+top RSS (KiB):
+16663564 2652146 python3
+879744 2651562 ft
+861724 2652147 python3
+302124 1508204 claude
+296400 1675160 claude
+275432 1488603 claude
+--- 2026-09-28T12:32:13+04:00 tick
+ 12:32:13 up 1 day, 23:52,  1 user,  load average: 2.97, 2.07, 2.43
+MemAvailable:   12623672 kB
+Cached:          6912544 kB
+15080 MiB, 2857 MHz, 100 %, 80
+top CPU:
+ 100 2674207 git
+ 100 2674228 git
+96.3 2673424 rustc
+93.8 2673425 rustc
+73.8 2652146 python3
+50.0 2674199 python3
+top RSS (KiB):
+16664588 2652146 python3
+1122212 2673424 rustc
+952304 2651562 ft
+921900 2652147 python3
+913352 2673425 rustc
+301024 1508204 claude
+--- 2026-09-28T12:33:13+04:00 tick
+ 12:33:13 up 1 day, 23:53,  1 user,  load average: 8.70, 3.61, 2.92
+MemAvailable:   14103420 kB
+Cached:          7658604 kB
+15082 MiB, 2850 MHz, 100 %, 79
+top CPU:
+ 894 2680363 piro_agentd-b05
+80.8 2652146 python3
+50.0 2686245 python3
+ 2.6  704990 codex
+ 2.6 2651562 ft
+ 1.8 1675160 claude
+top RSS (KiB):
+16724156 2652146 python3
+952476 2651562 ft
+876000 2652147 python3
+297952 1508204 claude
+293244 1675160 claude
+274432 1488603 claude
+--- 2026-09-28T12:34:13+04:00 tick
+ 12:34:13 up 1 day, 23:54,  1 user,  load average: 10.35, 5.10, 3.48
+MemAvailable:   14023436 kB
+Cached:          7880868 kB
+15080 MiB, 2902 MHz, 97 %, 63
+top CPU:
+ 984 2699139 piro_native_eng
+84.9 2652146 python3
+ 2.6  704990 codex
+ 2.3 2651562 ft
+ 1.8 1675160 claude
+ 1.7 1508204 claude
+top RSS (KiB):
+16732968 2652146 python3
+952860 2651562 ft
+876000 2652147 python3
+300624 1508204 claude
+294404 1675160 claude
+274728 1488603 claude
+--- 2026-09-28T12:35:13+04:00 tick
+ 12:35:13 up 1 day, 23:55,  1 user,  load average: 8.83, 5.41, 3.68
+MemAvailable:   14010640 kB
+Cached:          8020948 kB
+15080 MiB, 2902 MHz, 97 %, 64
+top CPU:
+1290 2708625 piro_relayd-ba2
+87.5 2652146 python3
+50.0 2710664 git
+22.2 2710660 python3
+ 2.6  704990 codex
+ 2.4 2651562 ft
+top RSS (KiB):
+16732968 2652146 python3
+952860 2651562 ft
+876000 2652147 python3
+298376 1508204 claude
+295244 1675160 claude
+274968 1488603 claude
+--- 2026-09-28T12:36:14+04:00 tick
+ 12:36:14 up 1 day, 23:56,  1 user,  load average: 6.32, 5.53, 3.84
+MemAvailable:   14247432 kB
+Cached:          8268768 kB
+15080 MiB, 2902 MHz, 97 %, 65
+top CPU:
+89.5 2652146 python3
+ 2.6  704990 codex
+ 2.4 2651562 ft
+ 1.9 2652147 python3
+ 1.8 1675160 claude
+ 1.7 1508204 claude
+top RSS (KiB):
+16732968 2652146 python3
+952860 2651562 ft
+876000 2652147 python3
+300208 1508204 claude
+293980 1675160 claude
+275516 1488603 claude
+--- 2026-09-28T12:37:14+04:00 tick
+ 12:37:14 up 1 day, 23:57,  1 user,  load average: 3.03, 4.72, 3.67
+MemAvailable:   14234864 kB
+Cached:          8269760 kB
+15080 MiB, 2902 MHz, 97 %, 66
+top CPU:
+91.0 2652146 python3
+ 2.6  704990 codex
+ 2.4 2651562 ft
+ 2.0 2652147 python3
+ 1.8 1675160 claude
+ 1.7 1508204 claude
+top RSS (KiB):
+16732968 2652146 python3
+952860 2651562 ft
+876000 2652147 python3
+300488 1508204 claude
+294544 1675160 claude
+273368 1488603 claude
+--- 2026-09-28T12:38:14+04:00 tick
+ 12:38:14 up 1 day, 23:58,  1 user,  load average: 1.79, 4.06, 3.50
+MemAvailable:   14215580 kB
+Cached:          8270152 kB
+15080 MiB, 2902 MHz, 94 %, 67
+top CPU:
+92.1 2652146 python3
+ 2.6  704990 codex
+ 2.4 2651562 ft
+ 2.0 2652147 python3
+ 1.8 1675160 claude
+ 1.7 1508204 claude
+top RSS (KiB):
+16733096 2652146 python3
+952860 2651562 ft
+876000 2652147 python3
+302160 1508204 claude
+296936 1675160 claude
+274304 1488603 claude
+--- 2026-09-28T12:39:14+04:00 tick
+ 12:39:14 up 1 day, 23:59,  1 user,  load average: 2.16, 3.73, 3.42
+MemAvailable:   14215364 kB
+Cached:          8371944 kB
+15076 MiB, 2902 MHz, 97 %, 66
+top CPU:
+92.9 2652146 python3
+ 2.6  704990 codex
+ 2.4 2651562 ft
+ 2.0 2652147 python3
+ 1.8 1675160 claude
+ 1.6 1508204 claude
+top RSS (KiB):
+16734248 2652146 python3
+952860 2651562 ft
+876000 2652147 python3
+300748 1508204 claude
+289896 1675160 claude
+278960 1488603 claude
+--- 2026-09-28T12:40:14+04:00 tick
+ 12:40:14 up 2 days, 0 min,  1 user,  load average: 4.14, 3.94, 3.51
+MemAvailable:   14236612 kB
+Cached:          8373592 kB
+15076 MiB, 2902 MHz, 95 %, 67
+top CPU:
+93.6 2652146 python3
+ 2.6  704990 codex
+ 2.4 2651562 ft
+ 2.0 2652147 python3
+ 1.8 1675160 claude
+ 1.6 1508204 claude
+top RSS (KiB):
+16734632 2652146 python3
+952860 2651562 ft
+876000 2652147 python3
+297184 1508204 claude
+293528 1675160 claude
+275028 1488603 claude
+--- 2026-09-28T12:41:14+04:00 tick
+ 12:41:14 up 2 days, 1 min,  1 user,  load average: 5.26, 4.33, 3.68
+MemAvailable:   14205680 kB
+Cached:          8374024 kB
+15078 MiB, 2850 MHz, 100 %, 77
+top CPU:
+94.1 2652146 python3
+ 2.6  704990 codex
+ 2.4 2651562 ft
+ 2.1 2652147 python3
+ 1.8 1675160 claude
+ 1.6 1508204 claude
+top RSS (KiB):
+16737308 2652146 python3
+954148 2651562 ft
+895200 2652147 python3
+300328 1508204 claude
+296848 1675160 claude
+280356 1488603 claude
+--- 2026-09-28T12:42:14+04:00 tick
+ 12:42:14 up 2 days, 2 min,  1 user,  load average: 4.59, 4.31, 3.71
+MemAvailable:   14224940 kB
+Cached:          8375316 kB
+15078 MiB, 2902 MHz, 95 %, 64
+top CPU:
+94.5 2652146 python3
+ 2.6  704990 codex
+ 2.4 2651562 ft
+ 2.1 2652147 python3
+ 1.8 1675160 claude
+ 1.6 1508204 claude
+top RSS (KiB):
+16737428 2652146 python3
+954148 2651562 ft
+895200 2652147 python3
+301740 1508204 claude
+293908 1675160 claude
+274096 1488603 claude
+--- 2026-09-28T12:43:14+04:00 tick
+ 12:43:14 up 2 days, 3 min,  1 user,  load average: 3.31, 4.04, 3.66
+MemAvailable:   14205912 kB
+Cached:          8375700 kB
+15078 MiB, 2910 MHz, 97 %, 65
+top CPU:
+95.0 2652146 python3
+ 2.6  704990 codex
+ 2.4 2651562 ft
+ 2.1 2652147 python3
+ 1.8 1675160 claude
+ 1.6 1508204 claude
+top RSS (KiB):
+16737428 2652146 python3
+954148 2651562 ft
+895200 2652147 python3
+302476 1508204 claude
+293920 1675160 claude
+278468 1488603 claude
+--- 2026-09-28T12:44:14+04:00 tick
+ 12:44:14 up 2 days, 4 min,  1 user,  load average: 2.19, 3.56, 3.51
+MemAvailable:   12160072 kB
+Cached:          8376212 kB
+15078 MiB, 2902 MHz, 97 %, 66
+top CPU:
+ 100 2785231 rustc
+95.4 2652146 python3
+ 2.6  704990 codex
+ 2.4 2651562 ft
+ 2.1 2652147 python3
+ 1.7 1675160 claude
+top RSS (KiB):
+16737428 2652146 python3
+2251340 2785231 rustc
+954148 2651562 ft
+895200 2652147 python3
+302972 1508204 claude
+294400 1675160 claude
+--- 2026-09-28T12:45:14+04:00 tick
+ 12:45:14 up 2 days, 5 min,  1 user,  load average: 1.91, 3.26, 3.42
+MemAvailable:   14082912 kB
+Cached:          8488108 kB
+15080 MiB, 2902 MHz, 98 %, 67
+top CPU:
+95.7 2652146 python3
+ 4.3 2789834 piro-board-mcp
+ 2.6  704990 codex
+ 2.4 2651562 ft
+ 2.1 2652147 python3
+ 1.7 1675160 claude
+top RSS (KiB):
+16738452 2652146 python3
+954148 2651562 ft
+895200 2652147 python3
+298020 1508204 claude
+293472 1675160 claude
+277308 1488603 claude
+--- 2026-09-28T12:46:14+04:00 tick
+ 12:46:14 up 2 days, 6 min,  1 user,  load average: 3.84, 3.46, 3.47
+MemAvailable:   13981484 kB
+Cached:          8488996 kB
+15082 MiB, 2910 MHz, 97 %, 67
+top CPU:
+ 783 2806021 piro_agentd-b05
+96.0 2652146 python3
+ 2.6  704990 codex
+ 2.4 2651562 ft
+ 2.1 2652147 python3
+ 1.8 2789834 piro-board-mcp
+top RSS (KiB):
+16738452 2652146 python3
+954148 2651562 ft
+895200 2652147 python3
+301880 1508204 claude
+294196 1675160 claude
+275888 1488603 claude
+--- 2026-09-28T12:47:14+04:00 tick
+ 12:47:14 up 2 days, 7 min,  1 user,  load average: 11.74, 5.76, 4.25
+MemAvailable:   13947472 kB
+Cached:          8494520 kB
+15082 MiB, 2910 MHz, 95 %, 68
+top CPU:
+ 886 2806021 piro_agentd-b05
+96.2 2652146 python3
+ 2.6  704990 codex
+ 2.4 2651562 ft
+ 2.2 2652147 python3
+ 1.7 1675160 claude
+top RSS (KiB):
+16739220 2652146 python3
+954148 2651562 ft
+895200 2652147 python3
+302628 1508204 claude
+295164 1675160 claude
+276248 1488603 claude
+--- 2026-09-28T12:48:14+04:00 tick
+ 12:48:14 up 2 days, 8 min,  1 user,  load average: 5.39, 5.08, 4.12
+MemAvailable:   14062920 kB
+Cached:          8492412 kB
+15082 MiB, 2910 MHz, 98 %, 68
+top CPU:
+96.4 2652146 python3
+ 2.6  704990 codex
+ 2.4 2651562 ft
+ 2.2 2652147 python3
+ 1.7 1675160 claude
+ 1.6 1508204 claude
+top RSS (KiB):
+16739732 2652146 python3
+954148 2651562 ft
+895200 2652147 python3
+304284 1508204 claude
+297884 1675160 claude
+275436 1488603 claude
+--- 2026-09-28T12:49:15+04:00 tick
+ 12:49:15 up 2 days, 9 min,  1 user,  load average: 2.61, 4.34, 3.92
+MemAvailable:   14040376 kB
+Cached:          8493748 kB
+15078 MiB, 2835 MHz, 100 %, 82
+top CPU:
+96.6 2652146 python3
+ 2.6  704990 codex
+ 2.4 2651562 ft
+ 2.2 2652147 python3
+ 1.7 1675160 claude
+ 1.6 1508204 claude
+top RSS (KiB):
+16741568 2652146 python3
+955172 2651562 ft
+895200 2652147 python3
+303452 1508204 claude
+295976 1675160 claude
+279564 1488603 claude
+--- 2026-09-28T12:50:15+04:00 tick
+ 12:50:15 up 2 days, 10 min,  1 user,  load average: 1.79, 3.77, 3.75
+MemAvailable:   14061920 kB
+Cached:          8494296 kB
+15078 MiB, 2902 MHz, 98 %, 61
+top CPU:
+96.8 2652146 python3
+ 2.6  704990 codex
+ 2.4 2651562 ft
+ 2.2 2652147 python3
+ 1.7 1675160 claude
+ 1.6 1508204 claude
+top RSS (KiB):
+16741568 2652146 python3
+955172 2651562 ft
+895200 2652147 python3
+302468 1508204 claude
+294032 1675160 claude
+276456 1488603 claude
+--- 2026-09-28T12:51:15+04:00 tick
+ 12:51:15 up 2 days, 11 min,  1 user,  load average: 2.16, 3.46, 3.64
+MemAvailable:   13962628 kB
+Cached:          8384580 kB
+15078 MiB, 2902 MHz, 98 %, 60
+top CPU:
+ 666 2852440 piro_agentd-d7a
+97.0 2652146 python3
+ 2.6  704990 codex
+ 2.4 2651562 ft
+ 2.2 2652147 python3
+ 1.7 1675160 claude
+top RSS (KiB):
+16741568 2652146 python3
+955172 2651562 ft
+895200 2652147 python3
+314068 1675160 claude
+306868 1508204 claude
+276872 1488603 claude
+--- 2026-09-28T12:52:15+04:00 tick
+ 12:52:15 up 2 days, 12 min,  1 user,  load average: 3.69, 3.85, 3.77
+MemAvailable:   13921232 kB
+Cached:          8619588 kB
+15078 MiB, 2902 MHz, 98 %, 61
+top CPU:
+98.7 2861310 python
+97.1 2652146 python3
+ 2.6  704990 codex
+ 2.4 2651562 ft
+ 2.2 2652147 python3
+ 1.7 1675160 claude
+top RSS (KiB):
+16741824 2652146 python3
+955172 2651562 ft
+895200 2652147 python3
+337180 1675160 claude
+312900 1508204 claude
+275608 1488603 claude
+--- 2026-09-28T12:53:15+04:00 tick
+ 12:53:15 up 2 days, 13 min,  1 user,  load average: 3.97, 3.78, 3.75
+MemAvailable:   13923360 kB
+Cached:          8350928 kB
+15078 MiB, 2902 MHz, 98 %, 63
+top CPU:
+ 891 2869080 piro_agentd-d7a
+97.3 2652146 python3
+75.0 2870137 python
+ 2.6  704990 codex
+ 2.4 2651562 ft
+ 2.2 2652147 python3
+top RSS (KiB):
+16742336 2652146 python3
+955172 2651562 ft
+895200 2652147 python3
+343360 1675160 claude
+307080 1508204 claude
+278720 1488603 claude
+--- 2026-09-28T12:54:15+04:00 tick
+ 12:54:15 up 2 days, 14 min,  1 user,  load average: 4.27, 4.10, 3.87
+MemAvailable:   13125300 kB
+Cached:          8347568 kB
+15080 MiB, 2902 MHz, 98 %, 63
+top CPU:
+ 100 2878151 rustc
+97.4 2652146 python3
+ 3.3 2878015 cargo
+ 2.6  704990 codex
+ 2.4 2651562 ft
+ 2.2 2652147 python3
+top RSS (KiB):
+16743616 2652146 python3
+1036204 2878151 rustc
+955172 2651562 ft
+895200 2652147 python3
+326432 1675160 claude
+309336 1508204 claude
+--- 2026-09-28T12:55:15+04:00 tick
+ 12:55:15 up 2 days, 15 min,  1 user,  load average: 8.70, 5.17, 4.24
+MemAvailable:   13879692 kB
+Cached:          8358004 kB
+15082 MiB, 2902 MHz, 98 %, 64
+top CPU:
+ 792 2883919 piro_agentd-b05
+97.5 2652146 python3
+31.2 2888257 systemd-tmpfile
+ 2.6  704990 codex
+ 2.4 2651562 ft
+ 2.2 2652147 python3
+top RSS (KiB):
+16743616 2652146 python3
+955172 2651562 ft
+895200 2652147 python3
+342632 1675160 claude
+309012 1508204 claude
+274896 1488603 claude
+--- 2026-09-28T12:56:15+04:00 tick
+ 12:56:15 up 2 days, 16 min,  1 user,  load average: 10.97, 6.56, 4.78
+MemAvailable:   13793292 kB
+Cached:          8436452 kB
+15082 MiB, 2902 MHz, 98 %, 64
+top CPU:
+97.6 2652146 python3
+12.5 2903195 piro_credential
+ 2.6  704990 codex
+ 2.4 2651562 ft
+ 2.2 2652147 python3
+ 1.8 1675160 claude
+top RSS (KiB):
+16743616 2652146 python3
+955172 2651562 ft
+895200 2652147 python3
+368004 1675160 claude
+307716 1508204 claude
+277980 1488603 claude
+--- 2026-09-28T12:57:15+04:00 tick
+ 12:57:15 up 2 days, 17 min,  1 user,  load average: 10.19, 6.96, 5.02
+MemAvailable:   13763304 kB
+Cached:          8644776 kB
+15082 MiB, 2902 MHz, 98 %, 65
+top CPU:
+ 145 2914780 recovery_public
+97.7 2652146 python3
+ 2.6  704990 codex
+ 2.4 2651562 ft
+ 2.2 2652147 python3
+ 1.8 1675160 claude
+top RSS (KiB):
+16743616 2652146 python3
+955172 2651562 ft
+895200 2652147 python3
+385348 1675160 claude
+309596 1508204 claude
+277420 1488603 claude
+--- 2026-09-28T12:58:15+04:00 tick
+ 12:58:15 up 2 days, 18 min,  1 user,  load average: 8.92, 7.43, 5.32
+MemAvailable:   13877828 kB
+Cached:          8667488 kB
+15082 MiB, 2902 MHz, 98 %, 65
+top CPU:
+97.8 2652146 python3
+ 2.6  704990 codex
+ 2.4 2651562 ft
+ 2.2 2652147 python3
+ 1.8 1675160 claude
+ 1.6 1508204 claude
+top RSS (KiB):
+16743616 2652146 python3
+955172 2651562 ft
+895200 2652147 python3
+353416 1675160 claude
+303152 1508204 claude
+276356 1488603 claude
+--- 2026-09-28T12:59:15+04:00 tick
+ 12:59:15 up 2 days, 19 min,  1 user,  load average: 4.16, 6.35, 5.08
+MemAvailable:   13810296 kB
+Cached:          8855784 kB
+15082 MiB, 2902 MHz, 94 %, 65
+top CPU:
+ 100 2934768 git
+97.8 2652146 python3
+88.8 2934743 python
+33.3 2934764 python3
+ 2.6  704990 codex
+ 2.4 2651562 ft
+top RSS (KiB):
+16743616 2652146 python3
+955172 2651562 ft
+895200 2652147 python3
+372172 1675160 claude
+306108 1508204 claude
+280688 1488603 claude
+--- 2026-09-28T13:00:15+04:00 tick
+ 13:00:15 up 2 days, 20 min,  1 user,  load average: 2.45, 5.47, 4.86
+MemAvailable:   13969156 kB
+Cached:          8857396 kB
+15078 MiB, 2850 MHz, 100 %, 79
+top CPU:
+ 100 2943327 git
+97.9 2652146 python3
+50.0 2943295 python3
+50.0 2943300 git
+50.0 2943301 python3
+20.0 2943267 python3
+top RSS (KiB):
+16743616 2652146 python3
+957780 2651562 ft
+895200 2652147 python3
+355976 1675160 claude
+309628 1508204 claude
+276872 1488603 claude
+--- 2026-09-28T13:01:15+04:00 tick
+ 13:01:15 up 2 days, 21 min,  1 user,  load average: 1.51, 4.66, 4.61
+MemAvailable:   13852200 kB
+Cached:          8858156 kB
+14146 MiB, 345 MHz, 0 %, 50
+top CPU:
+ 100 2951680 git
+ 100 2951681 git
+97.7 2652146 python3
+25.0 2951646 python3
+25.0 2951647 python3
+20.0 2951615 python3
+top RSS (KiB):
+16753088 2652146 python3
+1074724 2651562 ft
+880868 2652147 python3
+354028 1675160 claude
+307420 1508204 claude
+276224 1488603 claude
+--- 2026-09-28T13:01:48+04:00 ck9c-nat-whole-1 start
+ 13:01:48 up 2 days, 22 min,  1 user,  load average: 1.00, 4.18, 4.45
+MemAvailable:   31634064 kB
+Cached:          8763900 kB
+0 MiB, 277 MHz, 0 %, 43
+top CPU:
+ 2.6  704990 codex
+ 1.8 1675160 claude
+ 1.5 1508204 claude
+ 1.3 1378076 codex
+ 1.3 1488603 claude
+ 0.8  280711 claude
+top RSS (KiB):
+323560 1675160 claude
+308536 1508204 claude
+278032 1488603 claude
+248772 280711 claude
+240972  87554 claude
+233200 287390 claude
+--- 2026-09-28T13:02:15+04:00 tick
+ 13:02:15 up 2 days, 22 min,  1 user,  load average: 4.64, 4.72, 4.62
+MemAvailable:   18130240 kB
+Cached:         26460544 kB
+3028 MiB, 277 MHz, 0 %, 41
+top CPU:
+ 992 2957246 python3
+15.4 2956913 ft
+13.6 2957247 python3
+11.1 2959883 python3
+ 2.6  704990 codex
+ 1.8 1675160 claude
+top RSS (KiB):
+12844436 2957246 python3
+860484 2957247 python3
+684580 2956913 ft
+324164 1675160 claude
+301968 1508204 claude
+278816 1488603 claude
+--- 2026-09-28T13:03:16+04:00 tick
+ 13:03:16 up 2 days, 23 min,  1 user,  load average: 3.49, 4.49, 4.56
+MemAvailable:    8441276 kB
+Cached:         26391996 kB
+15078 MiB, 2917 MHz, 98 %, 60
+top CPU:
+ 506 2957246 python3
+ 5.5 2956913 ft
+ 3.7 2957247 python3
+ 2.6  704990 codex
+ 1.8 1675160 claude
+ 1.5 1508204 claude
+top RSS (KiB):
+22280184 2957246 python3
+885792 2956913 ft
+782276 2957247 python3
+336100 1675160 claude
+299372 1508204 claude
+270208 1488603 claude
+--- 2026-09-28T13:04:16+04:00 tick
+ 13:04:16 up 2 days, 24 min,  1 user,  load average: 2.04, 3.88, 4.34
+MemAvailable:    8375648 kB
+Cached:         26387724 kB
+15078 MiB, 2895 MHz, 98 %, 66
+top CPU:
+ 331 2957246 python3
+97.7 2976790 python
+ 4.2 2956913 ft
+ 3.1 2957247 python3
+ 2.6  704990 codex
+ 1.8 1675160 claude
+top RSS (KiB):
+22280184 2957246 python3
+886176 2956913 ft
+782276 2957247 python3
+350288 1675160 claude
+296284 1508204 claude
+270588 1488603 claude
+--- 2026-09-28T13:05:16+04:00 tick
+ 13:05:16 up 2 days, 25 min,  1 user,  load average: 1.54, 3.43, 4.15
+MemAvailable:   31699164 kB
+Cached:          6473680 kB
+0 MiB, 277 MHz, 0 %, 44
+top CPU:
+ 2.6  704990 codex
+ 1.9 1675160 claude
+ 1.5 1508204 claude
+ 1.3 1378076 codex
+ 1.3 1488603 claude
+ 0.8  280711 claude
+top RSS (KiB):
+348592 1675160 claude
+297256 1508204 claude
+273916 1488603 claude
+246304 280711 claude
+230620 287390 claude
+229912  87554 claude
+--- 2026-09-28T13:05:26+04:00 ck9c-nat-mirror-1 start
+ 13:05:26 up 2 days, 25 min,  1 user,  load average: 1.71, 3.40, 4.14
+MemAvailable:   31703564 kB
+Cached:          6474388 kB
+0 MiB, 277 MHz, 0 %, 43
+top CPU:
+ 2.6  704990 codex
+ 1.9 1675160 claude
+ 1.5 1508204 claude
+ 1.3 1378076 codex
+ 1.3 1488603 claude
+ 0.8  280711 claude
+top RSS (KiB):
+349916 1675160 claude
+297604 1508204 claude
+273468 1488603 claude
+246296 280711 claude
+230336  87554 claude
+230076 287390 claude
+--- 2026-09-28T13:06:16+04:00 tick
+ 13:06:16 up 2 days, 26 min,  1 user,  load average: 1.53, 3.07, 3.99
+MemAvailable:   15160100 kB
+Cached:          8103328 kB
+11786 MiB, 555 MHz, 100 %, 44
+top CPU:
+ 105 2987863 python3
+ 8.1 2987296 ft
+ 6.4 2987864 python3
+ 2.6  704990 codex
+ 1.9 1675160 claude
+ 1.5 1508204 claude
+top RSS (KiB):
+15958468 2987863 python3
+863192 2987864 python3
+684196 2987296 ft
+360996 1675160 claude
+295252 1508204 claude
+272300 1488603 claude
+--- 2026-09-28T13:07:16+04:00 tick
+ 13:07:16 up 2 days, 27 min,  1 user,  load average: 1.07, 2.68, 3.79
+MemAvailable:   14158468 kB
+Cached:          8108784 kB
+15080 MiB, 2917 MHz, 97 %, 59
+top CPU:
+64.5 2987863 python3
+ 4.4 2987296 ft
+ 2.8 2987864 python3
+ 2.6  704990 codex
+ 1.9 1675160 claude
+ 1.5 1508204 claude
+top RSS (KiB):
+16680100 2987863 python3
+967076 2987296 ft
+866904 2987864 python3
+363024 1675160 claude
+298840 1508204 claude
+274284 1488603 claude
+--- 2026-09-28T13:08:16+04:00 tick
+ 13:08:16 up 2 days, 28 min,  1 user,  load average: 1.25, 2.43, 3.63
+MemAvailable:   14140468 kB
+Cached:          8125576 kB
+15080 MiB, 2902 MHz, 97 %, 65
+top CPU:
+ 100 3011327 awk
+78.1 2987863 python3
+ 3.8 2987296 ft
+ 2.7 2987864 python3
+ 2.6  704990 codex
+ 1.9 1675160 claude
+top RSS (KiB):
+16680100 2987863 python3
+967588 2987296 ft
+866904 2987864 python3
+367708 1675160 claude
+298564 1508204 claude
+272012 1488603 claude
+--- 2026-09-28T13:09:16+04:00 tick
+ 13:09:16 up 2 days, 29 min,  1 user,  load average: 1.94, 2.41, 3.55
+MemAvailable:   31375404 kB
+Cached:          8350168 kB
+0 MiB, 277 MHz, 0 %, 47
+top CPU:
+ 100 3019608 python
+ 2.6  704990 codex
+ 1.9 1675160 claude
+ 1.5 1508204 claude
+ 1.4 1378076 codex
+ 1.3 1488603 claude
+top RSS (KiB):
+367712 1675160 claude
+328764 3019608 python
+301216 1508204 claude
+275308 1488603 claude
+243720 280711 claude
+235332 287390 claude
+--- 2026-09-28T13:09:44+04:00 ck9c-nat-whole-2 start
+ 13:09:44 up 2 days, 30 min,  1 user,  load average: 1.88, 2.36, 3.50
+MemAvailable:   31676840 kB
+Cached:          8370232 kB
+0 MiB, 277 MHz, 0 %, 43
+top CPU:
+ 2.6  704990 codex
+ 1.9 1675160 claude
+ 1.5 1508204 claude
+ 1.4 1378076 codex
+ 1.3 1488603 claude
+ 0.8  280711 claude
+top RSS (KiB):
+371916 1675160 claude
+294132 1508204 claude
+275860 1488603 claude
+246492 280711 claude
+231136  87554 claude
+230048 287390 claude
+--- 2026-09-28T13:10:17+04:00 tick
+ 13:10:17 up 2 days, 30 min,  1 user,  load average: 6.61, 3.40, 3.80
+MemAvailable:   13120340 kB
+Cached:         28152704 kB
+3028 MiB, 277 MHz, 0 %, 41
+top CPU:
+1109 3024827 python3
+12.1 3024545 ft
+10.7 3024828 python3
+ 2.6  704990 codex
+ 1.9 1675160 claude
+ 1.5 1508204 claude
+top RSS (KiB):
+17895136 3024827 python3
+861588 3024828 python3
+683552 3024545 ft
+357548 1675160 claude
+300400 1508204 claude
+273872 1488603 claude
+--- 2026-09-28T13:11:17+04:00 tick
+ 13:11:17 up 2 days, 31 min,  1 user,  load average: 4.54, 3.46, 3.80
+MemAvailable:    8469988 kB
+Cached:         26668272 kB
+15078 MiB, 2902 MHz, 98 %, 62
+top CPU:
+ 465 3024827 python3
+ 5.3 3024545 ft
+ 3.7 3024828 python3
+ 2.6  704990 codex
+ 1.9 1675160 claude
+ 1.5 1508204 claude
+top RSS (KiB):
+22307132 3024827 python3
+926508 3024545 ft
+825108 3024828 python3
+348584 1675160 claude
+292516 1508204 claude
+265004 1488603 claude
+--- 2026-09-28T13:12:17+04:00 tick
+ 13:12:17 up 2 days, 32 min,  1 user,  load average: 6.04, 4.02, 3.97
+MemAvailable:    5760124 kB
+Cached:         24349144 kB
+15078 MiB, 2902 MHz, 98 %, 66
+top CPU:
+ 314 3024827 python3
+98.1 3039166 rustc
+ 4.2 3024545 ft
+ 3.2 3024828 python3
+ 2.6  704990 codex
+ 1.9 1675160 claude
+top RSS (KiB):
+22272956 3024827 python3
+2990220 3039166 rustc
+849196 3024545 ft
+805908 3024828 python3
+303456 1675160 claude
+286704 1508204 claude
+--- 2026-09-28T13:13:18+04:00 tick
+ 13:13:18 up 2 days, 33 min,  1 user,  load average: 4.16, 3.89, 3.93
+MemAvailable:   31777968 kB
+Cached:          4819956 kB
+0 MiB, 277 MHz, 0 %, 43
+top CPU:
+ 2.6  704990 codex
+ 1.9 1675160 claude
+ 1.5 1508204 claude
+ 1.3 1378076 codex
+ 1.3 1488603 claude
+ 0.8  280711 claude
+top RSS (KiB):
+295140 1675160 claude
+289100 1508204 claude
+261252 1488603 claude
+233700 280711 claude
+228768 287390 claude
+223952  87554 claude
+--- 2026-09-28T13:13:23+04:00 ck9c-nat-mirror-2 start
+ 13:13:23 up 2 days, 33 min,  1 user,  load average: 3.99, 3.86, 3.92
+MemAvailable:   31782996 kB
+Cached:          4820080 kB
+0 MiB, 277 MHz, 0 %, 43
+top CPU:
+ 2.6  704990 codex
+ 1.9 1675160 claude
+ 1.5 1508204 claude
+ 1.3 1378076 codex
+ 1.3 1488603 claude
+ 0.8  280711 claude
+top RSS (KiB):
+296420 1675160 claude
+289228 1508204 claude
+261508 1488603 claude
+234164 280711 claude
+228768 287390 claude
+220532  87554 claude
+--- 2026-09-28T13:14:18+04:00 tick
+ 13:14:18 up 2 days, 34 min,  1 user,  load average: 3.51, 3.78, 3.89
+MemAvailable:   14985012 kB
+Cached:          7049732 kB
+11838 MiB, 2317 MHz, 96 %, 46
+top CPU:
+82.6 3055268 python3
+ 7.1 3054869 ft
+ 5.7 3055269 python3
+ 2.6  704990 codex
+ 1.9 1675160 claude
+ 1.5 1508204 claude
+top RSS (KiB):
+16202636 3055268 python3
+860620 3055269 python3
+680952 3054869 ft
+298324 1675160 claude
+285116 1508204 claude
+261400 1488603 claude
+--- 2026-09-28T13:15:19+04:00 tick
+ 13:15:19 up 2 days, 35 min,  1 user,  load average: 1.93, 3.27, 3.71
+MemAvailable:   14222760 kB
+Cached:          7057488 kB
+15080 MiB, 2917 MHz, 97 %, 60
+top CPU:
+64.0 3055268 python3
+ 4.4 3054869 ft
+ 2.9 3055269 python3
+ 2.6  704990 codex
+ 1.9 1675160 claude
+ 1.5 1508204 claude
+top RSS (KiB):
+16673812 3055268 python3
+964164 3054869 ft
+864332 3055269 python3
+299640 1675160 claude
+285768 1508204 claude
+263392 1488603 claude
+--- 2026-09-28T13:16:20+04:00 tick
+ 13:16:20 up 2 days, 36 min,  1 user,  load average: 1.65, 2.94, 3.56
+MemAvailable:   14099992 kB
+Cached:          7111112 kB
+15080 MiB, 2902 MHz, 96 %, 64
+top CPU:
+90.9 3078612 python
+77.7 3055268 python3
+ 3.8 3054869 ft
+ 2.8 3055269 python3
+ 2.6  704990 codex
+ 1.9 1675160 claude
+top RSS (KiB):
+16673812 3055268 python3
+964548 3054869 ft
+864332 3055269 python3
+386288 1675160 claude
+286948 1508204 claude
+264924 1488603 claude
+--- 2026-09-28T13:17:21+04:00 tick
+ 13:17:21 up 2 days, 37 min,  1 user,  load average: 2.25, 2.98, 3.55
+MemAvailable:   31713148 kB
+Cached:          7198060 kB
+0 MiB, 277 MHz, 0 %, 45
+top CPU:
+ 2.6  704990 codex
+ 1.9 1675160 claude
+ 1.5 1508204 claude
+ 1.3 1378076 codex
+ 1.3 1488603 claude
+ 0.8  280711 claude
+top RSS (KiB):
+369436 1675160 claude
+285364 1508204 claude
+267136 1488603 claude
+238012 280711 claude
+228120 287390 claude
+221248  87554 claude
+--- 2026-09-28T13:17:36+04:00 ck9c-replay start
+ 13:17:36 up 2 days, 37 min,  1 user,  load average: 1.82, 2.85, 3.49
+MemAvailable:   31719516 kB
+Cached:          7284880 kB
+0 MiB, 277 MHz, 0 %, 42
+top CPU:
+ 2.6  704990 codex
+ 1.9 1675160 claude
+ 1.5 1508204 claude
+ 1.3 1378076 codex
+ 1.3 1488603 claude
+ 0.8  280711 claude
+top RSS (KiB):
+367384 1675160 claude
+284808 1508204 claude
+260256 1488603 claude
+237960 280711 claude
+228120 287390 claude
+221220  87554 claude
+--- 2026-09-28T13:18:21+04:00 tick
+ 13:18:21 up 2 days, 38 min,  1 user,  load average: 7.77, 4.14, 3.89
+MemAvailable:   22397616 kB
+Cached:         20378316 kB
+3028 MiB, 277 MHz, 1 %, 41
+top CPU:
+1144 3090828 python3
+ 8.2 3090555 ft
+ 7.0 3090829 python3
+ 2.6  704990 codex
+ 2.0 1675160 claude
+ 1.5 1508204 claude
+top RSS (KiB):
+8661660 3090828 python3
+858172 3090829 python3
+683436 3090555 ft
+368516 1675160 claude
+286180 1508204 claude
+262908 1488603 claude
+--- 2026-09-28T13:19:22+04:00 tick
+ 13:19:22 up 2 days, 39 min,  1 user,  load average: 5.49, 4.38, 4.00
+MemAvailable:    8600196 kB
+Cached:         27361968 kB
+15076 MiB, 2865 MHz, 100 %, 67
+top CPU:
+ 734 3090828 python3
+ 3.9 3090555 ft
+ 3.0 3090829 python3
+ 2.6  704990 codex
+ 2.0 1675160 claude
+ 1.5 1508204 claude
+top RSS (KiB):
+22279208 3090828 python3
+811668 3090555 ft
+790332 3090829 python3
+355384 1675160 claude
+279312 1508204 claude
+256908 1488603 claude
+--- 2026-09-28T13:20:22+04:00 tick
+ 13:20:22 up 2 days, 40 min,  1 user,  load average: 2.58, 3.76, 3.81
+MemAvailable:   31788304 kB
+Cached:          6421600 kB
+0 MiB, 277 MHz, 0 %, 42
+top CPU:
+ 2.6  704990 codex
+ 2.0 1675160 claude
+ 1.5 1508204 claude
+ 1.3 1378076 codex
+ 1.3 1488603 claude
+ 0.8  280711 claude
+top RSS (KiB):
+354444 1675160 claude
+280324 1508204 claude
+257252 1488603 claude
+229044 280711 claude
+224564 287390 claude
+215584  87554 claude
