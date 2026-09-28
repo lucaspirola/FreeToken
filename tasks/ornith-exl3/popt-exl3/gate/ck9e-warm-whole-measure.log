@@ -1,0 +1,41 @@
+[ck9e-warm-whole] starting: model=Ornith-1.5-35B-A3B-exl3-5.0bpw-hq rows=0 ratio=1.00 port=1920 code=/home/lucas/ai/FreeToken-wt/pgate-exl3@f99bad5 venv=/home/lucas/ai/FreeToken/.venv launcher=systemd
+Running as unit: ft-measure-ck9e-warm-whole.service; invocation ID: a8696d155de440e7a17652f031e5c749
+[ck9e-warm-whole] ready after 68s
+Sep 28 05:08:19 TESSERACT serve-default.sh[288814]: [2026-09-28|05:08:19|core|rank=0] INFO     Allocating 262144 tokens for KV cache, K + V = 2.66 GiB
+Sep 28 05:08:30 TESSERACT serve-default.sh[288814]: [2026-09-28|05:08:30|core|rank=0] INFO     Prefill headroom: transient 0.94 GiB measured on a 8192-token chunk (empty prefix 0.94 GiB, after a 8192-token prefix 0.94 GiB, allocator peak 0.85 GiB); headroom 0.94 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 512 -> 5016 of 5623 slots, 1.08 GiB free (target 1.07 GiB), 607 slots below the ratio plan
+Sep 28 05:08:30 TESSERACT serve-default.sh[288814]: [2026-09-28|05:08:30|core|rank=0] INFO     Startup geometry: memory ratio 1.00, runtime reserve 0.00 GiB; expert arena 5016 slots; KV 65536 tokens mapped of 262144 (0.74 GiB); 1.08 GiB free
+[ck9e-warm-whole] measuring
+{"target": 8000, "pass": 1, "prompt_tokens": 8009, "ttft_s": 0.41, "prefill_tok_s": 19483.0, "gen_tokens": 127, "decode_tok_s": 192.4, "decode_tok_s_wall": 192.4, "total_s": 1.1, "ttft_mono_s": 0.411, "prefill_tok_s_mono": 19483.0, "total_mono_s": 1.07, "t_start_wall": 1790557739.608, "out_sha1": "7c7bbef7104024cf84e16afc868a7dfeec84af54", "gap1_ms": 42.9, "max_gap_ms": 42.9, "median_gap_ms": 4.8, "decode_tok_s_after_gap1": 204.2}
+{"target": 8000, "pass": 2, "prompt_tokens": 8011, "ttft_s": 0.82, "prefill_tok_s": 9762.0, "gen_tokens": 127, "decode_tok_s": 182.4, "decode_tok_s_wall": 182.4, "total_s": 1.5, "ttft_mono_s": 0.821, "prefill_tok_s_mono": 9762.0, "total_mono_s": 1.51, "t_start_wall": 1790557740.674, "out_sha1": "04aaba34dd9eb36497fad2e1977370001365b701", "gap1_ms": 72.6, "max_gap_ms": 72.6, "median_gap_ms": 4.8, "decode_tok_s_after_gap1": 202.1}
+{
+  "arm": "ck9e-warm-whole",
+  "model": "Ornith-1.5-35B-A3B-exl3-5.0bpw-hq",
+  "rows": "0",
+  "commit": "f99bad5",
+  "venv": "/home/lucas/ai/FreeToken/.venv",
+  "ratio": "1.00",
+  "kv": "q8q8",
+  "ram_gib": 21.93,
+  "rss_ready_gib": 22.72,
+  "devzero_gib": 18.98,
+  "ram_after_80k_gib": 22.07,
+  "rss_gib": 22.85,
+  "locked_gib": 0.0,
+  "anon_gib": 2.87,
+  "file_gib": 23.35,
+  "unevict_gib": 0.0,
+  "shmem_gib": 18.98,
+  "current_gib": 26.36,
+  "peak_current_gib": 27.34,
+  "gpu_mib": "15078",
+  "decode_8k_p1": 192.4,
+  "ttft_8k_p1": 0.41,
+  "total_8k_p1": 1.1,
+  "ttft_mono_8k_p1": 0.41,
+  "decode_8k": 182.4,
+  "ttft_8k": 0.82,
+  "total_8k": 1.5,
+  "ttft_mono_8k": 0.82
+}
+74 arms -> /home/lucas/ai/FreeToken-wt/pgate-exl3/tasks/exclusive-expert-ram/results/sweep.tsv
+[ck9e-warm-whole] stopping
