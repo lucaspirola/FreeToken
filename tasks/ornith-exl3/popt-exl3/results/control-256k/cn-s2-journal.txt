@@ -1,0 +1,478 @@
+Started ft-measure-cn-s2.service - /home/lucas/ai/FreeToken-wt/popt-sched/scripts/serve-default.sh.
+[2026-09-28|09:00:24] WARNING  --moe-backend is deprecated; use --moe-strategy
+[2026-09-28|09:00:24] INFO     Parsed arguments:
+ServerArgs(model_path='/home/lucas/ai/models/Ornith-1.5-35B-A3B-exl3-5.0bpw-hq', tp_info=DistributedInfo(rank=0, size=1), dtype=torch.bfloat16, max_running_req=1, adaptive_scheduler=True, auto_session_grace_seconds=0.0, session_spill_dir='/home/lucas/ai/FreeToken-wt/popt-sched/tasks/ornith-exl3/popt-sched/results/control-256k/spill-cn-s2', session_spill_ram_gb=1.0, session_spill_disk_gb=50.0, session_spill_limit_gb=50.0, session_spill_persist=True, session_spill_state_stride=65536, session_spill_capture_states=None, attention_backend='triton', moe_strategy='offload', quant_backend=None, ple_backend='disk', nvfp4_backend='triton', expert_load='auto', host_ram_reserve_gb=0.0, moe_cache_size=0, moe_cache_rate=None, moe_cache_auto=True, kv_reserve_tokens=8192, moe_cache_policy='lfu', moe_prefill_overlap=True, expert_residency='mirror', moe_mirror_host_rows=-1, moe_prefill_hit_d2d=False, moe_prefill_hit_d2d_tokens=2048, moe_extend_cache_tokens=64, moe_collect_stats=False, moe_pageable_profile='off', moe_cpu_threads=0, moe_cpu_layers=None, moe_pageable_gpu=False, moe_hybrid_max_fetch=-1, cuda_graph_bs=None, cuda_graph_max_bs=None, page_size=1, memory_ratio=1.0, runtime_reserve_bytes=0, linear_state_cache_ratio=2.0, swa_full_tokens_ratio=0.2, swa_num_pages_override=None, distributed_timeout=60.0, use_dummy_weight=False, use_pynccl=True, max_seq_len_override=262144, rope_yarn_factor=None, rope_yarn_original_context=None, linear_state_slots_override=13, num_page_override=None, num_token_override=262144, kv_cache_dtype='q8_0', kv_cache_dtype_k=None, kv_cache_dtype_v=None, kv_grow_step_tokens=65536, expert_arena=True, context_preflight=True, json_retry=1, hidden_states_dir='/home/lucas/.cache/freetoken/hidden-states', hidden_states_max_tokens=4096, pooled_sink_dir='/home/lucas/.cache/freetoken/pooled-sink', mm=MultimodalConfig(disabled_encoders=frozenset({'vision', 'audio'}), embed_cache_device='cpu', encoder_weights='host', image_min_tokens=None, image_max_tokens=None, processor_kwargs={}), max_extend_tokens=8192, auto_prefill_chunk=False, max_prefill_seqs=None, cache_type='radix', pin_prefix_min_tokens=1024, pin_prefix_max_tokens=65536, pin_prefix_max_slots=-1, pin_prefix_scope='shared', speculative=None, spec_ngram_n=8, spec_draft_len=8, spec_adaptive=True, offline_mode=False, decode_log_interval=40, special_token_ckpt=False, _unique_suffix='.pid=1227278', server_host='127.0.0.1', server_port=1920, num_tokenizer=0, silent_output=False, shell_mode=False, served_model_name='ornith', served_model_aliases=(), strict_model_name=False, tool_call_parser='qwen3_coder', reasoning_parser='qwen3', sampling_defaults='model', max_output_tokens=65536, enable_cache_report=True, anthropic_strip_billing_header=True, anthropic_system_in_place=True, cuda_memory_telemetry=False, force_nonempty_content=True, allowed_media_domains='', allowed_local_media_path='', cors_origins='tauri://localhost,http://tauri.localhost,http://localhost:1420', trace_dir='/home/lucas/.cache/freetoken/trace', trace_include_text=False, gpu=(), gpu_assigned=None)
+[2026-09-28|09:00:24|FrontendAPI] INFO     Default sampling config (source=model): temperature=1.0, top_k=20, top_p=0.95
+INFO:     Started server process [1227278]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:1920 (Press CTRL+C to quit)
+INFO:     127.0.0.1:52808 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+/home/lucas/ai/FreeToken-wt/popt-sched/python/freetoken/engine/engine.py:2451: FutureWarning: torch.cuda._set_allocator_settings is deprecated. Use torch._C._accelerator_setAllocatorSettings instead.
+  torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+[2026-09-28|09:00:26|core|rank=0] INFO     Enabled expandable_segments (override via PYTORCH_ALLOC_CONF)
+[2026-09-28|09:00:26|core|rank=0] INFO     Resolved config: moe_strategy='offload', attention_backend='triton', cache_type='hybrid_radix', page_size=1
+[2026-09-28|09:00:26|core|rank=0] INFO     Free memory before loading model: 14.59 GiB
+Loading weights:   0%|          | 0/3 [00:00<?, ?it/s]Loading weights:  33%|███▎      | 1/3 [00:02<00:04,  2.42s/it]Loading weights:  67%|██████▋   | 2/3 [00:02<00:01,  1.27s/it]
+INFO:     127.0.0.1:52820 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+Loading weights: 100%|██████████| 3/3 [00:03<00:00,  1.02s/it]Loading weights: 100%|██████████| 3/3 [00:03<00:00,  1.20s/it]
+[2026-09-28|09:00:31|core|rank=0] INFO     Startup memory prediction: prefill transient 0.88 GiB on a 8192-token chunk (peak layer gdn; full_attention 0.30 GiB, gdn 0.88 GiB, moe 0.52 GiB); graph pool 0.03 GiB (max bs 1); linear-state pool 0.78 GiB; KV floor 0.66 GiB (65536 tokens); non-expert weights 2.50 GiB; runtime reserve 0.00 GiB (growable KV: none, the arena is filled back around the measured transient)
+[2026-09-28|09:00:31|core|rank=0] INFO     Memory prediction check: non-expert weights predicted 2.50 GiB, measured 2.69 GiB (-7%)
+[2026-09-28|09:00:31|core|rank=0] INFO     MoE experts: exl3 via triton
+[2026-09-28|09:00:31|core|rank=0] INFO     Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode graphs enabled, prefill overlap on (layers assembled from resident slots + pool rows, no disk)
+[2026-09-28|09:00:31|core|rank=0] INFO     Mirror pool: reserve resolved to 768 rows (default: 3 * num_experts)
+[2026-09-28|09:00:33|core|rank=0] INFO     --moe-cache-auto resolved moe_cache_size=5623 num_pages=73364 (prefill_overlap=True)
+[2026-09-28|09:00:34|core|rank=0] INFO     mirror DMA writebacks: 73-row VRAM staging ring (137.9 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[2026-09-28|09:00:34|core|rank=0] INFO     mirror expert pool attached: 7290 host rows, 13.45 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO:     127.0.0.1:51394 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:51404 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-28|09:00:44|core|rank=0] INFO     mirror warm start: 5623 experts on GPU (slots 0..5623), 4617 mirrored, 1905 duplicated, 768 rows in reserve (33.9% of evictions skip the writeback)
+[2026-09-28|09:00:44|core|rank=0] INFO     Mirror pool: 7290 rows pinned (13.45 GiB), 4617 cover the complement of 5623 GPU residents, 768 reserved, up to 1905 duplicates (a duplicate makes its expert's next eviction free of any host traffic)
+[2026-09-28|09:00:44|core|rank=0] INFO     Mirror pool: the coverage floor is 3720 of 5623 arena slots, leaving 1903 slots (3.51 GiB) the growable KV may still take
+[2026-09-28|09:00:44|core|rank=0] INFO     Arena compaction 5623 -> 3720: 1903 doomed, 0 moved (0.0 MiB D2D, 1.70 ms), 1903 dropped with a host copy, 0 left for write-back
+[2026-09-28|09:00:45|core|rank=0] INFO     Expert arena parked 5623 -> 3720 slots (3.51 GiB) until the prefill transient is measured
+[2026-09-28|09:00:45|core|rank=0] INFO     Multimodal disabled: --text-model-only
+[2026-09-28|09:00:45|core|rank=0] INFO     Allocating 262144 tokens for KV cache, K + V = 2.66 GiB
+[2026-09-28|09:00:45|core|rank=0] INFO     Triton decode launch: kv_splits=64 block_n=64 warps=4 (q_heads=16 kv_heads=2 head_dim=256 quant=q8_0 sms=84)
+[2026-09-28|09:00:45|core|rank=0] INFO     Triton extend launch: block_m=32 block_n=32 warps=4 stages=1 (head_dim=256 sm=12.0)
+[2026-09-28|09:00:45|core|rank=0] INFO     mirror DMA writebacks: one chunk per decode attention layer, issued behind that layer's attention start event
+[2026-09-28|09:00:45|core|rank=0] INFO     Free memory after initialization: 3.39 GiB
+[2026-09-28|09:00:45|core|rank=0] INFO     Start capturing CUDA graphs with sizes: [1]
+[2026-09-28|09:00:45|core|rank=0] INFO     Free GPU memory before capturing CUDA graphs: 3.39 GiB
+INFO:     127.0.0.1:52028 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:52044 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-28|09:00:52|core|rank=0] INFO     mirror warm start: 3720 experts on GPU (slots 0..3720), 6520 mirrored, 2 duplicated, 768 rows in reserve (0.1% of evictions skip the writeback)
+Preparing for capturing CUDA graphs...:   0%|          | 0/1 [00:00<?, ?batch/s]Capturing graphs: bs = 1   | avail_mem = 3.39 GiB:   0%|          | 0/1 [00:00<?, ?batch/s]
+INFO:     127.0.0.1:52848 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-28|09:01:03|core|rank=0] INFO     mirror warm start: 3720 experts on GPU (slots 0..3720), 6520 mirrored, 2 duplicated, 768 rows in reserve (0.1% of evictions skip the writeback)
+Capturing graphs: bs = 1   | avail_mem = 3.39 GiB: 100%|██████████| 1/1 [00:11<00:00, 11.42s/batch]Capturing graphs: bs = 1   | avail_mem = 3.39 GiB: 100%|██████████| 1/1 [00:11<00:00, 11.42s/batch]
+INFO:     127.0.0.1:52852 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:53062 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-28|09:01:10|core|rank=0] INFO     mirror warm start: 3720 experts on GPU (slots 0..3720), 6520 mirrored, 2 duplicated, 768 rows in reserve (0.1% of evictions skip the writeback)
+[2026-09-28|09:01:10|core|rank=0] INFO     Free GPU memory after capturing CUDA graphs: 3.35 GiB
+[2026-09-28|09:01:10|core|rank=0] INFO     Memory prediction check: CUDA graph pool (max bs 1) predicted 0.03 GiB, measured 0.04 GiB (-24%)
+[2026-09-28|09:01:11|core|rank=0] INFO     extend attention: flashinfer 0.6.17 prefill, prefix dequantized in 16384-token blocks (FREETOKEN_EXTEND_BACKEND=triton for the triton kernel)
+INFO:     127.0.0.1:53068 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-28|09:01:18|core|rank=0] INFO     mirror warm start: 3720 experts on GPU (slots 0..3720), 6520 mirrored, 2 duplicated, 768 rows in reserve (0.1% of evictions skip the writeback)
+[2026-09-28|09:01:18|core|rank=0] INFO     Prefill warmup complete for lengths [80, 128] in 9.156 s
+INFO:     127.0.0.1:52360 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:52370 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-28|09:01:29|core|rank=0] INFO     mirror warm start: 3720 experts on GPU (slots 0..3720), 6520 mirrored, 2 duplicated, 768 rows in reserve (0.1% of evictions skip the writeback)
+[2026-09-28|09:01:29|core|rank=0] INFO     Growable-KV ceiling validated: 262144 tokens, 2.73 GiB physical, planned final MoE cache 3856 slots (coverage floor 3718; pool priced for a 1196 MiB transient, measured 1126 MiB)
+[2026-09-28|09:01:29|core|rank=0] INFO     Prefill headroom: transient 1.10 GiB measured on a 8192-token chunk (empty prefix 1.10 GiB, after a 8192-token prefix 1.10 GiB, allocator peak 0.97 GiB); a 1024-token chunk 0.30 GiB; headroom 1.10 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 3720 -> 4864 of 5623 slots, 1.24 GiB free (target 1.22 GiB), 759 slots below the ratio plan
+[2026-09-28|09:01:29|core|rank=0] INFO     Memory prediction check: prefill transient (8192-token chunk, peak layer gdn) predicted 0.88 GiB, measured 1.10 GiB (-20%)
+[2026-09-28|09:01:29|core|rank=0] INFO     Memory prediction check: linear-state pool predicted 0.78 GiB, measured 0.78 GiB (+0%)
+[2026-09-28|09:01:29|core|rank=0] INFO     Startup geometry: memory ratio 1.00, runtime reserve 0.00 GiB; expert arena 4864 slots; KV 65536 tokens mapped of 262144 (0.74 GiB); 1.24 GiB free
+[2026-09-28|09:01:29|core|rank=0] INFO     Cold session tier enabled: RAM 1.00 GiB, disk 50.00 GiB, retained 50.00 GiB total (persistent), host reserve 0.00 GiB
+INFO:     127.0.0.1:51594 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-28|09:01:30|core|rank=0] INFO     Scheduler loop: overlap (kv_grow_step_tokens=65536, growable_overlap=True)
+[2026-09-28|09:01:30|FrontendAPI] INFO     API server is ready to serve on 127.0.0.1:1920
+[2026-09-28|09:01:30|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+[2026-09-28|09:01:39|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 11, #cached-token: 0, token usage: 0.00, #mamba-slot: 0/12, mamba usage: 0.00, #running-req: 0, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 1.88 instant, 1.88 average
+INFO:     127.0.0.1:51604 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-28|09:01:39|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+INFO:     127.0.0.1:52720 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-28|09:01:40|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8009, #cached-token: 0, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 6308.77 instant, 6308.77 average
+[2026-09-28|09:01:40|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 4864 -> 5448 (1.08 GiB committed, 1.21 GiB free before, target 0.12 GiB, 45.1 ms)
+[2026-09-28|09:01:41|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8050, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 5.38, #queue-req: 0
+[2026-09-28|09:01:41|core|rank=0] INFO     mirror idle seed: 1218 rows (1 free, 1217 from hotter duplicates) in 108.5 ms
+[2026-09-28|09:01:41|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+INFO:     127.0.0.1:50216 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-28|09:02:01|core|rank=0] INFO     Arena compaction 5448 -> 5288: 160 doomed, 160 moved (302.3 MiB D2D, 35.17 ms), 0 dropped with a host copy, 0 left for write-back
+[2026-09-28|09:02:01|core|rank=0] INFO     Prefill headroom reserved: MoE slots 5448 -> 5288 (0.29 GiB released, 0.42 GiB free, target 0.42 GiB for <= 1024 tokens, 49.8 ms)
+[2026-09-28|09:02:01|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 9, #cached-token: 8000, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 0.43 instant, 0.43 average
+[2026-09-28|09:02:01|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 5288 -> 5448 (0.29 GiB committed, 0.42 GiB free before, target 0.12 GiB, 11.4 ms)
+[2026-09-28|09:02:01|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8027, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 1.93, #queue-req: 0
+[2026-09-28|09:02:02|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8067, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 193.44, #queue-req: 0
+INFO:     127.0.0.1:50240 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-28|09:02:02|core|rank=0] INFO     mirror idle seed: 672 rows (8 free, 664 from hotter duplicates) in 70.2 ms, stopped for a waiting request
+[2026-09-28|09:02:02|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+[2026-09-28|09:02:02|core|rank=0] INFO     Arena compaction 5448 -> 5288: 0 doomed, 0 moved (0.0 MiB D2D, 1.26 ms), 0 dropped with a host copy, 0 left for write-back
+[2026-09-28|09:02:02|core|rank=0] INFO     Prefill headroom reserved: MoE slots 5448 -> 5288 (0.29 GiB released, 0.42 GiB free, target 0.42 GiB for <= 1024 tokens, 10.8 ms)
+[2026-09-28|09:02:02|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 9, #cached-token: 8000, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 13.32 instant, 13.32 average
+[2026-09-28|09:02:02|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 5288 -> 5448 (0.29 GiB committed, 0.42 GiB free before, target 0.12 GiB, 11.8 ms)
+[2026-09-28|09:02:02|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8044, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 75.83, #queue-req: 0
+[2026-09-28|09:02:02|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8084, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 201.58, #queue-req: 0
+[2026-09-28|09:02:03|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8124, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 195.00, #queue-req: 0
+[2026-09-28|09:02:03|core|rank=0] INFO     mirror idle seed: 615 rows (1 free, 614 from hotter duplicates) in 59.9 ms
+[2026-09-28|09:02:03|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+INFO:     127.0.0.1:50250 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-28|09:02:04|core|rank=0] INFO     Arena compaction 5448 -> 4848: 440 doomed, 386 moved (729.4 MiB D2D, 4.73 ms), 54 dropped with a host copy, 0 left for write-back
+[2026-09-28|09:02:04|core|rank=0] INFO     Prefill headroom reserved: MoE slots 5448 -> 4848 (1.11 GiB released, 1.24 GiB free, target 1.22 GiB for a full chunk, 41.2 ms)
+[2026-09-28|09:02:05|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.25, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2371.02 instant, 2371.02 average
+[2026-09-28|09:02:06|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.38, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 7893.55 instant, 3646.67 average
+[2026-09-28|09:02:11|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.50, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 7271.01 instant, 4373.32 average
+[2026-09-28|09:02:12|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.62, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 6702.41 instant, 4789.40 average
+[2026-09-28|09:02:14|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.75, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 6250.38 instant, 5024.28 average
+[2026-09-28|09:02:15|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.88, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 5865.81 instant, 5147.35 average
+[2026-09-28|09:02:16|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 5494.33 instant, 5194.21 average
+[2026-09-28|09:02:17|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 79563.31 instant, 5881.39 average
+[2026-09-28|09:02:17|core|rank=0] INFO     Arena compaction 4848 -> 4488: 360 doomed, 354 moved (668.9 MiB D2D, 4.24 ms), 6 dropped with a host copy, 0 left for write-back
+[2026-09-28|09:02:17|core|rank=0] INFO     Growable-KV arena shrink: 4848 -> 4488 slots, 0.66 GiB uncommitted (driver-reported free 1.90 GiB)
+[2026-09-28|09:02:17|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.90 GiB free (driver 1.90 GiB), 0.66 GiB commit, 1.76 GiB required (allocator 3.50 GiB allocated / 3.58 GiB reserved)
+[2026-09-28|09:02:17|core|rank=0] INFO     Committed growable KV through 131072 tokens (1.41 GiB physical); MoE slots 4848 -> 4488
+[2026-09-28|09:02:17|core|rank=0] INFO     KV grew 65536 -> 131072 tokens; MoE cache now 4488 slots
+[2026-09-28|09:02:20|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.62, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2557.86 instant, 5139.41 average
+[2026-09-28|09:02:21|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.69, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 4650.37 instant, 5085.93 average
+[2026-09-28|09:02:23|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.75, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 4412.99 instant, 5016.39 average
+[2026-09-28|09:02:25|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.81, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 4215.03 instant, 4938.15 average
+[2026-09-28|09:02:27|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.88, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 4023.93 instant, 4853.33 average
+[2026-09-28|09:02:29|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.94, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 3861.95 instant, 4765.94 average
+[2026-09-28|09:02:32|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 3695.83 instant, 4675.69 average
+[2026-09-28|09:02:32|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 46578.28 instant, 4954.25 average
+[2026-09-28|09:02:32|core|rank=0] INFO     Arena compaction 4488 -> 4128: 360 doomed, 246 moved (464.9 MiB D2D, 3.40 ms), 12 dropped with a host copy, 102 left for write-back
+[2026-09-28|09:02:32|core|rank=0] INFO     mirror restored coverage for 102 experts (written back from the GPU)
+[2026-09-28|09:02:32|core|rank=0] INFO     Growable-KV arena shrink: 4488 -> 4128 slots, 0.66 GiB uncommitted (driver-reported free 1.90 GiB)
+[2026-09-28|09:02:32|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.90 GiB free (driver 1.90 GiB), 0.66 GiB commit, 1.76 GiB required (allocator 3.50 GiB allocated / 3.58 GiB reserved)
+[2026-09-28|09:02:32|core|rank=0] INFO     Committed growable KV through 196608 tokens (2.07 GiB physical); MoE slots 4488 -> 4128
+[2026-09-28|09:02:32|core|rank=0] INFO     KV grew 131072 -> 196608 tokens; MoE cache now 4128 slots
+[2026-09-28|09:02:36|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.75, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 1778.89 instant, 4483.48 average
+[2026-09-28|09:02:39|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.79, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 3289.83 instant, 4394.89 average
+[2026-09-28|09:02:42|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.83, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 3170.36 instant, 4307.32 average
+[2026-09-28|09:02:48|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.88, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 3014.75 instant, 4216.92 average
+[2026-09-28|09:02:51|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.92, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2880.26 instant, 4125.75 average
+[2026-09-28|09:02:54|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.96, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2789.27 instant, 4037.81 average
+[2026-09-28|09:02:57|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2703.56 instant, 3952.99 average
+[2026-09-28|09:02:57|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 32047.43 instant, 4102.85 average
+[2026-09-28|09:02:57|core|rank=0] INFO     Arena compaction 4128 -> 3768: 360 doomed, 0 moved (0.0 MiB D2D, 1.60 ms), 0 dropped with a host copy, 360 left for write-back
+[2026-09-28|09:02:57|core|rank=0] INFO     mirror restored coverage for 360 experts (written back from the GPU)
+[2026-09-28|09:02:57|core|rank=0] INFO     Growable-KV arena shrink: 4128 -> 3768 slots, 0.67 GiB uncommitted (driver-reported free 1.90 GiB)
+[2026-09-28|09:02:57|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.90 GiB free (driver 1.90 GiB), 0.66 GiB commit, 1.76 GiB required (allocator 3.50 GiB allocated / 3.58 GiB reserved)
+[2026-09-28|09:02:57|core|rank=0] INFO     Committed growable KV through 262144 tokens (2.73 GiB physical); MoE slots 4128 -> 3768
+[2026-09-28|09:02:57|core|rank=0] INFO     KV grew 196608 -> 262144 tokens; MoE cache now 3768 slots
+[2026-09-28|09:03:03|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.81, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 1328.90 instant, 3786.68 average
+[2026-09-28|09:03:06|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.84, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2474.24 instant, 3710.97 average
+[2026-09-28|09:03:10|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.88, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2402.89 instant, 3637.63 average
+[2026-09-28|09:03:13|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.91, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2399.35 instant, 3571.79 average
+[2026-09-28|09:03:17|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.94, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2346.19 instant, 3508.59 average
+[2026-09-28|09:03:23|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.97, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2287.11 instant, 3447.23 average
+[2026-09-28|09:03:24|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.98, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 5895.40 instant, 3494.03 average
+[2026-09-28|09:03:25|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 2068, #cached-token: 0, token usage: 0.98, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 22297.02 instant, 3517.99 average
+[2026-09-28|09:03:25|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 3768 -> 4368 (1.11 GiB committed, 1.24 GiB free before, target 0.12 GiB, 43.1 ms)
+[2026-09-28|09:03:25|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 256048, token usage: 0.98, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 0.55, #queue-req: 0
+[2026-09-28|09:03:25|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 256088, token usage: 0.98, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 123.29, #queue-req: 0
+[2026-09-28|09:03:25|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 256128, token usage: 0.98, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 126.95, #queue-req: 0
+INFO:     127.0.0.1:52256 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-28|09:03:26|core|rank=0] INFO     Released growable KV 262144 -> 65536 tokens (1.99 GiB returned); MoE slots 4368 -> 4864
+[2026-09-28|09:03:27|core|rank=0] INFO     KV shrank 262144 -> 65536 tokens after agent teardown; MoE cache restored to 4864 slots
+[2026-09-28|09:03:27|core|rank=0] INFO     mirror idle seed: 0 rows (0 free, 0 from hotter duplicates) in 0.0 ms, stopped for a waiting request
+[2026-09-28|09:03:27|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+[2026-09-28|09:03:27|core|rank=0] INFO     Arena compaction 4864 -> 4848: 0 doomed, 0 moved (0.0 MiB D2D, 1.38 ms), 0 dropped with a host copy, 0 left for write-back
+[2026-09-28|09:03:27|core|rank=0] INFO     Prefill headroom reserved: MoE slots 4864 -> 4848 (0.03 GiB released, 1.24 GiB free, target 1.22 GiB for a full chunk, 4.4 ms)
+[2026-09-28|09:03:27|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8011, #cached-token: 0, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 2840.51 instant, 2840.51 average
+[2026-09-28|09:03:27|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 4848 -> 5448 (1.11 GiB committed, 1.24 GiB free before, target 0.12 GiB, 30.9 ms)
+[2026-09-28|09:03:28|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8032, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 19.61, #queue-req: 0
+[2026-09-28|09:03:28|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8072, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 196.53, #queue-req: 0
+[2026-09-28|09:03:28|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8112, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 196.54, #queue-req: 0
+[2026-09-28|09:03:28|core|rank=0] INFO     mirror idle seed: 810 rows (1 free, 809 from hotter duplicates) in 70.9 ms
+[2026-09-28|09:03:28|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+INFO:     127.0.0.1:52292 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-28|09:03:29|core|rank=0] INFO     Arena compaction 5448 -> 4848: 510 doomed, 510 moved (963.7 MiB D2D, 5.58 ms), 0 dropped with a host copy, 0 left for write-back
+[2026-09-28|09:03:29|core|rank=0] INFO     Prefill headroom reserved: MoE slots 5448 -> 4848 (1.11 GiB released, 1.24 GiB free, target 1.22 GiB for a full chunk, 41.0 ms)
+[2026-09-28|09:03:31|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.25, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2521.29 instant, 2521.29 average
+[2026-09-28|09:03:32|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.38, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 7865.86 instant, 3818.59 average
+[2026-09-28|09:03:33|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.50, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 7235.44 instant, 4531.98 average
+[2026-09-28|09:03:34|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.62, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 6716.17 instant, 4933.06 average
+[2026-09-28|09:03:35|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.75, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 6238.72 instant, 5148.56 average
+[2026-09-28|09:03:37|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.88, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 5845.00 instant, 5252.87 average
+[2026-09-28|09:03:38|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 5482.05 instant, 5284.43 average
+[2026-09-28|09:03:38|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 79356.04 instant, 5982.44 average
+[2026-09-28|09:03:38|core|rank=0] INFO     Arena compaction 4848 -> 4488: 360 doomed, 240 moved (453.5 MiB D2D, 3.47 ms), 120 dropped with a host copy, 0 left for write-back
+[2026-09-28|09:03:38|core|rank=0] INFO     Growable-KV arena shrink: 4848 -> 4488 slots, 0.66 GiB uncommitted (driver-reported free 1.90 GiB)
+[2026-09-28|09:03:38|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.90 GiB free (driver 1.90 GiB), 0.66 GiB commit, 1.76 GiB required (allocator 3.50 GiB allocated / 3.58 GiB reserved)
+[2026-09-28|09:03:38|core|rank=0] INFO     Committed growable KV through 131072 tokens (1.41 GiB physical); MoE slots 4848 -> 4488
+[2026-09-28|09:03:38|core|rank=0] INFO     KV grew 65536 -> 131072 tokens; MoE cache now 4488 slots
+[2026-09-28|09:03:42|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.62, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2554.72 instant, 5206.29 average
+[2026-09-28|09:03:43|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.69, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 4637.34 instant, 5143.19 average
+[2026-09-28|09:03:45|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.75, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 4405.67 instant, 5066.09 average
+[2026-09-28|09:03:47|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.81, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 4207.78 instant, 4981.41 average
+[2026-09-28|09:03:49|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.88, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 4015.29 instant, 4890.89 average
+[2026-09-28|09:03:51|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.94, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 3849.46 instant, 4798.17 average
+[2026-09-28|09:03:57|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 3654.72 instant, 4700.13 average
+[2026-09-28|09:03:57|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 44600.43 instant, 4978.50 average
+[2026-09-28|09:03:57|core|rank=0] INFO     Arena compaction 4488 -> 4128: 360 doomed, 221 moved (417.6 MiB D2D, 3.58 ms), 37 dropped with a host copy, 102 left for write-back
+[2026-09-28|09:03:57|core|rank=0] INFO     mirror restored coverage for 102 experts (written back from the GPU)
+[2026-09-28|09:03:57|core|rank=0] INFO     Growable-KV arena shrink: 4488 -> 4128 slots, 0.66 GiB uncommitted (driver-reported free 1.90 GiB)
+[2026-09-28|09:03:57|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.90 GiB free (driver 1.90 GiB), 0.66 GiB commit, 1.76 GiB required (allocator 3.50 GiB allocated / 3.58 GiB reserved)
+[2026-09-28|09:03:57|core|rank=0] INFO     Committed growable KV through 196608 tokens (2.07 GiB physical); MoE slots 4488 -> 4128
+[2026-09-28|09:03:57|core|rank=0] INFO     KV grew 131072 -> 196608 tokens; MoE cache now 4128 slots
+[2026-09-28|09:04:02|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.75, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 1706.63 instant, 4473.96 average
+[2026-09-28|09:04:05|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.79, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 3148.24 instant, 4371.68 average
+[2026-09-28|09:04:07|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.83, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 3035.90 instant, 4272.74 average
+[2026-09-28|09:04:10|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.88, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2934.21 instant, 4177.45 average
+[2026-09-28|09:04:13|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.92, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2868.93 instant, 4088.65 average
+[2026-09-28|09:04:16|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.96, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2800.02 instant, 4004.87 average
+[2026-09-28|09:04:19|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2711.18 instant, 3923.47 average
+[2026-09-28|09:04:19|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 32185.44 instant, 4072.48 average
+[2026-09-28|09:04:19|core|rank=0] INFO     Arena compaction 4128 -> 3768: 360 doomed, 0 moved (0.0 MiB D2D, 1.64 ms), 0 dropped with a host copy, 360 left for write-back
+[2026-09-28|09:04:19|core|rank=0] INFO     mirror restored coverage for 360 experts (written back from the GPU)
+[2026-09-28|09:04:19|core|rank=0] INFO     Growable-KV arena shrink: 4128 -> 3768 slots, 0.67 GiB uncommitted (driver-reported free 1.90 GiB)
+[2026-09-28|09:04:19|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.90 GiB free (driver 1.90 GiB), 0.66 GiB commit, 1.76 GiB required (allocator 3.50 GiB allocated / 3.58 GiB reserved)
+[2026-09-28|09:04:19|core|rank=0] INFO     Committed growable KV through 262144 tokens (2.73 GiB physical); MoE slots 4128 -> 3768
+[2026-09-28|09:04:19|core|rank=0] INFO     KV grew 196608 -> 262144 tokens; MoE cache now 3768 slots
+[2026-09-28|09:04:25|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.81, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 1357.89 instant, 3770.93 average
+[2026-09-28|09:04:28|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.84, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2544.64 instant, 3702.31 average
+[2026-09-28|09:04:34|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.88, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2474.13 instant, 3635.47 average
+[2026-09-28|09:04:38|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.91, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2407.89 instant, 3570.46 average
+[2026-09-28|09:04:41|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.94, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2342.80 instant, 3507.09 average
+[2026-09-28|09:04:45|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.97, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2286.34 instant, 3445.76 average
+[2026-09-28|09:04:46|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.98, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 5946.29 instant, 3493.15 average
+[2026-09-28|09:04:46|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 2070, #cached-token: 0, token usage: 0.98, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 22405.33 instant, 3517.15 average
+[2026-09-28|09:04:46|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 3768 -> 4360 (1.10 GiB committed, 1.23 GiB free before, target 0.12 GiB, 39.7 ms)
+[2026-09-28|09:04:47|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 256036, token usage: 0.98, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 0.55, #queue-req: 0
+[2026-09-28|09:04:47|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 256076, token usage: 0.98, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 123.07, #queue-req: 0
+[2026-09-28|09:04:47|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 256116, token usage: 0.98, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 123.26, #queue-req: 0
+[2026-09-28|09:04:48|core|rank=0] INFO     Released growable KV 262144 -> 65536 tokens (1.99 GiB returned); MoE slots 4360 -> 4864
+[2026-09-28|09:04:48|core|rank=0] INFO     KV shrank 262144 -> 65536 tokens after agent teardown; MoE cache restored to 4864 slots
+[2026-09-28|09:04:48|core|rank=0] INFO     mirror idle seed: 130 rows (1 free, 129 from hotter duplicates) in 14.6 ms
+[2026-09-28|09:04:48|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+Stopping ft-measure-cn-s2.service - /home/lucas/ai/FreeToken-wt/popt-sched/scripts/serve-default.sh...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [1227278]
+/usr/lib/python3.12/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 4 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+ft-measure-cn-s2.service: Main process exited, code=exited, status=143/n/a
+ft-measure-cn-s2.service: Failed with result 'exit-code'.
+Stopped ft-measure-cn-s2.service - /home/lucas/ai/FreeToken-wt/popt-sched/scripts/serve-default.sh.
+ft-measure-cn-s2.service: Consumed 3min 45.753s CPU time, 19.7G memory peak, 0B memory swap peak.
+Started ft-measure-cn-s2.service - /home/lucas/ai/FreeToken-wt/pcomb-exl3/scripts/serve-default.sh.
+[2026-09-28|14:15:39] WARNING  --moe-backend is deprecated; use --moe-strategy
+[2026-09-28|14:15:39] INFO     Parsed arguments:
+ServerArgs(model_path='/home/lucas/ai/models/Ornith-1.5-35B-A3B-exl3-5.0bpw-hq', tp_info=DistributedInfo(rank=0, size=1), dtype=torch.bfloat16, max_running_req=1, adaptive_scheduler=True, auto_session_grace_seconds=0.0, session_spill_dir='/home/lucas/ai/FreeToken-wt/popt-exl3/tasks/ornith-exl3/popt-exl3/results/control-256k/spill-cn-s2', session_spill_ram_gb=1.0, session_spill_disk_gb=50.0, session_spill_limit_gb=50.0, session_spill_persist=True, session_spill_state_stride=65536, session_spill_capture_states=None, attention_backend='triton', moe_strategy='offload', quant_backend=None, ple_backend='disk', nvfp4_backend='triton', expert_load='auto', host_ram_reserve_gb=0.0, moe_cache_size=0, moe_cache_rate=None, moe_cache_auto=True, kv_reserve_tokens=8192, moe_cache_policy='lfu', moe_prefill_overlap=True, expert_residency='mirror', moe_mirror_host_rows=-1, moe_prefill_hit_d2d=False, moe_prefill_hit_d2d_tokens=2048, moe_extend_cache_tokens=64, moe_collect_stats=False, moe_pageable_profile='off', moe_cpu_threads=0, moe_cpu_layers=None, moe_pageable_gpu=False, moe_hybrid_max_fetch=-1, cuda_graph_bs=None, cuda_graph_max_bs=None, page_size=1, memory_ratio=1.0, runtime_reserve_bytes=0, linear_state_cache_ratio=2.0, swa_full_tokens_ratio=0.2, swa_num_pages_override=None, distributed_timeout=60.0, use_dummy_weight=False, use_pynccl=True, max_seq_len_override=262144, rope_yarn_factor=None, rope_yarn_original_context=None, linear_state_slots_override=13, num_page_override=None, num_token_override=262144, kv_cache_dtype='q8_0', kv_cache_dtype_k=None, kv_cache_dtype_v=None, kv_grow_step_tokens=65536, expert_arena=True, context_preflight=True, json_retry=1, hidden_states_dir='/home/lucas/.cache/freetoken/hidden-states', hidden_states_max_tokens=4096, pooled_sink_dir='/home/lucas/.cache/freetoken/pooled-sink', mm=MultimodalConfig(disabled_encoders=frozenset({'vision', 'audio'}), embed_cache_device='cpu', encoder_weights='host', image_min_tokens=None, image_max_tokens=None, processor_kwargs={}), max_extend_tokens=8192, auto_prefill_chunk=False, max_prefill_seqs=None, cache_type='radix', pin_prefix_min_tokens=1024, pin_prefix_max_tokens=65536, pin_prefix_max_slots=-1, pin_prefix_scope='shared', speculative=None, spec_ngram_n=8, spec_draft_len=8, spec_adaptive=True, offline_mode=False, decode_log_interval=40, special_token_ckpt=False, _unique_suffix='.pid=3601574', server_host='127.0.0.1', server_port=1920, num_tokenizer=0, silent_output=False, shell_mode=False, served_model_name='ornith', served_model_aliases=(), strict_model_name=False, tool_call_parser='qwen3_coder', reasoning_parser='qwen3', sampling_defaults='model', max_output_tokens=65536, enable_cache_report=True, anthropic_strip_billing_header=True, anthropic_system_in_place=True, cuda_memory_telemetry=False, force_nonempty_content=True, allowed_media_domains='', allowed_local_media_path='', cors_origins='tauri://localhost,http://tauri.localhost,http://localhost:1420', trace_dir='/home/lucas/.cache/freetoken/trace', trace_include_text=False, gpu=(), gpu_assigned=None)
+[2026-09-28|14:15:39|FrontendAPI] INFO     Default sampling config (source=model): temperature=1.0, top_k=20, top_p=0.95
+INFO:     Started server process [3601574]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:1920 (Press CTRL+C to quit)
+INFO:     127.0.0.1:54032 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+/home/lucas/ai/FreeToken-wt/pcomb-exl3/python/freetoken/engine/engine.py:2451: FutureWarning: torch.cuda._set_allocator_settings is deprecated. Use torch._C._accelerator_setAllocatorSettings instead.
+  torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+[2026-09-28|14:15:41|core|rank=0] INFO     Enabled expandable_segments (override via PYTORCH_ALLOC_CONF)
+[2026-09-28|14:15:41|core|rank=0] INFO     Resolved config: moe_strategy='offload', attention_backend='triton', cache_type='hybrid_radix', page_size=1
+[2026-09-28|14:15:41|core|rank=0] INFO     Free memory before loading model: 14.59 GiB
+Loading weights:   0%|          | 0/3 [00:00<?, ?it/s]Loading weights:  33%|███▎      | 1/3 [00:01<00:03,  1.67s/it]Loading weights:  67%|██████▋   | 2/3 [00:02<00:00,  1.01it/s]Loading weights: 100%|██████████| 3/3 [00:03<00:00,  1.09it/s]Loading weights: 100%|██████████| 3/3 [00:03<00:00,  1.00s/it]
+INFO:     127.0.0.1:54036 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-28|14:15:46|core|rank=0] INFO     Startup memory prediction: prefill transient 0.88 GiB on a 8192-token chunk (peak layer gdn; full_attention 0.30 GiB, gdn 0.88 GiB, moe 0.52 GiB); graph pool 0.03 GiB (max bs 1); linear-state pool 0.78 GiB; KV floor 0.66 GiB (65536 tokens); non-expert weights 2.50 GiB; runtime reserve 0.00 GiB (growable KV: none, the arena is filled back around the measured transient)
+[2026-09-28|14:15:46|core|rank=0] INFO     Memory prediction check: non-expert weights predicted 2.50 GiB, measured 2.69 GiB (-7%)
+[2026-09-28|14:15:46|core|rank=0] INFO     MoE experts: exl3 via triton
+[2026-09-28|14:15:46|core|rank=0] INFO     Mirror expert RAM: bounded host pool, GPU<->RAM swap, decode graphs enabled, prefill overlap on (layers assembled from resident slots + pool rows, no disk)
+[2026-09-28|14:15:46|core|rank=0] INFO     Mirror pool: reserve resolved to 768 rows (default: 3 * num_experts)
+ninja: no work to do.
+[2026-09-28|14:15:48|core|rank=0] INFO     --moe-cache-auto resolved moe_cache_size=5623 num_pages=73364 (prefill_overlap=True)
+[2026-09-28|14:15:49|core|rank=0] INFO     mirror DMA writebacks: 73-row VRAM staging ring (137.9 MiB); FREETOKEN_MIRROR_WB_STAGE_MB=0 restores SM-store writebacks
+[2026-09-28|14:15:49|core|rank=0] INFO     mirror expert pool attached: 7290 host rows, 13.45 GiB pinned (whole-model host residency skipped; graphs/overlap unchanged)
+INFO:     127.0.0.1:52250 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:52264 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-28|14:15:59|core|rank=0] INFO     mirror warm start: 5623 experts on GPU (slots 0..5623), 4617 mirrored, 1905 duplicated, 768 rows in reserve (33.9% of evictions skip the writeback)
+[2026-09-28|14:15:59|core|rank=0] INFO     Mirror pool: 7290 rows pinned (13.45 GiB), 4617 cover the complement of 5623 GPU residents, 768 reserved, up to 1905 duplicates (a duplicate makes its expert's next eviction free of any host traffic)
+[2026-09-28|14:15:59|core|rank=0] INFO     Mirror pool: the coverage floor is 3720 of 5623 arena slots, leaving 1903 slots (3.51 GiB) the growable KV may still take
+[2026-09-28|14:15:59|core|rank=0] INFO     Arena compaction 5623 -> 3720: 1903 doomed, 0 moved (0.0 MiB D2D, 1.76 ms), 1903 dropped with a host copy, 0 left for write-back
+[2026-09-28|14:15:59|core|rank=0] INFO     Expert arena parked 5623 -> 3720 slots (3.51 GiB) until the prefill transient is measured
+[2026-09-28|14:15:59|core|rank=0] INFO     Multimodal disabled: --text-model-only
+[2026-09-28|14:15:59|core|rank=0] INFO     Allocating 262144 tokens for KV cache, K + V = 2.66 GiB
+[2026-09-28|14:15:59|core|rank=0] INFO     Triton decode launch: kv_splits=64 block_n=64 warps=4 (q_heads=16 kv_heads=2 head_dim=256 quant=q8_0 sms=84)
+[2026-09-28|14:15:59|core|rank=0] INFO     Triton extend launch: block_m=32 block_n=32 warps=4 stages=1 (head_dim=256 sm=12.0)
+[2026-09-28|14:15:59|core|rank=0] INFO     mirror DMA writebacks: one chunk per decode attention layer, issued behind that layer's attention start event
+[2026-09-28|14:15:59|core|rank=0] INFO     Free memory after initialization: 3.39 GiB
+[2026-09-28|14:15:59|core|rank=0] INFO     Start capturing CUDA graphs with sizes: [1]
+[2026-09-28|14:15:59|core|rank=0] INFO     Free GPU memory before capturing CUDA graphs: 3.39 GiB
+INFO:     127.0.0.1:50548 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:50564 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-28|14:16:07|core|rank=0] INFO     mirror warm start: 3720 experts on GPU (slots 0..3720), 6520 mirrored, 2 duplicated, 768 rows in reserve (0.1% of evictions skip the writeback)
+Preparing for capturing CUDA graphs...:   0%|          | 0/1 [00:00<?, ?batch/s]Capturing graphs: bs = 1   | avail_mem = 3.39 GiB:   0%|          | 0/1 [00:00<?, ?batch/s]
+INFO:     127.0.0.1:52330 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-28|14:16:16|core|rank=0] INFO     mirror warm start: 3720 experts on GPU (slots 0..3720), 6520 mirrored, 2 duplicated, 768 rows in reserve (0.1% of evictions skip the writeback)
+Capturing graphs: bs = 1   | avail_mem = 3.39 GiB: 100%|██████████| 1/1 [00:09<00:00,  9.06s/batch]Capturing graphs: bs = 1   | avail_mem = 3.39 GiB: 100%|██████████| 1/1 [00:09<00:00,  9.06s/batch]
+INFO:     127.0.0.1:52340 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:50784 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-28|14:16:24|core|rank=0] INFO     mirror warm start: 3720 experts on GPU (slots 0..3720), 6520 mirrored, 2 duplicated, 768 rows in reserve (0.1% of evictions skip the writeback)
+[2026-09-28|14:16:24|core|rank=0] INFO     Free GPU memory after capturing CUDA graphs: 3.35 GiB
+[2026-09-28|14:16:24|core|rank=0] INFO     Memory prediction check: CUDA graph pool (max bs 1) predicted 0.03 GiB, measured 0.04 GiB (-24%)
+[2026-09-28|14:16:24|core|rank=0] INFO     extend attention: flashinfer 0.6.17 prefill, prefix dequantized in 16384-token blocks (FREETOKEN_EXTEND_BACKEND=triton for the triton kernel)
+INFO:     127.0.0.1:50798 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:50430 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-28|14:16:33|core|rank=0] INFO     mirror warm start: 3720 experts on GPU (slots 0..3720), 6520 mirrored, 2 duplicated, 768 rows in reserve (0.1% of evictions skip the writeback)
+[2026-09-28|14:16:33|core|rank=0] INFO     Prefill warmup complete for lengths [80, 128] in 8.748 s
+INFO:     127.0.0.1:50432 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:52046 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-28|14:16:44|core|rank=0] INFO     mirror warm start: 3720 experts on GPU (slots 0..3720), 6520 mirrored, 2 duplicated, 768 rows in reserve (0.1% of evictions skip the writeback)
+[2026-09-28|14:16:44|core|rank=0] INFO     Growable-KV ceiling validated: 262144 tokens, 2.73 GiB physical, planned final MoE cache 3936 slots (coverage floor 3718; pool priced for a 1196 MiB transient, measured 966 MiB)
+[2026-09-28|14:16:44|core|rank=0] INFO     Prefill headroom: transient 0.94 GiB measured on a 8192-token chunk (empty prefix 0.94 GiB, after a 8192-token prefix 0.94 GiB, allocator peak 0.85 GiB); a 1024-token chunk 0.16 GiB; headroom 0.94 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 3720 -> 4952 of 5623 slots, 1.07 GiB free (target 1.07 GiB), 671 slots below the ratio plan
+[2026-09-28|14:16:44|core|rank=0] INFO     Memory prediction check: prefill transient (8192-token chunk, peak layer gdn) predicted 0.88 GiB, measured 0.94 GiB (-7%)
+[2026-09-28|14:16:44|core|rank=0] INFO     Memory prediction check: linear-state pool predicted 0.78 GiB, measured 0.78 GiB (+0%)
+[2026-09-28|14:16:44|core|rank=0] INFO     Startup geometry: memory ratio 1.00, runtime reserve 0.00 GiB; expert arena 4952 slots; KV 65536 tokens mapped of 262144 (0.74 GiB); 1.07 GiB free
+[2026-09-28|14:16:44|core|rank=0] INFO     Cold session tier enabled: RAM 1.00 GiB, disk 50.00 GiB, retained 50.00 GiB total (persistent), host reserve 0.00 GiB
+[2026-09-28|14:16:44|core|rank=0] INFO     Scheduler loop: overlap (kv_grow_step_tokens=65536, growable_overlap=True)
+[2026-09-28|14:16:44|FrontendAPI] INFO     API server is ready to serve on 127.0.0.1:1920
+[2026-09-28|14:16:44|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+[2026-09-28|14:16:48|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 11, #cached-token: 0, token usage: 0.00, #mamba-slot: 0/12, mamba usage: 0.00, #running-req: 0, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 2.86 instant, 2.86 average
+INFO:     127.0.0.1:52062 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-28|14:16:48|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+INFO:     127.0.0.1:51962 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-28|14:16:50|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8009, #cached-token: 0, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 6295.19 instant, 6295.19 average
+[2026-09-28|14:16:50|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 4952 -> 5448 (0.92 GiB committed, 1.05 GiB free before, target 0.12 GiB, 38.7 ms)
+[2026-09-28|14:16:50|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8050, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 7.33, #queue-req: 0
+[2026-09-28|14:16:50|core|rank=0] INFO     mirror idle seed: 1218 rows (1 free, 1217 from hotter duplicates) in 125.4 ms
+[2026-09-28|14:16:50|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+INFO:     127.0.0.1:53618 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-28|14:17:11|core|rank=0] INFO     Arena compaction 5448 -> 5312: 136 doomed, 136 moved (257.0 MiB D2D, 30.22 ms), 0 dropped with a host copy, 0 left for write-back
+[2026-09-28|14:17:11|core|rank=0] INFO     Prefill headroom reserved: MoE slots 5448 -> 5312 (0.25 GiB released, 0.38 GiB free, target 0.38 GiB for <= 1024 tokens, 45.9 ms)
+[2026-09-28|14:17:11|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 9, #cached-token: 8000, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 0.43 instant, 0.43 average
+[2026-09-28|14:17:11|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 5312 -> 5448 (0.25 GiB committed, 0.38 GiB free before, target 0.12 GiB, 11.4 ms)
+[2026-09-28|14:17:11|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8027, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 1.93, #queue-req: 0
+[2026-09-28|14:17:11|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8067, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 178.66, #queue-req: 0
+INFO:     127.0.0.1:53660 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-28|14:17:12|core|rank=0] INFO     mirror idle seed: 576 rows (8 free, 568 from hotter duplicates) in 78.6 ms, stopped for a waiting request
+[2026-09-28|14:17:12|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+[2026-09-28|14:17:12|core|rank=0] INFO     Arena compaction 5448 -> 5312: 0 doomed, 0 moved (0.0 MiB D2D, 1.40 ms), 0 dropped with a host copy, 0 left for write-back
+[2026-09-28|14:17:12|core|rank=0] INFO     Prefill headroom reserved: MoE slots 5448 -> 5312 (0.25 GiB released, 0.38 GiB free, target 0.38 GiB for <= 1024 tokens, 15.8 ms)
+[2026-09-28|14:17:12|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 9, #cached-token: 8000, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 12.02 instant, 12.02 average
+[2026-09-28|14:17:12|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 5312 -> 5448 (0.25 GiB committed, 0.38 GiB free before, target 0.12 GiB, 11.8 ms)
+[2026-09-28|14:17:12|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8044, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 68.04, #queue-req: 0
+[2026-09-28|14:17:12|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8084, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 186.34, #queue-req: 0
+[2026-09-28|14:17:12|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8124, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 180.49, #queue-req: 0
+[2026-09-28|14:17:13|core|rank=0] INFO     mirror idle seed: 695 rows (1 free, 694 from hotter duplicates) in 78.9 ms
+[2026-09-28|14:17:13|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+INFO:     127.0.0.1:53694 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-28|14:17:14|core|rank=0] INFO     Arena compaction 5448 -> 4936: 376 doomed, 371 moved (701.1 MiB D2D, 4.82 ms), 5 dropped with a host copy, 0 left for write-back
+[2026-09-28|14:17:14|core|rank=0] INFO     Prefill headroom reserved: MoE slots 5448 -> 4936 (0.95 GiB released, 1.08 GiB free, target 1.07 GiB for a full chunk, 45.8 ms)
+[2026-09-28|14:17:15|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.25, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2363.10 instant, 2363.10 average
+[2026-09-28|14:17:16|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.38, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 8033.55 instant, 3651.96 average
+[2026-09-28|14:17:17|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.50, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 7295.27 instant, 4381.31 average
+[2026-09-28|14:17:19|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.62, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 6747.00 instant, 4802.26 average
+[2026-09-28|14:17:20|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.75, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 6219.07 instant, 5031.52 average
+[2026-09-28|14:17:21|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.88, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 5804.72 instant, 5145.75 average
+[2026-09-28|14:17:23|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 5416.64 instant, 5182.78 average
+[2026-09-28|14:17:23|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 78504.48 instant, 5867.84 average
+[2026-09-28|14:17:23|core|rank=0] INFO     Arena compaction 4936 -> 4576: 360 doomed, 332 moved (627.4 MiB D2D, 4.42 ms), 28 dropped with a host copy, 0 left for write-back
+[2026-09-28|14:17:23|core|rank=0] INFO     Growable-KV arena shrink: 4936 -> 4576 slots, 0.67 GiB uncommitted (driver-reported free 1.74 GiB)
+[2026-09-28|14:17:23|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.74 GiB free (driver 1.74 GiB), 0.66 GiB commit, 1.61 GiB required (allocator 3.50 GiB allocated / 3.58 GiB reserved)
+[2026-09-28|14:17:23|core|rank=0] INFO     Committed growable KV through 131072 tokens (1.41 GiB physical); MoE slots 4936 -> 4576
+[2026-09-28|14:17:23|core|rank=0] INFO     KV grew 65536 -> 131072 tokens; MoE cache now 4576 slots
+[2026-09-28|14:17:26|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.62, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2489.10 instant, 5098.82 average
+[2026-09-28|14:17:28|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.69, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 4534.40 instant, 5036.13 average
+[2026-09-28|14:17:30|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.75, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 4286.92 instant, 4957.37 average
+[2026-09-28|14:17:32|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.81, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 4079.42 instant, 4870.03 average
+[2026-09-28|14:17:35|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.88, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 3881.85 instant, 4776.50 average
+[2026-09-28|14:17:37|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.94, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 3711.49 instant, 4680.56 average
+[2026-09-28|14:17:39|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 3552.17 instant, 4583.49 average
+[2026-09-28|14:17:39|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 44565.51 instant, 4855.77 average
+[2026-09-28|14:17:39|core|rank=0] INFO     Arena compaction 4576 -> 4216: 360 doomed, 327 moved (617.9 MiB D2D, 4.35 ms), 19 dropped with a host copy, 14 left for write-back
+[2026-09-28|14:17:39|core|rank=0] INFO     mirror restored coverage for 14 experts (written back from the GPU)
+[2026-09-28|14:17:40|core|rank=0] INFO     Growable-KV arena shrink: 4576 -> 4216 slots, 0.66 GiB uncommitted (driver-reported free 1.74 GiB)
+[2026-09-28|14:17:40|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.74 GiB free (driver 1.74 GiB), 0.66 GiB commit, 1.61 GiB required (allocator 3.50 GiB allocated / 3.58 GiB reserved)
+[2026-09-28|14:17:40|core|rank=0] INFO     Committed growable KV through 196608 tokens (2.07 GiB physical); MoE slots 4576 -> 4216
+[2026-09-28|14:17:40|core|rank=0] INFO     KV grew 131072 -> 196608 tokens; MoE cache now 4216 slots
+[2026-09-28|14:17:44|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.75, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 1702.81 instant, 4378.83 average
+[2026-09-28|14:17:47|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.79, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 3144.91 instant, 4285.42 average
+[2026-09-28|14:17:50|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.83, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 3027.58 instant, 4193.72 average
+[2026-09-28|14:17:52|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.88, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2922.42 instant, 4104.44 average
+[2026-09-28|14:17:55|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.92, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2824.94 instant, 4017.79 average
+[2026-09-28|14:17:58|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.96, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2733.45 instant, 3933.77 average
+[2026-09-28|14:18:01|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2643.46 instant, 3852.02 average
+[2026-09-28|14:18:02|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 31218.95 instant, 3998.05 average
+[2026-09-28|14:18:02|core|rank=0] INFO     Arena compaction 4216 -> 3856: 360 doomed, 0 moved (0.0 MiB D2D, 1.63 ms), 0 dropped with a host copy, 360 left for write-back
+[2026-09-28|14:18:02|core|rank=0] INFO     mirror restored coverage for 360 experts (written back from the GPU)
+[2026-09-28|14:18:02|core|rank=0] INFO     Growable-KV arena shrink: 4216 -> 3856 slots, 0.67 GiB uncommitted (driver-reported free 1.74 GiB)
+[2026-09-28|14:18:02|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.74 GiB free (driver 1.74 GiB), 0.66 GiB commit, 1.61 GiB required (allocator 3.50 GiB allocated / 3.58 GiB reserved)
+[2026-09-28|14:18:02|core|rank=0] INFO     Committed growable KV through 262144 tokens (2.73 GiB physical); MoE slots 4216 -> 3856
+[2026-09-28|14:18:02|core|rank=0] INFO     KV grew 196608 -> 262144 tokens; MoE cache now 3856 slots
+[2026-09-28|14:18:09|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.81, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 1292.81 instant, 3689.26 average
+[2026-09-28|14:18:12|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.84, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2411.46 instant, 3615.57 average
+[2026-09-28|14:18:16|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.88, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2340.98 instant, 3544.10 average
+[2026-09-28|14:18:19|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.91, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2280.02 instant, 3475.29 average
+[2026-09-28|14:18:23|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.94, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2218.59 instant, 3408.71 average
+[2026-09-28|14:18:27|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.97, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2162.61 instant, 3344.47 average
+[2026-09-28|14:18:28|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.98, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 5554.92 instant, 3387.96 average
+[2026-09-28|14:18:28|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 2068, #cached-token: 0, token usage: 0.98, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 21697.02 instant, 3411.21 average
+[2026-09-28|14:18:28|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 3856 -> 4368 (0.95 GiB committed, 1.07 GiB free before, target 0.12 GiB, 63.9 ms)
+[2026-09-28|14:18:28|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 256048, token usage: 0.98, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 0.54, #queue-req: 0
+[2026-09-28|14:18:29|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 256088, token usage: 0.98, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 111.72, #queue-req: 0
+[2026-09-28|14:18:29|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 256128, token usage: 0.98, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 116.72, #queue-req: 0
+INFO:     127.0.0.1:51560 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-28|14:18:29|core|rank=0] INFO     Released growable KV 262144 -> 65536 tokens (1.99 GiB returned); MoE slots 4368 -> 4952
+[2026-09-28|14:18:29|core|rank=0] INFO     KV shrank 262144 -> 65536 tokens after agent teardown; MoE cache restored to 4952 slots
+[2026-09-28|14:18:29|core|rank=0] INFO     mirror idle seed: 0 rows (0 free, 0 from hotter duplicates) in 0.0 ms, stopped for a waiting request
+[2026-09-28|14:18:29|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+[2026-09-28|14:18:29|core|rank=0] INFO     Arena compaction 4952 -> 4936: 0 doomed, 0 moved (0.0 MiB D2D, 1.28 ms), 0 dropped with a host copy, 0 left for write-back
+[2026-09-28|14:18:29|core|rank=0] INFO     Prefill headroom reserved: MoE slots 4952 -> 4936 (0.03 GiB released, 1.08 GiB free, target 1.07 GiB for a full chunk, 5.0 ms)
+[2026-09-28|14:18:30|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8011, #cached-token: 0, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 3715.04 instant, 3715.04 average
+[2026-09-28|14:18:30|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 4936 -> 5448 (0.95 GiB committed, 1.08 GiB free before, target 0.12 GiB, 47.1 ms)
+[2026-09-28|14:18:30|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8032, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 30.79, #queue-req: 0
+[2026-09-28|14:18:31|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8072, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 180.64, #queue-req: 0
+[2026-09-28|14:18:31|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8112, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 179.95, #queue-req: 0
+[2026-09-28|14:18:31|core|rank=0] INFO     mirror idle seed: 820 rows (2 free, 818 from hotter duplicates) in 92.4 ms
+[2026-09-28|14:18:31|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+INFO:     127.0.0.1:50112 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-28|14:18:32|core|rank=0] INFO     Arena compaction 5448 -> 4936: 422 doomed, 422 moved (797.4 MiB D2D, 5.17 ms), 0 dropped with a host copy, 0 left for write-back
+[2026-09-28|14:18:32|core|rank=0] INFO     Prefill headroom reserved: MoE slots 5448 -> 4936 (0.95 GiB released, 1.08 GiB free, target 1.07 GiB for a full chunk, 36.2 ms)
+[2026-09-28|14:18:34|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.25, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2450.36 instant, 2450.36 average
+[2026-09-28|14:18:35|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.38, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 7985.78 instant, 3750.05 average
+[2026-09-28|14:18:36|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.50, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 7260.15 instant, 4470.51 average
+[2026-09-28|14:18:37|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.62, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 6705.37 instant, 4876.87 average
+[2026-09-28|14:18:38|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.75, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 6194.32 instant, 5093.53 average
+[2026-09-28|14:18:40|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.88, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 5767.93 instant, 5194.76 average
+[2026-09-28|14:18:42|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 5381.25 instant, 5220.61 average
+[2026-09-28|14:18:42|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 77689.73 instant, 5909.68 average
+[2026-09-28|14:18:42|core|rank=0] INFO     Arena compaction 4936 -> 4576: 360 doomed, 275 moved (519.7 MiB D2D, 3.97 ms), 85 dropped with a host copy, 0 left for write-back
+[2026-09-28|14:18:42|core|rank=0] INFO     Growable-KV arena shrink: 4936 -> 4576 slots, 0.67 GiB uncommitted (driver-reported free 1.74 GiB)
+[2026-09-28|14:18:42|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.74 GiB free (driver 1.74 GiB), 0.66 GiB commit, 1.61 GiB required (allocator 3.50 GiB allocated / 3.58 GiB reserved)
+[2026-09-28|14:18:42|core|rank=0] INFO     Committed growable KV through 131072 tokens (1.41 GiB physical); MoE slots 4936 -> 4576
+[2026-09-28|14:18:42|core|rank=0] INFO     KV grew 65536 -> 131072 tokens; MoE cache now 4576 slots
+[2026-09-28|14:18:45|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.62, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2480.80 instant, 5122.93 average
+[2026-09-28|14:18:47|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.69, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 4491.11 instant, 5051.86 average
+[2026-09-28|14:18:49|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.75, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 4251.39 instant, 4966.84 average
+[2026-09-28|14:18:51|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.81, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 4068.88 instant, 4877.15 average
+[2026-09-28|14:18:53|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.88, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 3886.70 instant, 4783.38 average
+[2026-09-28|14:18:55|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.94, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 3709.76 instant, 4686.51 average
+[2026-09-28|14:18:58|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 3549.35 instant, 4588.50 average
+[2026-09-28|14:18:58|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 44540.95 instant, 4861.02 average
+[2026-09-28|14:18:58|core|rank=0] INFO     Arena compaction 4576 -> 4216: 360 doomed, 294 moved (555.6 MiB D2D, 4.27 ms), 52 dropped with a host copy, 14 left for write-back
+[2026-09-28|14:18:58|core|rank=0] INFO     mirror restored coverage for 14 experts (written back from the GPU)
+[2026-09-28|14:18:58|core|rank=0] INFO     Growable-KV arena shrink: 4576 -> 4216 slots, 0.66 GiB uncommitted (driver-reported free 1.74 GiB)
+[2026-09-28|14:18:58|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.74 GiB free (driver 1.74 GiB), 0.66 GiB commit, 1.61 GiB required (allocator 3.50 GiB allocated / 3.58 GiB reserved)
+[2026-09-28|14:18:58|core|rank=0] INFO     Committed growable KV through 196608 tokens (2.07 GiB physical); MoE slots 4576 -> 4216
+[2026-09-28|14:18:58|core|rank=0] INFO     KV grew 131072 -> 196608 tokens; MoE cache now 4216 slots
+[2026-09-28|14:19:03|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.75, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 1706.69 instant, 4384.36 average
+[2026-09-28|14:19:05|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.79, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 3142.01 instant, 4290.12 average
+[2026-09-28|14:19:08|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.83, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 3016.68 instant, 4196.87 average
+[2026-09-28|14:19:11|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.88, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2912.70 instant, 4106.35 average
+[2026-09-28|14:19:14|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.92, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2807.43 instant, 4017.83 average
+[2026-09-28|14:19:17|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.96, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2693.38 instant, 3929.99 average
+[2026-09-28|14:19:21|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2611.72 instant, 3845.59 average
+[2026-09-28|14:19:21|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 1.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 30986.31 instant, 3991.26 average
+[2026-09-28|14:19:21|core|rank=0] INFO     Arena compaction 4216 -> 3856: 360 doomed, 0 moved (0.0 MiB D2D, 1.75 ms), 0 dropped with a host copy, 360 left for write-back
+[2026-09-28|14:19:21|core|rank=0] INFO     mirror restored coverage for 360 experts (written back from the GPU)
+[2026-09-28|14:19:21|core|rank=0] INFO     Growable-KV arena shrink: 4216 -> 3856 slots, 0.67 GiB uncommitted (driver-reported free 1.74 GiB)
+[2026-09-28|14:19:21|core|rank=0] INFO     Growable-KV pre-commit (arena): 1.74 GiB free (driver 1.74 GiB), 0.66 GiB commit, 1.61 GiB required (allocator 3.50 GiB allocated / 3.58 GiB reserved)
+[2026-09-28|14:19:21|core|rank=0] INFO     Committed growable KV through 262144 tokens (2.73 GiB physical); MoE slots 4216 -> 3856
+[2026-09-28|14:19:21|core|rank=0] INFO     KV grew 196608 -> 262144 tokens; MoE cache now 3856 slots
+[2026-09-28|14:19:27|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.81, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 1308.10 instant, 3688.61 average
+[2026-09-28|14:19:31|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.84, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2403.71 instant, 3614.30 average
+[2026-09-28|14:19:34|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.88, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2335.53 instant, 3542.47 average
+[2026-09-28|14:19:38|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.91, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2274.49 instant, 3473.31 average
+[2026-09-28|14:19:41|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.94, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2210.67 instant, 3406.23 average
+[2026-09-28|14:19:45|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.97, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 2150.55 instant, 3341.20 average
+[2026-09-28|14:19:47|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.98, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 5555.68 instant, 3384.72 average
+[2026-09-28|14:19:47|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 2070, #cached-token: 0, token usage: 0.98, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 21488.31 instant, 3407.93 average
+[2026-09-28|14:19:48|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 3856 -> 4360 (0.93 GiB committed, 1.07 GiB free before, target 0.12 GiB, 51.9 ms)
+[2026-09-28|14:19:48|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 256036, token usage: 0.98, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 0.54, #queue-req: 0
+[2026-09-28|14:19:48|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 256076, token usage: 0.98, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 110.89, #queue-req: 0
+[2026-09-28|14:19:48|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 256116, token usage: 0.98, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 112.59, #queue-req: 0
+[2026-09-28|14:19:49|core|rank=0] INFO     Released growable KV 262144 -> 65536 tokens (1.99 GiB returned); MoE slots 4360 -> 4952
+[2026-09-28|14:19:49|core|rank=0] INFO     KV shrank 262144 -> 65536 tokens after agent teardown; MoE cache restored to 4952 slots
+[2026-09-28|14:19:49|core|rank=0] INFO     mirror idle seed: 130 rows (1 free, 129 from hotter duplicates) in 20.6 ms
+[2026-09-28|14:19:49|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+Stopping ft-measure-cn-s2.service - /home/lucas/ai/FreeToken-wt/pcomb-exl3/scripts/serve-default.sh...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [3601574]
+/usr/lib/python3.12/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 4 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+ft-measure-cn-s2.service: Main process exited, code=exited, status=143/n/a
+ft-measure-cn-s2.service: Failed with result 'exit-code'.
+Stopped ft-measure-cn-s2.service - /home/lucas/ai/FreeToken-wt/pcomb-exl3/scripts/serve-default.sh.
+ft-measure-cn-s2.service: Consumed 3min 35.733s CPU time, 20.3G memory peak, 0B memory swap peak.

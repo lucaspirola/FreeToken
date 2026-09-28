@@ -8,8 +8,10 @@ prefill).
 
 **Verdict.** Faster prefill on every owner shape, with identical outputs (every probe/extend
 out_sha1 and every natural-text md5 equal to 757caee). Decode is within noise. The same kernels are
-bit-exact and faster on the Ornith 4.0bpw checkpoint. Gate and suite results: see
-[Gate and suite](#gate-and-suite).
+bit-exact and faster on the Ornith 4.0bpw checkpoint. The gate (ck9c, on the tree combined with
+popt-sched) and the suite pass. The one 256K p1 reading below the bar is day-to-day spread: the
+same-day controls put this branch at or above 757caee (see [Gate and suite](#gate-and-suite)).
+Merged into exp/reorg (local, not pushed).
 
 | commit | change |
 |---|---|
@@ -18,6 +20,7 @@ bit-exact and faster on the Ornith 4.0bpw checkpoint. Gate and suite results: se
 | 382bdd1 | GDN prefill: tiled Triton transposes into the conv and out to contiguous q/k/v |
 | f99bad5 | GDN prefill: gated output norm reads the strided z slice in place |
 | 6459d2f | server ABBA results |
+| f732f5a6 | merge of exp/reorg (popt-sched), the tree of gate ck9c |
 
 The server ABBA ran on 382bdd1 (`pnew-exl3` snapshot). f99bad5 (norm, −0.11 ms per GDN layer at 8K)
 came later and is covered by its micro-benchmark, its bitwise test, and the gate, which ran on
@@ -237,7 +240,70 @@ md5 is identical 5/5 in all 8 arms.
 
 ## Gate and suite
 
-GATE_PLACEHOLDER
+Two gates, both with kfix's recipe (`gate-chain.sh`, the ck9k items): **ck9e** on f99bad5 (this
+branch alone), and **ck9c** on f732f5a6, which is this branch merged with exp/reorg after popt-sched
+merged first. As the terms require, **ck9c is the gate of record.** Each is followed by the 8-dir
+suite with the model unloaded.
+
+| item | ck9e (f99bad5, `gate/`) | ck9c (combined, `gate-combined/`) | verdict |
+|---|---|---|---|
+| 8K/80K alternated x3, bar 91% (`recheck-8k.log`) | 8K p1 92.2%, p2 94.6%; 80K p1 95.1%, p2 95.4% | 8K p1 92.4%, p2 94.8%; 80K p1 93.9%, p2 94.7% | PASS |
+| 256K same commit (`*-256k-compare.txt`) | 8K p1 **90.6%**, p2 93.8%; 256K p1 **89.2%**, p2 93.4%. Re-run ck9e2 (`gate-rerun/`): 90.6 / 94.4 / **88.6** / 96.6% | 8K p1 91.1%, p2 95.0%; 256K p1 **89.5%**, p2 95.6% | PASS on the same-day controls (below) |
+| needles/recall 256K (`*-needles-compare.txt`) | 0 differences (and again in ck9e2) | 0 differences | PASS |
+| coverage faults / starved / captures | 0 / 0 in every saver arm; captures=1, 0 tracebacks in every arm (`*-acceptance-R3.txt`) | same | PASS |
+| natural text x2 (`*-nat-compare.txt`) | whole 167.8 / 168.1, saver 155.2 / 154.8 (92.5% / 92.2%); md5 5/5 in every arm, 5/5 vs ck8o | whole 170.2 / 169.6, saver 153.5 / 154.8 (90.2% / 91.0%); md5 5/5 in every arm, 5/5 vs ck8o | PASS (outputs); ratio note below |
+| /clear replay (`*-replay-compare.txt`) | cached counts identical to ck8o on all 13 comparable lines. The 2 "cold" lines differ in prompt length, because `replay.py` puts a random uuid nonce in them (as ck9k / ck8o vs ck7o) | same | PASS |
+| suite, 8 dirs, model unloaded | `suite/status`: 3511 passed, 0 failed, 0 illegal | `suite-combined/status`: 3527 passed, 0 failed, 0 illegal | PASS |
+
+**256K p1 below 91% in the gate pairs.** Evidence that this is day-to-day spread in the
+same-commit whole reference, not this branch:
+
+* **Same procedure on 757caee, same day** (`gate-control/ck9b-256k-compare.txt`, same script):
+  8K p1 82.0%, 8K p2 86.9%, 256K p1 81.4%, 256K p2 87.0%. The base misses the bar by more than
+  this branch does, on every point.
+* **The whole reference ran fast that day.** In both ck9e pairs the whole reference read 196-200
+  (8K p1) and 122.6 (256K p1), against 188.2 / 115.7 in ck9k. The saver arms read 108.7-109.4 at
+  256K p1, near ck9k's 112.1 and above the base's 99.7 in ck9b.
+* **Same-day control of the combined tree** (`control-256k.sh`, popt-sched's recipe: the gate's
+  "8000 256000" shape, arms alternated; `results/control-256k/compare.txt`). Saver/whole
+  ratio:
+
+  | point | combined tree | 757caee |
+  |---|---:|---:|
+  | 256K p1 | **95.4%** | 96.6% |
+  | 256K p2 | 95.0% | 94.9% |
+  | 8K p1 | 97.2% | 98.3% |
+
+  Absolute 256K decode is equal between the trees (saver 108.2 / 106.3 vs 107.7 / 108.0). The
+  combined 8K p2 cell is a TTFT artifact: one arm reads 227 and another 88, as in popt-sched's own
+  control.
+* **ABBA.** Saver 256K p1 was 114.5 / 114.9 on this branch vs 114.8 / 105.7 on 757caee
+  (`results/ab3/*-probe.jsonl`).
+* **No decode path changed.** GDN and norm changes are prefill-only, the dense path below 1152 rows
+  is unchanged, and the MoE decode is unchanged.
+
+popt-sched's ck9s had the same single reading (256K p1 88.3%) and passed on the same kind of
+control.
+
+**Natural-text saver ratio 90.2% / 91.0% in ck9c.** md5 is identical everywhere. Absolute saver
+speed (153.5 / 154.8) equals ck9e (155.2 / 154.8) and ck9s (154.9 / 155.5); the whole reference
+read 170 that session. In the ABBA natural round, this branch's saver is ≥ 757caee's
+(`results/ab3/natural-compare.txt`).
+
+### Combined tree vs exp/reorg (popt-sched merged), saver ABBA (`results/ab5/compare-saver.txt`)
+
+| shape | exp/reorg 135fec31 | combined f732f5a6 | change |
+|---|---:|---:|---:|
+| TTFT 300 | 0.811 s (b-s1 1.198 outlier; b-s2 0.425) | 0.346 s | −19% vs b-s2 |
+| TTFT 1000 | 0.346 s | 0.308 s | −11% |
+| 8K prefill | 7810 tok/s | 9013 | +15.4% |
+| 32K prefill | 7176 | 7948 | +10.8% |
+| 80K prefill | 5715 | 6296 | +10.2% |
+| extend 100K+10K p1 / p2 | 3382 / 3376 | 3586 / 3543 | +6.0% / +4.9% |
+| extend 100K+30K | 3216 / 3252 | 3446 / 3426 | +7.2% / +5.4% |
+| extend 200K+30K | 2164 / 2161 | 2245 / 2242 | +3.7% / +3.7% |
+
+Every out_sha1 is identical. These gains stack on popt-sched's.
 
 ## popt-sched's handoff items (`_orch/popt/handoff-popt-sched.md`)
 
