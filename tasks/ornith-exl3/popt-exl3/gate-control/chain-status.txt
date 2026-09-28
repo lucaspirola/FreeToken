@@ -1,0 +1,8 @@
+chain start 757caee Merge exp/exl3-kfix: EXL3 expert kernels, bit-exact  2026-09-28T10:21:13+04:00
+ck9b-whole-256k start 10:25:02 1.27 2.61 2.88 gpu=0 MiB avail=29.3 code=757caeeb
+ck9b-whole-256k done: captures=1 kv_grows=21 tracebacks=0 2026-09-28T10:55:06+04:00
+QUIET at poll 2 2026-09-28T11:01:51+04:00
+ck9b-mirror-256k start 11:01:51 1.22 2.58 3.22 gpu=0 MiB avail=28.9 code=757caeeb
+ck9b-mirror-256k done: captures=1 kv_grows=21 tracebacks=0 2026-09-28T11:34:02+04:00
+256k compared: 0 difference(s); 4 point(s) outside the band 2026-09-28T11:34:32+04:00
+RERUNDONE 2026-09-28T11:34:32+04:00
