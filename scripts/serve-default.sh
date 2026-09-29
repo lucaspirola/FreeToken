@@ -24,10 +24,21 @@
 #   exceeded the KV pool, it blocked that session's admission indefinitely
 #   (tasks/exclusive-expert-ram/results/s13b-session-stuck.txt). A request without a session
 #   key gets no cache across requests: send session-id / x-session-id (or prompt_cache_key).
-# Context: 262144 tokens, the model's native maximum. 384K runs with
-#   FREETOKEN_EXTRA_ARGS="--rope-yarn-factor 2 --num-tokens 393216 --max-seq-len-override 393216"
-#   (measured: 384K prefill 2466-2521 tok/s, decode 90-92 tok/s on the RTX 5080), but static YaRN
-#   rescales RoPE at every position, so it is not the default.
+# Context: 262144 tokens, the model's native maximum, is the default. FREETOKEN_LONG_CONTEXT=1
+#   switches to 393216 (1.5x, YaRN factor 2 over the native 262144). Not the default because static
+#   YaRN rescales RoPE at EVERY position, so short-prompt outputs differ byte-for-byte from the
+#   262144 profile even when the session never approaches 393216 (measured: all 5 natural-text md5
+#   change; the text itself stays coherent and correct). It also costs RAM/VRAM unconditionally:
+#     - saver pins ~1.39 GiB more host RAM (the pool is sized for the ceiling, paid even if a
+#       session never passes 262144);
+#     - once a session's KV actually grows past 262144, each 65536-token step funds itself from the
+#       GPU expert cache: full 393216 KV costs 768 fewer resident expert slots than full 262144
+#       (saver 3856 -> 3088, whole 3920 -> 3168 slots, -20%), only past the old ceiling.
+#   Correctness measured clean: 15/15 depth needles (single + multi, 10-98% depth, up to 390K
+#   tokens) pass in both saver and whole, character-identical between them; no recall degradation
+#   toward the ceiling. Speed: 380K saver prefill 2702 tok/s (TTFT 141s), decode 94 tok/s; <=262144
+#   numbers are unchanged from the 262144 profile (same-day control, within normal arm spread).
+#   Full tables: tasks/ornith-exl3/ctx393/README.md.
 # KV: q8_0 keys and values. The lower lanes (K q8_0/V q6_0, K q6_0/V q5_0, q4_0) free
 #   0.3-1.25 GiB of KV at 256K for expert slots, but their prefill runs on the triton extend
 #   kernel (kernel/extend_flashinfer.py eligible() takes q8_0/fp8/unquantized only): 256K
@@ -71,6 +82,9 @@
 #                                 measurement taken beside another GPU process is not
 #                                 comparable.
 #   FREETOKEN_CACHE_DIR           default $HOME/.cache/freetoken (spill, traces, logs)
+#   FREETOKEN_LONG_CONTEXT        default 0 (262144, native). 1 = 393216 via YaRN factor 2; see the
+#                                 Context note above and tasks/ornith-exl3/ctx393/README.md before
+#                                 enabling it -- it changes short-prompt output determinism.
 #   FREETOKEN_EXTRA_ARGS          appended verbatim (last flag wins for repeated options)
 #   TVM_FFI_CUDA_ARCH_LIST        auto-detected from nvidia-smi (12.0 Blackwell, 8.9 Ada)
 set -euo pipefail
@@ -97,6 +111,13 @@ export FREETOKEN_EXPERT_ARENA="${FREETOKEN_EXPERT_ARENA:-1}"
 export FREETOKEN_ARENA_STEP_SLOTS="${FREETOKEN_ARENA_STEP_SLOTS:-8}"
 export FREETOKEN_GROWABLE_OVERLAP="${FREETOKEN_GROWABLE_OVERLAP:-1}"
 
+CTX_TOKENS=262144
+YARN_ARGS=()
+if [ "${FREETOKEN_LONG_CONTEXT:-0}" = "1" ]; then
+  CTX_TOKENS=393216
+  YARN_ARGS=(--rope-yarn-factor 2 --rope-yarn-original-context 262144)
+fi
+
 mkdir -p "$CACHE"/{hidden-states,pooled-sink,spill,trace,logs}
 
 # Output cap: 65536, raised from 16384 on 2026-09-22. Measured on Nemotron's needle
@@ -112,7 +133,7 @@ exec uv run ft serve \
   --host 127.0.0.1 --port "${FREETOKEN_PORT:-1919}" \
   --max-running-requests 1 --linear-state-slots 13 --kv-grow-step-tokens 65536 \
   --text-model-only \
-  --num-tokens 262144 --max-seq-len-override 262144 --kv-cache-dtype q8_0 \
+  --num-tokens "$CTX_TOKENS" --max-seq-len-override "$CTX_TOKENS" --kv-cache-dtype q8_0 \
   --attention-backend triton --moe-backend offload --moe-cache-auto --moe-cache-policy lfu \
   --memory-ratio "${FREETOKEN_MEMORY_RATIO:-1.00}" --max-prefill-length 8192 \
   --host-ram-reserve-gb "${FREETOKEN_HOST_RAM_RESERVE_GB:-0}" \
@@ -126,4 +147,5 @@ exec uv run ft serve \
   --trace-dir "$CACHE/trace" \
   --hidden-states-dir "$CACHE/hidden-states" --hidden-states-max-tokens 4096 \
   --pooled-sink-dir "$CACHE/pooled-sink" --pin-prefix-min-tokens 1024 \
+  "${YARN_ARGS[@]}" \
   ${FREETOKEN_EXTRA_ARGS:-}
