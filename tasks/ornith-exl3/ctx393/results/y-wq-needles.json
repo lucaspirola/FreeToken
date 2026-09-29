@@ -1,0 +1,256 @@
+{
+ "url": "http://127.0.0.1:1920",
+ "model": "ornith",
+ "max_tokens": 1024,
+ "think_max_tokens": 65536,
+ "sizes": [
+  {
+   "target": 21000,
+   "questions": {
+    "codes": {
+     "thinking": false,
+     "correct": true,
+     "seconds": 0.47,
+     "cached_tokens": 17600,
+     "completion_tokens": 25,
+     "reasoning_chars": 0,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "ROMEO-5324, TANGO-3579, ZULU-1956"
+    },
+    "multihop": {
+     "thinking": true,
+     "correct": true,
+     "seconds": 0.83,
+     "cached_tokens": 17600,
+     "completion_tokens": 97,
+     "reasoning_chars": 258,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "Delia Marsh's manager is Ov Petran, and Ov Petran's office is in **Braunfels**."
+    },
+    "counting": {
+     "thinking": true,
+     "correct": false,
+     "seconds": 2.24,
+     "cached_tokens": 17600,
+     "completion_tokens": 351,
+     "reasoning_chars": 1406,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "6"
+    },
+    "ordering": {
+     "thinking": true,
+     "correct": true,
+     "seconds": 5.25,
+     "cached_tokens": 17600,
+     "completion_tokens": 866,
+     "reasoning_chars": 1923,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "Here are the five events with dates, listed in chronological order (earliest first):\n\n1. The innsmouth filing was concluded on 1979-01-30.\n2. The ostrey merger was concluded on 1987-11-02.\n3. The halberd audit was concluded on 1994-03-12.\n4. The pellow recall was concluded on 2003-07-19.\n5. The verrick settlement was concluded on 2011-09-08."
+    },
+    "contradiction": {
+     "thinking": true,
+     "correct": true,
+     "seconds": 1.57,
+     "cached_tokens": 17600,
+     "completion_tokens": 218,
+     "reasoning_chars": 414,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "**Current total for the Calloway account: 51,750 units**\n\n**Did the figure change: Yes**\n\nThe text initially states \"The Calloway account total is 48,200 units,\" but later includes an amendment: \"Amended figure: the 48,200 quoted earlier was wrong; the correct total for the Calloway account is 51,750 units.\""
+    },
+    "arithmetic": {
+     "thinking": true,
+     "correct": true,
+     "seconds": 1.75,
+     "cached_tokens": 17600,
+     "completion_tokens": 253,
+     "reasoning_chars": 621,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "3878"
+    },
+    "negative": {
+     "thinking": false,
+     "correct": true,
+     "seconds": 0.9,
+     "cached_tokens": 17600,
+     "completion_tokens": 107,
+     "reasoning_chars": 0,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "The authorization code OSCAR-6621 does not appear anywhere in the text.\n\nThe only authorization codes present in the text are:\n- ROMEO-5324 (\"The authorization code for this section is ROMEO-5324.\")\n- TANGO-3579 (\"The authorization code for this section is TANGO-3579.\")\n- ZULU-1956 (\"The authorization code for this section is ZULU-1956.\")"
+    }
+   },
+   "prompt_tokens": 17647,
+   "prefill_seconds": 2.04,
+   "prefill_cached_tokens": 0,
+   "truth": {
+    "codes": [
+     "ROMEO-5324",
+     "TANGO-3579",
+     "ZULU-1956"
+    ],
+    "multihop": {
+     "person": "Delia Marsh",
+     "manager": "Ov Petran",
+     "city": "Braunfels"
+    },
+    "counting": {
+     "phrase": "crimson ledger",
+     "n": 7
+    },
+    "ordering": [
+     "the Innsmouth filing",
+     "the Ostrey merger",
+     "the Halberd audit",
+     "the Pellow recall",
+     "the Verrick settlement"
+    ],
+    "contradiction": {
+     "first": "48,200",
+     "revised": "51,750"
+    },
+    "arithmetic": {
+     "parts": [
+      1420,
+      385,
+      2073
+     ],
+     "sum": 3878
+    },
+    "negative": {
+     "code": "OSCAR-6621"
+    }
+   },
+   "score": 6
+  },
+  {
+   "target": 120000,
+   "questions": {
+    "codes": {
+     "thinking": false,
+     "correct": true,
+     "seconds": 7.56,
+     "cached_tokens": 65472,
+     "completion_tokens": 24,
+     "reasoning_chars": 0,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "KILO-8972\nKILO-6305\nKILO-7431"
+    },
+    "multihop": {
+     "thinking": true,
+     "correct": true,
+     "seconds": 8.19,
+     "cached_tokens": 65472,
+     "completion_tokens": 113,
+     "reasoning_chars": 315,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "Delia Marsh's manager is Ov Petran, and Ov Petran's office is in **Braunfels**."
+    },
+    "counting": {
+     "thinking": true,
+     "correct": true,
+     "seconds": 10.11,
+     "cached_tokens": 65472,
+     "completion_tokens": 396,
+     "reasoning_chars": 1524,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "7"
+    },
+    "ordering": {
+     "thinking": true,
+     "correct": true,
+     "seconds": 31.87,
+     "cached_tokens": 65472,
+     "completion_tokens": 3523,
+     "reasoning_chars": 9459,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "**Five events with dates, in chronological order (earliest first):**\n\n1. The innsmouth filing \u2014 1979-01-30\n2. The ostrey merger \u2014 1987-11-02\n3. The halberd audit \u2014 1994-03-12\n4. The pellow recall \u2014 2003-07-19\n5. The verrick settlement \u2014 2011-09-08"
+    },
+    "contradiction": {
+     "thinking": true,
+     "correct": true,
+     "seconds": 8.58,
+     "cached_tokens": 65472,
+     "completion_tokens": 171,
+     "reasoning_chars": 376,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "The current total for the Calloway account is **51,750 units**, and yes, the figure changed (it was originally stated as 48,200 units, but was later amended to 51,750 units)."
+    },
+    "arithmetic": {
+     "thinking": true,
+     "correct": true,
+     "seconds": 8.34,
+     "cached_tokens": 65472,
+     "completion_tokens": 139,
+     "reasoning_chars": 300,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "3878"
+    },
+    "negative": {
+     "thinking": false,
+     "correct": true,
+     "seconds": 8.36,
+     "cached_tokens": 65472,
+     "completion_tokens": 133,
+     "reasoning_chars": 0,
+     "finish_reason": "stop",
+     "truncated": false,
+     "answer": "I need to search the text for the authorization code \"OSCAR-6621\".\n\nLooking through the text, I found these authorization codes:\n- **KILO-8972** (\"The authorization code for this section is KILO-8972.\")\n- **KILO-6305** (\"The authorization code for this section is KILO-6305.\")\n- **KILO-7431** (\"The authorization code for this section is KILO-7431.\")\n\nThe code **OSCAR-6621** does not appear anywhere"
+    }
+   },
+   "prompt_tokens": 99207,
+   "prefill_seconds": 16.25,
+   "prefill_cached_tokens": 0,
+   "truth": {
+    "codes": [
+     "KILO-8972",
+     "KILO-6305",
+     "KILO-7431"
+    ],
+    "multihop": {
+     "person": "Delia Marsh",
+     "manager": "Ov Petran",
+     "city": "Braunfels"
+    },
+    "counting": {
+     "phrase": "crimson ledger",
+     "n": 7
+    },
+    "ordering": [
+     "the Innsmouth filing",
+     "the Ostrey merger",
+     "the Halberd audit",
+     "the Pellow recall",
+     "the Verrick settlement"
+    ],
+    "contradiction": {
+     "first": "48,200",
+     "revised": "51,750"
+    },
+    "arithmetic": {
+     "parts": [
+      1420,
+      385,
+      2073
+     ],
+     "sum": 3878
+    },
+    "negative": {
+     "code": "OSCAR-6621"
+    }
+   },
+   "score": 7
+  }
+ ]
+}

@@ -1,0 +1,512 @@
+Started ft-measure-y-wn.service - /home/lucas/ai/FreeToken-wt/ctx393/scripts/serve-default.sh.
+[2026-09-29|00:06:24] WARNING  --moe-backend is deprecated; use --moe-strategy
+[2026-09-29|00:06:24] INFO     Parsed arguments:
+ServerArgs(model_path='/home/lucas/ai/models/Ornith-1.5-35B-A3B-exl3-5.0bpw-hq', tp_info=DistributedInfo(rank=0, size=1), dtype=torch.bfloat16, max_running_req=1, adaptive_scheduler=True, auto_session_grace_seconds=0.0, session_spill_dir='/home/lucas/ai/FreeToken-wt/ctx393/tasks/ornith-exl3/ctx393/results/spill-y-wn', session_spill_ram_gb=1.0, session_spill_disk_gb=50.0, session_spill_limit_gb=50.0, session_spill_persist=True, session_spill_state_stride=65536, session_spill_capture_states=None, attention_backend='triton', moe_strategy='offload', quant_backend=None, ple_backend='disk', nvfp4_backend='triton', expert_load='auto', host_ram_reserve_gb=0.0, moe_cache_size=0, moe_cache_rate=None, moe_cache_auto=True, kv_reserve_tokens=8192, moe_cache_policy='lfu', moe_prefill_overlap=True, expert_residency='whole', moe_mirror_host_rows=0, moe_prefill_hit_d2d=False, moe_prefill_hit_d2d_tokens=2048, moe_extend_cache_tokens=64, moe_collect_stats=False, moe_pageable_profile='off', moe_cpu_threads=0, moe_cpu_layers=None, moe_pageable_gpu=False, moe_hybrid_max_fetch=-1, cuda_graph_bs=None, cuda_graph_max_bs=None, page_size=1, memory_ratio=1.0, runtime_reserve_bytes=0, linear_state_cache_ratio=2.0, swa_full_tokens_ratio=0.2, swa_num_pages_override=None, distributed_timeout=60.0, use_dummy_weight=False, use_pynccl=True, max_seq_len_override=393216, rope_yarn_factor=2.0, rope_yarn_original_context=262144, linear_state_slots_override=13, num_page_override=None, num_token_override=393216, kv_cache_dtype='q8_0', kv_cache_dtype_k=None, kv_cache_dtype_v=None, kv_grow_step_tokens=65536, expert_arena=True, context_preflight=True, json_retry=1, hidden_states_dir='/home/lucas/.cache/freetoken/hidden-states', hidden_states_max_tokens=4096, pooled_sink_dir='/home/lucas/.cache/freetoken/pooled-sink', mm=MultimodalConfig(disabled_encoders=frozenset({'audio', 'vision'}), embed_cache_device='cpu', encoder_weights='host', image_min_tokens=None, image_max_tokens=None, processor_kwargs={}), max_extend_tokens=8192, auto_prefill_chunk=False, max_prefill_seqs=None, cache_type='radix', pin_prefix_min_tokens=1024, pin_prefix_max_tokens=65536, pin_prefix_max_slots=-1, pin_prefix_scope='shared', speculative=None, spec_ngram_n=8, spec_draft_len=8, spec_adaptive=True, offline_mode=False, decode_log_interval=40, special_token_ckpt=False, _unique_suffix='.pid=3502136', server_host='127.0.0.1', server_port=1920, num_tokenizer=0, silent_output=False, shell_mode=False, served_model_name='ornith', served_model_aliases=(), strict_model_name=False, tool_call_parser='qwen3_coder', reasoning_parser='qwen3', sampling_defaults='model', max_output_tokens=65536, enable_cache_report=True, anthropic_strip_billing_header=True, anthropic_system_in_place=True, cuda_memory_telemetry=False, force_nonempty_content=True, allowed_media_domains='', allowed_local_media_path='', cors_origins='tauri://localhost,http://tauri.localhost,http://localhost:1420', trace_dir='/home/lucas/.cache/freetoken/trace', trace_include_text=False, gpu=(), gpu_assigned=None)
+[2026-09-29|00:06:24|FrontendAPI] INFO     Default sampling config (source=model): temperature=1.0, top_k=20, top_p=0.95
+INFO:     Started server process [3502136]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:1920 (Press CTRL+C to quit)
+/home/lucas/ai/FreeToken-wt/ctx393/python/freetoken/engine/engine.py:2451: FutureWarning: torch.cuda._set_allocator_settings is deprecated. Use torch._C._accelerator_setAllocatorSettings instead.
+  torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+[2026-09-29|00:06:26|core|rank=0] INFO     Enabled expandable_segments (override via PYTORCH_ALLOC_CONF)
+[2026-09-29|00:06:26|core|rank=0] INFO     Resolved config: moe_strategy='offload', attention_backend='triton', cache_type='hybrid_radix', page_size=1
+INFO:     127.0.0.1:53716 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-29|00:06:26|core|rank=0] INFO     Free memory before loading model: 14.59 GiB
+Loading weights:   0%|          | 0/3 [00:00<?, ?it/s]Loading weights:  33%|███▎      | 1/3 [00:01<00:02,  1.18s/it]Loading weights:  67%|██████▋   | 2/3 [00:01<00:00,  1.45it/s]Loading weights: 100%|██████████| 3/3 [00:02<00:00,  1.53it/s]Loading weights: 100%|██████████| 3/3 [00:02<00:00,  1.40it/s]
+[2026-09-29|00:06:29|core|rank=0] INFO     Startup memory prediction: prefill transient 0.88 GiB on a 8192-token chunk (peak layer gdn; full_attention 0.30 GiB, gdn 0.88 GiB, moe 0.52 GiB); graph pool 0.03 GiB (max bs 1); linear-state pool 0.78 GiB; KV floor 0.66 GiB (65536 tokens); non-expert weights 2.50 GiB; runtime reserve 0.00 GiB (growable KV: none, the arena is filled back around the measured transient)
+[2026-09-29|00:06:29|core|rank=0] INFO     Memory prediction check: non-expert weights predicted 2.50 GiB, measured 2.73 GiB (-8%)
+[2026-09-29|00:06:29|core|rank=0] INFO     MoE experts: exl3 via triton
+[2026-09-29|00:06:29|core|rank=0] WARNING  expert banks: low free RAM -> serial build (avoids parallel-reader OOM; override with --expert-load parallel)
+[2026-09-29|00:06:29|core|rank=0] INFO     expert banks: slow path (serial build)
+INFO:     127.0.0.1:50646 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:50658 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:52456 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:52466 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:50292 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:50302 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:52472 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-29|00:07:06|core|rank=0] INFO     --moe-cache-auto resolved moe_cache_size=5602 num_pages=73333 (prefill_overlap=True)
+[2026-09-29|00:07:06|core|rank=0] INFO     Arena compaction 5602 -> 512: 0 doomed, 0 moved (0.0 MiB D2D, 0.59 ms), 0 dropped with a host copy, 0 left for write-back
+[2026-09-29|00:07:06|core|rank=0] INFO     Expert arena parked 5602 -> 512 slots (9.39 GiB) until the prefill transient is measured
+[2026-09-29|00:07:06|core|rank=0] INFO     Multimodal disabled: --text-model-only
+[2026-09-29|00:07:06|core|rank=0] INFO     Allocating 393216 tokens for KV cache, K + V = 3.98 GiB
+[2026-09-29|00:07:06|core|rank=0] INFO     Triton decode launch: kv_splits=64 block_n=64 warps=4 (q_heads=16 kv_heads=2 head_dim=256 quant=q8_0 sms=84)
+[2026-09-29|00:07:06|core|rank=0] INFO     Triton extend launch: block_m=32 block_n=32 warps=4 stages=1 (head_dim=256 sm=12.0)
+[2026-09-29|00:07:06|core|rank=0] INFO     Free memory after initialization: 9.39 GiB
+[2026-09-29|00:07:06|core|rank=0] INFO     Start capturing CUDA graphs with sizes: [1]
+[2026-09-29|00:07:06|core|rank=0] INFO     Free GPU memory before capturing CUDA graphs: 9.39 GiB
+Preparing for capturing CUDA graphs...:   0%|          | 0/1 [00:00<?, ?batch/s]Capturing graphs: bs = 1   | avail_mem = 9.39 GiB:   0%|          | 0/1 [00:00<?, ?batch/s]Capturing graphs: bs = 1   | avail_mem = 9.39 GiB: 100%|██████████| 1/1 [00:01<00:00,  1.16s/batch]Capturing graphs: bs = 1   | avail_mem = 9.39 GiB: 100%|██████████| 1/1 [00:01<00:00,  1.16s/batch]
+[2026-09-29|00:07:08|core|rank=0] INFO     Free GPU memory after capturing CUDA graphs: 9.35 GiB
+[2026-09-29|00:07:08|core|rank=0] INFO     Memory prediction check: CUDA graph pool (max bs 1) predicted 0.03 GiB, measured 0.04 GiB (-24%)
+[2026-09-29|00:07:08|core|rank=0] INFO     MoE prefill hit-D2D for short chunks but unavailable (cache_size 512 leaves no hit region (needs > 512 slots)); falling back to full-layer copies
+[2026-09-29|00:07:08|core|rank=0] INFO     extend attention: flashinfer 0.6.17 prefill, prefix dequantized in 16384-token blocks (FREETOKEN_EXTEND_BACKEND=triton for the triton kernel)
+INFO:     127.0.0.1:52476 - "POST /v1/chat/completions HTTP/1.1" 503 Service Unavailable
+[2026-09-29|00:07:09|core|rank=0] INFO     Prefill warmup complete for lengths [80, 128] in 1.069 s
+[2026-09-29|00:07:12|core|rank=0] INFO     Growable-KV ceiling validated: 393216 tokens, 4.06 GiB physical, planned final MoE cache 3248 slots (coverage floor 0; pool priced for a 1196 MiB transient, measured 986 MiB)
+[2026-09-29|00:07:12|core|rank=0] INFO     Prefill headroom: transient 0.96 GiB measured on a 8192-token chunk (empty prefix 0.96 GiB, after a 8192-token prefix 0.96 GiB, allocator peak 0.85 GiB); a 1024-token chunk 0.16 GiB; headroom 0.96 GiB (max of VMM cushion 0.25 GiB and transient) + margin 0.12 GiB; expert arena 512 -> 4984 of 5602 slots, 1.09 GiB free (target 1.09 GiB), 618 slots below the ratio plan
+[2026-09-29|00:07:12|core|rank=0] INFO     Memory prediction check: prefill transient (8192-token chunk, peak layer gdn) predicted 0.88 GiB, measured 0.96 GiB (-9%)
+[2026-09-29|00:07:12|core|rank=0] INFO     Memory prediction check: linear-state pool predicted 0.78 GiB, measured 0.78 GiB (+0%)
+[2026-09-29|00:07:12|core|rank=0] INFO     Startup geometry: memory ratio 1.00, runtime reserve 0.00 GiB; expert arena 4984 slots; KV 65536 tokens mapped of 393216 (0.74 GiB); 1.09 GiB free
+[2026-09-29|00:07:12|core|rank=0] INFO     Cold session tier enabled: RAM 1.00 GiB, disk 50.00 GiB, retained 50.00 GiB total (persistent), host reserve 0.00 GiB
+[2026-09-29|00:07:12|core|rank=0] INFO     Scheduler loop: overlap (kv_grow_step_tokens=65536, growable_overlap=True)
+[2026-09-29|00:07:12|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+[2026-09-29|00:07:12|FrontendAPI] INFO     API server is ready to serve on 127.0.0.1:1920
+[2026-09-29|00:07:15|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 11, #cached-token: 0, token usage: 0.00, #mamba-slot: 0/12, mamba usage: 0.00, #running-req: 0, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 4.57 instant, 4.57 average
+[2026-09-29|00:07:15|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+INFO:     127.0.0.1:53754 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53780 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-29|00:07:16|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8009, #cached-token: 0, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 6395.09 instant, 6395.09 average
+[2026-09-29|00:07:16|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 4984 -> 5488 (0.93 GiB committed, 1.07 GiB free before, target 0.12 GiB, 40.7 ms)
+[2026-09-29|00:07:16|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8050, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 9.98, #queue-req: 0
+[2026-09-29|00:07:16|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+INFO:     127.0.0.1:52306 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-29|00:07:39|core|rank=0] INFO     Arena compaction 5488 -> 5352: 0 doomed, 0 moved (0.0 MiB D2D, 0.77 ms), 0 dropped with a host copy, 0 left for write-back
+[2026-09-29|00:07:39|core|rank=0] INFO     Prefill headroom reserved: MoE slots 5488 -> 5352 (0.25 GiB released, 0.39 GiB free, target 0.38 GiB for <= 1024 tokens, 12.8 ms)
+[2026-09-29|00:07:39|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 9, #cached-token: 8000, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 0.43 instant, 0.43 average
+[2026-09-29|00:07:39|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 5352 -> 5488 (0.25 GiB committed, 0.39 GiB free before, target 0.12 GiB, 10.2 ms)
+[2026-09-29|00:07:39|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8027, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 1.93, #queue-req: 0
+[2026-09-29|00:07:39|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8067, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 196.64, #queue-req: 0
+[2026-09-29|00:07:39|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+INFO:     127.0.0.1:52326 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-29|00:07:39|core|rank=0] INFO     Arena compaction 5488 -> 5352: 0 doomed, 0 moved (0.0 MiB D2D, 0.73 ms), 0 dropped with a host copy, 0 left for write-back
+[2026-09-29|00:07:39|core|rank=0] INFO     Prefill headroom reserved: MoE slots 5488 -> 5352 (0.25 GiB released, 0.39 GiB free, target 0.38 GiB for <= 1024 tokens, 8.3 ms)
+[2026-09-29|00:07:40|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 9, #cached-token: 8000, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 13.88 instant, 13.88 average
+[2026-09-29|00:07:40|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 5352 -> 5488 (0.25 GiB committed, 0.39 GiB free before, target 0.12 GiB, 8.2 ms)
+[2026-09-29|00:07:40|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8044, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 77.60, #queue-req: 0
+[2026-09-29|00:07:40|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8084, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 210.94, #queue-req: 0
+[2026-09-29|00:07:40|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8124, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 199.47, #queue-req: 0
+[2026-09-29|00:07:40|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+INFO:     127.0.0.1:52356 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-29|00:07:40|core|rank=0] INFO     Arena compaction 5488 -> 4968: 0 doomed, 0 moved (0.0 MiB D2D, 0.71 ms), 0 dropped with a host copy, 0 left for write-back
+[2026-09-29|00:07:40|core|rank=0] INFO     Prefill headroom reserved: MoE slots 5488 -> 4968 (0.96 GiB released, 1.10 GiB free, target 1.09 GiB for a full chunk, 35.4 ms)
+[2026-09-29|00:07:41|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8011, #cached-token: 0, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 5501.46 instant, 5501.46 average
+[2026-09-29|00:07:41|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 4968 -> 5488 (0.96 GiB committed, 1.10 GiB free before, target 0.12 GiB, 35.0 ms)
+[2026-09-29|00:07:41|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8039, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 37.55, #queue-req: 0
+[2026-09-29|00:07:41|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8079, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 204.68, #queue-req: 0
+[2026-09-29|00:07:42|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 8119, token usage: 0.12, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 199.03, #queue-req: 0
+[2026-09-29|00:07:42|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+[2026-09-29|00:07:42|core|rank=0] INFO     Arena compaction 5488 -> 5352: 0 doomed, 0 moved (0.0 MiB D2D, 0.70 ms), 0 dropped with a host copy, 0 left for write-back
+[2026-09-29|00:07:42|core|rank=0] INFO     Prefill headroom reserved: MoE slots 5488 -> 5352 (0.25 GiB released, 0.39 GiB free, target 0.38 GiB for <= 1024 tokens, 9.1 ms)
+[2026-09-29|00:07:42|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 61, #cached-token: 0, token usage: 0.00, #mamba-slot: 3/12, mamba usage: 0.25, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 64.37 instant, 64.37 average
+[2026-09-29|00:07:42|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 5352 -> 5488 (0.25 GiB committed, 0.39 GiB free before, target 0.12 GiB, 8.0 ms)
+[2026-09-29|00:07:42|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 82, token usage: 0.00, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 78.35, #queue-req: 0
+[2026-09-29|00:07:42|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 122, token usage: 0.00, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 167.84, #queue-req: 0
+[2026-09-29|00:07:43|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 162, token usage: 0.00, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 187.49, #queue-req: 0
+[2026-09-29|00:07:43|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 202, token usage: 0.00, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 197.19, #queue-req: 0
+[2026-09-29|00:07:43|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 242, token usage: 0.00, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 190.27, #queue-req: 0
+[2026-09-29|00:07:43|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 282, token usage: 0.00, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 194.29, #queue-req: 0
+[2026-09-29|00:07:43|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 322, token usage: 0.00, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 190.49, #queue-req: 0
+[2026-09-29|00:07:44|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 362, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 194.33, #queue-req: 0
+[2026-09-29|00:07:44|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 402, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 198.14, #queue-req: 0
+[2026-09-29|00:07:44|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 442, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 203.80, #queue-req: 0
+[2026-09-29|00:07:44|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 482, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 181.50, #queue-req: 0
+[2026-09-29|00:07:44|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 522, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 191.14, #queue-req: 0
+[2026-09-29|00:07:45|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 562, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 203.61, #queue-req: 0
+[2026-09-29|00:07:45|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 602, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 206.61, #queue-req: 0
+[2026-09-29|00:07:45|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 642, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 207.87, #queue-req: 0
+[2026-09-29|00:07:45|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 682, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 190.66, #queue-req: 0
+[2026-09-29|00:07:45|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 722, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 201.03, #queue-req: 0
+[2026-09-29|00:07:46|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 762, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 190.91, #queue-req: 0
+[2026-09-29|00:07:46|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 802, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 177.72, #queue-req: 0
+[2026-09-29|00:07:46|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 842, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 177.76, #queue-req: 0
+[2026-09-29|00:07:46|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 882, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 172.19, #queue-req: 0
+[2026-09-29|00:07:47|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 922, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 181.18, #queue-req: 0
+[2026-09-29|00:07:47|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 962, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 194.75, #queue-req: 0
+[2026-09-29|00:07:47|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1002, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 192.06, #queue-req: 0
+[2026-09-29|00:07:47|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1042, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 198.90, #queue-req: 0
+[2026-09-29|00:07:47|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1082, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 204.68, #queue-req: 0
+[2026-09-29|00:07:48|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1122, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 200.37, #queue-req: 0
+[2026-09-29|00:07:48|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1162, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 179.06, #queue-req: 0
+[2026-09-29|00:07:48|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1202, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 166.76, #queue-req: 0
+[2026-09-29|00:07:48|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1242, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 169.08, #queue-req: 0
+[2026-09-29|00:07:49|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1282, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 183.34, #queue-req: 0
+[2026-09-29|00:07:49|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1322, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 190.99, #queue-req: 0
+[2026-09-29|00:07:49|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1362, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 191.06, #queue-req: 0
+[2026-09-29|00:07:49|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1402, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 193.77, #queue-req: 0
+[2026-09-29|00:07:49|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1442, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 174.70, #queue-req: 0
+[2026-09-29|00:07:50|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1482, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 179.63, #queue-req: 0
+[2026-09-29|00:07:50|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1522, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 198.18, #queue-req: 0
+[2026-09-29|00:07:50|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1562, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 199.35, #queue-req: 0
+[2026-09-29|00:07:50|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1602, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 202.12, #queue-req: 0
+[2026-09-29|00:07:50|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1642, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 167.84, #queue-req: 0
+[2026-09-29|00:07:51|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1682, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 182.84, #queue-req: 0
+[2026-09-29|00:07:51|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1722, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 186.62, #queue-req: 0
+[2026-09-29|00:07:51|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1762, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 199.69, #queue-req: 0
+[2026-09-29|00:07:51|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1802, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 193.51, #queue-req: 0
+[2026-09-29|00:07:51|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1842, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 189.80, #queue-req: 0
+[2026-09-29|00:07:52|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1882, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 198.57, #queue-req: 0
+[2026-09-29|00:07:52|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1922, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 189.08, #queue-req: 0
+[2026-09-29|00:07:52|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1962, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 194.15, #queue-req: 0
+[2026-09-29|00:07:52|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2002, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 200.85, #queue-req: 0
+[2026-09-29|00:07:52|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2042, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 199.79, #queue-req: 0
+[2026-09-29|00:07:53|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2082, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 188.13, #queue-req: 0
+[2026-09-29|00:07:53|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2122, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 182.04, #queue-req: 0
+[2026-09-29|00:07:53|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2162, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 188.84, #queue-req: 0
+[2026-09-29|00:07:53|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2202, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 197.71, #queue-req: 0
+[2026-09-29|00:07:54|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2242, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 182.58, #queue-req: 0
+[2026-09-29|00:07:54|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2282, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 172.96, #queue-req: 0
+[2026-09-29|00:07:54|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2322, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 175.50, #queue-req: 0
+[2026-09-29|00:07:54|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2362, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 181.42, #queue-req: 0
+[2026-09-29|00:07:54|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2402, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 188.77, #queue-req: 0
+[2026-09-29|00:07:55|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2442, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 195.05, #queue-req: 0
+[2026-09-29|00:07:55|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2482, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 202.13, #queue-req: 0
+[2026-09-29|00:07:55|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2522, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 171.58, #queue-req: 0
+[2026-09-29|00:07:55|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2562, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 166.68, #queue-req: 0
+[2026-09-29|00:07:56|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2602, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 171.76, #queue-req: 0
+[2026-09-29|00:07:56|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2642, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 180.04, #queue-req: 0
+[2026-09-29|00:07:56|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2682, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 195.87, #queue-req: 0
+[2026-09-29|00:07:56|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2722, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 196.65, #queue-req: 0
+[2026-09-29|00:07:56|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2762, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 195.85, #queue-req: 0
+[2026-09-29|00:07:57|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2802, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 192.87, #queue-req: 0
+[2026-09-29|00:07:57|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2842, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 205.07, #queue-req: 0
+[2026-09-29|00:07:57|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2882, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 191.00, #queue-req: 0
+[2026-09-29|00:07:57|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2922, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 193.70, #queue-req: 0
+[2026-09-29|00:07:57|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2962, token usage: 0.05, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 192.50, #queue-req: 0
+[2026-09-29|00:07:58|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3002, token usage: 0.05, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 192.30, #queue-req: 0
+[2026-09-29|00:07:58|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3042, token usage: 0.05, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 192.17, #queue-req: 0
+[2026-09-29|00:07:58|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3082, token usage: 0.05, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 194.92, #queue-req: 0
+[2026-09-29|00:07:58|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3122, token usage: 0.05, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 187.32, #queue-req: 0
+[2026-09-29|00:08:01|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3162, token usage: 0.05, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 188.63, #queue-req: 0
+[2026-09-29|00:08:01|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3202, token usage: 0.05, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 179.48, #queue-req: 0
+[2026-09-29|00:08:01|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3242, token usage: 0.05, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 195.24, #queue-req: 0
+[2026-09-29|00:08:01|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3282, token usage: 0.05, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 196.47, #queue-req: 0
+[2026-09-29|00:08:02|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3322, token usage: 0.05, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 193.20, #queue-req: 0
+[2026-09-29|00:08:02|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3362, token usage: 0.05, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 188.43, #queue-req: 0
+[2026-09-29|00:08:02|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3402, token usage: 0.05, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 170.08, #queue-req: 0
+[2026-09-29|00:08:02|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3442, token usage: 0.05, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 176.41, #queue-req: 0
+[2026-09-29|00:08:03|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3482, token usage: 0.05, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 172.92, #queue-req: 0
+[2026-09-29|00:08:03|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3522, token usage: 0.05, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 189.25, #queue-req: 0
+INFO:     127.0.0.1:52380 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-29|00:08:03|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+[2026-09-29|00:08:03|core|rank=0] INFO     Arena compaction 5488 -> 5352: 136 doomed, 132 moved (249.4 MiB D2D, 3.32 ms), 4 dropped with a host copy, 0 left for write-back
+[2026-09-29|00:08:03|core|rank=0] INFO     Prefill headroom reserved: MoE slots 5488 -> 5352 (0.25 GiB released, 0.39 GiB free, target 0.38 GiB for <= 1024 tokens, 10.3 ms)
+[2026-09-29|00:08:03|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 58, #cached-token: 0, token usage: 0.00, #mamba-slot: 3/12, mamba usage: 0.25, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 3.08 instant, 3.08 average
+[2026-09-29|00:08:03|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 5352 -> 5488 (0.25 GiB committed, 0.39 GiB free before, target 0.12 GiB, 8.7 ms)
+[2026-09-29|00:08:03|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 60, token usage: 0.00, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 91.53, #queue-req: 0
+[2026-09-29|00:08:03|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 100, token usage: 0.00, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 160.20, #queue-req: 0
+[2026-09-29|00:08:04|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 140, token usage: 0.00, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 195.51, #queue-req: 0
+[2026-09-29|00:08:04|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 180, token usage: 0.00, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 194.62, #queue-req: 0
+[2026-09-29|00:08:04|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 220, token usage: 0.00, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 199.34, #queue-req: 0
+[2026-09-29|00:08:04|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 260, token usage: 0.00, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 199.27, #queue-req: 0
+[2026-09-29|00:08:04|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 300, token usage: 0.00, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 202.60, #queue-req: 0
+[2026-09-29|00:08:05|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 340, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 196.21, #queue-req: 0
+[2026-09-29|00:08:05|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 380, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 197.57, #queue-req: 0
+[2026-09-29|00:08:05|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 420, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 194.85, #queue-req: 0
+[2026-09-29|00:08:05|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 460, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 204.11, #queue-req: 0
+[2026-09-29|00:08:05|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 500, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 206.13, #queue-req: 0
+[2026-09-29|00:08:06|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 540, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 198.62, #queue-req: 0
+[2026-09-29|00:08:06|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 580, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 204.82, #queue-req: 0
+[2026-09-29|00:08:06|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 620, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 200.55, #queue-req: 0
+[2026-09-29|00:08:06|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 660, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 206.65, #queue-req: 0
+[2026-09-29|00:08:06|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 700, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 204.78, #queue-req: 0
+[2026-09-29|00:08:07|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 740, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 205.37, #queue-req: 0
+[2026-09-29|00:08:07|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 780, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 206.07, #queue-req: 0
+[2026-09-29|00:08:07|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 820, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 201.54, #queue-req: 0
+[2026-09-29|00:08:07|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 860, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 198.49, #queue-req: 0
+[2026-09-29|00:08:07|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 900, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 206.19, #queue-req: 0
+[2026-09-29|00:08:08|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 940, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 198.12, #queue-req: 0
+[2026-09-29|00:08:08|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 980, token usage: 0.01, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 209.00, #queue-req: 0
+[2026-09-29|00:08:08|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1020, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 207.09, #queue-req: 0
+[2026-09-29|00:08:08|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1060, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 208.64, #queue-req: 0
+[2026-09-29|00:08:08|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1100, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 206.82, #queue-req: 0
+[2026-09-29|00:08:09|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1140, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 193.85, #queue-req: 0
+[2026-09-29|00:08:09|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1180, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 208.07, #queue-req: 0
+[2026-09-29|00:08:09|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1220, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 204.09, #queue-req: 0
+[2026-09-29|00:08:09|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1260, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 196.30, #queue-req: 0
+[2026-09-29|00:08:09|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1300, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 204.43, #queue-req: 0
+[2026-09-29|00:08:10|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1340, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 206.76, #queue-req: 0
+[2026-09-29|00:08:10|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1380, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 206.33, #queue-req: 0
+[2026-09-29|00:08:10|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1420, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 201.72, #queue-req: 0
+[2026-09-29|00:08:10|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1460, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 199.44, #queue-req: 0
+[2026-09-29|00:08:10|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1500, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 205.72, #queue-req: 0
+[2026-09-29|00:08:11|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1540, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 202.41, #queue-req: 0
+[2026-09-29|00:08:11|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1580, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 206.33, #queue-req: 0
+[2026-09-29|00:08:11|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1620, token usage: 0.02, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 203.09, #queue-req: 0
+[2026-09-29|00:08:11|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1660, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 204.66, #queue-req: 0
+[2026-09-29|00:08:11|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1700, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 208.46, #queue-req: 0
+[2026-09-29|00:08:12|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1740, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 198.27, #queue-req: 0
+[2026-09-29|00:08:12|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1780, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 198.65, #queue-req: 0
+[2026-09-29|00:08:12|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1820, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 200.80, #queue-req: 0
+[2026-09-29|00:08:12|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1860, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 207.20, #queue-req: 0
+[2026-09-29|00:08:12|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1900, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 201.86, #queue-req: 0
+[2026-09-29|00:08:13|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1940, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 207.83, #queue-req: 0
+[2026-09-29|00:08:13|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1980, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 201.96, #queue-req: 0
+[2026-09-29|00:08:13|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2020, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 209.63, #queue-req: 0
+[2026-09-29|00:08:13|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2060, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 208.97, #queue-req: 0
+[2026-09-29|00:08:13|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2100, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 204.03, #queue-req: 0
+[2026-09-29|00:08:13|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2140, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 210.58, #queue-req: 0
+[2026-09-29|00:08:14|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2180, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 209.09, #queue-req: 0
+[2026-09-29|00:08:14|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2220, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 198.78, #queue-req: 0
+[2026-09-29|00:08:14|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2260, token usage: 0.03, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 202.72, #queue-req: 0
+[2026-09-29|00:08:14|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2300, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 207.13, #queue-req: 0
+[2026-09-29|00:08:14|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2340, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 207.33, #queue-req: 0
+[2026-09-29|00:08:15|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2380, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 208.42, #queue-req: 0
+[2026-09-29|00:08:15|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2420, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 204.66, #queue-req: 0
+[2026-09-29|00:08:15|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2460, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 205.45, #queue-req: 0
+[2026-09-29|00:08:15|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2500, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 203.44, #queue-req: 0
+[2026-09-29|00:08:15|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2540, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 206.75, #queue-req: 0
+[2026-09-29|00:08:16|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2580, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 198.50, #queue-req: 0
+[2026-09-29|00:08:16|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2620, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 195.57, #queue-req: 0
+[2026-09-29|00:08:16|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2660, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 209.23, #queue-req: 0
+[2026-09-29|00:08:16|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2700, token usage: 0.04, #mamba-slot: 3/12, mamba usage: 0.25, gen throughput (token/s): 209.91, #queue-req: 0
+INFO:     127.0.0.1:54028 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-29|00:08:16|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+[2026-09-29|00:08:16|core|rank=0] INFO     Arena compaction 5488 -> 5352: 136 doomed, 135 moved (255.1 MiB D2D, 3.07 ms), 1 dropped with a host copy, 0 left for write-back
+[2026-09-29|00:08:16|core|rank=0] INFO     Prefill headroom reserved: MoE slots 5488 -> 5352 (0.25 GiB released, 0.39 GiB free, target 0.38 GiB for <= 1024 tokens, 11.0 ms)
+[2026-09-29|00:08:17|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 113, #cached-token: 0, token usage: 0.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 8.42 instant, 8.42 average
+[2026-09-29|00:08:17|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 5352 -> 5488 (0.25 GiB committed, 0.39 GiB free before, target 0.12 GiB, 10.0 ms)
+[2026-09-29|00:08:17|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 125, token usage: 0.00, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 90.62, #queue-req: 0
+[2026-09-29|00:08:17|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 165, token usage: 0.00, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 155.32, #queue-req: 0
+[2026-09-29|00:08:17|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 205, token usage: 0.00, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 175.92, #queue-req: 0
+[2026-09-29|00:08:17|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 245, token usage: 0.00, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 186.89, #queue-req: 0
+[2026-09-29|00:08:18|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 285, token usage: 0.00, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 191.77, #queue-req: 0
+[2026-09-29|00:08:18|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 325, token usage: 0.00, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 170.88, #queue-req: 0
+[2026-09-29|00:08:18|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 365, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 190.65, #queue-req: 0
+[2026-09-29|00:08:18|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 405, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 189.53, #queue-req: 0
+[2026-09-29|00:08:18|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 445, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 173.92, #queue-req: 0
+[2026-09-29|00:08:19|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 485, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 185.66, #queue-req: 0
+[2026-09-29|00:08:19|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 525, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 190.40, #queue-req: 0
+[2026-09-29|00:08:19|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 565, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 189.48, #queue-req: 0
+[2026-09-29|00:08:19|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 605, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 186.04, #queue-req: 0
+[2026-09-29|00:08:20|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 645, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 170.55, #queue-req: 0
+[2026-09-29|00:08:20|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 685, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 187.74, #queue-req: 0
+[2026-09-29|00:08:20|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 725, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 183.96, #queue-req: 0
+[2026-09-29|00:08:20|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 765, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 184.17, #queue-req: 0
+[2026-09-29|00:08:20|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 805, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 198.22, #queue-req: 0
+[2026-09-29|00:08:21|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 845, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 179.62, #queue-req: 0
+[2026-09-29|00:08:21|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 885, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 180.14, #queue-req: 0
+[2026-09-29|00:08:21|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 925, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 181.90, #queue-req: 0
+[2026-09-29|00:08:21|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 965, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 172.28, #queue-req: 0
+[2026-09-29|00:08:22|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1005, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 180.12, #queue-req: 0
+[2026-09-29|00:08:22|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1045, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 187.90, #queue-req: 0
+[2026-09-29|00:08:22|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1085, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 185.12, #queue-req: 0
+[2026-09-29|00:08:22|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1125, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 159.03, #queue-req: 0
+[2026-09-29|00:08:22|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1165, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 170.15, #queue-req: 0
+[2026-09-29|00:08:23|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1205, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 193.80, #queue-req: 0
+[2026-09-29|00:08:23|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1245, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 200.28, #queue-req: 0
+[2026-09-29|00:08:23|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1285, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 201.75, #queue-req: 0
+[2026-09-29|00:08:23|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1325, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 194.56, #queue-req: 0
+[2026-09-29|00:08:23|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1365, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 207.33, #queue-req: 0
+[2026-09-29|00:08:24|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1405, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 198.24, #queue-req: 0
+[2026-09-29|00:08:24|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1445, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 173.34, #queue-req: 0
+[2026-09-29|00:08:24|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1485, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 194.33, #queue-req: 0
+[2026-09-29|00:08:24|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1525, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 188.68, #queue-req: 0
+[2026-09-29|00:08:24|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1565, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 187.02, #queue-req: 0
+[2026-09-29|00:08:25|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1605, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 195.71, #queue-req: 0
+[2026-09-29|00:08:25|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1645, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 199.09, #queue-req: 0
+[2026-09-29|00:08:25|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1685, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 186.63, #queue-req: 0
+[2026-09-29|00:08:25|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1725, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 183.69, #queue-req: 0
+[2026-09-29|00:08:26|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1765, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 188.95, #queue-req: 0
+[2026-09-29|00:08:26|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1805, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 196.57, #queue-req: 0
+[2026-09-29|00:08:26|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1845, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 192.50, #queue-req: 0
+[2026-09-29|00:08:26|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1885, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 191.57, #queue-req: 0
+[2026-09-29|00:08:26|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1925, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 186.72, #queue-req: 0
+[2026-09-29|00:08:27|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1965, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 188.85, #queue-req: 0
+[2026-09-29|00:08:27|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2005, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 177.57, #queue-req: 0
+[2026-09-29|00:08:27|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2045, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 187.90, #queue-req: 0
+[2026-09-29|00:08:27|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2085, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 198.49, #queue-req: 0
+[2026-09-29|00:08:27|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2125, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 197.03, #queue-req: 0
+[2026-09-29|00:08:28|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2165, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 193.97, #queue-req: 0
+[2026-09-29|00:08:28|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2205, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 189.61, #queue-req: 0
+[2026-09-29|00:08:28|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2245, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 194.77, #queue-req: 0
+[2026-09-29|00:08:28|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2285, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 174.12, #queue-req: 0
+[2026-09-29|00:08:28|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2325, token usage: 0.04, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 188.76, #queue-req: 0
+[2026-09-29|00:08:29|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2365, token usage: 0.04, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 178.76, #queue-req: 0
+[2026-09-29|00:08:29|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2405, token usage: 0.04, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 181.31, #queue-req: 0
+[2026-09-29|00:08:29|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2445, token usage: 0.04, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 166.67, #queue-req: 0
+[2026-09-29|00:08:29|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2485, token usage: 0.04, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 157.49, #queue-req: 0
+[2026-09-29|00:08:30|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2525, token usage: 0.04, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 164.84, #queue-req: 0
+[2026-09-29|00:08:30|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2565, token usage: 0.04, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 170.03, #queue-req: 0
+[2026-09-29|00:08:30|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2605, token usage: 0.04, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 173.97, #queue-req: 0
+[2026-09-29|00:08:30|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2645, token usage: 0.04, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 188.50, #queue-req: 0
+[2026-09-29|00:08:31|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2685, token usage: 0.04, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 193.82, #queue-req: 0
+[2026-09-29|00:08:31|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2725, token usage: 0.04, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 183.61, #queue-req: 0
+[2026-09-29|00:08:31|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2765, token usage: 0.04, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 188.87, #queue-req: 0
+[2026-09-29|00:08:31|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2805, token usage: 0.04, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 173.39, #queue-req: 0
+[2026-09-29|00:08:31|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2845, token usage: 0.04, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 183.95, #queue-req: 0
+[2026-09-29|00:08:32|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2885, token usage: 0.04, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 180.45, #queue-req: 0
+[2026-09-29|00:08:32|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2925, token usage: 0.04, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 163.99, #queue-req: 0
+[2026-09-29|00:08:32|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2965, token usage: 0.05, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 175.83, #queue-req: 0
+[2026-09-29|00:08:32|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3005, token usage: 0.05, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 184.33, #queue-req: 0
+[2026-09-29|00:08:33|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3045, token usage: 0.05, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 185.50, #queue-req: 0
+[2026-09-29|00:08:33|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3085, token usage: 0.05, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 187.71, #queue-req: 0
+[2026-09-29|00:08:35|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3125, token usage: 0.05, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 181.42, #queue-req: 0
+[2026-09-29|00:08:36|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3165, token usage: 0.05, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 179.47, #queue-req: 0
+[2026-09-29|00:08:36|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3205, token usage: 0.05, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 180.44, #queue-req: 0
+[2026-09-29|00:08:36|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3245, token usage: 0.05, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 161.93, #queue-req: 0
+[2026-09-29|00:08:36|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3285, token usage: 0.05, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 176.00, #queue-req: 0
+[2026-09-29|00:08:37|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3325, token usage: 0.05, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 186.16, #queue-req: 0
+[2026-09-29|00:08:37|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3365, token usage: 0.05, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 192.28, #queue-req: 0
+[2026-09-29|00:08:37|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3405, token usage: 0.05, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 188.36, #queue-req: 0
+[2026-09-29|00:08:37|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3445, token usage: 0.05, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 183.68, #queue-req: 0
+[2026-09-29|00:08:37|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3485, token usage: 0.05, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 171.24, #queue-req: 0
+[2026-09-29|00:08:38|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3525, token usage: 0.05, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 176.02, #queue-req: 0
+[2026-09-29|00:08:38|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3565, token usage: 0.05, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 175.18, #queue-req: 0
+[2026-09-29|00:08:38|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 3605, token usage: 0.06, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 183.70, #queue-req: 0
+INFO:     127.0.0.1:53014 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-29|00:08:38|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+[2026-09-29|00:08:38|core|rank=0] INFO     Arena compaction 5488 -> 5352: 136 doomed, 131 moved (247.5 MiB D2D, 3.27 ms), 5 dropped with a host copy, 0 left for write-back
+[2026-09-29|00:08:38|core|rank=0] INFO     Prefill headroom reserved: MoE slots 5488 -> 5352 (0.25 GiB released, 0.39 GiB free, target 0.38 GiB for <= 1024 tokens, 10.5 ms)
+[2026-09-29|00:08:38|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 81, #cached-token: 0, token usage: 0.00, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 0, input throughput (token/s): 4.19 instant, 4.19 average
+[2026-09-29|00:08:38|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 5352 -> 5488 (0.25 GiB committed, 0.39 GiB free before, target 0.12 GiB, 11.5 ms)
+[2026-09-29|00:08:39|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 114, token usage: 0.00, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 84.99, #queue-req: 0
+[2026-09-29|00:08:39|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 154, token usage: 0.00, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 173.61, #queue-req: 0
+[2026-09-29|00:08:39|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 194, token usage: 0.00, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 184.31, #queue-req: 0
+[2026-09-29|00:08:39|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 234, token usage: 0.00, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 185.58, #queue-req: 0
+[2026-09-29|00:08:39|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 274, token usage: 0.00, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 192.66, #queue-req: 0
+[2026-09-29|00:08:40|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 314, token usage: 0.00, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 198.95, #queue-req: 0
+[2026-09-29|00:08:40|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 354, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 199.21, #queue-req: 0
+[2026-09-29|00:08:40|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 394, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 195.26, #queue-req: 0
+[2026-09-29|00:08:40|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 434, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 199.54, #queue-req: 0
+[2026-09-29|00:08:40|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 474, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 204.43, #queue-req: 0
+[2026-09-29|00:08:41|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 514, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 186.95, #queue-req: 0
+[2026-09-29|00:08:41|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 554, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 203.48, #queue-req: 0
+[2026-09-29|00:08:41|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 594, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 203.15, #queue-req: 0
+[2026-09-29|00:08:41|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 634, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 200.66, #queue-req: 0
+[2026-09-29|00:08:41|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 674, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 194.43, #queue-req: 0
+[2026-09-29|00:08:42|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 714, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 203.19, #queue-req: 0
+[2026-09-29|00:08:42|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 754, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 207.31, #queue-req: 0
+[2026-09-29|00:08:42|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 794, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 203.69, #queue-req: 0
+[2026-09-29|00:08:42|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 834, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 182.77, #queue-req: 0
+[2026-09-29|00:08:42|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 874, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 187.41, #queue-req: 0
+[2026-09-29|00:08:43|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 914, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 182.70, #queue-req: 0
+[2026-09-29|00:08:43|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 954, token usage: 0.01, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 195.63, #queue-req: 0
+[2026-09-29|00:08:43|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 994, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 195.26, #queue-req: 0
+[2026-09-29|00:08:43|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1034, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 199.24, #queue-req: 0
+[2026-09-29|00:08:43|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1074, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 199.63, #queue-req: 0
+[2026-09-29|00:08:44|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1114, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 196.14, #queue-req: 0
+[2026-09-29|00:08:44|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1154, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 181.05, #queue-req: 0
+[2026-09-29|00:08:44|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1194, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 179.76, #queue-req: 0
+[2026-09-29|00:08:44|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1234, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 177.65, #queue-req: 0
+[2026-09-29|00:08:45|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1274, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 192.39, #queue-req: 0
+[2026-09-29|00:08:45|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1314, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 189.64, #queue-req: 0
+[2026-09-29|00:08:45|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1354, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 202.68, #queue-req: 0
+[2026-09-29|00:08:45|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1394, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 200.76, #queue-req: 0
+[2026-09-29|00:08:45|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1434, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 209.29, #queue-req: 0
+[2026-09-29|00:08:46|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1474, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 201.79, #queue-req: 0
+[2026-09-29|00:08:46|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1514, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 201.57, #queue-req: 0
+[2026-09-29|00:08:46|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1554, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 205.90, #queue-req: 0
+[2026-09-29|00:08:46|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1594, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 191.48, #queue-req: 0
+[2026-09-29|00:08:46|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1634, token usage: 0.02, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 177.98, #queue-req: 0
+[2026-09-29|00:08:47|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1674, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 196.32, #queue-req: 0
+[2026-09-29|00:08:47|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1714, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 202.42, #queue-req: 0
+[2026-09-29|00:08:47|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1754, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 202.14, #queue-req: 0
+[2026-09-29|00:08:47|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1794, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 174.25, #queue-req: 0
+[2026-09-29|00:08:47|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1834, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 183.95, #queue-req: 0
+[2026-09-29|00:08:48|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1874, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 189.67, #queue-req: 0
+[2026-09-29|00:08:48|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1914, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 191.71, #queue-req: 0
+[2026-09-29|00:08:48|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1954, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 198.42, #queue-req: 0
+[2026-09-29|00:08:48|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 1994, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 197.64, #queue-req: 0
+[2026-09-29|00:08:48|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2034, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 203.92, #queue-req: 0
+[2026-09-29|00:08:49|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2074, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 198.90, #queue-req: 0
+[2026-09-29|00:08:49|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2114, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 193.70, #queue-req: 0
+[2026-09-29|00:08:49|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 2154, token usage: 0.03, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 202.56, #queue-req: 0
+INFO:     127.0.0.1:52642 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-29|00:08:49|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+[2026-09-29|00:08:49|core|rank=0] INFO     Arena compaction 5488 -> 4968: 520 doomed, 465 moved (878.7 MiB D2D, 5.21 ms), 55 dropped with a host copy, 0 left for write-back
+[2026-09-29|00:08:49|core|rank=0] INFO     Prefill headroom reserved: MoE slots 5488 -> 4968 (0.96 GiB released, 1.10 GiB free, target 1.09 GiB for a full chunk, 36.0 ms)
+[2026-09-29|00:08:51|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.25, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 0, #queue-req: 1, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 658.19 instant, 658.19 average
+[2026-09-29|00:08:51|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 8192, #cached-token: 0, token usage: 0.31, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 16287.91 instant, 1265.25 average
+[2026-09-29|00:08:51|core|rank=0] INFO     Prefill batch, #new-seq: 1, #new-token: 3646, #cached-token: 0, token usage: 0.31, #mamba-slot: 4/12, mamba usage: 0.33, #running-req: 1, #queue-req: 0, #seatable-lane: 0, #chunked-inflight: 1, input throughput (token/s): 168626.68 instant, 1544.24 average
+[2026-09-29|00:08:51|core|rank=0] INFO     Prefill headroom released to decode: MoE slots 4968 -> 5488 (0.96 GiB committed, 1.10 GiB free before, target 0.12 GiB, 28.0 ms)
+[2026-09-29|00:08:51|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 20052, token usage: 0.31, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 16.51, #queue-req: 0
+[2026-09-29|00:08:52|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 20092, token usage: 0.31, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 175.52, #queue-req: 0
+[2026-09-29|00:08:52|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 20132, token usage: 0.31, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 185.15, #queue-req: 0
+[2026-09-29|00:08:52|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 20172, token usage: 0.31, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 163.91, #queue-req: 0
+[2026-09-29|00:08:52|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 20212, token usage: 0.31, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 162.93, #queue-req: 0
+[2026-09-29|00:08:53|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 20252, token usage: 0.31, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 166.08, #queue-req: 0
+[2026-09-29|00:08:53|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 20292, token usage: 0.31, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 173.55, #queue-req: 0
+[2026-09-29|00:08:53|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 20332, token usage: 0.31, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 176.00, #queue-req: 0
+[2026-09-29|00:08:53|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 20372, token usage: 0.31, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 181.83, #queue-req: 0
+[2026-09-29|00:08:54|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 20412, token usage: 0.31, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 178.43, #queue-req: 0
+[2026-09-29|00:08:54|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 20452, token usage: 0.31, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 176.91, #queue-req: 0
+[2026-09-29|00:08:54|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 20492, token usage: 0.31, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 172.84, #queue-req: 0
+[2026-09-29|00:08:54|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 20532, token usage: 0.31, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 180.06, #queue-req: 0
+[2026-09-29|00:08:54|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 20572, token usage: 0.31, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 171.74, #queue-req: 0
+[2026-09-29|00:08:55|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 20612, token usage: 0.31, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 166.38, #queue-req: 0
+[2026-09-29|00:08:55|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 20652, token usage: 0.32, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 174.96, #queue-req: 0
+[2026-09-29|00:08:55|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 20692, token usage: 0.32, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 175.32, #queue-req: 0
+[2026-09-29|00:08:55|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 20732, token usage: 0.32, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 171.70, #queue-req: 0
+[2026-09-29|00:08:56|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 20772, token usage: 0.32, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 173.41, #queue-req: 0
+[2026-09-29|00:08:56|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 20812, token usage: 0.32, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 166.40, #queue-req: 0
+[2026-09-29|00:08:56|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 20852, token usage: 0.32, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 168.62, #queue-req: 0
+[2026-09-29|00:08:56|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 20892, token usage: 0.32, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 176.74, #queue-req: 0
+[2026-09-29|00:08:57|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 20932, token usage: 0.32, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 182.15, #queue-req: 0
+[2026-09-29|00:08:57|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 20972, token usage: 0.32, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 176.13, #queue-req: 0
+[2026-09-29|00:08:57|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21012, token usage: 0.32, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 184.84, #queue-req: 0
+[2026-09-29|00:08:57|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21052, token usage: 0.32, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 179.29, #queue-req: 0
+[2026-09-29|00:08:57|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21092, token usage: 0.32, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 189.98, #queue-req: 0
+[2026-09-29|00:08:58|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21132, token usage: 0.32, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 179.92, #queue-req: 0
+[2026-09-29|00:08:58|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21172, token usage: 0.32, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 185.05, #queue-req: 0
+[2026-09-29|00:08:58|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21212, token usage: 0.32, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 184.30, #queue-req: 0
+[2026-09-29|00:08:58|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21252, token usage: 0.32, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 187.44, #queue-req: 0
+[2026-09-29|00:08:58|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21292, token usage: 0.32, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 186.01, #queue-req: 0
+[2026-09-29|00:08:59|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21332, token usage: 0.33, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 182.53, #queue-req: 0
+[2026-09-29|00:08:59|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21372, token usage: 0.33, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 169.29, #queue-req: 0
+[2026-09-29|00:08:59|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21412, token usage: 0.33, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 182.60, #queue-req: 0
+[2026-09-29|00:08:59|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21452, token usage: 0.33, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 182.43, #queue-req: 0
+[2026-09-29|00:09:00|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21492, token usage: 0.33, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 186.32, #queue-req: 0
+[2026-09-29|00:09:00|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21532, token usage: 0.33, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 178.60, #queue-req: 0
+[2026-09-29|00:09:00|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21572, token usage: 0.33, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 186.30, #queue-req: 0
+[2026-09-29|00:09:00|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21612, token usage: 0.33, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 182.77, #queue-req: 0
+[2026-09-29|00:09:00|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21652, token usage: 0.33, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 187.85, #queue-req: 0
+[2026-09-29|00:09:01|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21692, token usage: 0.33, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 188.14, #queue-req: 0
+[2026-09-29|00:09:01|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21732, token usage: 0.33, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 174.84, #queue-req: 0
+[2026-09-29|00:09:01|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21772, token usage: 0.33, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 177.58, #queue-req: 0
+[2026-09-29|00:09:01|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21812, token usage: 0.33, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 185.51, #queue-req: 0
+[2026-09-29|00:09:02|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21852, token usage: 0.33, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 174.02, #queue-req: 0
+[2026-09-29|00:09:02|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21892, token usage: 0.33, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 189.15, #queue-req: 0
+[2026-09-29|00:09:02|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21932, token usage: 0.33, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 182.56, #queue-req: 0
+[2026-09-29|00:09:02|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 21972, token usage: 0.34, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 185.22, #queue-req: 0
+[2026-09-29|00:09:02|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22012, token usage: 0.34, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 180.90, #queue-req: 0
+[2026-09-29|00:09:03|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22052, token usage: 0.34, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 175.96, #queue-req: 0
+[2026-09-29|00:09:03|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22092, token usage: 0.34, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 181.67, #queue-req: 0
+[2026-09-29|00:09:03|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22132, token usage: 0.34, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 182.15, #queue-req: 0
+[2026-09-29|00:09:03|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22172, token usage: 0.34, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 191.08, #queue-req: 0
+[2026-09-29|00:09:04|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22212, token usage: 0.34, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 182.50, #queue-req: 0
+[2026-09-29|00:09:04|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22252, token usage: 0.34, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 176.06, #queue-req: 0
+[2026-09-29|00:09:04|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22292, token usage: 0.34, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 184.59, #queue-req: 0
+[2026-09-29|00:09:04|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22332, token usage: 0.34, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 187.16, #queue-req: 0
+[2026-09-29|00:09:04|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22372, token usage: 0.34, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 176.12, #queue-req: 0
+[2026-09-29|00:09:05|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22412, token usage: 0.34, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 174.98, #queue-req: 0
+[2026-09-29|00:09:05|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22452, token usage: 0.34, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 187.47, #queue-req: 0
+[2026-09-29|00:09:05|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22492, token usage: 0.34, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 182.09, #queue-req: 0
+[2026-09-29|00:09:05|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22532, token usage: 0.34, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 176.06, #queue-req: 0
+[2026-09-29|00:09:06|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22572, token usage: 0.34, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 184.10, #queue-req: 0
+[2026-09-29|00:09:06|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22612, token usage: 0.35, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 191.84, #queue-req: 0
+[2026-09-29|00:09:06|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22652, token usage: 0.35, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 192.55, #queue-req: 0
+[2026-09-29|00:09:06|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22692, token usage: 0.35, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 170.32, #queue-req: 0
+[2026-09-29|00:09:06|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22732, token usage: 0.35, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 178.00, #queue-req: 0
+[2026-09-29|00:09:07|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22772, token usage: 0.35, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 173.19, #queue-req: 0
+[2026-09-29|00:09:07|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22812, token usage: 0.35, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 169.20, #queue-req: 0
+[2026-09-29|00:09:07|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22852, token usage: 0.35, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 180.29, #queue-req: 0
+[2026-09-29|00:09:07|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22892, token usage: 0.35, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 161.57, #queue-req: 0
+[2026-09-29|00:09:08|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22932, token usage: 0.35, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 173.83, #queue-req: 0
+[2026-09-29|00:09:10|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 22972, token usage: 0.35, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 166.01, #queue-req: 0
+[2026-09-29|00:09:10|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 23012, token usage: 0.35, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 168.74, #queue-req: 0
+[2026-09-29|00:09:11|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 23052, token usage: 0.35, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 176.07, #queue-req: 0
+[2026-09-29|00:09:11|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 23092, token usage: 0.35, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 166.99, #queue-req: 0
+[2026-09-29|00:09:11|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 23132, token usage: 0.35, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 170.95, #queue-req: 0
+[2026-09-29|00:09:11|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 23172, token usage: 0.35, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 176.85, #queue-req: 0
+[2026-09-29|00:09:12|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 23212, token usage: 0.35, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 177.73, #queue-req: 0
+[2026-09-29|00:09:12|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 23252, token usage: 0.35, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 174.37, #queue-req: 0
+[2026-09-29|00:09:12|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 23292, token usage: 0.36, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 178.21, #queue-req: 0
+[2026-09-29|00:09:12|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 23332, token usage: 0.36, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 174.50, #queue-req: 0
+[2026-09-29|00:09:13|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 23372, token usage: 0.36, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 176.38, #queue-req: 0
+[2026-09-29|00:09:13|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 23412, token usage: 0.36, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 159.82, #queue-req: 0
+[2026-09-29|00:09:13|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 23452, token usage: 0.36, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 174.01, #queue-req: 0
+[2026-09-29|00:09:13|core|rank=0] INFO     Decode batch, #running-req: 1, #token: 23492, token usage: 0.36, #mamba-slot: 4/12, mamba usage: 0.33, gen throughput (token/s): 176.66, #queue-req: 0
+INFO:     127.0.0.1:52794 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+[2026-09-29|00:09:13|core|rank=0] INFO     Scheduler is idle, waiting for new reqs...
+Stopping ft-measure-y-wn.service - /home/lucas/ai/FreeToken-wt/ctx393/scripts/serve-default.sh...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [3502136]
+/usr/lib/python3.12/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 4 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+ft-measure-y-wn.service: Main process exited, code=exited, status=143/n/a
+ft-measure-y-wn.service: Failed with result 'exit-code'.
+Stopped ft-measure-y-wn.service - /home/lucas/ai/FreeToken-wt/ctx393/scripts/serve-default.sh.
+ft-measure-y-wn.service: Consumed 10min 20.456s CPU time, 25.2G memory peak, 0B memory swap peak.

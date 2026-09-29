@@ -1,0 +1,393 @@
+The user has shared a detailed engineering design document about serving NVIDIA Nemotron models on FreeToken. They want me to:
+1. Summarize the main design decisions
+2. Critique them — which decisions look fragile, what measurements are missing, and what I'd change first
+
+Let me carefully read through this document and extract the key design decisions, then provide a thoughtful critique.
+
+Let me identify the main design decisions:
+
+**Architecture/Model family:**
+- NemotronHForCausalLM family — hybrid Mamba-2 / full-attention / latent-MoE
+- Two checkpoints: Nemotron 3 Super (120B-A12B, latent MoE, single_stream_only) and Nemotron 3.5 Lightning (30B-A3B, non-latent, 52 layers: 23 Mamba-2, 23 MoE, 6 full-attention)
+
+**MoE offload strategy:**
+- `offload` backend chosen over `cpu`/`hybrid` — because hybrid measured 3.6× slower end-to-end despite 1.26× kernel bandwidth ratio (below 2× threshold)
+- NVFP4 expert banks on host RAM, fetched via PCIe on demand
+- `--moe-pageable-gpu` for WSL pin-budget overflow
+
+**Expert GEMM kernel choice:**
+- `triton` chosen over `b12x` (tensor core) and `flashinfer` for Lightning
+- b12x's auto-resolution is "now wrong on this geometry"
+- Triton wins decode microbenchmarks, b12x keeps a small prefill lead at widest chunks
+- Backend chosen once at bank-load time (pins weight layout)
+
+**KV cache:**
+- `q8_0` quantized KV chosen over `fp8_e4m3` (fp8 flipped first tokens on cached-prefix reuse)
+- Growable KV via `--kv-grow-step-tokens`
+- Context ceiling: tokenizer model_max_length 262K vs max_position_embeddings 1M
+
+**Concurrency model:**
+- Lightning: up to 16 concurrent (not single_stream_only)
+- Default profile: single lane (1 running request), others checkpointed/swapped
+- 1M profile: one resident session, others queue and served in sequence via spill/restore
+
+**Expert cache policy:**
+- LFU over LRU at 16-way (LRU degenerates to 99.6% miss rate)
+- Rule of thumb: LFU above ~15% miss rate, LRU below
+
+**CUDA graphs:**
+- Dense decode graph ladder [1..16] for offload-MoE (padded rows route their own experts, so exact graphs better)
+- Single-stream keeps graphs; pageable-gpu disables them
+
+**Speculative decoding:**
+- ngram spec, off by default, --spec-ngram-n 8
+- Greedy and single-stream only (silently falls back)
+- --moe-extend-cache-tokens 64 to make multi-token forward cheap
+- --spec-draft-len 16 worth more on copy-heavy but default stays 8 (131K regression)
+
+**Memory management:**
+- `--memory-ratio 1.00` default (engine predicts headroom, not a tuning knob)
+- Session spill to RAM then NVMe
+- Residency policy: no spill while queue empty, retention by capacity + age, survive restart
+- Partial-prefix restore with recurrent state at multiple boundaries
+
+**Launch profiles:**
+- Default (2026-09-17): single lane
+- P1: bring-up
+- P2: 16 concurrent (historical)
+
+Now let me think about the critique. Which decisions look fragile?
+
+1. **The expert GEMM backend choice (triton vs b12x)** — This is fragile because:
+   - The decision is made once at bank-load time and pins the weight layout
+   - The auto-resolution is "wrong on this geometry" — meaning the heuristic that picks the backend is brittle
+   - The kernel microbenchmarks are very width-specific and the lead changes with each rewrite (b12x 2.3× → 1.34× → 1.10×)
+   - The whole thing hinges on microbenchmark measurements that keep shifting
+   - "auto still resolves to b12x here... and that resolution is now wrong" — this is a red flag that the auto-selection is a maintenance burden
+
+2. **The single-lane default profile** — Fragile because:
+   - It relies on checkpoint/swap to RAM/disk for queued sessions
+   - p95 18.6s vs 179s is a big tail cost
+   - The soak numbers (16 clients, 0 errors) might hide per-request latency issues
+   - It's a big bet on the swap mechanism being reliable
+
+3. **The memory-ratio 1.00 decision** — The doc says it's "an override, not a tuning knob" and the engine predicts headroom. But:
+   - The prediction is "measured at startup" and WARNs outside ±25%
+   - The 5080 passed from the start but that's one GPU
+   - Different GPUs, different workloads could break the prediction
+
+4. **The LFU/LRU miss-rate rule of thumb** — 
+   - 99.6% miss rate with LRU at 16-way is extreme
+   - The rule "LFU above ~15%, LRU below" is heuristic
+   - Depends heavily on traffic pattern
+
+5. **Speculative decoding** — 
+   - The 131K regression is a real limitation
+   - The gate "cannot refund the measurement"
+   - Not token-identical to greedy — this is a correctness concern for some use cases
+   - The whole thing is gated on greedy + single-stream
+
+6. **The MoE extend cache threshold (64)** — 
+   - "The crossover is between 64 and 80, i.e. exactly at the shipped default" — shipping exactly at a measured crossover is fragile
+   - The hard servable width ceiling (m ≤ 170) is a bug that had to be worked around
+
+7. **The addressing-under-interference finding** — 
+   - This is a model property, not a defect, but it means recall at 524K+ is unreliable for certain query types
+   - This is a fundamental limitation that affects the product's value proposition for long-context agents
+
+Let me think about what measurements are missing:
+
+1. **End-to-end correctness under speculation** — the doc admits it's not token-identical to greedy. For an agent serving tool-output prompts, divergence matters.
+
+2. **The memory prediction across GPUs** — only the 5080 (16GB) is measured. What about 24GB, 48GB, multi-GPU?
+
+3. **Swap/spill reliability under failure** — what happens when NVMe is slow, or the checkpoint is corrupted? The "survive restart" story assumes clean checkpoints.
+
+4. **Real traffic vs synthetic** — most numbers are synthetic needle prompts. The doc acknowledges "which is not what the probe measures" for the memory-ratio.
+
+5. **The expert cache eviction under varied traffic** — LFU's advantage depends on hot/cold expert distribution.
+
+6. **Prefill chunk size sensitivity** — the doc says it's "not a throughput lever" but this is measured on synthetic.
+
+7. **Long-context speculation cost** — the 131K regression.
+
+8. **Multi-GPU / scaling** — not discussed.
+
+9. **The b12x vs triton tradeoff on other GPUs** — sm_120 is Blackwell. Different architectures might favor b12x.
+
+10. **Cost per token / economic analysis** — for a serving product.
+
+What would I change first?
+
+Let me think about the highest-leverage, highest-risk items:
+
+1. **The expert GEMM backend auto-selection** — This is the most fragile because it's a heuristic that's explicitly "wrong" and the kernel benchmarks keep shifting. The fact that "auto still resolves to b12x here... and that resolution is now wrong on this geometry" is a huge red flag. I'd want to either make the selection robust or pin it per-checkpoint. Actually, the deeper issue is that the backend choice pins the weight layout, so it's a hard, irreversible decision at load time. That's a design smell.
+
+2. **The single-lane default** — This is a big product decision. The 18.6s p95 tail is a real cost. But it's measured and justified. Hmm.
+
+3. **The addressing-under-interference** — This is a fundamental limitation. But it's a model property, not something to "fix."
+
+Let me reconsider. The question asks for a genuine engineering critique. Let me be honest and specific.
+
+Actually, I think the most fragile thing is the coupling between the expert GEMM backend and the weight layout. Choosing the backend "once, at bank-load time" because it "pins the on-GPU weight layout" means you can't use b12x for prefill and Triton for decode. This is a rigid design. And the auto-selection is known to be wrong. So you have a brittle heuristic making an irreversible decision. That's the top critique.
+
+Second, the memory-ratio 1.00 "not a tuning knob" — the doc is defensive about this. The prediction is measured at startup and warns outside ±25%. But the whole value prop is serving on a 16GB card with tight margins. If the prediction is off, what happens? OOM? Degraded? The doc doesn't say what happens when prediction fails.
+
+Third, the single-lane default with swap — the reliability of the swap/restore is unproven under real failure conditions. The "survive restart" is measured but only in the happy path.
+
+Let me also think about the speculative decoding correctness issue more. The doc says it's "not token-identical to non-speculative greedy decoding." For an AI coding agent (which is the target — tool-output prompts, code), this could be a real problem. If the model's output diverges, and the user is pasting in a file and asking for the "complete updated file," divergence could corrupt the output. This is a correctness risk that's downplayed.
+
+Actually wait — the spec decoding "silently takes the ordinary decode path" for many cases, and greedy+single-stream only. But the acceptance is measured on copy-heavy prompts. For code/prose it's neutral (0.99×). But it's still not token-identical. Hmm, but if it's neutral on code/prose, maybe the divergence is rare there. Still, the doc admits divergence at token 40-71 on 3 of 4 prompts.
+
+Let me also note: the document is extremely measurement-heavy and self-correcting (retractions, corrections, A/Bs). This is actually a strength — it shows a rigorous culture. But it also means the "design" is really a collection of measured decisions, some of which are already being revised. The fragility is that many decisions are pinned to specific measurements on a specific GPU (5080, sm_120) that may not generalize.
+
+Let me structure my answer:
+
+1. **Summary of main design decisions** (grouped)
+2. **Critique: fragile decisions**
+3. **Missing measurements**
+4. **What I'd change first**
+
+Let me be concrete and use specifics from the doc. I should be honest about what's good and what's bad.
+
+Let me think about the format. This is a substantial technical question. A good structure would be:
+- Brief summary of the design decisions (maybe with a table or grouped bullets)
+- Critique section
+- What I'd change first
+
+I should use headers to organize. The response should be thorough but not bloated. Let me aim for something comprehensive but readable.
+
+Let me draft.
+
+**Summary of main design decisions:**
+
+The core tension: serving a huge hybrid model (Mamba-2 recurrent + MoE + attention) on constrained hardware (16GB 5080) by offloading expert banks to host RAM and fetching over PCIe on demand, while keeping everything else GPU-resident and fast.
+
+Key decisions:
+1. MoE offload to host RAM (PCIe fetch) over CPU/hybrid execution — offload wins end-to-end despite kernel bandwidth ratio <2×
+2. Triton expert GEMM over b12x tensor-core — auto-selection is known wrong for this geometry
+3. q8_0 KV over fp8_e4m3 — fp8 had correctness flips
+4. Single-lane default (1 request resident, others swap to RAM/disk) vs 16-way — default is single-lane for latency
+5. LFU expert cache over LRU — LRU degenerates to 99.6% miss at 16-way
+6. Growable KV funded from expert cache
+7. Dense CUDA graph ladder [1..16] for offload-MoE — padded rows route experts
+8. ngram speculative decoding, gated to greedy/single-stream, draft-len 8
+9. memory-ratio 1.00, engine-predicted headroom (not tuning knob)
+10. Session spill/restore with partial-prefix and look-ahead for 1M context
+11. --moe-extend-cache-tokens 64 to make spec verify cheap
+
+**Critique — fragile decisions:**
+
+1. **The backend→layout coupling + known-wrong auto-selection.** The expert GEMM backend is chosen once at bank-load and pins the weight layout irreversibly. The auto-heuristic is explicitly "wrong on this geometry." So a brittle heuristic makes an irreversible, layout-affecting decision. And the b12x-vs-triton lead keeps shrinking with each Triton rewrite (2.3× → 1.10×), suggesting the whole debate is a moving target. If a future kernel reclaims the prefill lead, you're stuck with the layout. This is the single most fragile coupling.
+
+2. **memory-ratio 1.00 "not a tuning knob" with a prediction that warns ±25%.** The whole model runs at the edge of VRAM. The doc says the engine predicts headroom and measures the prefill transient, filling back so "exactly that is left free." But it doesn't say what happens when the prediction is wrong — OOM? The 5080 passed from the start, but that's one card. The ±25% WARN band is a canary that the model is under-provisioned.
+
+3. **Single-lane default with swap.** p95 18.6s is a real tail cost. The swap/restore reliability is measured only in the happy path (byte-identical restore, clean restart). No failure-mode coverage: slow/dying NVMe, corrupted checkpoint, partial restore fingerprint mismatch.
+
+4. **Speculative decoding non-identity.** Admitted not token-identical to greedy. For a coding agent pasting files, divergence is a correctness risk, not just a throughput one. The doc treats it as a known property but it's load-bearing for the target workload.
+
+5. **The 64-token extend-cache threshold shipped exactly at the measured crossover.** "The crossover is between 64 and 80, i.e. exactly at the shipped default." Shipping a knob at the knife-edge of a measured crossover is fragile — different traffic, a slightly faster link, or a different model shifts the crossover.
+
+6. **Addressing-under-interference at 524K+.** This is a model property, but it undercuts the long-context value prop for agents. The doc is honest about it, but it's a fundamental limitation that isn't mitigated.
+
+**Missing measurements:**
+
+1. **Failure-mode / reliability of the swap-spill path** — NVMe latency variance, checkpoint corruption, partial-restore mismatch, restart under load.
+2. **memory-ratio
+<<content>>
+The user has shared a detailed engineering design document about serving NVIDIA Nemotron models on FreeToken. They want me to:
+1. Summarize the main design decisions
+2. Critique them — which decisions look fragile, what measurements are missing, and what I'd change first
+
+Let me carefully read through this document and extract the key design decisions, then provide a thoughtful critique.
+
+Let me identify the main design decisions:
+
+**Architecture/Model family:**
+- NemotronHForCausalLM family — hybrid Mamba-2 / full-attention / latent-MoE
+- Two checkpoints: Nemotron 3 Super (120B-A12B, latent MoE, single_stream_only) and Nemotron 3.5 Lightning (30B-A3B, non-latent, 52 layers: 23 Mamba-2, 23 MoE, 6 full-attention)
+
+**MoE offload strategy:**
+- `offload` backend chosen over `cpu`/`hybrid` — because hybrid measured 3.6× slower end-to-end despite 1.26× kernel bandwidth ratio (below 2× threshold)
+- NVFP4 expert banks on host RAM, fetched via PCIe on demand
+- `--moe-pageable-gpu` for WSL pin-budget overflow
+
+**Expert GEMM kernel choice:**
+- `triton` chosen over `b12x` (tensor core) and `flashinfer` for Lightning
+- b12x's auto-resolution is "now wrong on this geometry"
+- Triton wins decode microbenchmarks, b12x keeps a small prefill lead at widest chunks
+- Backend chosen once at bank-load time (pins weight layout)
+
+**KV cache:**
+- `q8_0` quantized KV chosen over `fp8_e4m3` (fp8 flipped first tokens on cached-prefix reuse)
+- Growable KV via `--kv-grow-step-tokens`
+- Context ceiling: tokenizer model_max_length 262K vs max_position_embeddings 1M
+
+**Concurrency model:**
+- Lightning: up to 16 concurrent (not single_stream_only)
+- Default profile: single lane (1 running request), others checkpointed/swapped
+- 1M profile: one resident session, others queue and served in sequence via spill/restore
+
+**Expert cache policy:**
+- LFU over LRU at 16-way (LRU degenerates to 99.6% miss rate)
+- Rule of thumb: LFU above ~15% miss rate, LRU below
+
+**CUDA graphs:**
+- Dense decode graph ladder [1..16] for offload-MoE (padded rows route their own experts, so exact graphs better)
+- Single-stream keeps graphs; pageable-gpu disables them
+
+**Speculative decoding:**
+- ngram spec, off by default, --spec-ngram-n 8
+- Greedy and single-stream only (silently falls back)
+- --moe-extend-cache-tokens 64 to make multi-token forward cheap
+- --spec-draft-len 16 worth more on copy-heavy but default stays 8 (131K regression)
+
+**Memory management:**
+- `--memory-ratio 1.00` default (engine predicts headroom, not a tuning knob)
+- Session spill to RAM then NVMe
+- Residency policy: no spill while queue empty, retention by capacity + age, survive restart
+- Partial-prefix restore with recurrent state at multiple boundaries
+
+**Launch profiles:**
+- Default (2026-09-17): single lane
+- P1: bring-up
+- P2: 16 concurrent (historical)
+
+Now let me think about the critique. Which decisions look fragile?
+
+1. **The expert GEMM backend choice (triton vs b12x)** — This is fragile because:
+   - The decision is made once at bank-load time and pins the weight layout
+   - The auto-resolution is "wrong on this geometry" — meaning the heuristic that picks the backend is brittle
+   - The kernel microbenchmarks are very width-specific and the lead changes with each rewrite (b12x 2.3× → 1.34× → 1.10×)
+   - The whole thing hinges on microbenchmark measurements that keep shifting
+   - "auto still resolves to b12x here... and that resolution is now wrong" — this is a red flag that the auto-selection is a maintenance burden
+
+2. **The single-lane default profile** — Fragile because:
+   - It relies on checkpoint/swap to RAM/disk for queued sessions
+   - p95 18.6s vs 179s is a big tail cost
+   - The soak numbers (16 clients, 0 errors) might hide per-request latency issues
+   - It's a big bet on the swap mechanism being reliable
+
+3. **The memory-ratio 1.00 decision** — The doc says it's "an override, not a tuning knob" and the engine predicts headroom. But:
+   - The prediction is "measured at startup" and WARNs outside ±25%
+   - The 5080 passed from the start but that's one GPU
+   - Different GPUs, different workloads could break the prediction
+
+4. **The LFU/LRU miss-rate rule of thumb** — 
+   - 99.6% miss rate with LRU at 16-way is extreme
+   - The rule "LFU above ~15%, LRU below" is heuristic
+   - Depends heavily on traffic pattern
+
+5. **Speculative decoding** — 
+   - The 131K regression is a real limitation
+   - The gate "cannot refund the measurement"
+   - Not token-identical to greedy — this is a correctness concern for some use cases
+   - The whole thing is gated on greedy + single-stream
+
+6. **The MoE extend cache threshold (64)** — 
+   - "The crossover is between 64 and 80, i.e. exactly at the shipped default" — shipping exactly at a measured crossover is fragile
+   - The hard servable width ceiling (m ≤ 170) is a bug that had to be worked around
+
+7. **The addressing-under-interference finding** — 
+   - This is a model property, not a defect, but it means recall at 524K+ is unreliable for certain query types
+   - This is a fundamental limitation that affects the product's value proposition for long-context agents
+
+Let me think about what measurements are missing:
+
+1. **End-to-end correctness under speculation** — the doc admits it's not token-identical to greedy. For an agent serving tool-output prompts, divergence matters.
+
+2. **The memory prediction across GPUs** — only the 5080 (16GB) is measured. What about 24GB, 48GB, multi-GPU?
+
+3. **Swap/spill reliability under failure** — what happens when NVMe is slow, or the checkpoint is corrupted? The "survive restart" story assumes clean checkpoints.
+
+4. **Real traffic vs synthetic** — most numbers are synthetic needle prompts. The doc acknowledges "which is not what the probe measures" for the memory-ratio.
+
+5. **The expert cache eviction under varied traffic** — LFU's advantage depends on hot/cold expert distribution.
+
+6. **Prefill chunk size sensitivity** — the doc says it's "not a throughput lever" but this is measured on synthetic.
+
+7. **Long-context speculation cost** — the 131K regression.
+
+8. **Multi-GPU / scaling** — not discussed.
+
+9. **The b12x vs triton tradeoff on other GPUs** — sm_120 is Blackwell. Different architectures might favor b12x.
+
+10. **Cost per token / economic analysis** — for a serving product.
+
+What would I change first?
+
+Let me think about the highest-leverage, highest-risk items:
+
+1. **The expert GEMM backend auto-selection** — This is the most fragile because it's a heuristic that's explicitly "wrong" and the kernel benchmarks keep shifting. The fact that "auto still resolves to b12x here... and that resolution is now wrong on this geometry" is a huge red flag. I'd want to either make the selection robust or pin it per-checkpoint. Actually, the deeper issue is that the backend choice pins the weight layout, so it's a hard, irreversible decision at load time. That's a design smell.
+
+2. **The single-lane default** — This is a big product decision. The 18.6s p95 tail is a real cost. But it's measured and justified. Hmm.
+
+3. **The addressing-under-interference** — This is a fundamental limitation. But it's a model property, not something to "fix."
+
+Let me reconsider. The question asks for a genuine engineering critique. Let me be honest and specific.
+
+Actually, I think the most fragile thing is the coupling between the expert GEMM backend and the weight layout. Choosing the backend "once, at bank-load time" because it "pins the on-GPU weight layout" means you can't use b12x for prefill and Triton for decode. This is a rigid design. And the auto-selection is known to be wrong. So you have a brittle heuristic making an irreversible decision. That's the top critique.
+
+Second, the memory-ratio 1.00 "not a tuning knob" — the doc is defensive about this. The prediction is measured at startup and warns outside ±25%. But the whole value prop is serving on a 16GB card with tight margins. If the prediction is off, what happens? OOM? Degraded? The doc doesn't say what happens when prediction fails.
+
+Third, the single-lane default with swap — the reliability of the swap/restore is unproven under real failure conditions. The "survive restart" is measured but only in the happy path.
+
+Let me also think about the speculative decoding correctness issue more. The doc says it's "not token-identical to non-speculative greedy decoding." For an AI coding agent (which is the target — tool-output prompts, code), this could be a real problem. If the model's output diverges, and the user is pasting in a file and asking for the "complete updated file," divergence could corrupt the output. This is a correctness risk that's downplayed.
+
+Actually wait — the spec decoding "silently takes the ordinary decode path" for many cases, and greedy+single-stream only. But the acceptance is measured on copy-heavy prompts. For code/prose it's neutral (0.99×). But it's still not token-identical. Hmm, but if it's neutral on code/prose, maybe the divergence is rare there. Still, the doc admits divergence at token 40-71 on 3 of 4 prompts.
+
+Let me also note: the document is extremely measurement-heavy and self-correcting (retractions, corrections, A/Bs). This is actually a strength — it shows a rigorous culture. But it also means the "design" is really a collection of measured decisions, some of which are already being revised. The fragility is that many decisions are pinned to specific measurements on a specific GPU (5080, sm_120) that may not generalize.
+
+Let me structure my answer:
+
+1. **Summary of main design decisions** (grouped)
+2. **Critique: fragile decisions**
+3. **Missing measurements**
+4. **What I'd change first**
+
+Let me be concrete and use specifics from the doc. I should be honest about what's good and what's bad.
+
+Let me think about the format. This is a substantial technical question. A good structure would be:
+- Brief summary of the design decisions (maybe with a table or grouped bullets)
+- Critique section
+- What I'd change first
+
+I should use headers to organize. The response should be thorough but not bloated. Let me aim for something comprehensive but readable.
+
+Let me draft.
+
+**Summary of main design decisions:**
+
+The core tension: serving a huge hybrid model (Mamba-2 recurrent + MoE + attention) on constrained hardware (16GB 5080) by offloading expert banks to host RAM and fetching over PCIe on demand, while keeping everything else GPU-resident and fast.
+
+Key decisions:
+1. MoE offload to host RAM (PCIe fetch) over CPU/hybrid execution — offload wins end-to-end despite kernel bandwidth ratio <2×
+2. Triton expert GEMM over b12x tensor-core — auto-selection is known wrong for this geometry
+3. q8_0 KV over fp8_e4m3 — fp8 had correctness flips
+4. Single-lane default (1 request resident, others swap to RAM/disk) vs 16-way — default is single-lane for latency
+5. LFU expert cache over LRU — LRU degenerates to 99.6% miss at 16-way
+6. Growable KV funded from expert cache
+7. Dense CUDA graph ladder [1..16] for offload-MoE — padded rows route experts
+8. ngram speculative decoding, gated to greedy/single-stream, draft-len 8
+9. memory-ratio 1.00, engine-predicted headroom (not tuning knob)
+10. Session spill/restore with partial-prefix and look-ahead for 1M context
+11. --moe-extend-cache-tokens 64 to make spec verify cheap
+
+**Critique — fragile decisions:**
+
+1. **The backend→layout coupling + known-wrong auto-selection.** The expert GEMM backend is chosen once at bank-load and pins the weight layout irreversibly. The auto-heuristic is explicitly "wrong on this geometry." So a brittle heuristic makes an irreversible, layout-affecting decision. And the b12x-vs-triton lead keeps shrinking with each Triton rewrite (2.3× → 1.10×), suggesting the whole debate is a moving target. If a future kernel reclaims the prefill lead, you're stuck with the layout. This is the single most fragile coupling.
+
+2. **memory-ratio 1.00 "not a tuning knob" with a prediction that warns ±25%.** The whole model runs at the edge of VRAM. The doc says the engine predicts headroom and measures the prefill transient, filling back so "exactly that is left free." But it doesn't say what happens when the prediction is wrong — OOM? The 5080 passed from the start, but that's one card. The ±25% WARN band is a canary that the model is under-provisioned.
+
+3. **Single-lane default with swap.** p95 18.6s is a real tail cost. The swap/restore reliability is measured only in the happy path (byte-identical restore, clean restart). No failure-mode coverage: slow/dying NVMe, corrupted checkpoint, partial restore fingerprint mismatch.
+
+4. **Speculative decoding non-identity.** Admitted not token-identical to greedy. For a coding agent pasting files, divergence is a correctness risk, not just a throughput one. The doc treats it as a known property but it's load-bearing for the target workload.
+
+5. **The 64-token extend-cache threshold shipped exactly at the measured crossover.** "The crossover is between 64 and 80, i.e. exactly at the shipped default." Shipping a knob at the knife-edge of a measured crossover is fragile — different traffic, a slightly faster link, or a different model shifts the crossover.
+
+6. **Addressing-under-interference at 524K+.** This is a model property, but it undercuts the long-context value prop for agents. The doc is honest about it, but it's a fundamental limitation that isn't mitigated.
+
+**Missing measurements:**
+
+1. **Failure-mode / reliability of the swap-spill path** — NVMe latency variance, checkpoint corruption, partial-restore mismatch, restart under load.
+2. **memory-ratio
