@@ -114,6 +114,7 @@ def test_a_pass_that_seats_nothing_new_still_counts_itself():
     assert pm.schedule_next_batch(32) is None
     assert pm.counters.passes == 1
     assert pm.counters.fresh_admits_deferred == 1
+    assert pm.counters.deferred_by == {"kv": 1}  # a 4K prompt against a 32-page pool
     assert pm.counters.refusals == 0
 
 

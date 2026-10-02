@@ -71,7 +71,10 @@
 #   FREETOKEN_MIRROR_HOST_ROWS    default -1 (auto pool rows)
 #   FREETOKEN_PIN_BUDGET_GB       default 20 (>= Ornith EXL3's 19.28 GiB of expert banks, for
 #                                 the whole-model residency; lower only if RAM is short)
-#   FREETOKEN_HOST_RAM_RESERVE_GB default 0 (RAM the preflight keeps free; owner's choice)
+#   FREETOKEN_HOST_RAM_RESERVE_GB default 2 (owner's choice, 2026-10-03): MemAvailable the
+#                                 session tier never fills -- under it RAM checkpoints move
+#                                 to disk -- and that the load preflight requires beside
+#                                 the expert banks (19.28 + 2 GiB)
 #   FREETOKEN_MEMORY_RATIO        default 1.00 of FREE VRAM (KV ceiling + expert cache),
 #                                 the engine's default too (2026-09-24, owner decision):
 #                                 an override, not a tuning knob. The engine reserves its
@@ -81,6 +84,8 @@
 #                                 whatever else holds the card -- which is also why a
 #                                 measurement taken beside another GPU process is not
 #                                 comparable.
+#   FREETOKEN_SESSION_SPILL_RAM_GB default 3: RAM for queued sessions' checkpoints, one
+#                                 full 262K session prefetched (KV 2.68 GiB + one state)
 #   FREETOKEN_CACHE_DIR           default $HOME/.cache/freetoken (spill, traces, logs)
 #   FREETOKEN_LONG_CONTEXT        default 0 (262144, native). 1 = 393216 via YaRN factor 2; see the
 #                                 Context note above and tasks/ornith-exl3/ctx393/README.md before
@@ -136,8 +141,9 @@ exec uv run ft serve \
   --num-tokens "$CTX_TOKENS" --max-seq-len-override "$CTX_TOKENS" --kv-cache-dtype q8_0 \
   --attention-backend triton --moe-backend offload --moe-cache-auto --moe-cache-policy lfu \
   --memory-ratio "${FREETOKEN_MEMORY_RATIO:-1.00}" --max-prefill-length 8192 \
-  --host-ram-reserve-gb "${FREETOKEN_HOST_RAM_RESERVE_GB:-0}" \
-  --session-spill-ram-gb 1 --session-spill-disk-gb 50 --session-spill-limit-gb 50 \
+  --host-ram-reserve-gb "${FREETOKEN_HOST_RAM_RESERVE_GB:-2}" \
+  --session-spill-ram-gb "${FREETOKEN_SESSION_SPILL_RAM_GB:-3}" \
+  --session-spill-disk-gb 50 --session-spill-limit-gb 50 \
   --session-spill-dir "$CACHE/spill" \
   --enable-cache-report \
   --served-model-name ornith \

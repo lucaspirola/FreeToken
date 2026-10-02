@@ -86,6 +86,8 @@ class PrefillCounters:
     # is no longer holding up the queue); a large value together with ``refusals`` rising
     # and no prefill batches is the pool actually being full.
     fresh_admits_deferred: int = 0
+    # The same deferrals by the pool that refused: table, kv, mamba, swa, chunk.
+    deferred_by: Dict[str, int] = field(default_factory=dict)
     # Passes that stopped because a lane was refused (the admission loop's ``break``), i.e.
     # the queue tail went unserved for want of pool, table or budget rather than lanes.
     refusals: int = 0
@@ -140,6 +142,7 @@ class PrefillCounters:
             "fresh_admits_blocked_by_cap": self.fresh_admits_blocked_by_cap,
             "deferred_chunks": self.deferred_chunks,
             "fresh_admits_deferred": self.fresh_admits_deferred,
+            "deferred_by": dict(self.deferred_by),
             "refusals": self.refusals,
             "chunked_inflight": self.chunked_inflight,
             "chunked_inflight_max": self.chunked_inflight_max,

@@ -126,6 +126,8 @@ class SessionSpillRecord:
     # A disk record's prefetched chunks: their tensors sit on ``chunk.value`` beside
     # ``chunk.file``, and these bytes are charged to the RAM tier.
     cached_bytes: int = 0
+    # start_prefetch's memo: (key, chunks to read, their bytes).
+    prefetch_plan: tuple = (None, None, 0)
 
     @property
     def in_ram(self) -> bool:
@@ -1344,20 +1346,19 @@ class SessionSpillStore:
         if record is None or record.tier != "disk" or record.cached_bytes:
             return False
         # Read only what the restore will: the KV below its cut and the one state at it.
-        # The cut comes from the queued request's own tokens when they are known.
-        cut = record.num_pages
-        if token_ids is not None:
-            cut = record.restorable_length(_matched_len(record.token_ids, token_ids))
-            if cut == 0:
-                return False
-        wanted = [c for c in record.chunks if self._chunk_needed(c, cut, cut)]
-        if not wanted or any(chunk.file is None for chunk in wanted):
-            self.counters.prefetches_failed += 1
+        # The cut comes from the queued request's own tokens when they are known. The plan
+        # is memoized per (record, request length): a refused prefetch is retried every
+        # scheduler pass, and re-matching ~100K tokens and stat-ing ~600 files each time
+        # was most of an idle pass (py-spy, 2026-10-03).
+        key = (record.num_pages, None if token_ids is None else len(token_ids))
+        plan = record.prefetch_plan if record.prefetch_plan[0] == key else None
+        if plan is None:
+            plan = (key, *self._prefetch_plan(record, token_ids))
+            record.prefetch_plan = plan
+        _key, wanted, reserve = plan
+        if wanted is None:
             return False
-        try:
-            # File sizes bound the tensors from above (plus some pickle framing per file).
-            reserve = min(sum(chunk.file.stat().st_size for chunk in wanted), record.byte_size)
-        except OSError:
+        if not wanted:
             self.counters.prefetches_failed += 1
             return False
         files = [chunk.file for chunk in wanted]
@@ -1400,6 +1401,26 @@ class SessionSpillStore:
             return False
         self.counters.prefetches += 1
         return True
+
+    def _prefetch_plan(
+        self, record: SessionSpillRecord, token_ids
+    ) -> tuple[list[SpillChunk] | None, int]:
+        """(chunks a restore of ``token_ids`` reads, their bytes); None = nothing to restore,
+        [] = a chunk is unreadable."""
+        cut = record.num_pages
+        if token_ids is not None:
+            cut = record.restorable_length(_matched_len(record.token_ids, token_ids))
+            if cut == 0:
+                return None, 0
+        wanted = [c for c in record.chunks if self._chunk_needed(c, cut, cut)]
+        if not wanted or any(chunk.file is None for chunk in wanted):
+            return [], 0
+        try:
+            # File sizes bound the tensors from above (plus some pickle framing per file).
+            reserve = min(sum(chunk.file.stat().st_size for chunk in wanted), record.byte_size)
+        except OSError:
+            return [], 0
+        return wanted, reserve
 
     def _take_promoted(self, session_id: str | None) -> str | None:
         """Report an already-installed promotion once, to the first caller that asks."""

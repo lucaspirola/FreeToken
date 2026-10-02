@@ -42,8 +42,9 @@ Do not start the server from an agent shell: the harness can kill shells during 
 and a server started there dies with them.
 
 Before starting, `free -g` must show MemAvailable ≥ expert banks + ~4 GiB (≈ 20 GiB for
-this model); with `--host-ram-reserve-gb 0` (the owner's choice) the server keeps only
-~6–7 GiB of headroom on a 28 GiB host, and it dies first in a host OOM (OOMScoreAdjust=1000).
+this model). `--host-ram-reserve-gb 2` (owner's choice, 2026-10-03) is the MemAvailable the
+session tier never fills: below it, RAM checkpoints (up to `--session-spill-ram-gb 3`) move to
+disk. The server still dies first in a host OOM (OOMScoreAdjust=1000).
 Never run torch-backed pytest beside the live model; stop the server first
 (`tests/scheduler` etc. need ~1 GiB, the OOM sweep of 2026-09-06 killed a server this way).
 

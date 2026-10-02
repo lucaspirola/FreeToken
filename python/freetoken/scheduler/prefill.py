@@ -89,6 +89,8 @@ class PrefillAdder:
     # every prompt already mid-prefill: a cross-pass admission claim, not a page demand this
     # pass can be asked for. Inheriting that here would re-create the starvation above.
     reserved_pages: int = -1
+    # Which pool refused the last fresh admit (``PrefillCounters.deferred_by``).
+    refusal: str = ""
     # Per-PASS memo of ``CacheManager.match_req``, owned by the manager and handed in here.
     # ``dataclasses.replace`` passes the same dict object to the seat scan's throwaway copy,
     # which is the point: the scan and the admission loop ask the tree the same question
@@ -233,6 +235,7 @@ class PrefillAdder:
         ) * page_size
 
     def _try_allocate_one(self, req: PendingReq):
+        self.refusal = "table"
         if self.table_manager.available_size == 0:
             return None
 
@@ -259,12 +262,14 @@ class PrefillAdder:
         # a gate that measured only itself, and between them owed 1.76x the pool.
         # The charged quantity is the PAGE span, not the raw token count (upstream 46d2743):
         # CacheManager allocates each request in whole pages.
+        self.refusal = "kv"
         if not self._kv_gate_ok(estimated_size):
             return None
         self.cache_manager.lock(handle)
         # Re-read: lock() moved the matched prefix out of ``evictable``, so the budget shrank.
         if not self._kv_gate_ok(estimated_size):
             return self.cache_manager.unlock(handle)
+        self.refusal = "mamba"
 
         # Second currency (hybrid GDN): reserve 1 live + 2 ping-pong state slots; evict tree
         # snapshots if the pool is short, fail admission if still short (mirrors the KV gate).
@@ -287,8 +292,10 @@ class PrefillAdder:
         # chunk / one window (the per-chunk charge is in _add_one_req; the reclaim -- radix
         # evict_swa -- happens in allocate_paged, so no ensure here; swa_available_size already
         # folds the evictable tree). For naive (no tree) this can only refuse, which is correct.
+        self.refusal = "swa"
         if not self._swa_seat_ok(extend_len):
             return self.cache_manager.unlock(handle)
+        self.refusal = "chunk"  # admitted, but _add_one_req found no chunk to run this pass
 
         table_idx = self.table_manager.allocate()
         if cached_len > 0:  # NOTE: set the cached part
@@ -515,6 +522,7 @@ class PrefillAdder:
         return b if 0 < b < pending_req.input_len else None
 
     def try_add_one(self, pending_req: PendingReq, chunk_limit: int | None = None) -> Req | None:
+        self.refusal = ""
         if self.token_budget <= 0:
             return None
 
@@ -921,6 +929,8 @@ class PrefillManager:
                     # requests that did fit waited behind it, 108 K tokens of the pool went
                     # unused, and the pass re-ran the identical refusal 1.87 M times.
                     self.counters.fresh_admits_deferred += 1
+                    reason = adder.refusal or "other"
+                    self.counters.deferred_by[reason] = self.counters.deferred_by.get(reason, 0) + 1
                     continue
                 # Either the pool has nothing left to give anyone this pass (``headroom``
                 # gone, or a continuation -- which owns its slots and is refused only when
