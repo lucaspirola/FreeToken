@@ -603,3 +603,41 @@ def test_captured_states_ride_into_the_checkpoint_beside_the_final_one(tmp_path)
     assert torch.equal(linear.conv_states[:, restored.node.mamba_value], conv)
     manager.unlock(restored)
     store.shutdown()
+
+
+@pytest.mark.parametrize("tier", ["ram", "disk"])
+def test_a_rekeyed_checkpoint_survives_its_old_id_checkpointing_again(tmp_path, tier):
+    kv, linear, manager = _pools()
+
+    def new_store():
+        return SessionSpillStore(
+            kv, linear, directory=str(tmp_path),
+            ram_budget_bytes=(1 << 30) if tier == "ram" else 0,
+            disk_budget_bytes=1 << 30, host_reserve_bytes=0,
+        )
+
+    store = new_store()
+    tokens = torch.tensor([11, 12, 13, 14, 15], dtype=torch.int32)
+    pages = manager._page_to_token(manager._allocate(len(tokens)))
+    slot = linear.alloc(1)[0]
+    torch.manual_seed(3)
+    kv._k_buffer[:, pages] = torch.randint(-128, 127, kv._k_buffer[:, pages].shape, dtype=torch.int8)
+    linear.recurrent_states[:, slot] = torch.randn_like(linear.recurrent_states[:, slot])
+    expected_k = kv._k_buffer[:, pages].clone()
+    conversation = store.spill("agent-a", tokens, pages, slot)
+
+    assert store.rekey(conversation, "agent-a~prev")
+    # the compaction summary now checkpoints under the conversation's old id
+    summary = torch.tensor([7, 8, 9], dtype=torch.int32)
+    assert store.spill("agent-a", summary, pages[:3], slot) is not None
+
+    kept = store.get("agent-a~prev")
+    assert kept is conversation and kept.valid
+    assert [r.session_id for r in store.family("agent-a")] == ["agent-a~prev", "agent-a"]
+    restored = manager.restore_hybrid_session_prefix(kept, store)
+    assert torch.equal(kv._k_buffer[:, restored.get_matched_indices().long()], expected_k)
+    manager.unlock(restored)
+    if tier == "disk":
+        store.shutdown()
+        assert new_store().get("agent-a~prev") is not None   # the manifest moved with it
+    store.shutdown()

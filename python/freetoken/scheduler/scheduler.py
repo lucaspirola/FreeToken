@@ -1846,11 +1846,19 @@ class Scheduler(SchedulerIOMixin):
         return _common_prefix_len(tokens, input_ids, len(tokens)) >= len(tokens)
 
     def _spill_replaced_conversation(self, session_id: str, session: SessionLease) -> None:
-        if session.handle is None or session.token_ids is None:
+        """Keep the conversation this session held under ``<family>~prev``, out of the way
+        of the next checkpoint of ``session_id`` (which would overwrite it)."""
+        target = f"{_session_family(session_id)}~prev"
+        if session.handle is not None and session.token_ids is not None:
+            shadow = SessionLease(session.handle, session.ttl_seconds, reclaimable=True)
+            shadow.token_ids = session.token_ids
+            self._spill_soft_session(target, shadow)
             return
-        shadow = SessionLease(session.handle, session.ttl_seconds, reclaimable=True)
-        shadow.token_ids = session.token_ids
-        self._spill_soft_session(f"{_session_family(session_id)}~prev", shadow)
+        store = getattr(self, "_session_spill_store", None)
+        record = session.spill if session.spill is not None and session.spill.valid else None
+        record = record or (store.get(session_id) if store is not None else None)
+        if store is not None and record is not None and store.rekey(record, target):
+            logger.info_rank0("Kept the conversation of session %s as %s", session_id, target)
 
     def _discard_session_spill(self, session: SessionLease) -> None:
         store = getattr(self, "_session_spill_store", None)

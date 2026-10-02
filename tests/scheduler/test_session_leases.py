@@ -1087,6 +1087,26 @@ def test_a_turn_that_replaces_a_conversation_it_does_not_continue_saves_it():
     assert scheduler._sessions["A"].handle == "handle-0"
 
 
+def test_a_replaced_conversation_already_on_disk_is_moved_out_of_the_way():
+    import torch
+
+    scheduler = _demand_scheduler()
+    store = scheduler._session_spill_store
+    moved = []
+    store.rekey = lambda record, sid: moved.append((record.session_id, sid)) or True
+    lease = SessionLease(None, 300.0, active_uid=9, reclaimable=True)
+    lease.spill = store.spill("A", torch.tensor([1, 2, 3, 4], dtype=torch.int32),
+                              [0, 1, 2, 3], 3)
+    scheduler._sessions["A"] = lease
+    summary = _req(9, "A")
+    summary.input_ids = [7, 8, 9, 10, 11]
+
+    scheduler._free_req_resources(summary, retain_session=True)
+
+    # was: left under "A", where the summary's next checkpoint overwrote it
+    assert moved == [("A", "A~prev")]
+
+
 def test_a_turn_that_continues_its_conversation_saves_nothing_extra():
     import torch
 

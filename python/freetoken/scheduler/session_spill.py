@@ -498,6 +498,40 @@ class SessionSpillStore:
         record = self._by_session.get(session_id)
         return record if record is not None and record.valid else None
 
+    def rekey(self, record: SessionSpillRecord | None, session_id: str) -> bool:
+        """File ``record`` under ``session_id`` (directory, manifest and index), replacing
+        any checkpoint already there. Keeps a conversation's checkpoint alive when its
+        session id is about to checkpoint a different prompt over it."""
+        if record is None or not record.valid or record.session_id == session_id:
+            return False
+        if self._prefetch is not None and self._prefetch.record is record:
+            self.cancel_prefetch()
+        if self._promoted == record.session_id:
+            self._promoted = None
+        self.discard(self.get(session_id))
+        if record.directory is not None:
+            target = self._record_dir(session_id)
+            shutil.rmtree(target, ignore_errors=True)
+            try:
+                record.directory.rename(target)
+            except OSError:
+                return False
+            for chunk in record.chunks:
+                if chunk.file is not None:
+                    chunk.file = target / chunk.file.name
+            if record.token_file is not None:
+                record.token_file = target / record.token_file.name
+            record.directory = target
+        if self._by_session.get(record.session_id) is record:
+            self._by_session.pop(record.session_id, None)
+        record.session_id = session_id
+        self._by_session[session_id] = record
+        try:
+            self._write_manifest(record)
+        except OSError:
+            pass
+        return True
+
     def family(self, base: str) -> list[SessionSpillRecord]:
         """Valid checkpoints of ``base`` and its ``base~...`` siblings."""
         return [
