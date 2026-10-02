@@ -128,6 +128,21 @@ class ForwardInput(NamedTuple):
 ForwardData: TypeAlias = "Tuple[ForwardInput, ForwardOutput]"
 
 
+def _session_family(session_id: str) -> str:
+    """The conversation a sibling (``id~N``) or replaced-conversation (``id~prev``) lease
+    belongs to."""
+    return session_id.split("~", 1)[0]
+
+
+def _session_aliases(scheduler) -> dict:
+    """uid -> sibling session id, for requests rebound off a busy session (aborts carry
+    the id the client sent). Duck-typed: stub schedulers in the tests lack the attribute."""
+    aliases = getattr(scheduler, "_session_aliases", None)
+    if aliases is None:
+        aliases = scheduler._session_aliases = {}
+    return aliases
+
+
 def _common_prefix_len(record_tokens: torch.Tensor, input_ids, limit: int) -> int:
     """Length of the common prefix of a checkpoint and a client prompt, capped at ``limit``."""
     if limit <= 0:
@@ -1183,6 +1198,16 @@ class Scheduler(SchedulerIOMixin):
                 if not hasattr(self, "_sessions"):
                     self._sessions = {}
                 session = self._sessions.get(msg.session_id)
+                if (session is not None and session.active_uid is not None
+                        and msg.session_reclaimable):
+                    # An auto-bound conversation already has a turn in flight (a compaction
+                    # summary or side call beside the real turn). Bind this one to a sibling
+                    # lease instead of none, so it keeps protection and can restore the
+                    # family's checkpoints (_restore_cold_session).
+                    sibling = self._free_sibling_session(msg.session_id)
+                    _session_aliases(self)[msg.uid] = sibling
+                    msg.session_id = sibling
+                    session = self._sessions.get(sibling)
                 if session is not None and session.active_uid is not None:
                     self.send_result(
                         [
@@ -1270,9 +1295,10 @@ class Scheduler(SchedulerIOMixin):
             if tombstones is None:
                 tombstones = self._abort_tombstones = {}
             tombstones[msg.uid] = None
-            if msg.session_id is not None:
+            session_id = _session_aliases(self).pop(msg.uid, msg.session_id)
+            if session_id is not None:
                 # A disconnect ends the lease; the checkpoint stays for a reconnect.
-                self._close_session(msg.session_id, discard_state=False)
+                self._close_session(session_id, discard_state=False)
             # Unknown aborts normally consume their tombstone when the cross-worker UserMsg
             # catches up. Bound hostile/no-followup abort traffic without affecting realistic
             # in-flight concurrency.
@@ -1606,7 +1632,15 @@ class Scheduler(SchedulerIOMixin):
                     req.input_ids, req.cached_len
                 )
                 old_handle = session.handle
-                self._discard_session_spill(session)
+                _session_aliases(self).pop(req.uid, None)
+                if self._extends(session, req.input_ids):
+                    self._discard_session_spill(session)
+                else:
+                    # This turn replaced a conversation it does not continue (a compaction
+                    # summary finishing first). Keep that conversation restorable for the
+                    # turn that does continue it; its checkpoint, if any, stays in the store.
+                    self._spill_replaced_conversation(req.session_id, session)
+                    session.spill = None
                 session.handle = new_handle
                 retained_len = int(getattr(new_handle, "cached_len", req.cached_len))
                 session.token_ids = torch.as_tensor(
@@ -1790,6 +1824,34 @@ class Scheduler(SchedulerIOMixin):
             pool.bytes_per_slot() / (1 << 20),
         )
 
+    def _free_sibling_session(self, session_id: str) -> str:
+        base = _session_family(session_id)
+        for k in range(1, 1 << 16):
+            sibling = f"{base}~{k}"
+            lease = self._sessions.get(sibling)
+            if lease is None or lease.active_uid is None:
+                return sibling
+        return session_id
+
+    @staticmethod
+    def _extends(session: SessionLease, input_ids) -> bool:
+        """Whether ``input_ids`` continue the conversation this lease (or its checkpoint)
+        holds. Nothing held counts as continued."""
+        tokens = session.token_ids
+        if tokens is None or session.handle is None:
+            record = session.spill if session.spill is not None and session.spill.valid else None
+            tokens = None if record is None else record.token_ids
+        if tokens is None or len(tokens) == 0:
+            return True
+        return _common_prefix_len(tokens, input_ids, len(tokens)) >= len(tokens)
+
+    def _spill_replaced_conversation(self, session_id: str, session: SessionLease) -> None:
+        if session.handle is None or session.token_ids is None:
+            return
+        shadow = SessionLease(session.handle, session.ttl_seconds, reclaimable=True)
+        shadow.token_ids = session.token_ids
+        self._spill_soft_session(f"{_session_family(session_id)}~prev", shadow)
+
     def _discard_session_spill(self, session: SessionLease) -> None:
         store = getattr(self, "_session_spill_store", None)
         if store is not None and session.spill is not None:
@@ -1879,13 +1941,25 @@ class Scheduler(SchedulerIOMixin):
         # pointing at the object, so an unchecked reference both reports an eviction as a
         # prefix divergence and shadows a newer valid record for the same session id.
         spilled = session.spill if session.spill is not None and session.spill.valid else None
-        record = spilled or store.get(session_id)
-        if record is None:
+        own = spilled or store.get(session_id)
+        family = getattr(store, "family", None)
+        records = ([own] if own is not None else []) + [
+            r for r in (family(_session_family(session_id)) if family else ())
+            if r is not own
+        ]
+        if not records:
             return False
+        limit = max(0, len(input_ids) - 1)
+
+        def reusable(r):
+            return r.restorable_length(_common_prefix_len(r.token_ids, input_ids,
+                                                          min(r.num_pages, limit)))
+        # A sibling's or a replaced conversation's checkpoint may continue this prompt
+        # better than the session's own (compaction: summary and real turn share an id).
+        record = max(records, key=reusable)
         # A look-ahead promotion of this very record is worth waiting out: it is reading
         # the same bytes this restore needs, only into RAM.
         store.collect_prefetch(session_id, wait=True)
-        session.spill = record
         store.touch(record)
         # The final prompt token must still run through prefill, so the usable prefix stops
         # one short of the client's input. Restore the longest matching prefix that ends on
@@ -1908,6 +1982,7 @@ class Scheduler(SchedulerIOMixin):
                 matched,
             )
             return False
+        session.spill = record
 
         cm = self.cache_manager
         # A restore is the one thing that spends pool pages without passing an admission
@@ -3069,8 +3144,7 @@ class Scheduler(SchedulerIOMixin):
         lease = sessions.get(sid) if sid else None
         if lease is None or lease.handle is not None:
             return
-        if (lease.spill is not None and lease.spill.valid) or store.get(sid) is not None:
-            self._restore_cold_session(sid, pending.input_ids)
+        self._restore_cold_session(sid, pending.input_ids)
 
     def _schedule_next_batch(self) -> ForwardInput | None:
         if getattr(self, "_cold_restore_retry", False):

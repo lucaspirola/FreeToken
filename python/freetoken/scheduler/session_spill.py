@@ -498,6 +498,13 @@ class SessionSpillStore:
         record = self._by_session.get(session_id)
         return record if record is not None and record.valid else None
 
+    def family(self, base: str) -> list[SessionSpillRecord]:
+        """Valid checkpoints of ``base`` and its ``base~...`` siblings."""
+        return [
+            r for r in self._records
+            if r.valid and (r.session_id == base or r.session_id.startswith(base + "~"))
+        ]
+
     def touch(self, record: SessionSpillRecord | None) -> None:
         if record is None or not record.valid:
             return

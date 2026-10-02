@@ -347,6 +347,10 @@ class _SpillStore:
     def get(self, session_id):
         return self.records.get(session_id)
 
+    def family(self, base):
+        return [r for sid, r in self.records.items()
+                if sid == base or sid.startswith(base + "~")]
+
     def touch(self, record) -> None:
         self.touched.append(record)
 
@@ -1034,3 +1038,85 @@ def test_every_prefill_forward_offers_its_boundary_snapshot_to_the_session():
 
     assert [b for b, _c, _r in lease.state_captures] == [64, 128]
     assert torch.equal(lease.state_captures[0][2], expected)
+
+
+# ------------------------------- compaction: a summary and the real turn share one session
+
+
+def test_a_turn_beside_a_busy_auto_session_gets_a_sibling_lease():
+    scheduler = _scheduler()
+    scheduler._sessions["A"] = SessionLease("A-handle", 300.0, active_uid=5, reclaimable=True)
+    assert scheduler._free_sibling_session("A") == "A~1"
+    scheduler._sessions["A~1"] = SessionLease(None, 300.0, active_uid=6, reclaimable=True)
+    assert scheduler._free_sibling_session("A") == "A~2"
+    assert scheduler._free_sibling_session("A~1") == "A~2"
+
+
+def test_aborting_a_rebound_request_closes_its_sibling_not_the_busy_session():
+    from freetoken.message import AbortBackendMsg
+
+    scheduler = _demand_scheduler()
+    scheduler._abort_tombstones = {}
+    scheduler._sessions["A"] = SessionLease("A-handle", 300.0, active_uid=5, reclaimable=True)
+    scheduler._sessions["A~1"] = SessionLease(None, 300.0, active_uid=7, reclaimable=True)
+    scheduler._session_aliases = {7: "A~1"}
+
+    scheduler._process_one_msg(AbortBackendMsg(uid=7, session_id="A"))
+
+    assert "A~1" not in scheduler._sessions
+    assert scheduler._sessions["A"].active_uid == 5
+
+
+def test_a_turn_that_replaces_a_conversation_it_does_not_continue_saves_it():
+    import torch
+
+    scheduler = _scheduler()
+    saved = []
+    scheduler._spill_soft_session = lambda sid, lease: saved.append(
+        (sid, lease.handle, lease.token_ids.tolist())) or True
+    lease = SessionLease("conversation", 300.0, active_uid=9, reclaimable=True)
+    lease.token_ids = torch.tensor([1, 2, 3, 4], dtype=torch.int32)
+    scheduler._sessions["A"] = lease
+    summary = _req(9, "A")
+    summary.input_ids = [7, 8, 9, 10, 11]
+
+    scheduler._free_req_resources(summary, retain_session=True)
+
+    # was: unlocked unsaved, so the real turn re-prefilled the whole conversation
+    assert saved == [("A~prev", "conversation", [1, 2, 3, 4])]
+    assert scheduler._sessions["A"].handle == "handle-0"
+
+
+def test_a_turn_that_continues_its_conversation_saves_nothing_extra():
+    import torch
+
+    scheduler = _scheduler()
+    saved = []
+    scheduler._spill_soft_session = lambda *a: saved.append(a) or True
+    lease = SessionLease("conversation", 300.0, active_uid=9, reclaimable=True)
+    lease.token_ids = torch.tensor([1, 2, 3], dtype=torch.int32)
+    scheduler._sessions["A"] = lease
+
+    scheduler._free_req_resources(_req(9, "A"), retain_session=True)  # input [1, 2, 3, 4]
+
+    assert saved == []
+
+
+def test_a_sibling_restores_the_conversation_the_summary_replaced():
+    import torch
+
+    scheduler, store = _restoring_scheduler([1, 2, 3, 4, 5, 6], extra_states=[(4, 7)])
+    store.records["A~prev"] = store.records.pop("A")
+    store.records["A~prev"].session_id = "A~prev"
+    store.spill("A", torch.tensor([9, 9, 9], dtype=torch.int32), [0, 1, 2], 3)  # summary
+    scheduler._sessions["A~1"] = SessionLease(None, 300.0, reclaimable=True)
+    installed = []
+    scheduler.cache_manager.restore_hybrid_session_prefix = lambda _r, _s, n=None: (
+        installed.append(n) or "restored"
+    )
+
+    assert scheduler._restore_cold_session("A~1", torch.tensor([1, 2, 3, 4, 5, 6, 7]))
+
+    assert installed == [6]
+    assert scheduler._sessions["A~1"].handle == "restored"
+    assert store.get("A") is not None   # the summary's own checkpoint is untouched
