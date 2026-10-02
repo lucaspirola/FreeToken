@@ -1632,7 +1632,6 @@ class Scheduler(SchedulerIOMixin):
                     self.cache_manager.unlock(old_handle)
         self.table_manager.free(req.table_idx)
         req.table_idx = -1
-        self._cold_restore_retry = True
         if getattr(getattr(self, "config", None), "kv_grow_step_tokens", 0):
             self._growable_shrink_pending = True
 
@@ -1896,14 +1895,11 @@ class Scheduler(SchedulerIOMixin):
         )
         length = record.restorable_length(matched)
         if length <= 0:
-            # Kept, not discarded: the diverging request may be a sibling (omp sends its
-            # compaction summary beside the next turn under one session id), and the turn
-            # that continues this checkpoint is still queued. Capacity eviction and the next
-            # retained lease bound its lifetime (2026-10-02: discarding it re-prefilled 150K).
             store.counters.restores_diverged += 1
+            self._discard_session_spill(session)
             logger.info_rank0(
-                "Kept cold session %s for another turn: client tokens diverge at %d, "
-                "before the first stored state boundary",
+                "Discarded cold session %s: client tokens diverge at %d, before the "
+                "first stored state boundary",
                 session_id,
                 matched,
             )
@@ -3032,30 +3028,7 @@ class Scheduler(SchedulerIOMixin):
                 f"an image of {hi - lo} tokens does not fit one prefill chunk (--max-extend-tokens {self.prefill_budget}, or the sliding-window pool's share of it): its earlier rows attend within the first part only"
             )
 
-    def _retry_queued_cold_restores(self) -> None:
-        """A finished request just freed pool pages: give queued turns whose session has a
-        checkpoint and no resident prefix the restore that was deferred or skipped while
-        another request held the pool. Otherwise admission seats them on whatever partial
-        match is left and re-prefills a prefix the checkpoint already holds."""
-        self._cold_restore_retry = False
-        sessions = getattr(self, "_sessions", {})
-        store = getattr(self, "_session_spill_store", None)
-        if not sessions or store is None:
-            return
-        for pending in list(getattr(self.prefill_manager, "pending_list", ()))[
-            :_RECLAIM_SCAN_DEPTH
-        ]:
-            sid = getattr(pending, "session_id", None)
-            lease = sessions.get(sid) if sid else None
-            if (pending.chunked_req is not None or lease is None
-                    or lease.handle is not None):
-                continue
-            if (lease.spill is not None and lease.spill.valid) or store.get(sid) is not None:
-                self._restore_cold_session(sid, pending.input_ids)
-
     def _schedule_next_batch(self) -> ForwardInput | None:
-        if getattr(self, "_cold_restore_retry", False):
-            self._retry_queued_cold_restores()
         if (
             getattr(getattr(self, "config", None), "kv_grow_step_tokens", 0)
             and self.prefill_manager.runnable
