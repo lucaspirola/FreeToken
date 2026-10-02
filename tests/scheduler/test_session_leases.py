@@ -749,15 +749,43 @@ def test_an_unchanged_prompt_still_restores_the_whole_checkpoint():
     assert installed == [6]
 
 
-def test_a_drift_before_the_first_boundary_discards_the_checkpoint():
+def test_a_drift_before_the_first_boundary_keeps_the_checkpoint_for_a_sibling_turn():
     import torch
 
     scheduler, store = _restoring_scheduler([1, 2, 3, 4, 5, 6], extra_states=[(4, 7)])
     scheduler.cache_manager.restore_hybrid_session_prefix = lambda _r, _s, _n=None: "restored"
 
+    # omp's compaction summary: same session id, prompt diverges at once
     assert scheduler._restore_cold_session("A", torch.tensor([1, 99, 3, 4, 5, 6, 7])) is False
     assert scheduler._sessions["A"].handle is None
-    assert store.get("A") is None  # nothing reusable: full recompute
+    assert store.get("A") is not None   # was discarded, so the next turn re-prefilled 150K
+    assert store.counters.restores_diverged == 1
+
+    # the session's real next turn still restores the whole checkpoint
+    assert scheduler._restore_cold_session("A", torch.tensor([1, 2, 3, 4, 5, 6, 7])) is True
+    assert scheduler._sessions["A"].handle == "restored"
+
+
+def test_a_finished_request_retries_the_restore_of_a_queued_turn():
+    import torch
+
+    scheduler, store = _restoring_scheduler([1, 2, 3, 4, 5, 6], extra_states=[(4, 7)])
+    installed = []
+    scheduler.cache_manager.restore_hybrid_session_prefix = lambda _r, _s, n=None: (
+        installed.append(n) or "restored"
+    )
+    pending = _queued(3, "A")
+    pending.input_ids = torch.tensor([1, 2, 3, 4, 5, 6, 7], dtype=torch.int32)
+    scheduler.prefill_manager.pending_list.append(pending)
+
+    scheduler._schedule_next_batch()
+    assert installed == []              # nothing finished: no retry pass
+
+    scheduler._cold_restore_retry = True  # set by _free_req_resources
+    scheduler._schedule_next_batch()
+    assert installed == [6]
+    assert scheduler._sessions["A"].handle == "restored"
+    assert scheduler._cold_restore_retry is False
 
 
 def test_a_restore_blocked_by_the_resident_session_is_retried_before_admission():
