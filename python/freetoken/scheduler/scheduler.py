@@ -1632,6 +1632,7 @@ class Scheduler(SchedulerIOMixin):
                     self.cache_manager.unlock(old_handle)
         self.table_manager.free(req.table_idx)
         req.table_idx = -1
+        self._cold_restore_retry = True
         if getattr(getattr(self, "config", None), "kv_grow_step_tokens", 0):
             self._growable_shrink_pending = True
 
@@ -1895,11 +1896,14 @@ class Scheduler(SchedulerIOMixin):
         )
         length = record.restorable_length(matched)
         if length <= 0:
+            # Kept, not discarded: the diverging request may be a sibling (omp sends its
+            # compaction summary beside the next turn under one session id), and the turn
+            # that continues this checkpoint is still queued. Capacity eviction and the next
+            # retained lease bound its lifetime (2026-10-02: discarding it re-prefilled 150K).
             store.counters.restores_diverged += 1
-            self._discard_session_spill(session)
             logger.info_rank0(
-                "Discarded cold session %s: client tokens diverge at %d, before the "
-                "first stored state boundary",
+                "Kept cold session %s for another turn: client tokens diverge at %d, "
+                "before the first stored state boundary",
                 session_id,
                 matched,
             )
@@ -2105,17 +2109,35 @@ class Scheduler(SchedulerIOMixin):
         stays distinguishable from a soft-session release. A request whose own footprint
         already fits is never charged: this only runs once ``pressured()`` is still true.
         """
-        candidates = sorted(
-            (
+        sessions = getattr(self, "_sessions", {})
+        candidates = [
+            (sid, None)
+            for _last_used, sid in sorted(
                 (lease.last_used_at, sid)
-                for sid, lease in getattr(self, "_sessions", {}).items()
+                for sid, lease in sessions.items()
                 if sid != session_id
                 and lease.reclaimable
                 and lease.active_uid is None
                 and lease.handle is not None
-            ),
-            key=lambda item: item[0],
-        )
+            )
+        ]
+        # A checkpoint restored for a QUEUED request holds its KV with active_uid set, which
+        # the idle candidates above never include; two of them blocked each other forever
+        # (2026-10-02, 039b/38db). A request may release the parked restores of requests
+        # queued BEHIND it (back of the queue first), never ahead, so the head can always
+        # make room and two requests cannot take turns robbing each other.
+        queue = [
+            p.uid for p in getattr(getattr(self, "prefill_manager", None), "pending_list", ())
+            if p.chunked_req is None
+        ]
+        if pending.uid in queue:
+            behind = queue[queue.index(pending.uid) + 1:]
+            parked = {
+                lease.active_uid: sid for sid, lease in sessions.items()
+                if sid != session_id and lease.reclaimable and lease.handle is not None
+                and lease.active_uid in behind
+            }
+            candidates += [(parked[uid], uid) for uid in reversed(behind) if uid in parked]
         cm = self.cache_manager
         own = getattr(self, "_sessions", {}).get(session_id) if session_id else None
         if not (own is not None and own.reclaimable and own.handle is not None
@@ -2164,11 +2186,11 @@ class Scheduler(SchedulerIOMixin):
             return kv_short or state_short
 
         released = False
-        for _last_used, sid in candidates:
+        for sid, owner_uid in candidates:
             if not pressured():
                 break
             released |= self._release_soft_session_handle(
-                sid, "admission pressure", require_checkpoint=True
+                sid, "admission pressure", require_checkpoint=True, owner_uid=owner_uid
             )
         own_len = int(getattr(own.handle, "cached_len", 0) or 0) if own is not None else 0
         if own is not None and own_len > cached_len and pressured():
@@ -3028,7 +3050,31 @@ class Scheduler(SchedulerIOMixin):
                 f"an image of {hi - lo} tokens does not fit one prefill chunk (--max-extend-tokens {self.prefill_budget}, or the sliding-window pool's share of it): its earlier rows attend within the first part only"
             )
 
+    def _retry_queued_cold_restores(self) -> None:
+        """A finished request just freed pool pages: give the next queued turn, if its
+        session has a checkpoint and no resident prefix, the restore that was deferred or
+        skipped while another request held the pool. Otherwise admission seats it on
+        whatever partial match is left and re-prefills a prefix the checkpoint holds."""
+        self._cold_restore_retry = False
+        sessions = getattr(self, "_sessions", {})
+        store = getattr(self, "_session_spill_store", None)
+        if not sessions or store is None:
+            return
+        # Only the next fresh admission: restoring for requests further back would park
+        # their KV in front of it.
+        pending = next(
+            (p for p in getattr(self.prefill_manager, "pending_list", ())
+             if p.chunked_req is None), None)
+        sid = getattr(pending, "session_id", None)
+        lease = sessions.get(sid) if sid else None
+        if lease is None or lease.handle is not None:
+            return
+        if (lease.spill is not None and lease.spill.valid) or store.get(sid) is not None:
+            self._restore_cold_session(sid, pending.input_ids)
+
     def _schedule_next_batch(self) -> ForwardInput | None:
+        if getattr(self, "_cold_restore_retry", False):
+            self._retry_queued_cold_restores()
         if (
             getattr(getattr(self, "config", None), "kv_grow_step_tokens", 0)
             and self.prefill_manager.runnable

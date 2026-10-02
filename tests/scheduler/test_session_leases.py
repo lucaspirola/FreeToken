@@ -245,6 +245,55 @@ def test_a_lease_busy_with_another_request_is_never_released():
     assert scheduler.cache_manager.unlocked == []
 
 
+def _parked_scheduler():
+    """B (uid 2) heads the queue, C (uid 3) is behind it; both sessions had their
+    checkpoints restored while queued, so each lease holds KV with active_uid set."""
+    scheduler = _scheduler()
+
+    class _FullCache(_Cache):
+        is_hybrid = False
+        prefix_counters = PrefixCounters()
+
+        @property
+        def available_size(self):
+            return 100 if self.unlocked else 0
+
+        def match_req(self, _req):
+            return SimpleNamespace(cuda_handle=SimpleNamespace(cached_len=0))
+
+        def lock_delta(self, _handle):
+            return 0
+
+        def release_pins_for_admission(self, _needed):
+            return False
+
+    scheduler.cache_manager = _FullCache()
+    scheduler._spill_soft_session = lambda *_a, **_k: True
+    b, c = _queued(2, "B"), _queued(3, "C")
+    scheduler.prefill_manager = SimpleNamespace(pending_list=[b, c])
+    for sid, uid in (("B", 2), ("C", 3)):
+        scheduler._sessions[sid] = SessionLease(f"{sid}-handle", 300.0, reclaimable=True)
+        scheduler._sessions[sid].active_uid = uid
+    return scheduler, b, c
+
+
+def test_the_queue_head_releases_a_restore_parked_behind_it():
+    scheduler, b, _c = _parked_scheduler()
+
+    assert scheduler._reclaim_soft_sessions_for_pending(b, "B")
+
+    assert scheduler.cache_manager.unlocked == ["C-handle"]   # was: none, deadlock
+    assert scheduler._sessions["C"].active_uid == 3            # still queued, restorable
+
+
+def test_a_later_request_never_releases_the_restore_of_the_queue_head():
+    scheduler, _b, c = _parked_scheduler()
+
+    assert not scheduler._reclaim_soft_sessions_for_pending(c, "C")
+
+    assert scheduler.cache_manager.unlocked == []
+
+
 class _SpillStore:
     """Minimal cold-tier double: records what the scheduler asks it to do."""
 
@@ -749,15 +798,43 @@ def test_an_unchanged_prompt_still_restores_the_whole_checkpoint():
     assert installed == [6]
 
 
-def test_a_drift_before_the_first_boundary_discards_the_checkpoint():
+def test_a_drift_before_the_first_boundary_keeps_the_checkpoint_for_a_sibling_turn():
     import torch
 
     scheduler, store = _restoring_scheduler([1, 2, 3, 4, 5, 6], extra_states=[(4, 7)])
     scheduler.cache_manager.restore_hybrid_session_prefix = lambda _r, _s, _n=None: "restored"
 
+    # omp's compaction summary: same session id, prompt diverges at once
     assert scheduler._restore_cold_session("A", torch.tensor([1, 99, 3, 4, 5, 6, 7])) is False
     assert scheduler._sessions["A"].handle is None
-    assert store.get("A") is None  # nothing reusable: full recompute
+    assert store.get("A") is not None   # was discarded, so the next turn re-prefilled 150K
+    assert store.counters.restores_diverged == 1
+
+    # the session's real next turn still restores the whole checkpoint
+    assert scheduler._restore_cold_session("A", torch.tensor([1, 2, 3, 4, 5, 6, 7])) is True
+    assert scheduler._sessions["A"].handle == "restored"
+
+
+def test_a_finished_request_retries_the_restore_of_a_queued_turn():
+    import torch
+
+    scheduler, store = _restoring_scheduler([1, 2, 3, 4, 5, 6], extra_states=[(4, 7)])
+    installed = []
+    scheduler.cache_manager.restore_hybrid_session_prefix = lambda _r, _s, n=None: (
+        installed.append(n) or "restored"
+    )
+    pending = _queued(3, "A")
+    pending.input_ids = torch.tensor([1, 2, 3, 4, 5, 6, 7], dtype=torch.int32)
+    scheduler.prefill_manager.pending_list.append(pending)
+
+    scheduler._schedule_next_batch()
+    assert installed == []              # nothing finished: no retry pass
+
+    scheduler._cold_restore_retry = True  # set by _free_req_resources
+    scheduler._schedule_next_batch()
+    assert installed == [6]
+    assert scheduler._sessions["A"].handle == "restored"
+    assert scheduler._cold_restore_retry is False
 
 
 def test_a_restore_blocked_by_the_resident_session_is_retried_before_admission():
