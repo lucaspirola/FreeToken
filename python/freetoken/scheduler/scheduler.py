@@ -1694,13 +1694,14 @@ class Scheduler(SchedulerIOMixin):
             self._close_session(sid, discard_state=False)
 
     def _release_soft_session_handle(
-        self, session_id: str, reason: str, *, require_checkpoint: bool = False
+        self, session_id: str, reason: str, *, require_checkpoint: bool = False,
+        owner_uid: int | None = None,
     ) -> bool:
         session = getattr(self, "_sessions", {}).get(session_id)
         if (
             session is None
             or not session.reclaimable
-            or session.active_uid is not None
+            or session.active_uid not in (None, owner_uid)
             or session.handle is None
         ):
             return False
@@ -2116,10 +2117,15 @@ class Scheduler(SchedulerIOMixin):
             key=lambda item: item[0],
         )
         cm = self.cache_manager
-        if not candidates and not cm.prefix_counters.pinned_prefixes:
+        own = getattr(self, "_sessions", {}).get(session_id) if session_id else None
+        if not (own is not None and own.reclaimable and own.handle is not None
+                and own.active_uid in (None, pending.uid)):
+            own = None
+        if not candidates and own is None and not cm.prefix_counters.pinned_prefixes:
             # cheap gate: skip the prefix match when nothing can be freed either way
             return False
         lock_delta = 0
+        handle = None
         if cached_len is None:
             try:
                 # The pass that just refused this request matched it against the same,
@@ -2149,6 +2155,7 @@ class Scheduler(SchedulerIOMixin):
             ):  # matching is repeated by admission; stay conservative on failure
                 cached_len = 0
                 lock_delta = 0
+                own = None
         needed = max(0, pending.input_len - cached_len) + pending.output_len
 
         def pressured() -> bool:
@@ -2163,6 +2170,18 @@ class Scheduler(SchedulerIOMixin):
             released |= self._release_soft_session_handle(
                 sid, "admission pressure", require_checkpoint=True
             )
+        own_len = int(getattr(own.handle, "cached_len", 0) or 0) if own is not None else 0
+        if own is not None and own_len > cached_len and pressured():
+            # The request's own lease holds KV past what the request reuses (a client that
+            # compacted its conversation keeps the session id). Nothing else ever releases
+            # it, so a lease near the pool size starved its own turn forever (omp,
+            # 2026-10-02: 245,733-token lease vs a 59K compacted prompt, 80+ min deferred).
+            if self._release_soft_session_handle(
+                session_id, "own turn diverged from its cached prefix",
+                require_checkpoint=True, owner_uid=pending.uid,
+            ):
+                released = True
+                lock_delta = cm.lock_delta(handle) if handle is not None else 0
         if needed > cm.available_size - lock_delta:
             # Every reclaimable idle lease is gone (or there were none) and the request is
             # still KV-short: try what a pin is holding out of the evictable pool next.

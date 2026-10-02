@@ -179,6 +179,72 @@ def test_admission_pressure_releases_oldest_idle_soft_session_only():
     assert scheduler._sessions["hard"].handle == "hard-handle"
 
 
+class _OwnLeaseCache(_Cache):
+    """A 262-page pool whose only occupant is the requesting session's own 245-page lease."""
+
+    is_hybrid = False
+
+    def __init__(self, matched: int) -> None:
+        super().__init__()
+        self.matched = matched
+        self.prefix_counters = PrefixCounters()
+
+    @property
+    def available_size(self):
+        return 262 if self.unlocked else 262 - 245
+
+    def match_req(self, _req):
+        return SimpleNamespace(cuda_handle=SimpleNamespace(cached_len=self.matched))
+
+    def lock_delta(self, _handle):
+        return 0
+
+    def release_pins_for_admission(self, _needed):
+        return False
+
+
+def _own_lease_scheduler(matched: int, active_uid):
+    scheduler = _scheduler()
+    scheduler.cache_manager = _OwnLeaseCache(matched)
+    scheduler._spill_soft_session = lambda *_a, **_k: True
+    lease = SimpleNamespace(cached_len=245)
+    scheduler._sessions = {
+        "omp": SessionLease(lease, 300.0, reclaimable=True, last_used_at=1.0),
+    }
+    scheduler._sessions["omp"].active_uid = active_uid
+    return scheduler, lease
+
+
+def test_a_turn_that_diverged_from_its_own_lease_releases_it():
+    # compacted conversation, same session id: 59-token prompt reuses 20 of the 245
+    scheduler, lease = _own_lease_scheduler(matched=20, active_uid=9)
+    pending = SimpleNamespace(uid=9, input_len=59, output_len=30)
+
+    assert scheduler._reclaim_soft_sessions_for_pending(pending, "omp")
+
+    assert scheduler.cache_manager.unlocked == [lease]
+    assert scheduler._sessions["omp"].handle is None
+
+
+def test_a_turn_that_extends_its_own_lease_keeps_it():
+    scheduler, lease = _own_lease_scheduler(matched=245, active_uid=9)
+    pending = SimpleNamespace(uid=9, input_len=300, output_len=30)
+
+    assert not scheduler._reclaim_soft_sessions_for_pending(pending, "omp")
+
+    assert scheduler.cache_manager.unlocked == []
+    assert scheduler._sessions["omp"].handle is lease
+
+
+def test_a_lease_busy_with_another_request_is_never_released():
+    scheduler, lease = _own_lease_scheduler(matched=20, active_uid=5)
+    pending = SimpleNamespace(uid=9, input_len=59, output_len=30)
+
+    assert not scheduler._reclaim_soft_sessions_for_pending(pending, "omp")
+
+    assert scheduler.cache_manager.unlocked == []
+
+
 class _SpillStore:
     """Minimal cold-tier double: records what the scheduler asks it to do."""
 
