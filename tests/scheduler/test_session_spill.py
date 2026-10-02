@@ -953,3 +953,26 @@ def test_retire_keeps_disk_bases_and_frees_the_ram_tier(tmp_path, monkeypatch):
     assert promoted.valid and promoted.tier == "disk"  # dropped its tensors, no write
     assert not ram_only.valid and store.ram_bytes == 0
     store.shutdown()
+
+
+def test_short_tail_chunks_are_merged_once_they_pile_up(tmp_path, monkeypatch):
+    import freetoken.scheduler.session_spill as spill_mod
+
+    kv, linear, manager, store = _incremental_store(tmp_path, monkeypatch)
+    monkeypatch.setattr(spill_mod, "SPILL_CHUNK_PAGES", 4)
+    monkeypatch.setattr(spill_mod, "MAX_SHORT_CHUNKS", 2)
+    slot = linear.alloc(1)[0]
+    pages = manager._page_to_token(manager._allocate(4))
+    tokens = list(range(1, 5))
+    store.spill("agent", torch.tensor(tokens, dtype=torch.int32), pages, slot)
+    layout = []
+    for _turn in range(4):  # one token per turn: each leaves a 1-page chunk behind
+        pages = torch.cat((pages, manager._page_to_token(manager._allocate(1))))
+        tokens.append(len(tokens) + 1)
+        record = store.spill("agent", torch.tensor(tokens, dtype=torch.int32), pages, slot)
+        layout.append(sorted(c.start for c in record.chunks if c.family == "k" and c.layer == 0))
+
+    assert layout[:3] == [[0, 4], [0, 4, 5], [0, 4, 5, 6]]
+    # A third short chunk is one past the cap: the tail [4, 8) is rewritten as one chunk.
+    assert layout[3] == [0, 4]
+    store.shutdown()

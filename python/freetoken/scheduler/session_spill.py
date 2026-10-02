@@ -53,6 +53,7 @@ MANIFEST_VERSION = 2
 STATE_FAMILIES = ("gdn_conv", "gdn_recurrent")
 # KV pages per checkpoint file: also the granularity an incremental checkpoint reuses at.
 SPILL_CHUNK_PAGES = 8192
+MAX_SHORT_CHUNKS = 4
 # Look-ahead spacing of the extra boundary states, and their hard count bound.
 DEFAULT_STATE_STRIDE_TOKENS = 65_536
 MAX_STATE_SNAPSHOTS = 8
@@ -815,11 +816,17 @@ class SessionSpillStore:
             shared = int(mismatch[0])
         kv = [c for c in previous.chunks if c.family not in STATE_FAMILIES]
         starts = sorted({c.start for c in kv})
-        reuse_end = 0
-        for stop in [*starts[1:], previous.num_pages]:
-            if stop > shared:
-                break
-            reuse_end = stop
+        spans = [
+            (start, stop)
+            for start, stop in zip(starts, [*starts[1:], previous.num_pages])
+            if stop <= shared
+        ]
+        reuse_end = spans[-1][1] if spans else 0
+        # Every turn leaves one short chunk per layer behind. Past a few of them the tail is
+        # rewritten from the first short one, so files stay ~SPILL_CHUNK_PAGES long.
+        short = [start for start, stop in spans if stop - start < SPILL_CHUNK_PAGES]
+        if len(short) > MAX_SHORT_CHUNKS:
+            reuse_end = short[0]
         reused_kv = [
             SpillChunk(c.family, c.layer, c.start, file=c.file) for c in kv if c.start < reuse_end
         ]
