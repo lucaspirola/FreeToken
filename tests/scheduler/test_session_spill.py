@@ -1044,3 +1044,141 @@ def test_short_tail_chunks_are_merged_once_they_pile_up(tmp_path, monkeypatch):
     # A third short chunk is one past the cap: the tail [4, 8) is rewritten as one chunk.
     assert layout[3] == [0, 4]
     store.shutdown()
+
+
+# ---------------------------------------------------------- background writes
+
+
+def _background(monkeypatch):
+    import freetoken.scheduler.session_spill as spill_mod
+
+    monkeypatch.setattr(spill_mod, "BACKGROUND_WRITE_MAX_BYTES", 1 << 30)
+    monkeypatch.setattr(spill_mod, "_mem_available_bytes", lambda: 8 << 30)
+
+
+def _gated_save(monkeypatch):
+    """torch.save that blocks the writer thread until the test opens the gate."""
+    gate = threading.Event()
+    real = torch.save
+
+    def gated(value, path, *args, **kwargs):
+        if threading.current_thread().name == "session-spill-writer":
+            gate.wait(10)
+        return real(value, path, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "save", gated)
+    return gate
+
+
+def test_a_background_checkpoint_restores_before_its_files_land(tmp_path, monkeypatch, caplog):
+    import logging
+
+    kv, linear, manager, store = _incremental_store(tmp_path, monkeypatch)
+    _background(monkeypatch)
+    gate = _gated_save(monkeypatch)
+    tokens = torch.tensor([11, 12, 13, 14, 15], dtype=torch.int32)
+    pages = manager._page_to_token(manager._allocate(5))
+    slot = linear.alloc(1)[0]
+    _seed(kv, linear, pages, slot, 1)
+    expected_k = kv._k_buffer[:, pages].clone()
+
+    record = store.spill("agent", tokens, pages, slot)
+
+    assert record.tier == "disk" and record.pending is not None
+    assert not (record.directory / "manifest.json").exists()
+    assert store.ram_bytes == record.pending.nbytes > 0  # charged until written
+    store.collect_writes()  # still running: nothing published
+    assert record.pending is not None
+    kv._k_buffer[:, pages] = 0
+    restored = manager.restore_hybrid_session_prefix(record, store)  # served from RAM
+    assert torch.equal(kv._k_buffer[:, restored.get_matched_indices().long()], expected_k)
+    manager.unlock(restored)
+
+    gate.set()
+    with caplog.at_level(logging.INFO, logger="freetoken.scheduler.session_spill"):
+        store.collect_writes(wait=True)
+    assert record.pending is None and store.ram_bytes == 0
+    assert all(c.value is None and c.file.exists() for c in record.chunks)
+    assert (record.directory / "manifest.json").exists()
+    assert any(m.startswith("Wrote cold session agent checkpoint in the background")
+               for m in caplog.messages)
+    store.shutdown()
+    revived = SessionSpillStore(
+        kv, linear, directory=str(tmp_path), ram_budget_bytes=0,
+        disk_budget_bytes=1 << 30, host_reserve_bytes=0,
+    )
+    assert torch.equal(revived.get("agent").token_ids, tokens)
+    revived.shutdown()
+
+
+def test_the_next_incremental_checkpoint_waits_for_the_previous_write(tmp_path, monkeypatch):
+    kv, linear, manager, store = _incremental_store(tmp_path, monkeypatch)
+    _background(monkeypatch)
+    tokens = torch.tensor([11, 12, 13, 14, 15], dtype=torch.int32)
+    pages = manager._page_to_token(manager._allocate(5))
+    slot = linear.alloc(1)[0]
+    _seed(kv, linear, pages, slot, 1)
+    first = store.spill("agent", tokens, pages, slot)
+    reused = {c.file for c in first.chunks if c.family == "k" and c.start < 4}
+
+    longer = torch.tensor([11, 12, 13, 14, 15, 16, 17], dtype=torch.int32)
+    more = manager._page_to_token(manager._allocate(2))
+    all_pages = torch.cat((pages, more))
+    second = store.spill("agent", longer, all_pages, slot)
+
+    assert store.counters.spills_incremental == 1 and not first.valid
+    assert reused <= {c.file for c in second.chunks}
+    store.collect_writes(wait=True)
+    assert all(c.file.exists() for c in second.chunks)
+    names = {p.name for p in second.directory.iterdir()}
+    assert names == {"manifest.json", second.token_file.name, *(c.file.name for c in second.chunks)}
+    store.shutdown()
+
+
+def test_a_checkpoint_discarded_mid_write_leaves_no_files_or_charge(tmp_path, monkeypatch):
+    kv, linear, manager, store = _incremental_store(tmp_path, monkeypatch)
+    _background(monkeypatch)
+    gate = _gated_save(monkeypatch)
+    pages = manager._page_to_token(manager._allocate(5))
+    record = store.spill("agent", torch.arange(5, dtype=torch.int32), pages, linear.alloc(1)[0])
+    directory = record.directory
+
+    threading.Timer(0.2, gate.set).start()
+    store.discard(record)
+
+    assert not record.valid and record.pending is None
+    assert store.ram_bytes == 0 and store.disk_bytes == 0
+    assert not directory.exists()
+    store.shutdown()
+
+
+def test_a_large_checkpoint_is_written_inline(tmp_path, monkeypatch):
+    import freetoken.scheduler.session_spill as spill_mod
+
+    kv, linear, manager, store = _incremental_store(tmp_path, monkeypatch)
+    _background(monkeypatch)
+    monkeypatch.setattr(spill_mod, "BACKGROUND_WRITE_MAX_BYTES", 1)
+    pages = manager._page_to_token(manager._allocate(5))
+    record = store.spill("agent", torch.arange(5, dtype=torch.int32), pages, linear.alloc(1)[0])
+
+    assert record.pending is None and store.ram_bytes == 0
+    assert (record.directory / "manifest.json").exists()
+    assert all(c.value is None and c.file.exists() for c in record.chunks)
+    store.shutdown()
+
+
+def test_a_failed_background_write_drops_the_checkpoint(tmp_path, monkeypatch):
+    kv, linear, manager, store = _incremental_store(tmp_path, monkeypatch)
+    _background(monkeypatch)
+
+    def broken(value, path, *args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(torch, "save", broken)
+    pages = manager._page_to_token(manager._allocate(5))
+    record = store.spill("agent", torch.arange(5, dtype=torch.int32), pages, linear.alloc(1)[0])
+    store.collect_writes(wait=True)
+
+    assert not record.valid and store.get("agent") is None
+    assert store.counters.spills_failed == 1 and store.ram_bytes == 0
+    store.shutdown()

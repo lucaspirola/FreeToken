@@ -1882,11 +1882,11 @@ class Scheduler(SchedulerIOMixin):
         if now - getattr(self, "_session_spill_last_pressure_check", 0.0) < 1.0:
             return
         self._session_spill_last_pressure_check = now
+        store.collect_writes()  # publishes finished background checkpoint writes
         demoted, dropped = store.enforce_host_reserve()
-        if dropped:
-            for session in self._sessions.values():
-                if session.spill is not None and not session.spill.valid:
-                    session.spill = None
+        for session in self._sessions.values():  # also a failed background write's record
+            if session.spill is not None and not session.spill.valid:
+                session.spill = None
         if demoted or dropped:
             logger.warning(
                 "Cold-session host pressure: moved %d checkpoint(s) RAM -> disk, "

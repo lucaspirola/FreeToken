@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import shutil
 import threading
 import time
@@ -53,6 +54,10 @@ MANIFEST_VERSION = 2
 STATE_FAMILIES = ("gdn_conv", "gdn_recurrent")
 # KV pages per checkpoint file: also the granularity an incremental checkpoint reuses at.
 SPILL_CHUNK_PAGES = 8192
+# A disk checkpoint whose new bytes fit this is written by a background thread, its tensors
+# serving restores from RAM meanwhile; a larger one (a fresh long session) is written
+# synchronously, chunk by chunk, so it never holds its whole payload in host RAM.
+BACKGROUND_WRITE_MAX_BYTES = 512 << 20
 MAX_SHORT_CHUNKS = 4
 # Look-ahead spacing of the extra boundary states, and their hard count bound.
 DEFAULT_STATE_STRIDE_TOKENS = 65_536
@@ -126,6 +131,8 @@ class SessionSpillRecord:
     # A disk record's prefetched chunks: their tensors sit on ``chunk.value`` beside
     # ``chunk.file``, and these bytes are charged to the RAM tier.
     cached_bytes: int = 0
+    # The background write still owed for this record's new files (None once written).
+    pending: "_PendingWrite | None" = None
     # start_prefetch's memo: (key, chunks to read, their bytes).
     prefetch_plan: tuple = (None, None, 0)
 
@@ -181,6 +188,20 @@ class _Prefetch:
     chunks: list[SpillChunk] = field(default_factory=list)
     thread: threading.Thread | None = None
     values: list[torch.Tensor] | None = None
+
+
+@dataclass
+class _PendingWrite:
+    """One checkpoint's new files, written off the scheduler thread; manifest last."""
+
+    record: SessionSpillRecord
+    jobs: list[tuple[Path, torch.Tensor]]
+    nbytes: int
+    started: float
+    cancel: threading.Event = field(default_factory=threading.Event)
+    done: threading.Event = field(default_factory=threading.Event)
+    failed: bool = False
+    charged: bool = True
 
 
 @dataclass
@@ -319,6 +340,8 @@ class SessionSpillStore:
         # housekeeping), held until the caller that does ask for it collects it.
         self._promoted: str | None = None
         self._write_behind: _WriteBehind | None = None
+        self._pending_writes: list[_PendingWrite] = []
+        self._write_queue: queue.Queue | None = None
         self.ram_bytes = 0
         self.disk_bytes = 0
         self._records: list[SessionSpillRecord] = []
@@ -539,6 +562,8 @@ class SessionSpillStore:
         """File ``record`` under ``session_id`` (directory, manifest and index), replacing
         any checkpoint already there. Keeps a conversation's checkpoint alive when its
         session id is about to checkpoint a different prompt over it."""
+        if record is not None and record.pending is not None:
+            self._finish_write(record.pending, wait=True)  # its files must exist to move
         if record is None or not record.valid or record.session_id == session_id:
             return False
         if self._prefetch is not None and self._prefetch.record is record:
@@ -685,7 +710,10 @@ class SessionSpillStore:
         # A live pool slot and a host capture at the same boundary hold the same state; the
         # slot is preferred because its copy is the one this spill pays for anyway.
         states.update({int(b): int(slot) for b, slot in extra_states})
+        self.collect_writes()
         previous = self.get(session_id)
+        if previous is not None and previous.pending is not None:
+            self._finish_write(previous.pending, wait=True)  # its files are the next base
         base = self._incremental_base(previous, tokens, num_pages)
         if base is not None:
             # The previous checkpoint's own states below the shared prefix are the same
@@ -727,6 +755,26 @@ class SessionSpillStore:
         # previous manifest stays valid until the new one replaces it.
         prefix = "" if base is None else f"{uuid.uuid4().hex[:12]}-"
         written = 0
+        reused_states = sum(isinstance(states[b], list) for b in boundaries)
+        new_bytes = (
+            self.kv_pool.session_spill_bytes(num_pages - reuse_end)
+            + self.linear_state_pool.bytes_per_slot() * (len(boundaries) - reused_states)
+            + tokens.numel() * 4
+        )
+        background = (
+            tier == "disk"
+            and new_bytes <= BACKGROUND_WRITE_MAX_BYTES
+            and _mem_available_bytes() - new_bytes >= self.host_reserve_bytes + (256 << 20)
+        )
+        jobs: list[tuple[Path, torch.Tensor]] = []
+
+        def save(value: torch.Tensor, path: Path) -> None:
+            if background:
+                jobs.append((path, value))
+            else:
+                torch.save(value, path)
+                path.chmod(0o600)
+
         try:
             # Snapshot writes are enqueued on the engine stream. Session release is a safe
             # scheduler boundary, and this barrier makes the D2H checkpoint exact.
@@ -738,8 +786,7 @@ class SessionSpillStore:
                     target = self._prepare_dir(session_id)
                 record.directory = target
                 record.token_file = target / f"{prefix}{TOKENS_NAME}"
-                torch.save(tokens, record.token_file)
-                record.token_file.chmod(0o600)
+                save(tokens, record.token_file)
             chunks.extend(reused_kv)
             sources = self.kv_pool.iter_session_spill_tensors(
                 page_indices, chunk_pages=SPILL_CHUNK_PAGES, start_page=reuse_end
@@ -750,10 +797,10 @@ class SessionSpillStore:
                     chunks.append(SpillChunk(family, layer, start, value=value))
                 else:
                     path = target / f"{prefix}{len(chunks):06d}.pt"
-                    torch.save(value, path)
-                    path.chmod(0o600)
+                    save(value, path)
                     written += value.numel() * value.element_size()
-                    chunks.append(SpillChunk(family, layer, start, file=path))
+                    chunks.append(SpillChunk(
+                        family, layer, start, file=path, value=value if background else None))
 
             pool = self.linear_state_pool
             for boundary in boundaries:
@@ -774,17 +821,13 @@ class SessionSpillStore:
                         chunks.append(SpillChunk(family, -1, boundary, value=value))
                     else:
                         path = target / f"{prefix}{len(chunks):06d}.pt"
-                        torch.save(value, path)
-                        path.chmod(0o600)
+                        save(value, path)
                         written += value.numel() * value.element_size()
-                        chunks.append(SpillChunk(family, -1, boundary, file=path))
-            if tier == "disk":
-                self._write_manifest(record)
-                keep = {MANIFEST_NAME, record.token_file.name}
-                keep.update(chunk.file.name for chunk in chunks)
-                for path in target.iterdir():
-                    if path.name not in keep:
-                        path.unlink(missing_ok=True)
+                        chunks.append(SpillChunk(
+                            family, -1, boundary, file=path,
+                            value=value if background else None))
+            if tier == "disk" and not background:
+                self._publish(record)
         except Exception:
             if target is not None:
                 shutil.rmtree(target, ignore_errors=True)
@@ -793,6 +836,8 @@ class SessionSpillStore:
 
         self._track(record)
         self.counters.spills += 1
+        if background:
+            self._queue_write(record, jobs)
         if base is not None:
             self.counters.spills_incremental += 1
             logger.info_rank0(
@@ -808,6 +853,85 @@ class SessionSpillStore:
                 self.discard(record)
                 return None
         return record
+
+    def _publish(self, record: SessionSpillRecord) -> None:
+        """Manifest last, then drop the files no chunk of the record names any more."""
+        self._write_manifest(record)
+        keep = {MANIFEST_NAME, record.token_file.name}
+        keep.update(chunk.file.name for chunk in record.chunks if chunk.file is not None)
+        for path in record.directory.iterdir():
+            if path.name not in keep:
+                path.unlink(missing_ok=True)
+
+    def _queue_write(self, record: SessionSpillRecord, jobs) -> None:
+        nbytes = sum(value.numel() * value.element_size() for _path, value in jobs)
+        write = _PendingWrite(record, jobs, nbytes, time.perf_counter())
+        record.pending = write
+        self.ram_bytes += nbytes
+        self._pending_writes.append(write)
+        if self._write_queue is None:
+            self._write_queue = queue.Queue()
+            threading.Thread(
+                target=self._writer, args=(self._write_queue,),
+                name="session-spill-writer", daemon=True,
+            ).start()
+        self._write_queue.put(write)
+
+    @staticmethod
+    def _writer(jobs: queue.Queue) -> None:
+        while True:
+            write = jobs.get()
+            try:
+                for path, value in write.jobs:
+                    if write.cancel.is_set():
+                        break
+                    torch.save(value, path)
+                    path.chmod(0o600)
+            except Exception:  # the record is dropped at collect; the session recomputes
+                write.failed = True
+            finally:
+                write.done.set()
+
+    def _finish_write(self, write: _PendingWrite, *, wait: bool = False) -> bool:
+        """Install one finished background write (main thread). False while it runs."""
+        if not write.done.is_set():
+            if not wait:
+                return False
+            write.done.wait()
+        if write in self._pending_writes:
+            self._pending_writes.remove(write)
+        record = write.record
+        if write.charged:
+            self.ram_bytes = max(0, self.ram_bytes - write.nbytes)
+            write.charged = False
+        record.pending = None
+        written = {path for path, _value in write.jobs}
+        write.jobs = []
+        for chunk in record.chunks:
+            if chunk.file in written:
+                chunk.value = None
+        if write.cancel.is_set() or not record.valid:
+            return True
+        try:
+            if write.failed:
+                raise OSError("background checkpoint write failed")
+            self._publish(record)
+        except OSError:
+            self.counters.spills_failed += 1
+            self.discard(record)
+            return True
+        logger.info_rank0(
+            "Wrote cold session %s checkpoint in the background (%.2f GiB in %.2f s)",
+            record.session_id,
+            write.nbytes / (1 << 30),
+            time.perf_counter() - write.started,
+        )
+        return True
+
+    def collect_writes(self, *, wait: bool = False) -> None:
+        for write in list(self._pending_writes):
+            if not self._finish_write(write, wait=wait):
+                break  # FIFO: a later write cannot be done before this one
 
     def _incremental_base(
         self, previous: SessionSpillRecord | None, tokens: torch.Tensor, num_pages: int
@@ -1157,6 +1281,7 @@ class SessionSpillStore:
         """
         if not self.persist:
             return DurableSpillResult(False, (), "persistent session spill is disabled")
+        self.collect_writes(wait=True)
         by_source: dict[str, DurableSessionSource] = {}
         plans = {}
         try:
@@ -1343,7 +1468,10 @@ class SessionSpillStore:
         if self._prefetch is not None:
             return False
         record = self.get(session_id)
-        if record is None or record.tier != "disk" or record.cached_bytes:
+        if (
+            record is None or record.tier != "disk" or record.cached_bytes
+            or record.pending is not None
+        ):
             return False
         # Read only what the restore will: the KV below its cut and the one state at it.
         # The cut comes from the queued request's own tokens when they are known. The plan
@@ -1647,6 +1775,11 @@ class SessionSpillStore:
     def discard(self, record: SessionSpillRecord | None) -> None:
         if record is None or not record.valid:
             return
+        if record.pending is not None:
+            # Stops after the file in flight; waiting keeps it from landing in a later
+            # checkpoint of the same session that reuses this directory and file names.
+            record.pending.cancel.set()
+            self._finish_write(record.pending, wait=True)
         if self._prefetch is not None and self._prefetch.record is record:
             self.cancel_prefetch()
         if self._promoted == record.session_id:
@@ -1676,6 +1809,7 @@ class SessionSpillStore:
         self.collect_prefetch(wait=True)
         self._promoted = None
         self.collect_write_behind(wait=True)
+        self.collect_writes(wait=True)
         if not self.persist:
             for record in list(self._records):
                 self.discard(record)
