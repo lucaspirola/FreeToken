@@ -183,6 +183,10 @@ class SpillCounters:
     prefetches: int = 0
     prefetches_failed: int = 0
     prefetches_collected: int = 0
+    # RAM checkpoints given a disk copy in the background, and RAM -> disk demotions that
+    # still had to write synchronously on the scheduler thread for lack of one.
+    write_behinds: int = 0
+    demote_writes: int = 0
 
     def as_dict(self) -> Dict[str, int]:
         return {
@@ -195,6 +199,8 @@ class SpillCounters:
             "prefetches": self.prefetches,
             "prefetches_failed": self.prefetches_failed,
             "prefetches_collected": self.prefetches_collected,
+            "write_behinds": self.write_behinds,
+            "demote_writes": self.demote_writes,
         }
 
 

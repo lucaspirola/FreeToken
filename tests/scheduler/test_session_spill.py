@@ -471,9 +471,10 @@ def test_prefetch_promotes_a_queued_session_checkpoint_to_ram(tmp_path, monkeypa
         assert store.collect_prefetch("agent-a", wait=True) == "agent-a"
 
     assert record.tier == "ram" and record.directory is None
-    assert store.ram_bytes == record.byte_size and store.disk_bytes == 0
     assert all(c.value is not None and c.file is None for c in record.chunks)
-    assert not directory.exists()
+    # The disk copy stays as backing, so demoting it again costs no write.
+    assert store.ram_bytes == record.byte_size and store.disk_bytes == record.byte_size
+    assert directory.is_dir()
     assert any(m.startswith("Prefetched cold session agent-a to RAM") for m in caplog.messages)
     store.shutdown()
 
@@ -522,6 +523,161 @@ def test_prefetch_demotes_an_lru_ram_record_but_never_a_protected_one(tmp_path, 
     assert store.start_prefetch("queued") is True
     assert store.collect_prefetch(wait=True) == "queued"
     assert resident.tier == "disk" and queued.tier == "ram"
+    store.shutdown()
+
+
+def _promoted(store, linear, session_id, monkeypatch):
+    record = _disk_record(store, linear, session_id, monkeypatch)
+    assert store.start_prefetch(session_id) is True
+    assert store.collect_prefetch(session_id, wait=True) == session_id
+    return record
+
+
+def test_demoting_a_prefetched_checkpoint_drops_ram_without_rewriting_it(tmp_path, monkeypatch):
+    _kv, linear, _manager, store = _boundary_pools(tmp_path)
+    record = _promoted(store, linear, "agent-a", monkeypatch)
+    values = [c.value.clone() for c in record.chunks]
+    writes = []
+    monkeypatch.setattr(torch, "save", lambda *a, **k: writes.append(a[1]))
+
+    assert store._demote_to_disk(record) is True
+
+    assert writes == []
+    assert record.tier == "disk" and record.directory.is_dir() and record.backing is None
+    assert store.ram_bytes == 0 and store.disk_bytes == record.byte_size
+    monkeypatch.undo()
+    reread = store.iter_chunks(record)
+    # Byte compare: an unseeded state slot may hold NaN, which torch.equal never matches.
+    assert all(
+        torch.equal(v.contiguous().view(torch.uint8), e.view(torch.uint8))
+        for (_c, v), e in zip(reread, values, strict=True)
+    )
+    store.shutdown()
+
+
+def test_discarding_a_prefetched_checkpoint_removes_its_disk_backing(tmp_path, monkeypatch):
+    _kv, linear, _manager, store = _boundary_pools(tmp_path)
+    record = _promoted(store, linear, "agent-a", monkeypatch)
+    directory = record.backing[0]
+
+    store.discard(record)
+
+    assert not directory.exists()
+    assert store.ram_bytes == 0 and store.disk_bytes == 0
+    store.shutdown()
+
+
+def test_a_rekeyed_prefetched_checkpoint_keeps_its_backing(tmp_path, monkeypatch):
+    _kv, linear, _manager, store = _boundary_pools(tmp_path)
+    record = _promoted(store, linear, "agent-a", monkeypatch)
+    old = record.backing[0]
+
+    assert store.rekey(record, "agent-a~prev")
+    assert not old.exists() and record.backing[0] == store._record_dir("agent-a~prev")
+    assert store._demote_to_disk(record) is True
+    assert record.directory == store._record_dir("agent-a~prev")
+    assert all(c.file.parent == record.directory and c.file.exists() for c in record.chunks)
+    store.shutdown()
+
+
+def test_prefetch_never_demotes_another_queued_session(tmp_path, monkeypatch):
+    """Two queued sessions and room for one: B waits on disk instead of evicting A, which
+    the next pass would promote back (the 2026-10-02 ping-pong)."""
+    _kv, linear, _manager, store = _boundary_pools(tmp_path)
+    a = _promoted(store, linear, "agent-a", monkeypatch)
+    store.ram_budget_bytes = a.byte_size
+    b = _disk_record(store, linear, "agent-b", monkeypatch)
+
+    assert store.start_prefetch("agent-b", protect={"agent-a", "agent-b"}) is False
+    assert a.tier == "ram" and b.tier == "disk"
+    store.shutdown()
+
+
+def _full_ram(store, linear, monkeypatch, session_id="agent-a"):
+    """One RAM record and a RAM budget with no room for another like it."""
+    monkeypatch.setattr(
+        "freetoken.scheduler.session_spill._mem_available_bytes", lambda: 8 << 30
+    )
+    tokens = torch.tensor([1, 2, 3], dtype=torch.int32)
+    record = store.spill(session_id, tokens, tokens, linear.alloc(1)[0])
+    assert record is not None and record.tier == "ram"
+    store.ram_budget_bytes = record.byte_size
+    return record
+
+
+def test_write_behind_makes_the_next_demotion_free(tmp_path, monkeypatch):
+    _kv, linear, _manager, store = _boundary_pools(tmp_path)
+    record = _full_ram(store, linear, monkeypatch)
+    values = [c.value.clone() for c in record.chunks]
+
+    assert store.start_write_behind() is True
+    assert store.collect_write_behind(wait=True) is True
+    assert record.tier == "ram" and record.backing is not None
+    assert store.disk_bytes == record.byte_size and store.counters.write_behinds == 1
+    adopted = store._load_record(record.backing[0])  # what a restart would see
+    assert adopted is not None and adopted.session_id == "agent-a"
+
+    assert store._demote_to_disk(record) is True
+    assert store.counters.demote_writes == 0
+    assert record.tier == "disk" and store.ram_bytes == 0
+    reread = store.iter_chunks(record)
+    assert all(
+        torch.equal(v.contiguous().view(torch.uint8), e.view(torch.uint8))
+        for (_c, v), e in zip(reread, values, strict=True)
+    )
+    store.shutdown()
+    # The copy carries a manifest: a restart adopts it like any disk checkpoint.
+    revived = SessionSpillStore(
+        _kv, linear, directory=str(tmp_path), ram_budget_bytes=1 << 30,
+        disk_budget_bytes=1 << 30, host_reserve_bytes=0,
+    )
+    assert revived.get("agent-a") is not None
+    revived.shutdown()
+
+
+def test_write_behind_waits_for_ram_pressure_and_skips_protected(tmp_path, monkeypatch):
+    _kv, linear, _manager, store = _boundary_pools(tmp_path)
+    record = _full_ram(store, linear, monkeypatch)
+
+    assert store.start_write_behind(protect={"agent-a"}) is False
+    store.ram_budget_bytes = 2 * record.byte_size  # room for another: nothing to pre-write
+    assert store.start_write_behind() is False
+    assert store.counters.write_behinds == 0 and store.disk_bytes == 0
+    store.shutdown()
+
+
+def test_a_demotion_during_write_behind_reuses_the_copy(tmp_path, monkeypatch):
+    _kv, linear, _manager, store = _boundary_pools(tmp_path)
+    record = _full_ram(store, linear, monkeypatch)
+
+    assert store.start_write_behind() is True
+    assert store._demote_to_disk(record) is True  # joins the copy instead of a second write
+    assert store.counters.write_behinds == 1 and store.counters.demote_writes == 0
+    assert record.tier == "disk" and all(c.file.exists() for c in record.chunks)
+    store.shutdown()
+
+
+def test_a_checkpoint_discarded_during_write_behind_leaves_no_files(tmp_path, monkeypatch):
+    _kv, linear, _manager, store = _boundary_pools(tmp_path)
+    record = _full_ram(store, linear, monkeypatch)
+
+    assert store.start_write_behind() is True
+    store.discard(record)
+    assert store.collect_write_behind(wait=True) is False
+    assert store.disk_bytes == 0 and store.ram_bytes == 0
+    assert list(tmp_path.glob("checkpoint-wb-*")) == []
+    assert not store._record_dir("agent-a").exists()
+    store.shutdown()
+
+
+def test_a_checkpoint_rekeyed_during_write_behind_lands_under_its_new_id(tmp_path, monkeypatch):
+    _kv, linear, _manager, store = _boundary_pools(tmp_path)
+    record = _full_ram(store, linear, monkeypatch)
+
+    assert store.start_write_behind() is True
+    assert store.rekey(record, "agent-a~prev")
+    assert store.collect_write_behind(wait=True) is True
+    assert record.backing[0] == store._record_dir("agent-a~prev")
     store.shutdown()
 
 

@@ -2392,6 +2392,15 @@ class Scheduler(SchedulerIOMixin):
         promoted = store.collect_prefetch()
         sessions = getattr(self, "_sessions", {})
         resident = {sid for sid, lease in sessions.items() if lease.handle is not None}
+        # Every queued session's RAM copy is protected too: evicting one waiting session to
+        # promote another made the next pass promote the first back, re-reading and
+        # re-writing ~0.75 GiB/s on the scheduler thread (2026-10-02: decode 110 -> 54 tok/s).
+        queued = {
+            sid for sid in (getattr(p, "session_id", None)
+                            for p in getattr(self.prefill_manager, "pending_list", ()))
+            if sid
+        }
+        protect = resident | queued
         for pending in getattr(self.prefill_manager, "pending_list", ()):
             session_id = getattr(pending, "session_id", None)
             lease = sessions.get(session_id) if session_id else None
@@ -2399,8 +2408,11 @@ class Scheduler(SchedulerIOMixin):
                 continue
             if lease is not None and not lease.reclaimable:
                 continue  # explicit leases are never spilled: there is nothing to promote
-            if store.start_prefetch(session_id, protect=resident):
+            if store.start_prefetch(session_id, protect=protect):
                 break
+        # Pre-write the next demotion victim while the GPU is busy, so that demotion only
+        # drops tensors instead of writing ~0.6 GiB on this thread.
+        store.start_write_behind(protect=protect)
         return promoted
 
     def _sessions_need_service(self) -> bool:

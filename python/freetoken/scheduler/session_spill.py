@@ -117,6 +117,9 @@ class SessionSpillRecord:
     last_used_at: float = 0.0
     directory: Path | None = field(default=None)
     token_file: Path | None = field(default=None)
+    # A RAM record promoted from disk keeps its files: (directory, token file, chunk files).
+    # Demoting it again then drops the tensors instead of rewriting them.
+    backing: tuple | None = field(default=None)
 
     @property
     def state_boundaries(self) -> list[int]:
@@ -165,6 +168,18 @@ class _Prefetch:
     reserved_bytes: int
     thread: threading.Thread | None = None
     values: list[torch.Tensor] | None = None
+
+
+@dataclass
+class _WriteBehind:
+    """One in-flight background disk copy of a RAM record. Only the writer sets ``files``."""
+
+    record: SessionSpillRecord
+    staging: Path
+    cancel: threading.Event
+    started: float
+    thread: threading.Thread | None = None
+    files: list[Path] | None = None
 
 
 def select_state_boundaries(
@@ -282,6 +297,7 @@ class SessionSpillStore:
         # A promotion installed by a reap nobody asked for (``start_prefetch``'s own
         # housekeeping), held until the caller that does ask for it collects it.
         self._promoted: str | None = None
+        self._write_behind: _WriteBehind | None = None
         self.ram_bytes = 0
         self.disk_bytes = 0
         self._records: list[SessionSpillRecord] = []
@@ -522,6 +538,16 @@ class SessionSpillStore:
             if record.token_file is not None:
                 record.token_file = target / record.token_file.name
             record.directory = target
+        elif record.backing is not None:
+            directory, token_file, files = record.backing
+            target = self._record_dir(session_id)
+            shutil.rmtree(target, ignore_errors=True)
+            try:
+                directory.rename(target)
+                record.backing = (target, token_file and target / token_file.name,
+                                  [f and target / f.name for f in files])
+            except OSError:
+                self._drop_backing(record)
         if self._by_session.get(record.session_id) is record:
             self._by_session.pop(record.session_id, None)
         record.session_id = session_id
@@ -722,7 +748,13 @@ class SessionSpillStore:
         return byte_size <= self.disk_budget_bytes - self.disk_bytes and byte_size + (1 << 30) <= free_disk
 
     def _demote_to_disk(self, record: SessionSpillRecord) -> bool:
-        if not record.valid or record.tier != "ram" or not self._disk_has_room(record.byte_size):
+        if not record.valid or record.tier != "ram":
+            return False
+        if self._write_behind is not None and self._write_behind.record is record:
+            self.collect_write_behind(wait=True)
+        if record.backing is not None and self._drop_to_backing(record):
+            return True
+        if not self._disk_has_room(record.byte_size):
             return False
         target = self._prepare_dir(record.session_id)
         replacements: list[Path] = []
@@ -747,6 +779,7 @@ class SessionSpillStore:
         record.token_file = target / TOKENS_NAME
         self.ram_bytes = max(0, self.ram_bytes - record.byte_size)
         self.disk_bytes += record.byte_size
+        self.counters.demote_writes += 1
         try:
             self._write_manifest(record)
         except OSError:
@@ -844,6 +877,10 @@ class SessionSpillStore:
             self._records = [candidate for candidate in self._records if candidate is not previous]
             if previous.tier == "ram":
                 self.ram_bytes = max(0, self.ram_bytes - previous.byte_size)
+                if previous.backing is not None:
+                    # Same directory: the new generation's cleanup removes the old files.
+                    self.disk_bytes = max(0, self.disk_bytes - previous.byte_size)
+                    previous.backing = None
             else:
                 self.disk_bytes = max(0, self.disk_bytes - previous.byte_size)
             previous.valid = False
@@ -1249,17 +1286,158 @@ class SessionSpillStore:
         return True
 
     def _promote_to_ram(self, record: SessionSpillRecord, values: list[torch.Tensor]) -> None:
-        directory = record.directory
+        if record.directory is not None:
+            record.backing = (record.directory, record.token_file,
+                              [chunk.file for chunk in record.chunks])
         for chunk, value in zip(record.chunks, values, strict=True):
             chunk.value = value
             chunk.file = None
         record.tier = "ram"
         record.directory = None
         record.token_file = None
-        self.disk_bytes = max(0, self.disk_bytes - record.byte_size)
+        if record.backing is None:
+            self.disk_bytes = max(0, self.disk_bytes - record.byte_size)
         self.ram_bytes += record.byte_size
-        if directory is not None:
-            shutil.rmtree(directory, ignore_errors=True)
+
+    # ------------------------------------------------------------- write-behind
+
+    def start_write_behind(self, *, protect: Iterable[str] = ()) -> bool:
+        """Copy the next demotion victim to disk in the background. One at a time.
+
+        Only when RAM has no room for another record like it, i.e. the next promotion will
+        demote it: a demotion of a record with a disk copy only drops its tensors, instead
+        of writing ~0.6 GiB on the scheduler thread. Records that never come under RAM
+        pressure are never written, so this adds no SSD wear on a calm queue.
+        """
+        self.collect_write_behind()
+        if self._write_behind is not None:
+            return False
+        protect = set(protect)
+        victims = sorted(
+            (
+                record
+                for record in self._records
+                if record.valid and record.tier == "ram" and record.backing is None
+                and record.session_id not in protect
+            ),
+            key=lambda record: (record.last_used_at, record.created_at),
+        )
+        if not victims:
+            return False
+        record = victims[0]
+        if (
+            self._ram_has_room(record.byte_size)
+            or not self._disk_has_room(record.byte_size)
+            or self.ram_bytes + self.disk_bytes + record.byte_size > self.limit_bytes
+        ):
+            return False
+        values = [chunk.value for chunk in record.chunks]
+        if any(value is None for value in values):
+            return False
+        tokens = record.token_ids
+        state = _WriteBehind(
+            record, self.root / f"checkpoint-wb-{uuid.uuid4().hex}", threading.Event(),
+            time.perf_counter(),
+        )
+
+        def _write() -> None:
+            try:
+                state.staging.mkdir(mode=0o700)
+                torch.save(tokens, state.staging / TOKENS_NAME)
+                (state.staging / TOKENS_NAME).chmod(0o600)
+                files = []
+                for ordinal, value in enumerate(values):
+                    if state.cancel.is_set():
+                        return
+                    path = state.staging / f"{ordinal:06d}.pt"
+                    torch.save(value, path)
+                    path.chmod(0o600)
+                    files.append(path)
+            except Exception:  # a failed copy just leaves the demotion to write it
+                return
+            state.files = files
+
+        state.thread = threading.Thread(target=_write, name="session-write-behind", daemon=True)
+        self._write_behind = state
+        try:
+            state.thread.start()
+        except RuntimeError:
+            self._write_behind = None
+            return False
+        return True
+
+    def collect_write_behind(self, *, wait: bool = False) -> bool:
+        """Adopt a finished background copy as the record's disk backing (main thread only)."""
+        state = self._write_behind
+        if state is None:
+            return False
+        if state.thread is not None and state.thread.is_alive():
+            if not wait:
+                return False
+            state.thread.join()
+        self._write_behind = None
+        record, files = state.record, state.files
+        if (
+            state.cancel.is_set()
+            or files is None
+            or not record.valid
+            or record.tier != "ram"
+            or record.backing is not None
+            or len(files) != len(record.chunks)
+        ):
+            shutil.rmtree(state.staging, ignore_errors=True)
+            return False
+        # The session id may have been rekeyed while the copy ran: install under the
+        # current one, with a manifest so a restart adopts it like any disk checkpoint.
+        target = self._record_dir(record.session_id)
+        try:
+            shutil.rmtree(target, ignore_errors=True)
+            state.staging.rename(target)
+            files = [target / path.name for path in files]
+            manifest = self._manifest_document(record)
+            manifest["chunks"] = [
+                [chunk.family, chunk.layer, chunk.start, path.name]
+                for chunk, path in zip(record.chunks, files, strict=True)
+            ]
+            manifest["tokens"] = TOKENS_NAME
+            (target / MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
+            (target / MANIFEST_NAME).chmod(0o600)
+        except OSError:
+            shutil.rmtree(state.staging, ignore_errors=True)
+            shutil.rmtree(target, ignore_errors=True)
+            return False
+        record.backing = (target, target / TOKENS_NAME, files)
+        self.disk_bytes += record.byte_size
+        self.counters.write_behinds += 1
+        logger.info_rank0(
+            "Wrote cold session %s to disk behind RAM (%.2f GiB in %.2f s)",
+            record.session_id,
+            record.byte_size / (1 << 30),
+            time.perf_counter() - state.started,
+        )
+        return True
+
+    def _drop_to_backing(self, record: SessionSpillRecord) -> bool:
+        """Demote a promoted record by forgetting its tensors: its files are still there."""
+        directory, token_file, files = record.backing
+        if not all(path is not None and path.exists() for path in files):
+            self._drop_backing(record)
+            return False
+        for chunk, path in zip(record.chunks, files, strict=True):
+            chunk.value = None
+            chunk.file = path
+        record.tier = "disk"
+        record.directory = directory
+        record.token_file = token_file
+        record.backing = None
+        self.ram_bytes = max(0, self.ram_bytes - record.byte_size)
+        return True
+
+    def _drop_backing(self, record: SessionSpillRecord) -> None:
+        if record.backing is not None:
+            shutil.rmtree(record.backing[0], ignore_errors=True)
+            record.backing = None
+            self.disk_bytes = max(0, self.disk_bytes - record.byte_size)
 
     def discard(self, record: SessionSpillRecord | None) -> None:
         if record is None or not record.valid:
@@ -1274,6 +1452,9 @@ class SessionSpillStore:
             self._by_session.pop(record.session_id, None)
         if record.tier == "ram":
             self.ram_bytes = max(0, self.ram_bytes - record.byte_size)
+            self._drop_backing(record)
+            if self._write_behind is not None and self._write_behind.record is record:
+                self._write_behind.cancel.set()
         else:
             self.disk_bytes = max(0, self.disk_bytes - record.byte_size)
             parents = {chunk.file.parent for chunk in record.chunks if chunk.file is not None}
@@ -1288,6 +1469,7 @@ class SessionSpillStore:
         self.cancel_prefetch()
         self.collect_prefetch(wait=True)
         self._promoted = None
+        self.collect_write_behind(wait=True)
         if not self.persist:
             for record in list(self._records):
                 self.discard(record)

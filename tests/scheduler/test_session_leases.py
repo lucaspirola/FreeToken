@@ -379,6 +379,10 @@ class _SpillStore:
         self.records[promoted].tier = "ram"
         return promoted
 
+    def start_write_behind(self, *, protect=()) -> bool:
+        self.write_behind_protected = set(protect)
+        return False
+
     def cancel_prefetch(self, session_id=None) -> bool:
         if self.prefetching is None or session_id not in (None, self.prefetching):
             return False
@@ -716,12 +720,28 @@ def test_a_queued_session_prefetches_its_disk_checkpoint_while_the_resident_runs
     # A is mid-turn: B cannot be admitted, which is exactly the window to read it in.
     assert scheduler._schedule_next_batch() is None
     assert store.prefetching == "B"
-    assert store.protected == {"A"}  # the resident checkpoint never pays for the look-ahead
+    # Neither the resident nor any queued checkpoint pays for the look-ahead.
+    assert store.protected == {"A", "B"}
 
     # The next scheduler iteration installs it, so admission finds it in RAM.
     assert scheduler._schedule_next_batch() is None
     assert store.get("B").tier == "ram"
     assert scheduler.prefill_manager.admitted == []
+
+
+def test_look_ahead_protects_every_queued_session_not_only_the_resident():
+    scheduler = _demand_scheduler()
+    store = scheduler._session_spill_store
+    scheduler._sessions["A"] = SessionLease(
+        "A-handle", 300.0, active_uid=1, reclaimable=True, last_used_at=1.0
+    )
+    _queued_disk_checkpoint(scheduler, "B")
+    scheduler.prefill_manager.pending_list.append(_queued(3, "C"))
+
+    assert scheduler._schedule_next_batch() is None
+    assert store.prefetching == "B"
+    assert store.protected == {"A", "B", "C"}
+    assert store.write_behind_protected == {"A", "B", "C"}
 
 
 def test_no_look_ahead_for_an_explicit_lease_or_a_session_without_a_checkpoint():
