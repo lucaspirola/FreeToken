@@ -187,6 +187,10 @@ class SpillCounters:
     # still had to write synchronously on the scheduler thread for lack of one.
     write_behinds: int = 0
     demote_writes: int = 0
+    # Checkpoints that kept their previous checkpoint's files and wrote only the new tail,
+    # and RAM checkpoints moved to disk because the copy itself crossed the host reserve.
+    spills_incremental: int = 0
+    spills_demoted_after_capture: int = 0
 
     def as_dict(self) -> Dict[str, int]:
         return {
@@ -201,6 +205,8 @@ class SpillCounters:
             "prefetches_collected": self.prefetches_collected,
             "write_behinds": self.write_behinds,
             "demote_writes": self.demote_writes,
+            "spills_incremental": self.spills_incremental,
+            "spills_demoted_after_capture": self.spills_demoted_after_capture,
         }
 
 

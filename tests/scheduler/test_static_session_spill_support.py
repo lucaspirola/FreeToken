@@ -136,6 +136,8 @@ class StaticRestorePolicyTest(unittest.TestCase):
             config=SimpleNamespace(kv_grow_step_tokens=grow_step), discarded=[],
         )
         scheduler._discard_session_spill = lambda lease: scheduler.discarded.append(lease)
+        scheduler.retired = []
+        scheduler._retire_session_spill = lambda lease: scheduler.retired.append(lease)
         return scheduler, session, record, counters, engine, cm
 
     def test_static_shortage_defers_without_growth_or_discard(self):
@@ -169,7 +171,7 @@ class StaticRestorePolicyTest(unittest.TestCase):
         self.assertEqual(counters.restores, 1)
         self.assertEqual(counters.restores_deferred, 0)
         self.assertEqual(session.handle, "restored-handle")
-        self.assertEqual(scheduler.discarded, [session])
+        self.assertEqual(scheduler.retired, [session])
 
     def test_static_pool_positive_step_still_defers(self):
         scheduler, session, record, counters, engine, _cm = self._scheduler(growable=False, grow_step=64)

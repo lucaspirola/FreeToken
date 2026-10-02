@@ -797,3 +797,159 @@ def test_a_rekeyed_checkpoint_survives_its_old_id_checkpointing_again(tmp_path, 
         store.shutdown()
         assert new_store().get("agent-a~prev") is not None   # the manifest moved with it
     store.shutdown()
+
+
+# ------------------------------------------------------- incremental checkpoints
+
+
+def _incremental_store(tmp_path, monkeypatch, **overrides):
+    import freetoken.scheduler.session_spill as spill_mod
+
+    monkeypatch.setattr(spill_mod, "SPILL_CHUNK_PAGES", 2)
+    kv, linear, manager = _pools()
+    kwargs = dict(
+        directory=str(tmp_path), ram_budget_bytes=0, disk_budget_bytes=1 << 30,
+        host_reserve_bytes=0, state_stride_tokens=1,
+    )
+    kwargs.update(overrides)
+    return kv, linear, manager, SessionSpillStore(kv, linear, **kwargs)
+
+
+def _seed(kv, linear, pages, slot, seed):
+    torch.manual_seed(seed)
+    kv._k_buffer[:, pages] = torch.randint(-128, 127, kv._k_buffer[:, pages].shape, dtype=torch.int8)
+    linear.recurrent_states[:, slot] = torch.randn_like(linear.recurrent_states[:, slot])
+
+
+def _count_saves(monkeypatch):
+    saved = []
+    real = torch.save
+
+    def counting(value, path, *args, **kwargs):
+        saved.append(path)
+        return real(value, path, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "save", counting)
+    return saved
+
+
+def test_an_extended_session_checkpoints_only_its_new_pages(tmp_path, monkeypatch):
+    kv, linear, manager, store = _incremental_store(tmp_path, monkeypatch)
+    tokens = torch.tensor([11, 12, 13, 14, 15], dtype=torch.int32)
+    pages = manager._page_to_token(manager._allocate(5))
+    slot = linear.alloc(1)[0]
+    _seed(kv, linear, pages, slot, 1)
+    first = store.spill("agent", tokens, pages, slot)
+    reused = {c.file for c in first.chunks if c.family == "k" and c.start < 4}
+    assert len(reused) == 2 * kv._k_buffer.shape[0]  # chunks [0,2) and [2,4) per layer
+
+    # The next turn appends four tokens; pages [0, 5) are the same bytes.
+    longer = torch.tensor([11, 12, 13, 14, 15, 16, 17, 18, 19], dtype=torch.int32)
+    more = manager._page_to_token(manager._allocate(4))
+    _seed(kv, linear, more, slot, 2)
+    all_pages = torch.cat((pages, more))
+    expected_k = kv._k_buffer[:, all_pages].clone()
+    saved = _count_saves(monkeypatch)
+    second = store.spill("agent", longer, all_pages, slot)
+    monkeypatch.undo()
+
+    assert second is not None and second.tier == "disk"
+    assert store.counters.spills_incremental == 1
+    assert reused <= {c.file for c in second.chunks}
+    assert not any(str(path) in {str(f) for f in reused} for path in saved)
+    assert all(c.file.exists() for c in second.chunks)
+    names = {p.name for p in second.directory.iterdir()}
+    assert names == {"manifest.json", second.token_file.name, *(c.file.name for c in second.chunks)}
+    assert store.disk_bytes == second.byte_size and not first.valid
+    restored = manager.restore_hybrid_session_prefix(second, store)
+    assert torch.equal(kv._k_buffer[:, restored.get_matched_indices().long()], expected_k)
+    manager.unlock(restored)
+    store.shutdown()
+    # The mixed-generation manifest is what a restart adopts.
+    revived = SessionSpillStore(
+        kv, linear, directory=str(tmp_path), ram_budget_bytes=0,
+        disk_budget_bytes=1 << 30, host_reserve_bytes=0,
+    )
+    assert torch.equal(revived.get("agent").token_ids, longer)
+    revived.shutdown()
+
+
+def test_a_diverged_session_rewrites_its_whole_checkpoint(tmp_path, monkeypatch):
+    kv, linear, manager, store = _incremental_store(tmp_path, monkeypatch)
+    pages = manager._page_to_token(manager._allocate(5))
+    slot = linear.alloc(1)[0]
+    _seed(kv, linear, pages, slot, 1)
+    first = store.spill("agent", torch.tensor([1, 2, 3, 4, 5], dtype=torch.int32), pages, slot)
+    old_files = {c.file for c in first.chunks}
+
+    second = store.spill("agent", torch.tensor([1, 9, 3, 4, 5], dtype=torch.int32), pages, slot)
+
+    assert store.counters.spills_incremental == 0
+    assert all(c.file.name[0].isdigit() for c in second.chunks)  # a fresh, ordinal layout
+    assert {p.name for p in second.directory.iterdir()} >= {c.file.name for c in second.chunks}
+    assert not first.valid and len(old_files) == len(second.chunks)
+    store.shutdown()
+
+
+def test_an_incremental_checkpoint_reuses_states_inside_the_shared_prefix(tmp_path, monkeypatch):
+    kv, linear, manager, store = _incremental_store(tmp_path, monkeypatch)
+    tokens = torch.tensor([1, 2, 3, 4], dtype=torch.int32)
+    pages = manager._page_to_token(manager._allocate(4))
+    slot, early = linear.alloc(2)
+    _seed(kv, linear, pages, slot, 1)
+    first = store.spill("agent", tokens, pages, slot, extra_states=[(2, early)])
+    kept = {c.start: c.file for c in first.chunks if c.family == "gdn_recurrent"}
+    assert set(kept) == {2, 4}
+
+    more = manager._page_to_token(manager._allocate(2))
+    second = store.spill(
+        "agent", torch.tensor([1, 2, 3, 4, 5, 6], dtype=torch.int32),
+        torch.cat((pages, more)), slot,
+    )
+
+    states = {c.start: c.file for c in second.chunks if c.family == "gdn_recurrent"}
+    assert states[2] == kept[2] and states[4] == kept[4]  # both boundaries came along
+    assert 6 in states and states[6].exists()
+    store.shutdown()
+
+
+def test_a_ram_checkpoint_that_crossed_the_reserve_moves_to_disk(tmp_path, monkeypatch):
+    kv, linear, manager = _pools()
+    store = SessionSpillStore(
+        kv, linear, directory=str(tmp_path), ram_budget_bytes=1 << 30,
+        disk_budget_bytes=1 << 30, host_reserve_bytes=1 << 30,
+    )
+    available = {"bytes": 8 << 30}
+    monkeypatch.setattr(
+        "freetoken.scheduler.session_spill._mem_available_bytes", lambda: available["bytes"]
+    )
+    real_iter = kv.iter_session_spill_tensors
+
+    def growing_host(*args, **kwargs):
+        available["bytes"] = 0  # another process took the RAM while the copy ran
+        yield from real_iter(*args, **kwargs)
+
+    monkeypatch.setattr(kv, "iter_session_spill_tensors", growing_host)
+    tokens = torch.tensor([1, 2, 3], dtype=torch.int32)
+    record = store.spill("agent", tokens, tokens, linear.alloc(1)[0])
+
+    assert record is not None and record.tier == "disk"
+    assert store.ram_bytes == 0 and store.counters.spills_demoted_after_capture == 1
+    store.shutdown()
+
+
+def test_retire_keeps_disk_bases_and_frees_the_ram_tier(tmp_path, monkeypatch):
+    _kv, linear, _manager, store = _boundary_pools(tmp_path)
+    on_disk = _disk_record(store, linear, "on-disk", monkeypatch)
+    promoted = _promoted(store, linear, "promoted", monkeypatch)
+    tokens = torch.tensor([1, 2, 3], dtype=torch.int32)
+    ram_only = store.spill("ram-only", tokens, tokens, linear.alloc(1)[0])
+    assert ram_only.tier == "ram" and ram_only.backing is None
+
+    for record in (on_disk, promoted, ram_only):
+        store.retire(record)
+
+    assert on_disk.valid and on_disk.tier == "disk"
+    assert promoted.valid and promoted.tier == "disk"  # dropped its tensors, no write
+    assert not ram_only.valid and store.ram_bytes == 0
+    store.shutdown()

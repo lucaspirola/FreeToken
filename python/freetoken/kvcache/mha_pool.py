@@ -379,7 +379,7 @@ class MHAKVCache(QuantizedKVStorageMixin, BaseKVCachePool):
         return int(per_page) * int(num_pages)
 
     def iter_session_spill_tensors(
-        self, page_indices: torch.Tensor, *, chunk_pages: int = 4096
+        self, page_indices: torch.Tensor, *, chunk_pages: int = 4096, start_page: int = 0
     ):
         """Yield bounded CPU chunks of every physical tensor backing selected pages.
 
@@ -393,7 +393,7 @@ class MHAKVCache(QuantizedKVStorageMixin, BaseKVCachePool):
         for family, buffer in families:
             for layer in range(buffer.shape[0]):
                 slab = buffer[layer]
-                for start in range(0, ids.numel(), chunk_pages):
+                for start in range(start_page, ids.numel(), chunk_pages):
                     stop = min(start + chunk_pages, ids.numel())
                     yield family, layer, start, slab.index_select(0, ids[start:stop]).cpu()
 

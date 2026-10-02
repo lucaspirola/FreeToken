@@ -303,7 +303,7 @@ def test_spill_counters_render_every_failure_channel():
         "spills", "spills_failed", "restores", "restores_failed", "restores_diverged",
         "restores_deferred",
         "prefetches", "prefetches_failed", "prefetches_collected",
-        "write_behinds", "demote_writes",
+        "write_behinds", "demote_writes", "spills_incremental", "spills_demoted_after_capture",
     }
 
 # --------------------------------------------------------------------------- #

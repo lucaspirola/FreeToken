@@ -51,6 +51,8 @@ TOKENS_NAME = "tokens.pt"
 # v2 added the per-boundary recurrent states; v1 records are discarded on adoption.
 MANIFEST_VERSION = 2
 STATE_FAMILIES = ("gdn_conv", "gdn_recurrent")
+# KV pages per checkpoint file: also the granularity an incremental checkpoint reuses at.
+SPILL_CHUNK_PAGES = 8192
 # Look-ahead spacing of the extra boundary states, and their hard count bound.
 DEFAULT_STATE_STRIDE_TOKENS = 65_536
 MAX_STATE_SNAPSHOTS = 8
@@ -609,13 +611,22 @@ class SessionSpillStore:
             return "disk"
         return None
 
-    def _reserve_tier(self, byte_size: int, session_id: str) -> str | None:
-        """Pick a tier for ``byte_size``, evicting least-recently-used records to fit."""
+    def _reserve_tier(
+        self, byte_size: int, session_id: str, *, prefer_disk: bool = False
+    ) -> str | None:
+        """Pick a tier for ``byte_size``, evicting least-recently-used records to fit.
+
+        ``prefer_disk``: an incremental checkpoint writes only its new pages to disk, which
+        is cheaper than copying the whole session into the small RAM tier.
+        """
         if byte_size > self.limit_bytes:
             return None  # a single record larger than the whole cap is refused
         while True:
             if self.ram_bytes + self.disk_bytes + byte_size <= self.limit_bytes:
-                tier = self._choose_tier(byte_size)
+                tier = (
+                    "disk" if prefer_disk and self._disk_has_room(byte_size)
+                    else self._choose_tier(byte_size)
+                )
                 if tier is not None:
                     return tier
             if not self._evict_one_lru(session_id):
@@ -649,22 +660,35 @@ class SessionSpillStore:
         """
         tokens = token_ids.detach().to(device="cpu", dtype=torch.int32).clone()
         num_pages = int(len(page_indices))
-        states: dict[int, int | tuple[torch.Tensor, torch.Tensor]] = {
+        states: dict[int, int | tuple] = {
             int(boundary): (conv, recurrent) for boundary, conv, recurrent in captured_states
         }
         # A live pool slot and a host capture at the same boundary hold the same state; the
         # slot is preferred because its copy is the one this spill pays for anyway.
         states.update({int(b): int(slot) for b, slot in extra_states})
+        previous = self.get(session_id)
+        base = self._incremental_base(previous, tokens, num_pages)
+        if base is not None:
+            # The previous checkpoint's own states below the shared prefix are the same
+            # bytes and already on disk: preferred over a fresh copy of either kind.
+            states.update(base[1])
         states[num_pages] = int(linear_slot)
         boundaries = self._select_state_boundaries(states, num_pages)
         byte_size = self._payload_bytes(num_pages, tokens, len(boundaries))
-        # Drop any previous checkpoint for this session first: its directory is the same
-        # deterministic path this spill is about to write.
-        self.discard(self.get(session_id))
-        tier = self._reserve_tier(byte_size, session_id)
+        if base is not None:
+            self._detach(previous)
+        else:
+            # Drop any previous checkpoint for this session first: its directory is the
+            # same deterministic path this spill is about to write.
+            self.discard(previous)
+        tier = self._reserve_tier(byte_size, session_id, prefer_disk=base is not None)
+        if base is not None and tier != "disk":
+            self._discard_files(previous)
+            base = None
         if tier is None:
             self.counters.spills_failed += 1
             return None
+        reuse_end, _base_states, reused_kv = base if base is not None else (0, {}, [])
 
         now = time.time()
         chunks: list[SpillChunk] = []
@@ -680,31 +704,44 @@ class SessionSpillStore:
             last_used_at=now,
         )
         target = None
+        # New files carry a generation prefix so they never overwrite a reused one, and the
+        # previous manifest stays valid until the new one replaces it.
+        prefix = "" if base is None else f"{uuid.uuid4().hex[:12]}-"
+        written = 0
         try:
             # Snapshot writes are enqueued on the engine stream. Session release is a safe
             # scheduler boundary, and this barrier makes the D2H checkpoint exact.
             if page_indices.device.type == "cuda":
                 torch.cuda.synchronize(page_indices.device)
-            sources = self.kv_pool.iter_session_spill_tensors(page_indices, chunk_pages=16_384)
             if tier == "disk":
-                target = self._prepare_dir(session_id)
+                target = self._record_dir(session_id)
+                if base is None:
+                    target = self._prepare_dir(session_id)
                 record.directory = target
-                torch.save(tokens, target / TOKENS_NAME)
-                (target / TOKENS_NAME).chmod(0o600)
-                record.token_file = target / TOKENS_NAME
-            for ordinal, (family, layer, start, value) in enumerate(sources):
+                record.token_file = target / f"{prefix}{TOKENS_NAME}"
+                torch.save(tokens, record.token_file)
+                record.token_file.chmod(0o600)
+            chunks.extend(reused_kv)
+            sources = self.kv_pool.iter_session_spill_tensors(
+                page_indices, chunk_pages=SPILL_CHUNK_PAGES, start_page=reuse_end
+            )
+            for family, layer, start, value in sources:
                 value = value.contiguous()
                 if tier == "ram":
                     chunks.append(SpillChunk(family, layer, start, value=value))
                 else:
-                    path = target / f"{ordinal:06d}.pt"
+                    path = target / f"{prefix}{len(chunks):06d}.pt"
                     torch.save(value, path)
                     path.chmod(0o600)
+                    written += value.numel() * value.element_size()
                     chunks.append(SpillChunk(family, layer, start, file=path))
 
             pool = self.linear_state_pool
             for boundary in boundaries:
                 source = states[boundary]
+                if isinstance(source, list):
+                    chunks.extend(source)  # reused state files
+                    continue
                 pair = (
                     (pool.conv_states[:, source], pool.recurrent_states[:, source])
                     if isinstance(source, int)
@@ -717,12 +754,18 @@ class SessionSpillStore:
                     if tier == "ram":
                         chunks.append(SpillChunk(family, -1, boundary, value=value))
                     else:
-                        path = target / f"{len(chunks):06d}.pt"
+                        path = target / f"{prefix}{len(chunks):06d}.pt"
                         torch.save(value, path)
                         path.chmod(0o600)
+                        written += value.numel() * value.element_size()
                         chunks.append(SpillChunk(family, -1, boundary, file=path))
             if tier == "disk":
                 self._write_manifest(record)
+                keep = {MANIFEST_NAME, record.token_file.name}
+                keep.update(chunk.file.name for chunk in chunks)
+                for path in target.iterdir():
+                    if path.name not in keep:
+                        path.unlink(missing_ok=True)
         except Exception:
             if target is not None:
                 shutil.rmtree(target, ignore_errors=True)
@@ -731,7 +774,96 @@ class SessionSpillStore:
 
         self._track(record)
         self.counters.spills += 1
+        if base is not None:
+            self.counters.spills_incremental += 1
+            logger.info_rank0(
+                "Checkpointed session %s incrementally: reused %d/%d pages, wrote %.2f of "
+                "%.2f GiB",
+                session_id, reuse_end, num_pages, written / (1 << 30), byte_size / (1 << 30),
+            )
+        if tier == "ram" and _mem_available_bytes() < self.host_reserve_bytes + (256 << 20):
+            # The copy itself can be what crossed the reserve: checked again after it, as
+            # the free-RAM sample before it cannot see other processes growing meanwhile.
+            self.counters.spills_demoted_after_capture += 1
+            if not self._demote_to_disk(record):
+                self.discard(record)
+                return None
         return record
+
+    def _incremental_base(
+        self, previous: SessionSpillRecord | None, tokens: torch.Tensor, num_pages: int
+    ) -> tuple[int, dict[int, list[SpillChunk]], list[SpillChunk]] | None:
+        """What of ``previous``'s disk files a new checkpoint of ``tokens`` can keep.
+
+        KV at position i and the recurrent state at boundary b depend only on the tokens
+        before them, so every KV chunk that ends inside the shared token prefix and every
+        state at a boundary inside it is the same bytes. Returns (KV pages reused, reused
+        states by boundary, reused KV chunks), or None when nothing is reusable.
+        """
+        if (
+            previous is None
+            or not previous.valid
+            or previous.tier != "disk"
+            or previous.directory != self._record_dir(previous.session_id)
+            or previous.fingerprint != self.kv_pool.session_spill_fingerprint()
+        ):
+            return None
+        old = previous.token_ids
+        shared = min(old.numel(), tokens.numel(), previous.num_pages, num_pages)
+        mismatch = (old[:shared] != tokens[:shared]).nonzero()
+        if mismatch.numel():
+            shared = int(mismatch[0])
+        kv = [c for c in previous.chunks if c.family not in STATE_FAMILIES]
+        starts = sorted({c.start for c in kv})
+        reuse_end = 0
+        for stop in [*starts[1:], previous.num_pages]:
+            if stop > shared:
+                break
+            reuse_end = stop
+        reused_kv = [
+            SpillChunk(c.family, c.layer, c.start, file=c.file) for c in kv if c.start < reuse_end
+        ]
+        pairs: dict[int, list[SpillChunk]] = {}
+        for c in previous.chunks:
+            if c.family in STATE_FAMILIES and 0 < c.start <= shared and c.start < num_pages:
+                pairs.setdefault(c.start, []).append(SpillChunk(c.family, c.layer, c.start, file=c.file))
+        states = {b: sorted(pair, key=lambda c: STATE_FAMILIES.index(c.family))
+                  for b, pair in pairs.items() if len(pair) == len(STATE_FAMILIES)}
+        if not reused_kv and not states:
+            return None
+        if any(c.file is None or not c.file.is_file() for c in reused_kv):
+            return None
+        return reuse_end, states, reused_kv
+
+    def _detach(self, record: SessionSpillRecord) -> None:
+        """Forget a disk record whose files the next checkpoint takes over."""
+        if self._prefetch is not None and self._prefetch.record is record:
+            self.cancel_prefetch()
+        if self._promoted == record.session_id:
+            self._promoted = None
+        record.valid = False
+        self._records = [candidate for candidate in self._records if candidate is not record]
+        if self._by_session.get(record.session_id) is record:
+            self._by_session.pop(record.session_id, None)
+        self.disk_bytes = max(0, self.disk_bytes - record.byte_size)
+
+    def _discard_files(self, record: SessionSpillRecord) -> None:
+        if record.directory is not None:
+            shutil.rmtree(record.directory, ignore_errors=True)
+
+    def retire(self, record: SessionSpillRecord | None) -> None:
+        """A session moved past its checkpoint: keep it only as the next one's disk base.
+
+        A disk record stays as it is (it is still a valid, shorter restore point), a RAM
+        record with a disk copy drops its tensors, and a RAM-only record is discarded so
+        it does not hold the small RAM tier while its session is resident.
+        """
+        if record is None or not record.valid:
+            return
+        if record.tier == "ram" and not (
+            record.backing is not None and self._drop_to_backing(record)
+        ):
+            self.discard(record)
 
     def _prepare_dir(self, session_id: str) -> Path:
         target = self._record_dir(session_id)
@@ -1045,7 +1177,7 @@ class SessionSpillStore:
 
                     def resident_chunks():
                         yield from self.kv_pool.iter_session_spill_tensors(
-                            source.page_indices, chunk_pages=16_384
+                            source.page_indices, chunk_pages=SPILL_CHUNK_PAGES
                         )
                         pool = self.linear_state_pool
                         for boundary in boundaries:

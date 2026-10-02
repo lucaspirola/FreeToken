@@ -361,6 +361,11 @@ class _SpillStore:
         self.discarded.append(record)
         self.records.pop(getattr(record, "session_id", None), None)
 
+    def retire(self, record) -> None:
+        # Disk checkpoints stay as the next one's incremental base; RAM ones are dropped.
+        if record is not None and getattr(record, "tier", "ram") != "disk":
+            self.discard(record)
+
     # Look-ahead promotion (3F): the double records the calls, moves no bytes.
     def start_prefetch(self, session_id, *, protect=()) -> bool:
         record = self.records.get(session_id)

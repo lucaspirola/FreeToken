@@ -1634,7 +1634,7 @@ class Scheduler(SchedulerIOMixin):
                 old_handle = session.handle
                 _session_aliases(self).pop(req.uid, None)
                 if self._extends(session, req.input_ids):
-                    self._discard_session_spill(session)
+                    self._retire_session_spill(session)
                 else:
                     # This turn replaced a conversation it does not continue (a compaction
                     # summary finishing first). Keep that conversation restorable for the
@@ -1866,6 +1866,14 @@ class Scheduler(SchedulerIOMixin):
             store.discard(session.spill)
         session.spill = None
 
+    def _retire_session_spill(self, session: SessionLease) -> None:
+        """The session is resident again: its checkpoint stays only as the next one's base,
+        so that next checkpoint writes just the pages this turn added."""
+        store = getattr(self, "_session_spill_store", None)
+        if store is not None and session.spill is not None:
+            store.retire(session.spill)
+        session.spill = None
+
     def _enforce_session_host_reserve(self) -> None:
         store = getattr(self, "_session_spill_store", None)
         if store is None:
@@ -1898,7 +1906,7 @@ class Scheduler(SchedulerIOMixin):
         page_indices = handle.get_matched_indices()
         if linear_slot is None or len(page_indices) != len(session.token_ids):
             return False
-        self._discard_session_spill(session)
+        self._retire_session_spill(session)
         capture = getattr(self, "_state_capture", None)
         if capture is not None:
             capture.synchronize()  # the staged copies are host-readable now
@@ -2074,7 +2082,7 @@ class Scheduler(SchedulerIOMixin):
             session.handle = cm.restore_hybrid_session_prefix(record, store, length)
             elapsed = time.perf_counter() - started
             store.counters.restores += 1
-            self._discard_session_spill(session)
+            self._retire_session_spill(session)
             logger.info_rank0(
                 "Restored cold session %s: %d/%d tokens from %s, %.2f GiB in %.3f s "
                 "(%.2f GiB/s)",
