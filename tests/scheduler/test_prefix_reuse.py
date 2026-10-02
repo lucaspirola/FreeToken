@@ -204,7 +204,10 @@ class _ShrinkCM:
 def _shrink_obj(cm, sessions, release):
     obj = SimpleNamespace(cache_manager=cm, _sessions=sessions,
                           _release_soft_session_handle=release, engine=None)
+    obj._newest_evictable_prefix_leaf = Scheduler._newest_evictable_prefix_leaf.__get__(obj)
     obj._newest_evictable_prefix_ns = Scheduler._newest_evictable_prefix_ns.__get__(obj)
+    obj._newest_evictable_prefix_pages = (
+        Scheduler._newest_evictable_prefix_pages.__get__(obj))
     obj._kv_bytes_per_token = lambda: 0
     return obj
 

@@ -2403,8 +2403,13 @@ class Scheduler(SchedulerIOMixin):
         self._growable_shrink_in_flight = True
         try:
             used_pages, _total_pages = cm.page_usage()
+            # An idle shrink frees VRAM nobody is waiting for. Without it, a lone client
+            # that sends no session id loses the tail of its own prompt on every turn
+            # (omp, 2026-10-02: 87K-token prompts cut back to 42K each turn).
+            keep_pages = 0 if handoff else self._newest_evictable_prefix_pages()
             best_target = max(
-                initial, math.ceil((used_pages + future_pages) / step) * step
+                initial,
+                math.ceil((used_pages + future_pages + keep_pages) / step) * step,
             )
             if best_target > cm.committed_pages - step:
                 logger.debug_rank0(
@@ -2545,9 +2550,9 @@ class Scheduler(SchedulerIOMixin):
         reserved = int(reserve_fn()) if reserve_fn is not None else 0
         return max(head_need, reserved)
 
-    def _newest_evictable_prefix_ns(self) -> int | None:
-        """Last-use stamp (``time.monotonic_ns``) of the most recent unlocked prefix-tree
-        leaf -- in practice the prompt an identity-less request just left -- or None."""
+    def _newest_evictable_prefix_leaf(self):
+        """The most recent unlocked prefix-tree leaf -- in practice the prompt an
+        identity-less request just left -- or None."""
         prefix = getattr(self.cache_manager, "prefix_cache", None)
         root = getattr(prefix, "root", getattr(prefix, "root_node", None))
         if root is None:
@@ -2558,8 +2563,25 @@ class Scheduler(SchedulerIOMixin):
             if node.children:
                 stack.extend(node.children.values())
             elif node is not root and node.ref_count == 0:
-                newest = node.timestamp if newest is None else max(newest, node.timestamp)
+                if newest is None or node.timestamp > newest.timestamp:
+                    newest = node
         return newest
+
+    def _newest_evictable_prefix_ns(self) -> int | None:
+        """Last-use stamp (``time.monotonic_ns``) of ``_newest_evictable_prefix_leaf``."""
+        leaf = self._newest_evictable_prefix_leaf()
+        return None if leaf is None else leaf.timestamp
+
+    def _newest_evictable_prefix_pages(self) -> int:
+        """Unlocked pages on the root path of the newest unlocked leaf. Locked ancestors
+        are already in ``page_usage()``."""
+        leaf = self._newest_evictable_prefix_leaf()
+        tokens = 0
+        node = leaf
+        while node is not None and node.ref_count == 0 and getattr(node, "_parent", None):
+            tokens += node.length
+            node = node.parent
+        return tokens // self.cache_manager.page_size
 
     def _release_leases_older_than_prefix(self, initial: int, step: int,
                                           future_pages: int) -> None:

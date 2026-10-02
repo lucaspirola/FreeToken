@@ -100,7 +100,10 @@ def _scheduler(*, pending, cm=None, shrink_error=None):
     obj._retained_session_handles = Scheduler._retained_session_handles.__get__(obj)
     obj._release_leases_older_than_prefix = (
         Scheduler._release_leases_older_than_prefix.__get__(obj))
+    obj._newest_evictable_prefix_leaf = Scheduler._newest_evictable_prefix_leaf.__get__(obj)
     obj._newest_evictable_prefix_ns = Scheduler._newest_evictable_prefix_ns.__get__(obj)
+    obj._newest_evictable_prefix_pages = (
+        Scheduler._newest_evictable_prefix_pages.__get__(obj))
     obj.engine.stream = SimpleNamespace(synchronize=lambda: None)
     return obj, calls
 
@@ -110,6 +113,54 @@ def test_long_to_short_queued_handoff_shrinks_one_or_more_steps():
     Scheduler._maybe_shrink_growable_kv(obj)
     assert calls and calls[0] <= 24
     assert obj.cache_manager.removed == [calls[0]]
+
+
+class _Tree:
+    def __init__(self, length, ts, ref=0, parent=None):
+        self.length, self.timestamp, self.ref_count = length, ts, ref
+        self._parent = parent
+        self.children = {}
+        if parent is not None:
+            parent.children[len(parent.children)] = self
+
+    @property
+    def parent(self):
+        return self._parent
+
+
+def _evicted(obj):
+    asked = []
+    inner = obj._evict_growable_prefix_pages
+    obj._evict_growable_prefix_pages = lambda pages: asked.append(pages) or inner(pages)
+    return asked
+
+
+def test_idle_shrink_keeps_the_newest_identity_less_prompt():
+    # one client without a session id left a 20-token prompt (12 + 8) in a 32-page pool
+    cm = _CM(committed=32, used=0, occupied=20)
+    root = _Tree(0, 0, ref=1)
+    _Tree(8, 2, parent=_Tree(12, 1, parent=root))
+    cm.prefix_cache = SimpleNamespace(root=root)
+    obj, calls = _scheduler(pending=[], cm=cm)
+    asked = _evicted(obj)
+    Scheduler._maybe_shrink_growable_kv(obj)
+    assert sum(asked) == 0          # was 12: the tail past token 8 evicted every turn
+    assert calls == [24]
+
+
+def test_idle_shrink_still_evicts_older_prompts_and_counts_locked_pages_once():
+    # a session holds 12 locked pages; its unlocked 4-token tail is the newest leaf, and
+    # an older 8-token prompt from another client is evictable
+    cm = _CM(committed=32, used=12, occupied=24)
+    root = _Tree(0, 0, ref=1)
+    _Tree(4, 5, parent=_Tree(12, 3, ref=1, parent=root))
+    _Tree(8, 1, parent=root)
+    cm.prefix_cache = SimpleNamespace(root=root)
+    obj, calls = _scheduler(pending=[], cm=cm)
+    asked = _evicted(obj)
+    Scheduler._maybe_shrink_growable_kv(obj)
+    assert asked == [8]             # 24 occupied down to the 16 that 12 + 4 need
+    assert calls == [16]
 
 
 def test_shrink_supplies_all_resident_session_handles_including_protected():
