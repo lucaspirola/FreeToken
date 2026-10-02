@@ -123,6 +123,13 @@ class SessionSpillRecord:
     # A RAM record promoted from disk keeps its files: (directory, token file, chunk files).
     # Demoting it again then drops the tensors instead of rewriting them.
     backing: tuple | None = field(default=None)
+    # A disk record's prefetched chunks: their tensors sit on ``chunk.value`` beside
+    # ``chunk.file``, and these bytes are charged to the RAM tier.
+    cached_bytes: int = 0
+
+    @property
+    def in_ram(self) -> bool:
+        return self.valid and (self.tier == "ram" or self.cached_bytes > 0)
 
     @property
     def state_boundaries(self) -> list[int]:
@@ -169,6 +176,7 @@ class _Prefetch:
     cancel: threading.Event
     started: float
     reserved_bytes: int
+    chunks: list[SpillChunk] = field(default_factory=list)
     thread: threading.Thread | None = None
     values: list[torch.Tensor] | None = None
 
@@ -248,6 +256,14 @@ def _is_ours(entry: Path) -> bool:
             name.startswith("server-") or name.startswith("checkpoint-")
         )
     return entry.suffix in {".pt", ".tmp", ".json"}
+
+
+def _matched_len(a: torch.Tensor, b: torch.Tensor) -> int:
+    n = min(a.numel(), b.numel())
+    a = a[:n].to(dtype=torch.int64, device="cpu")
+    b = torch.as_tensor(b[:n]).to(dtype=torch.int64, device="cpu")
+    mismatch = (a != b).nonzero()
+    return int(mismatch[0]) if mismatch.numel() else n
 
 
 def _prefix_hash(token_ids: torch.Tensor) -> str:
@@ -853,6 +869,7 @@ class SessionSpillStore:
         if self._by_session.get(record.session_id) is record:
             self._by_session.pop(record.session_id, None)
         self.disk_bytes = max(0, self.disk_bytes - record.byte_size)
+        self._drop_cache(record)
 
     def _discard_files(self, record: SessionSpillRecord) -> None:
         if record.directory is not None:
@@ -867,6 +884,7 @@ class SessionSpillStore:
         """
         if record is None or not record.valid:
             return
+        self._drop_cache(record)
         if record.tier == "ram" and not (
             record.backing is not None and self._drop_to_backing(record)
         ):
@@ -887,6 +905,9 @@ class SessionSpillStore:
         return byte_size <= self.disk_budget_bytes - self.disk_bytes and byte_size + (1 << 30) <= free_disk
 
     def _demote_to_disk(self, record: SessionSpillRecord) -> bool:
+        if record.valid and record.tier == "disk" and record.cached_bytes:
+            self._drop_cache(record)  # a prefetched disk record: its files are complete
+            return True
         if not record.valid or record.tier != "ram":
             return False
         if self._write_behind is not None and self._write_behind.record is record:
@@ -934,7 +955,7 @@ class SessionSpillStore:
         demoted = dropped = 0
         floor = self.host_reserve_bytes + (256 << 20)
         candidates = sorted(
-            (r for r in self._records if r.valid and r.tier == "ram"),
+            (r for r in self._records if r.in_ram),
             key=lambda r: r.created_at,
         )
         for record in candidates:
@@ -1022,6 +1043,7 @@ class SessionSpillStore:
                     previous.backing = None
             else:
                 self.disk_bytes = max(0, self.disk_bytes - previous.byte_size)
+                self._drop_cache(previous)
             previous.valid = False
             previous.chunks.clear()
         self._records.append(record)
@@ -1257,6 +1279,8 @@ class SessionSpillStore:
             return
 
         def load(chunk: SpillChunk) -> torch.Tensor:
+            if chunk.value is not None:
+                return chunk.value  # prefetched
             if chunk.file is None:
                 raise ValueError("disk session checkpoint chunk has no file")
             return torch.load(chunk.file, map_location="cpu", weights_only=True)
@@ -1286,7 +1310,7 @@ class SessionSpillStore:
             (
                 record
                 for record in self._records
-                if record.valid and record.tier == "ram" and record.session_id not in protect
+                if record.in_ram and record.session_id not in protect
             ),
             key=lambda record: (record.last_used_at, record.created_at),
         )
@@ -1295,7 +1319,13 @@ class SessionSpillStore:
                 return True
         return self._ram_has_room(byte_size)
 
-    def start_prefetch(self, session_id: str, *, protect: Iterable[str] = ()) -> bool:
+    def start_prefetch(
+        self,
+        session_id: str,
+        *,
+        protect: Iterable[str] = (),
+        token_ids: torch.Tensor | None = None,
+    ) -> bool:
         """Begin promoting one queued session's disk checkpoint to RAM. One at a time.
 
         Returns False (never raises) when there is nothing to promote or the RAM budget
@@ -1311,13 +1341,27 @@ class SessionSpillStore:
         if self._prefetch is not None:
             return False
         record = self.get(session_id)
-        if record is None or record.tier != "disk":
+        if record is None or record.tier != "disk" or record.cached_bytes:
             return False
-        files = [chunk.file for chunk in record.chunks]
-        if any(path is None for path in files):
+        # Read only what the restore will: the KV below its cut and the one state at it.
+        # The cut comes from the queued request's own tokens when they are known.
+        cut = record.num_pages
+        if token_ids is not None:
+            cut = record.restorable_length(_matched_len(record.token_ids, token_ids))
+            if cut == 0:
+                return False
+        wanted = [c for c in record.chunks if self._chunk_needed(c, cut, cut)]
+        if not wanted or any(chunk.file is None for chunk in wanted):
             self.counters.prefetches_failed += 1
             return False
-        if not self._make_ram_room(record.byte_size, set(protect) | {session_id}):
+        try:
+            # File sizes bound the tensors from above (plus some pickle framing per file).
+            reserve = min(sum(chunk.file.stat().st_size for chunk in wanted), record.byte_size)
+        except OSError:
+            self.counters.prefetches_failed += 1
+            return False
+        files = [chunk.file for chunk in wanted]
+        if not self._make_ram_room(reserve, set(protect) | {session_id}):
             # There WAS something to promote and RAM could not hold it: the look-ahead is
             # an optimization, but a budget that never lets it run is worth seeing.
             self.counters.prefetches_failed += 1
@@ -1327,7 +1371,7 @@ class SessionSpillStore:
         # reaps the reader, because it may still hold tensors while observing the event.
         cancel = threading.Event()
         state = _Prefetch(
-            session_id, record, cancel, time.perf_counter(), record.byte_size
+            session_id, record, cancel, time.perf_counter(), reserve, wanted
         )
         self._prefetch_reserved_bytes += state.reserved_bytes
 
@@ -1383,7 +1427,9 @@ class SessionSpillStore:
             or values is None
             or not record.valid
             or record.tier != "disk"
-            or len(values) != len(record.chunks)
+            or record.cached_bytes
+            or any(chunk not in record.chunks for chunk in state.chunks)
+            or len(values) != len(state.chunks)
             # The tensors are already allocated, so check the live reserve itself rather
             # than asking _ram_has_room and charging their reservation a second time.
             or _mem_available_bytes() < self.host_reserve_bytes + (256 << 20)
@@ -1406,11 +1452,15 @@ class SessionSpillStore:
         self._prefetch_reserved_bytes = max(
             0, self._prefetch_reserved_bytes - state.reserved_bytes
         )
-        self._promote_to_ram(record, values)
+        for chunk, value in zip(state.chunks, values, strict=True):
+            chunk.value = value
+        record.cached_bytes = sum(value.numel() * value.element_size() for value in values)
+        self.ram_bytes += record.cached_bytes
         self.counters.prefetches_collected += 1
         logger.info_rank0(
-            "Prefetched cold session %s to RAM (%.2f GiB in %.2f s)",
+            "Prefetched cold session %s to RAM (%.2f of %.2f GiB in %.2f s)",
             record.session_id,
+            record.cached_bytes / (1 << 30),
             record.byte_size / (1 << 30),
             time.perf_counter() - state.started,
         )
@@ -1424,19 +1474,14 @@ class SessionSpillStore:
         state.cancel.set()
         return True
 
-    def _promote_to_ram(self, record: SessionSpillRecord, values: list[torch.Tensor]) -> None:
-        if record.directory is not None:
-            record.backing = (record.directory, record.token_file,
-                              [chunk.file for chunk in record.chunks])
-        for chunk, value in zip(record.chunks, values, strict=True):
-            chunk.value = value
-            chunk.file = None
-        record.tier = "ram"
-        record.directory = None
-        record.token_file = None
-        if record.backing is None:
-            self.disk_bytes = max(0, self.disk_bytes - record.byte_size)
-        self.ram_bytes += record.byte_size
+    def _drop_cache(self, record: SessionSpillRecord) -> None:
+        """Forget a disk record's prefetched tensors; its files still hold every chunk."""
+        if record.cached_bytes:
+            for chunk in record.chunks:
+                if chunk.file is not None:
+                    chunk.value = None
+            self.ram_bytes = max(0, self.ram_bytes - record.cached_bytes)
+            record.cached_bytes = 0
 
     # ------------------------------------------------------------- write-behind
 
@@ -1596,6 +1641,7 @@ class SessionSpillStore:
                 self._write_behind.cancel.set()
         else:
             self.disk_bytes = max(0, self.disk_bytes - record.byte_size)
+            self._drop_cache(record)
             parents = {chunk.file.parent for chunk in record.chunks if chunk.file is not None}
             if record.directory is not None:
                 parents.add(record.directory)

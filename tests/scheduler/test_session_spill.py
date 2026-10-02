@@ -458,7 +458,7 @@ def _disk_record(store, linear, session_id, monkeypatch):
     return record
 
 
-def test_prefetch_promotes_a_queued_session_checkpoint_to_ram(tmp_path, monkeypatch, caplog):
+def test_prefetch_caches_a_queued_session_checkpoint_in_ram(tmp_path, monkeypatch, caplog):
     import logging
 
     _kv, linear, _manager, store = _boundary_pools(tmp_path)
@@ -470,11 +470,10 @@ def test_prefetch_promotes_a_queued_session_checkpoint_to_ram(tmp_path, monkeypa
         assert store.start_prefetch("agent-b") is False  # one in flight at a time
         assert store.collect_prefetch("agent-a", wait=True) == "agent-a"
 
-    assert record.tier == "ram" and record.directory is None
-    assert all(c.value is not None and c.file is None for c in record.chunks)
-    # The disk copy stays as backing, so demoting it again costs no write.
-    assert store.ram_bytes == record.byte_size and store.disk_bytes == record.byte_size
-    assert directory.is_dir()
+    # Still a disk record, its files untouched: the read chunks are a RAM cache beside them.
+    assert record.tier == "disk" and record.directory == directory and directory.is_dir()
+    assert all(c.value is not None and c.file.exists() for c in record.chunks)
+    assert store.ram_bytes == record.cached_bytes > 0 and store.disk_bytes == record.byte_size
     assert any(m.startswith("Prefetched cold session agent-a to RAM") for m in caplog.messages)
     store.shutdown()
 
@@ -489,7 +488,7 @@ def test_prefetch_result_survives_the_reap_inside_the_next_start(tmp_path, monke
     store._prefetch.thread.join()  # the racy window, made deterministic
     assert store.start_prefetch("agent-b") is False  # reaps agent-a on the way through
     assert store.collect_prefetch("agent-a", wait=True) == "agent-a"
-    assert record.tier == "ram" and record.directory is None
+    assert record.cached_bytes > 0
     assert store.collect_prefetch("agent-a") is None  # reported once, not forever
     store.shutdown()
 
@@ -505,7 +504,7 @@ def test_prefetch_is_refused_when_the_ram_budget_cannot_hold_it(tmp_path, monkey
     store.shutdown()
 
 
-def test_prefetch_demotes_an_lru_ram_record_but_never_a_protected_one(tmp_path, monkeypatch):
+def test_prefetch_evicts_an_lru_ram_record_but_never_a_protected_one(tmp_path, monkeypatch):
     _kv, linear, _manager, store = _boundary_pools(tmp_path)
     monkeypatch.setattr(
         "freetoken.scheduler.session_spill._mem_available_bytes", lambda: 8 << 30
@@ -522,7 +521,7 @@ def test_prefetch_demotes_an_lru_ram_record_but_never_a_protected_one(tmp_path, 
 
     assert store.start_prefetch("queued") is True
     assert store.collect_prefetch(wait=True) == "queued"
-    assert resident.tier == "disk" and queued.tier == "ram"
+    assert resident.tier == "disk" and queued.cached_bytes > 0
     store.shutdown()
 
 
@@ -533,7 +532,7 @@ def _promoted(store, linear, session_id, monkeypatch):
     return record
 
 
-def test_demoting_a_prefetched_checkpoint_drops_ram_without_rewriting_it(tmp_path, monkeypatch):
+def test_evicting_a_prefetched_checkpoint_only_drops_its_cache(tmp_path, monkeypatch):
     _kv, linear, _manager, store = _boundary_pools(tmp_path)
     record = _promoted(store, linear, "agent-a", monkeypatch)
     values = [c.value.clone() for c in record.chunks]
@@ -543,7 +542,7 @@ def test_demoting_a_prefetched_checkpoint_drops_ram_without_rewriting_it(tmp_pat
     assert store._demote_to_disk(record) is True
 
     assert writes == []
-    assert record.tier == "disk" and record.directory.is_dir() and record.backing is None
+    assert record.cached_bytes == 0 and all(c.value is None for c in record.chunks)
     assert store.ram_bytes == 0 and store.disk_bytes == record.byte_size
     monkeypatch.undo()
     reread = store.iter_chunks(record)
@@ -555,10 +554,10 @@ def test_demoting_a_prefetched_checkpoint_drops_ram_without_rewriting_it(tmp_pat
     store.shutdown()
 
 
-def test_discarding_a_prefetched_checkpoint_removes_its_disk_backing(tmp_path, monkeypatch):
+def test_discarding_a_prefetched_checkpoint_returns_ram_and_disk(tmp_path, monkeypatch):
     _kv, linear, _manager, store = _boundary_pools(tmp_path)
     record = _promoted(store, linear, "agent-a", monkeypatch)
-    directory = record.backing[0]
+    directory = record.directory
 
     store.discard(record)
 
@@ -567,29 +566,98 @@ def test_discarding_a_prefetched_checkpoint_removes_its_disk_backing(tmp_path, m
     store.shutdown()
 
 
-def test_a_rekeyed_prefetched_checkpoint_keeps_its_backing(tmp_path, monkeypatch):
+def test_a_rekeyed_prefetched_checkpoint_keeps_its_cache_and_files(tmp_path, monkeypatch):
     _kv, linear, _manager, store = _boundary_pools(tmp_path)
     record = _promoted(store, linear, "agent-a", monkeypatch)
-    old = record.backing[0]
+    old = record.directory
 
     assert store.rekey(record, "agent-a~prev")
-    assert not old.exists() and record.backing[0] == store._record_dir("agent-a~prev")
-    assert store._demote_to_disk(record) is True
-    assert record.directory == store._record_dir("agent-a~prev")
+    assert not old.exists() and record.directory == store._record_dir("agent-a~prev")
+    assert record.cached_bytes > 0 and all(c.value is not None for c in record.chunks)
     assert all(c.file.parent == record.directory and c.file.exists() for c in record.chunks)
     store.shutdown()
 
 
-def test_prefetch_never_demotes_another_queued_session(tmp_path, monkeypatch):
+def test_prefetch_never_evicts_another_queued_session(tmp_path, monkeypatch):
     """Two queued sessions and room for one: B waits on disk instead of evicting A, which
     the next pass would promote back (the 2026-10-02 ping-pong)."""
     _kv, linear, _manager, store = _boundary_pools(tmp_path)
     a = _promoted(store, linear, "agent-a", monkeypatch)
-    store.ram_budget_bytes = a.byte_size
+    store.ram_budget_bytes = a.cached_bytes
     b = _disk_record(store, linear, "agent-b", monkeypatch)
 
     assert store.start_prefetch("agent-b", protect={"agent-a", "agent-b"}) is False
-    assert a.tier == "ram" and b.tier == "disk"
+    assert a.cached_bytes > 0 and b.cached_bytes == 0
+    store.shutdown()
+
+
+def _multi_state_disk_record(tmp_path, monkeypatch):
+    """Four tokens on disk, KV in two-page chunks, states at boundaries 2 and 4."""
+    kv, linear, manager, store = _incremental_store(
+        tmp_path, monkeypatch, ram_budget_bytes=1 << 30
+    )
+    monkeypatch.setattr(
+        "freetoken.scheduler.session_spill._mem_available_bytes", lambda: 8 << 30
+    )
+    store.ram_budget_bytes = 0  # the spill itself goes to disk
+    pages = manager._page_to_token(manager._allocate(4))
+    slot, early = linear.alloc(2)
+    record = store.spill(
+        "agent", torch.tensor([1, 2, 3, 4], dtype=torch.int32), pages, slot,
+        extra_states=[(2, early)],
+    )
+    assert record.tier == "disk" and record.state_boundaries == [2, 4]
+    store.ram_budget_bytes = 1 << 30
+    return kv, manager, store, record
+
+
+def _cached(record):
+    return sorted((c.family, c.start) for c in record.chunks if c.value is not None and c.layer <= 0)
+
+
+def test_prefetch_reads_only_the_kv_and_the_state_a_continuing_turn_restores(tmp_path, monkeypatch):
+    kv, manager, store, record = _multi_state_disk_record(tmp_path, monkeypatch)
+
+    assert store.start_prefetch("agent", token_ids=torch.tensor([1, 2, 3, 4, 5, 6])) is True
+    assert store.collect_prefetch(wait=True) == "agent"
+
+    assert _cached(record) == [
+        ("gdn_conv", 4), ("gdn_recurrent", 4), ("k", 0), ("k", 2), ("scale0", 0),
+        ("scale0", 2), ("scale1", 0), ("scale1", 2), ("v", 0), ("v", 2),
+    ]  # every KV chunk, and the state at 4 but not at 2
+    assert record.cached_bytes < record.byte_size
+    assert store.ram_bytes == record.cached_bytes
+    expected = kv._k_buffer[:, manager._page_to_token(torch.arange(0))].clone()  # warm-up
+    restored = manager.restore_hybrid_session_prefix(record, store, 4)
+    assert restored.cached_len == 4
+    manager.unlock(restored)
+    del expected
+    store.retire(record)  # the session is resident again: the cache is released
+    assert store.ram_bytes == 0 and record.cached_bytes == 0 and record.valid
+    store.shutdown()
+
+
+def test_prefetch_follows_a_drifted_turn_to_its_cut(tmp_path, monkeypatch):
+    _kv, manager, store, record = _multi_state_disk_record(tmp_path, monkeypatch)
+
+    # The client rewrote token 3: the restore will cut at 2.
+    assert store.start_prefetch("agent", token_ids=torch.tensor([1, 2, 9, 9])) is True
+    assert store.collect_prefetch(wait=True) == "agent"
+
+    assert _cached(record) == [
+        ("gdn_conv", 2), ("gdn_recurrent", 2), ("k", 0), ("scale0", 0), ("scale1", 0), ("v", 0),
+    ]
+    restored = manager.restore_hybrid_session_prefix(record, store, 2)
+    assert restored.cached_len == 2
+    manager.unlock(restored)
+    store.shutdown()
+
+
+def test_no_prefetch_when_the_queued_turn_shares_no_stored_boundary(tmp_path, monkeypatch):
+    _kv, _manager, store, record = _multi_state_disk_record(tmp_path, monkeypatch)
+
+    assert store.start_prefetch("agent", token_ids=torch.tensor([7, 8])) is False
+    assert store.ram_bytes == 0 and record.cached_bytes == 0
     store.shutdown()
 
 

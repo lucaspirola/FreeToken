@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import tempfile
 import threading
 import types
 import unittest
@@ -21,6 +22,16 @@ class _Counters:
         self.prefetches_collected = 0
 
 
+class _Payload:
+    """What the fake ``torch.load`` returns: an 80-byte tensor."""
+
+    def numel(self):
+        return 80
+
+    def element_size(self):
+        return 1
+
+
 class _Logger:
     def __getattr__(self, _name):
         return lambda *_args, **_kwargs: None
@@ -30,7 +41,7 @@ def _load_module():
     torch = types.ModuleType("torch")
     torch.Tensor = object
     torch.inference_mode = lambda: (lambda function: function)
-    torch.load = lambda *_args, **_kwargs: object()
+    torch.load = lambda *_args, **_kwargs: _Payload()
     freetoken = types.ModuleType("freetoken")
     freetoken.__path__ = []
     scheduler = types.ModuleType("freetoken.scheduler")
@@ -72,13 +83,17 @@ class PrefetchReservationTest(unittest.TestCase):
         self.store._records = []
         self.store._by_session = {}
         self.store.counters = _Counters()
+        # The prefetch reserves what it will read: the chunk file's size.
+        self.tmp = tempfile.TemporaryDirectory()
+        self.chunk_file = Path(self.tmp.name) / "chunk.pt"
+        self.chunk_file.write_bytes(b"x" * 80)
         self.record = spill.SessionSpillRecord(
             token_ids=object(),
             num_pages=1,
             byte_size=80,
             fingerprint=(),
             tier="disk",
-            chunks=[spill.SpillChunk("kv", 0, 0, file=Path("chunk.pt"))],
+            chunks=[spill.SpillChunk("kv", 0, 0, file=self.chunk_file)],
             session_id="queued",
         )
         self.store._records.append(self.record)
@@ -88,7 +103,8 @@ class PrefetchReservationTest(unittest.TestCase):
 
     def tearDown(self):
         spill._mem_available_bytes = self.old_available
-        fake_torch.load = lambda *_args, **_kwargs: object()
+        self.tmp.cleanup()
+        fake_torch.load = lambda *_args, **_kwargs: _Payload()
 
     def test_active_prefetch_reservation_blocks_other_ram_admission(self):
         entered = threading.Event()
@@ -97,7 +113,7 @@ class PrefetchReservationTest(unittest.TestCase):
         def blocked_load(*_args, **_kwargs):
             entered.set()
             release.wait(2)
-            return object()
+            return _Payload()
 
         fake_torch.load = blocked_load
         self.assertTrue(self.store.start_prefetch("queued"))
@@ -116,12 +132,14 @@ class PrefetchReservationTest(unittest.TestCase):
         self.assertTrue(self.store.start_prefetch("queued"))
         self.assertEqual(self.store.collect_prefetch(wait=True), "queued")
         self.assertEqual(self.store._prefetch_reserved_bytes, 0)
+        # The files stay: the record is a disk record with its chunks cached in RAM.
         self.assertEqual(self.store.ram_bytes, 80)
-        self.assertEqual(self.store.disk_bytes, 0)
-        self.assertEqual(self.record.tier, "ram")
+        self.assertEqual(self.store.disk_bytes, 80)
+        self.assertEqual((self.record.tier, self.record.cached_bytes), ("disk", 80))
 
     def test_record_larger_than_budget_never_starts_or_reserves(self):
         self.record.byte_size = 101
+        self.chunk_file.write_bytes(b"x" * 101)
         self.assertFalse(self.store.start_prefetch("queued"))
         self.assertEqual(self.store._prefetch_reserved_bytes, 0)
         self.assertEqual(self.store.counters.prefetches_failed, 1)

@@ -367,7 +367,7 @@ class _SpillStore:
             self.discard(record)
 
     # Look-ahead promotion (3F): the double records the calls, moves no bytes.
-    def start_prefetch(self, session_id, *, protect=()) -> bool:
+    def start_prefetch(self, session_id, *, protect=(), token_ids=None) -> bool:
         record = self.records.get(session_id)
         if record is None or record.tier != "disk" or self.prefetching is not None:
             return False

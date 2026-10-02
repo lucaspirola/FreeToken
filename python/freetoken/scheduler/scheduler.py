@@ -2076,6 +2076,8 @@ class Scheduler(SchedulerIOMixin):
                         session_id,
                     )
             tier, total = record.tier, record.num_pages
+            if getattr(record, "cached_bytes", 0):
+                tier = "disk (prefetched to RAM)"
             # Byte cost scales with what is actually installed, not with the record.
             nbytes = record.byte_size * length / max(1, total)
             started = time.perf_counter()
@@ -2416,7 +2418,9 @@ class Scheduler(SchedulerIOMixin):
                 continue
             if lease is not None and not lease.reclaimable:
                 continue  # explicit leases are never spilled: there is nothing to promote
-            if store.start_prefetch(session_id, protect=protect):
+            if store.start_prefetch(
+                session_id, protect=protect, token_ids=getattr(pending, "input_ids", None)
+            ):
                 break
         # Pre-write the next demotion victim while the GPU is busy, so that demotion only
         # drops tensors instead of writing ~0.6 GiB on this thread.
