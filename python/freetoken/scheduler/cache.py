@@ -1123,6 +1123,11 @@ class CacheManager:
                     store.kv_pool.restore_session_spill_tensor(
                         chunk.family, chunk.layer, overlap, all_pages, value)
 
+            # Drop the temporary lock before insert can give a KV-only node a snapshot.
+            # Otherwise dec_lock would consume the restored lease's new snapshot ref.
+            if resident_locked:
+                self.prefix_cache.dec_lock(kv_node)
+                resident_locked = False
             prefix_len, mamba_exist = self.prefix_cache.insert(tokens, all_pages, slot)
             inserted = True
             duplicate = max(0, prefix_len - resident_len)
@@ -1136,9 +1141,6 @@ class CacheManager:
                 )
             handle = HybridCacheHandle(matched.cached_len, matched.node, matched.kv_indices)
             self.lock(handle)
-            if resident_locked:
-                self.prefix_cache.dec_lock(kv_node)
-                resident_locked = False
             return handle
         except Exception:
             if resident_locked:

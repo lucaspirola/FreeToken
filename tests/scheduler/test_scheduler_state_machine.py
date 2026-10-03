@@ -86,15 +86,12 @@ MEM_PLENTY = 1 << 40
 # Open bugs this machine found (see the xfail tests at the bottom). An example that reaches
 # one's exact signature is discarded instead of failed, so the search keeps looking for new
 # ones; FREETOKEN_SM_STRICT=1 fails on them instead. Drop an entry with its fix.
-RESTORE_UNPROTECTS_SNAPSHOT = (
-    "restore cut inside a resident node leaves the lease's snapshot evictable")
 EXPLICIT_LEASE_STARVES_OWN_TURN = "explicit lease starves its own diverged turn"
 RESTORE_KEEPS_STALE_TOKEN_IDS = (
     "a restored lease keeps the token_ids of the turn before the restore")
 SHORT_OWN_LEASE_NEVER_RELEASED = (
     "a diverged own lease shorter than the request's match elsewhere is never released")
 KNOWN_BUGS = {
-    RESTORE_UNPROTECTS_SNAPSHOT,
     SHORT_OWN_LEASE_NEVER_RELEASED,
     EXPLICIT_LEASE_STARVES_OWN_TURN,
     RESTORE_KEEPS_STALE_TOKEN_IDS,
@@ -746,7 +743,6 @@ class SchedulerSessionMachine(RuleBasedStateMachine):
                 assert node.mamba_ref_count == 0, f"tombstone@{tree._path_len(node)} has mamba refs"
                 # Leases and requests lock a matched snapshot node; only a pin may lock KV alone.
                 if any(not who.startswith("pin") for who in holders):
-                    self._known_bug(RESTORE_UNPROTECTS_SNAPSHOT)
                     raise AssertionError(
                         f"snapshot@{tree._path_len(node)} was evicted under {holders}"
                     )
@@ -758,8 +754,6 @@ class SchedulerSessionMachine(RuleBasedStateMachine):
             # A lease or a request reads this snapshot; it must not be evictable under it.
             # (A pin that locked the node before it had a snapshot is a KV-only pin there.)
             if any(not who.startswith("pin") for who in holders):
-                if node.mamba_ref_count == 0:
-                    self._known_bug(RESTORE_UNPROTECTS_SNAPSHOT)
                 assert node.mamba_ref_count >= 1, (
                     f"snapshot@{tree._path_len(node)} held by {holders} is evictable"
                 )
@@ -909,9 +903,6 @@ def test_compaction_summary_then_restore_into_the_same_lease_leaks_no_lock():
     ])
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=RESTORE_UNPROTECTS_SNAPSHOT + (
-    ": restore_hybrid_session_prefix inc_locks the walked node before insert gives it the "
-    "snapshot, so its dec_lock drops the handle's mamba ref (cache.py restore path)"))
 def test_open_bug_sibling_restore_cut_inside_a_resident_node():
     _replay([
         _arrive("A", "new", 1, 1),
@@ -927,7 +918,6 @@ def test_open_bug_sibling_restore_cut_inside_a_resident_node():
     ])
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=RESTORE_UNPROTECTS_SNAPSHOT)
 def test_open_bug_restored_snapshot_is_evictable_under_its_lease(tmp_path):
     _setup_context()
     kv, linear = _pools()
@@ -947,10 +937,19 @@ def test_open_bug_restored_snapshot_is_evictable_under_its_lease(tmp_path):
                              extra_states=cm.hybrid_session_state_boundaries(handle))
         cm.unlock(handle)
         cm.evict_all_unlocked_prefixes()
-        cm.restore_hybrid_session_prefix(record, store, 15)  # lease B
+        resident = cm.restore_hybrid_session_prefix(record, store, 15)  # lease B
         # lease B~1 cuts the same record at 12, inside the node lease B just restored
         sibling = cm.restore_hybrid_session_prefix(record, store, 12)
         assert sibling.node.mamba_ref_count == 1  # was 0: evict_mamba frees it under the lease
+        assert sibling.node.ref_count == 2  # sibling plus the descendant resident lease
+        slot = sibling.node.mamba_value
+        cm.prefix_cache.evict_mamba(STATE_SLOTS)
+        assert sibling.node.mamba_value == slot
+        cm.unlock(sibling)
+        assert sibling.node.mamba_ref_count == 0
+        assert sibling.node.ref_count == 1
+        cm.unlock(resident)
+        assert sibling.node.ref_count == 0
     finally:
         store.shutdown()
 
