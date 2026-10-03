@@ -27,6 +27,12 @@ class _Cache:
     def unlock(self, handle) -> None:
         self.unlocked.append(handle)
 
+    def handle_on_path(self, lease, matched) -> bool:
+        return matched is not None and matched.cached_len >= getattr(lease, "cached_len", 0)
+
+    def mamba_lock_delta(self, _handle) -> int:
+        return 0
+
 
 def _scheduler() -> Scheduler:
     scheduler = Scheduler.__new__(Scheduler)
@@ -181,7 +187,6 @@ def test_admission_pressure_releases_oldest_idle_lease_including_explicit():
     assert scheduler._sessions["new-soft"].handle == "new-handle"
 
 
-
 class _OwnLeaseCache(_Cache):
     """A 262-page pool whose only occupant is the requesting session's own 245-page lease."""
 
@@ -191,6 +196,7 @@ class _OwnLeaseCache(_Cache):
         super().__init__()
         self.matched = matched
         self.prefix_counters = PrefixCounters()
+        self.lease_on_path = True
 
     @property
     def available_size(self):
@@ -202,8 +208,11 @@ class _OwnLeaseCache(_Cache):
     def lock_delta(self, _handle):
         return 0
 
-    def release_pins_for_admission(self, _needed):
+    def release_pins_for_admission(self, _needed, *, mamba_needed=0):
         return False
+
+    def handle_on_path(self, _lease, _matched) -> bool:
+        return self.lease_on_path
 
 
 def _own_lease_scheduler(matched: int, active_uid):
@@ -221,6 +230,7 @@ def _own_lease_scheduler(matched: int, active_uid):
 def test_a_turn_that_diverged_from_its_own_lease_releases_it():
     # compacted conversation, same session id: 59-token prompt reuses 20 of the 245
     scheduler, lease = _own_lease_scheduler(matched=20, active_uid=9)
+    scheduler.cache_manager.lease_on_path = False
     pending = SimpleNamespace(uid=9, input_len=59, output_len=30)
 
     assert scheduler._reclaim_soft_sessions_for_pending(pending, "omp")
@@ -229,11 +239,70 @@ def test_a_turn_that_diverged_from_its_own_lease_releases_it():
     assert scheduler._sessions["omp"].handle is None
 
 
+def test_explicit_admission_release_keeps_lease_when_checkpoint_fails():
+    scheduler, lease = _own_lease_scheduler(matched=20, active_uid=9)
+    scheduler._sessions["omp"].reclaimable = False
+    scheduler.cache_manager.lease_on_path = False
+    spills = []
+    scheduler._spill_soft_session = lambda sid, _lease: spills.append(sid) or False
+    pending = SimpleNamespace(uid=9, input_len=59, output_len=30)
+
+    assert not scheduler._reclaim_soft_sessions_for_pending(pending, "omp")
+
+    assert scheduler.cache_manager.unlocked == []
+    assert scheduler._sessions["omp"].handle is lease
+    assert scheduler._sessions["omp"].active_uid == 9
+    assert scheduler._sessions["omp"].expires_at is None
+    assert spills == ["omp"]
+
+
+def test_explicit_checkpoint_release_preserves_busy_owner_without_expiry():
+    scheduler, lease = _own_lease_scheduler(matched=20, active_uid=9)
+    scheduler._sessions["omp"].reclaimable = False
+    scheduler.cache_manager.lease_on_path = False
+    pending = SimpleNamespace(uid=9, input_len=59, output_len=30)
+
+    assert scheduler._reclaim_soft_sessions_for_pending(pending, "omp")
+
+    assert scheduler.cache_manager.unlocked == [lease]
+    assert scheduler._sessions["omp"].handle is None
+    assert scheduler._sessions["omp"].active_uid == 9
+    assert scheduler._sessions["omp"].expires_at is None
+
+
 def test_a_turn_that_extends_its_own_lease_keeps_it():
     scheduler, lease = _own_lease_scheduler(matched=245, active_uid=9)
     pending = SimpleNamespace(uid=9, input_len=300, output_len=30)
 
     assert not scheduler._reclaim_soft_sessions_for_pending(pending, "omp")
+
+    assert scheduler.cache_manager.unlocked == []
+    assert scheduler._sessions["omp"].handle is lease
+
+
+def test_short_off_path_lease_releases_even_when_match_is_longer():
+    scheduler, lease = _own_lease_scheduler(matched=260, active_uid=9)
+    scheduler.cache_manager.lease_on_path = False
+    pending = SimpleNamespace(uid=9, input_len=300, output_len=30)
+
+    assert scheduler._reclaim_soft_sessions_for_pending(pending, "omp")
+
+    assert scheduler.cache_manager.unlocked == [lease]
+    assert scheduler._sessions["omp"].handle is None
+
+
+def test_chunked_continuation_keeps_own_lease_when_its_locked_match_extends_it():
+    scheduler, lease = _own_lease_scheduler(matched=245, active_uid=9)
+    continuation_handle = SimpleNamespace(cached_len=245)
+    scheduler.cache_manager.lease_on_path = True
+    pending = SimpleNamespace(
+        uid=9,
+        input_len=300,
+        output_len=30,
+        chunked_req=SimpleNamespace(cache_handle=continuation_handle),
+    )
+
+    assert not scheduler._reclaim_soft_sessions_for_pending(pending, "omp", cached_len=245)
 
     assert scheduler.cache_manager.unlocked == []
     assert scheduler._sessions["omp"].handle is lease
@@ -267,7 +336,10 @@ def _parked_scheduler():
         def lock_delta(self, _handle):
             return 0
 
-        def release_pins_for_admission(self, _needed):
+        def handle_on_path(self, _lease, _matched):
+            return True
+
+        def release_pins_for_admission(self, _needed, *, mamba_needed=0):
             return False
 
     scheduler.cache_manager = _FullCache()
@@ -417,7 +489,7 @@ class _SessionCache(_Cache):
     def available_size(self):
         return self.free
 
-    def release_pins_for_admission(self, _needed: int) -> bool:
+    def release_pins_for_admission(self, _needed: int, *, mamba_needed: int = 0) -> bool:
         return False
 
     def match_req(self, _req):
@@ -765,7 +837,6 @@ def test_look_ahead_promotes_explicit_checkpoint_but_skips_missing_checkpoint():
     assert store.prefetching == "explicit"
     assert store.get("explicit").tier == "disk"
     assert store.get("unknown-session") is None
-
 
 
 def test_an_aborted_request_cancels_its_in_flight_look_ahead():
@@ -1206,35 +1277,3 @@ def test_a_sibling_restores_the_conversation_the_summary_replaced():
     assert installed == [6]
     assert scheduler._sessions["A~1"].handle == "restored"
     assert store.get("A") is not None   # the summary's own checkpoint is untouched
-
-
-def test_explicit_admission_release_keeps_lease_when_checkpoint_fails():
-    scheduler, lease = _own_lease_scheduler(matched=20, active_uid=9)
-    scheduler._sessions["omp"].reclaimable = False
-    scheduler.cache_manager.lease_on_path = False
-    spills = []
-    scheduler._spill_soft_session = lambda sid, _lease: spills.append(sid) or False
-    pending = SimpleNamespace(uid=9, input_len=59, output_len=30)
-
-    assert not scheduler._reclaim_soft_sessions_for_pending(pending, "omp")
-
-    assert scheduler.cache_manager.unlocked == []
-    assert scheduler._sessions["omp"].handle is lease
-    assert scheduler._sessions["omp"].active_uid == 9
-    assert scheduler._sessions["omp"].expires_at is None
-    assert spills == ["omp"]
-
-
-
-def test_explicit_checkpoint_release_preserves_busy_owner_without_expiry():
-    scheduler, lease = _own_lease_scheduler(matched=20, active_uid=9)
-    scheduler._sessions["omp"].reclaimable = False
-    scheduler.cache_manager.lease_on_path = False
-    pending = SimpleNamespace(uid=9, input_len=59, output_len=30)
-
-    assert scheduler._reclaim_soft_sessions_for_pending(pending, "omp")
-
-    assert scheduler.cache_manager.unlocked == [lease]
-    assert scheduler._sessions["omp"].handle is None
-    assert scheduler._sessions["omp"].active_uid == 9
-    assert scheduler._sessions["omp"].expires_at is None

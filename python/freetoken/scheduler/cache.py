@@ -980,6 +980,20 @@ class CacheManager:
         else:
             self.prefix_cache.lock_handle(handle, unlock=True)
 
+    def handle_on_path(self, lease: BaseCacheHandle, matched: BaseCacheHandle | None) -> bool:
+        """Whether the matched prefix extends the retained lease's actual branch."""
+        if matched is None or matched.cached_len < lease.cached_len:
+            return False
+        target = getattr(lease, "node", None)
+        node = getattr(matched, "node", None)
+        while node is not None:
+            if node is target:
+                return True
+            if node.is_root():
+                break
+            node = node.parent
+        return False
+
     def lock_delta(self, handle: BaseCacheHandle) -> int:
         """Tokens :meth:`lock` would take OUT of ``available_size`` for this handle.
 

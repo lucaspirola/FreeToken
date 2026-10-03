@@ -2248,7 +2248,7 @@ class Scheduler(SchedulerIOMixin):
             # cheap gate: skip the prefix match when nothing can be freed either way
             return False
         lock_delta = 0
-        handle = None
+        handle = getattr(getattr(pending, "chunked_req", None), "cache_handle", None)
         if cached_len is None:
             try:
                 # The pass that just refused this request matched it against the same,
@@ -2293,12 +2293,9 @@ class Scheduler(SchedulerIOMixin):
             released |= self._release_soft_session_handle(
                 sid, "admission pressure", require_checkpoint=True, owner_uid=owner_uid
             )
-        own_len = int(getattr(own.handle, "cached_len", 0) or 0) if own is not None else 0
-        if own is not None and own_len > cached_len and pressured():
-            # The request's own lease holds KV past what the request reuses (a client that
-            # compacted its conversation keeps the session id). Nothing else ever releases
-            # it, so a lease near the pool size starved its own turn forever (omp,
-            # 2026-10-02: 245,733-token lease vs a 59K compacted prompt, 80+ min deferred).
+        if own is not None and not cm.handle_on_path(own.handle, handle) and pressured():
+            # A summary and history can have different branches even when the summary
+            # is shorter. Only the matched path establishes whether this lease is reused.
             if self._release_soft_session_handle(
                 session_id, "own turn diverged from its cached prefix",
                 require_checkpoint=True, owner_uid=pending.uid,

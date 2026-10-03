@@ -20,7 +20,7 @@ liveness; after the loop runs, bounded admission progress. The motivating bug is
 until admission refused everything).
 
 The default run is derandomized. ``FREETOKEN_SM_PROFILE=heavy`` searches longer with a
-random seed; ``FREETOKEN_SM_STRICT=1`` fails on the open bugs in ``KNOWN_BUGS`` too.
+random seed; ``FREETOKEN_SM_STRICT=1`` fails on any state-machine invariant violation.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ import pytest
 import torch
 
 hypothesis = pytest.importorskip("hypothesis")
-from hypothesis import HealthCheck, assume, event, settings  # noqa: E402
+from hypothesis import HealthCheck, event, settings  # noqa: E402
 from hypothesis import strategies as st  # noqa: E402
 from hypothesis.control import currently_in_test_context  # noqa: E402
 from hypothesis.stateful import (  # noqa: E402
@@ -82,18 +82,6 @@ SUMMARY = [20, 21]
 EOS = 2
 PROGRESS_PASSES = 4
 MEM_PLENTY = 1 << 40
-
-# Open bugs this machine found (see the xfail tests at the bottom). An example that reaches
-# one's exact signature is discarded instead of failed, so the search keeps looking for new
-# ones; FREETOKEN_SM_STRICT=1 fails on them instead. Drop an entry with its fix.
-EXPLICIT_LEASE_STARVES_OWN_TURN = "explicit lease starves its own diverged turn"
-SHORT_OWN_LEASE_NEVER_RELEASED = (
-    "a diverged own lease shorter than the request's match elsewhere is never released")
-KNOWN_BUGS = {
-    SHORT_OWN_LEASE_NEVER_RELEASED,
-    EXPLICIT_LEASE_STARVES_OWN_TURN,
-}
-
 
 class _FakeTime:
     """``time`` for the scheduler, cache and spill modules: a clock the rules advance, and
@@ -551,10 +539,9 @@ class SchedulerSessionMachine(RuleBasedStateMachine):
     # ------------------------------------------------------------------ progress (4)
     def _check_progress(self) -> None:
         """(4) Bounded progress. With requests queued, nothing running and no message in
-        flight, the loop must admit within ``PROGRESS_PASSES`` passes -- or after every idle
-        lease's TTL has run out, since an idle explicit lease is released only by its TTL and
-        the reclaim deliberately never robs a parked restore of a request queued AHEAD of
-        the one it serves. A queue still refused after that never moves again: then the
+        flight, the loop must admit within ``PROGRESS_PASSES`` passes -- or after idle lease
+        TTLs run out. The reclaim deliberately never robs a parked restore of a request
+        queued AHEAD of the one it serves. A queue still refused after that never moves again: then the
         reclaim must not have been able to do better, and every queued request must be
         genuinely unseatable."""
         s = self.s
@@ -577,51 +564,18 @@ class SchedulerSessionMachine(RuleBasedStateMachine):
             return
         queued = [(p.uid, p.session_id, p.input_len, p.output_len) for p in pm.pending_list]
         state = self._describe()
-        short_own = []
-        for p in pm.pending_list:
-            own = s._sessions.get(p.session_id) if p.session_id else None
-            if (own is not None and own.reclaimable and own.active_uid == p.uid
-                    and own.handle is not None and own.token_ids is not None
-                    and len(own.token_ids) == own.handle.cached_len
-                    and not s._extends(own, p.input_ids)
-                    and own.handle.cached_len
-                    <= s.cache_manager.match_req(p).cuda_handle.cached_len):
-                short_own.append(p.uid)
-        # An explicit lease its own queued turn diverged from: admission would move it to
-        # ~prev anyway, but until then nothing may release it, whoever it starves.
-        explicit_diverged = [
-            p.uid for p in pm.pending_list
-            if p.session_id in s._sessions
-            and not s._sessions[p.session_id].reclaimable
-            and s._sessions[p.session_id].active_uid == p.uid
-            and s._sessions[p.session_id].handle is not None
-            and not s._extends(s._sessions[p.session_id], p.input_ids)
-        ]
         for sid, lease in list(s._sessions.items()):
-            if lease.reclaimable and lease.handle is not None:
-                s._release_soft_session_handle(sid, "progress oracle", owner_uid=lease.active_uid)
+            if lease.handle is not None:
+                s._release_soft_session_handle(
+                    sid, "progress oracle", require_checkpoint=True, owner_uid=lease.active_uid
+                )
         s.cache_manager.unpin_all()
         admitted = admits(1)
-        if admitted and explicit_diverged:
-            self._known_bug(EXPLICIT_LEASE_STARVES_OWN_TURN)
-        if admitted and short_own:
-            # Its own lease is not on its path, but no longer than the match: not "diverged".
-            self._known_bug(SHORT_OWN_LEASE_NEVER_RELEASED)
         assert not admitted, (
-            f"permanent stall: never admitted, yet admits once the automatic leases and pins "
+            f"permanent stall: never admitted, yet admits once soft leases and pins "
             f"are released; queue={queued}\n{state}"
         )
         cm = s.cache_manager
-        for p in pm.pending_list:
-            own = s._sessions.get(p.session_id) if p.session_id else None
-            if own is not None and not own.reclaimable and own.active_uid == p.uid and (
-                own.handle is not None
-            ):
-                # Its own explicit lease: busy, so no TTL; explicit, so never reclaimed.
-                handle = cm.match_req(p).cuda_handle
-                need = p.input_len + p.output_len - handle.cached_len
-                if need > cm.available_size - cm.lock_delta(handle):
-                    self._known_bug(EXPLICIT_LEASE_STARVES_OWN_TURN)
         for p in pm.pending_list:
             handle = cm.match_req(p).cuda_handle
             need = p.input_len + p.output_len - handle.cached_len
@@ -632,12 +586,6 @@ class SchedulerSessionMachine(RuleBasedStateMachine):
                 f"admitted; queue={queued}\n{state}"
             )
         self.seen["refused: larger than the pool"] += 1
-
-    def _known_bug(self, name: str) -> None:
-        """Discard an example that reached an open bug's signature (unless strict)."""
-        if name in KNOWN_BUGS and not self.strict:
-            event(f"known bug: {name}")
-            assume(False)
 
     def _describe(self) -> str:
         s, cm = self.s, self.s.cache_manager
@@ -950,7 +898,6 @@ def test_explicit_session_turn_that_does_not_fit_beside_its_own_lease():
     ])
 
 
-
 def test_open_bug_two_parked_restores_block_each_other():
     _replay([
         _loop(1),
@@ -985,11 +932,7 @@ def _turn(family, kind, new_len, out_len):
                          reclaimable=True))
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=SHORT_OWN_LEASE_NEVER_RELEASED + (
-    ": _reclaim_soft_sessions_for_pending releases the own lease only if own_len > cached_len, "
-    "a length test; here the lease is a 17-token summary branch and the request matches 28 "
-    "tokens of the closed session's history, 1 page short of fitting beside the lease"))
-def test_open_bug_own_summary_lease_starves_the_turn_that_continues_the_history():
+def test_own_summary_lease_starves_the_turn_that_continues_the_history():
     _replay([
         _turn("A", "new", 13, 4),
         ("close", dict(pick=0)),
@@ -1005,7 +948,6 @@ def test_explicit_lease_of_a_queued_diverged_turn_starves_the_head():
         _arrive("A", "continue", 6, 4),
         ("turn", dict(family="B", kind="new", new_len=1, cut=0, out_len=1, reclaimable=False)),
     ])
-
 
 
 def test_replay_explicit_lease_and_pin_admission_stall_from_fix_ac():
