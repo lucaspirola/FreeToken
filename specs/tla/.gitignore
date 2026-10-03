@@ -1,0 +1,4 @@
+results/
+states/
+Admission_TTrace_*.tla
+Admission_TTrace_*.bin
