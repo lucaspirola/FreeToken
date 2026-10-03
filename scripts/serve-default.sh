@@ -144,7 +144,7 @@ exec uv run ft serve \
   --memory-ratio "${FREETOKEN_MEMORY_RATIO:-1.00}" --max-prefill-length 8192 \
   --host-ram-reserve-gb "${FREETOKEN_HOST_RAM_RESERVE_GB:-2}" \
   --session-spill-ram-gb "${FREETOKEN_SESSION_SPILL_RAM_GB:-1}" \
-  --session-spill-disk-gb 50 --session-spill-limit-gb 50 \
+  --session-spill-disk-gb 15 --session-spill-limit-gb 15 \
   --session-spill-dir "$CACHE/spill" \
   --enable-cache-report \
   --served-model-name ornith \
