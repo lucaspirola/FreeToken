@@ -814,6 +814,24 @@ def test_restore_resumes_at_the_deepest_boundary_the_client_tokens_still_match()
     assert store.get("A") is None  # consumed
 
 
+def test_a_restore_into_a_lease_that_holds_a_prefix_unlocks_it():
+    import torch
+
+    scheduler, store = _restoring_scheduler([1, 2, 3, 4, 5, 6], extra_states=[(4, 7)])
+    store.records["A~prev"] = store.records.pop("A")
+    store.records["A~prev"].session_id = "A~prev"
+    # The compaction summary finished first: the lease holds the summary's prefix.
+    scheduler._sessions["A"].handle = "summary"
+    scheduler.cache_manager.restore_hybrid_session_prefix = lambda _r, _s, n=None: "restored"
+
+    assert scheduler._restore_cold_session("A", torch.tensor([1, 2, 3, 4, 5, 6, 7]))
+
+    assert scheduler._sessions["A"].handle == "restored"
+    # was: overwritten while still locked, one GDN state slot leaked per compaction turn
+    # until admission refused every request (omp, 2026-10-03: slots 5 -> 12 of 12)
+    assert "summary" in scheduler.cache_manager.unlocked
+
+
 def test_an_unchanged_prompt_still_restores_the_whole_checkpoint():
     import torch
 

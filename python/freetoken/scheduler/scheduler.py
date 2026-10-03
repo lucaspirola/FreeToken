@@ -2081,7 +2081,14 @@ class Scheduler(SchedulerIOMixin):
             # Byte cost scales with what is actually installed, not with the record.
             nbytes = record.byte_size * length / max(1, total)
             started = time.perf_counter()
+            # A lease can still hold a prefix here: a compaction summary that finished first
+            # left its own, and the continuing turn restores the replaced conversation into
+            # the same lease. Overwriting it unreleased leaked its locked GDN snapshot slot,
+            # one per such turn, until no admission could reserve state (2026-10-03).
+            held = session.handle
             session.handle = cm.restore_hybrid_session_prefix(record, store, length)
+            if held is not None:
+                cm.unlock(held)
             elapsed = time.perf_counter() - started
             store.counters.restores += 1
             self._retire_session_spill(session)
@@ -2107,7 +2114,6 @@ class Scheduler(SchedulerIOMixin):
                 session_id,
                 exc,
             )
-            session.handle = None
             return False
 
     def _session_resource_pressure(self) -> bool:
