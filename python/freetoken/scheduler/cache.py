@@ -980,6 +980,12 @@ class CacheManager:
         else:
             self.prefix_cache.lock_handle(handle, unlock=True)
 
+    def mamba_lock_delta(self, handle: BaseCacheHandle | None) -> int:
+        """State slots the match lock removes from allocatable capacity."""
+        node = getattr(handle, "node", None)
+        return int(self.is_hybrid and node is not None
+                   and node.mamba_value is not None and node.mamba_ref_count == 0)
+
     def handle_on_path(self, lease: BaseCacheHandle, matched: BaseCacheHandle | None) -> bool:
         """Whether the matched prefix extends the retained lease's actual branch."""
         if matched is None or matched.cached_len < lease.cached_len:

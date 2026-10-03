@@ -2283,7 +2283,8 @@ class Scheduler(SchedulerIOMixin):
 
         def pressured() -> bool:
             kv_short = needed > cm.available_size - lock_delta
-            state_short = cm.is_hybrid and cm.mamba_available_size < 3
+            state_short = (cm.is_hybrid and cm.mamba_available_size
+                           - cm.mamba_lock_delta(handle) < 3)
             return kv_short or state_short
 
         released = False

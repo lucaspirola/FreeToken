@@ -49,10 +49,11 @@ def _pool(num_slots: int = 16) -> LinearStatePool:
 
 
 def _cm(pool: LinearStatePool, num_pages: int, min_tokens: int = 2,
-        scope: str = "shared") -> CacheManager:
+        scope: str = "shared", max_pin_slots: int = -1) -> CacheManager:
     page_table = torch.zeros(4, num_pages, dtype=torch.int32)
     return CacheManager(num_pages, 1, page_table, "hybrid_radix", linear_state_pool=pool,
-                        pin_prefix_min_tokens=min_tokens, pin_prefix_scope=scope)
+                        pin_prefix_min_tokens=min_tokens, pin_prefix_scope=scope,
+                        pin_prefix_max_slots=max_pin_slots)
 
 
 def _pend(uid: int, ids: list[int], max_tokens: int = 0) -> PendingReq:
@@ -70,6 +71,13 @@ def _insert(cm: CacheManager, pool: LinearStatePool, ids: list[int]):
     assert not exists
     cm.free_slots = torch.cat([cm.free_slots, pages[:matched]])
     return slot
+
+
+def _insert_kv_only(cm: CacheManager, ids: list[int]):
+    pages, cm.free_slots = cm.free_slots[:len(ids)].clone(), cm.free_slots[len(ids):]
+    matched, exists = cm.prefix_cache.insert(torch.tensor(ids, dtype=torch.int32), pages, None)
+    assert not exists
+    cm.free_slots = torch.cat([cm.free_slots, pages[:matched]])
 
 
 def _admit(cm: CacheManager, ids: list[int], session: str) -> None:
@@ -159,4 +167,53 @@ def test_a_request_too_big_even_with_every_pin_released_is_unchanged():
     assert huge.input_len + huge.output_len > cm.available_size, (
         "still short -- the existing refusal/deferral path applies unchanged"
     )
+    cm.check_integrity()
+
+
+def test_mamba_lock_delta_predicts_the_state_slots_removed_by_match_lock():
+    _setup_context()
+    pool = _pool(8)
+    cm = _cm(pool, num_pages=64)
+    ids = [1, 2, 3, 4]
+    _insert(cm, pool, ids)
+    handle = cm.match_req(_pend(0, ids + [99])).cuda_handle
+    assert handle.cached_len == len(ids)
+
+    predicted = cm.mamba_lock_delta(handle)
+    before = cm.mamba_available_size
+    cm.lock(handle)
+    after = cm.mamba_available_size
+    cm.unlock(handle)
+
+    assert predicted == before - after == 1
+    assert cm.mamba_available_size == before
+
+
+def test_reclaim_uses_post_match_gdn_budget_to_release_an_idle_lease():
+    """Three slots look available before locking; the fourth slot comes from the lease."""
+    from freetoken.scheduler.scheduler import SessionLease
+
+    _setup_context()
+    pool = _pool(6)
+    cm = _cm(pool, num_pages=128, scope="shared", max_pin_slots=8)
+    match_ids = [1, 2, 3, 4]
+    _insert(cm, pool, match_ids)
+    lease_ids = [20, 21, 22, 23]
+    _insert(cm, pool, lease_ids)
+    lease = cm.retain_prefix(torch.tensor(lease_ids, dtype=torch.int32), len(lease_ids))
+    pool.alloc(1)  # The free slot plus the match snapshot leave exactly 3 available.
+    assert cm.mamba_available_size == 3
+
+    stub = _SchedulerStub(cm)
+    stub._spill_soft_session = lambda *_a, **_k: True
+    stub._sessions["lease"] = SessionLease(lease, 300.0, reclaimable=True)
+    request = _pend(7, match_ids + [99])
+    matched = cm.match_req(request).cuda_handle
+    assert cm.mamba_lock_delta(matched) == 1
+    assert cm.mamba_available_size - cm.mamba_lock_delta(matched) == 2
+
+    assert stub._reclaim_soft_sessions_for_pending(request, session_id=None)
+
+    assert stub._sessions["lease"].handle is None
+    assert cm.mamba_available_size == 4
     cm.check_integrity()
