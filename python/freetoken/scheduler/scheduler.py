@@ -1735,7 +1735,7 @@ class Scheduler(SchedulerIOMixin):
         session = getattr(self, "_sessions", {}).get(session_id)
         if (
             session is None
-            or not session.reclaimable
+            or (not session.reclaimable and not require_checkpoint)
             or session.active_uid not in (None, owner_uid)
             or session.handle is None
         ):
@@ -1775,7 +1775,9 @@ class Scheduler(SchedulerIOMixin):
         session.protected_until = None
         # The lease no longer pins GPU state, so the idle TTL may now reap the identity.
         # Its checkpoint outlives it under the spill store's capacity/age policy.
-        session.expires_at = time.monotonic() + session.ttl_seconds
+        session.expires_at = (
+            time.monotonic() + session.ttl_seconds if session.active_uid is None else None
+        )
         self._growable_shrink_pending = True
         logger.info_rank0(
             "Released soft session %s KV protection (%s); cached prefix is now evictable",
@@ -2160,7 +2162,7 @@ class Scheduler(SchedulerIOMixin):
             self._release_soft_session_handle(sid, "grace expired")
 
     def _reclaim_soft_sessions_for_admission(self, msg: UserMsg) -> bool:
-        """Release oldest idle automatic leases only when they block this admission."""
+        """Checkpoint oldest idle leases only when they block this admission."""
         from .utils import PendingReq
 
         pending = PendingReq(msg.uid, msg.input_ids, msg.sampling_params)
@@ -2216,7 +2218,6 @@ class Scheduler(SchedulerIOMixin):
                 (lease.last_used_at, sid)
                 for sid, lease in sessions.items()
                 if sid != session_id
-                and lease.reclaimable
                 and lease.active_uid is None
                 and lease.handle is not None
             )
@@ -2234,13 +2235,13 @@ class Scheduler(SchedulerIOMixin):
             behind = queue[queue.index(pending.uid) + 1:]
             parked = {
                 lease.active_uid: sid for sid, lease in sessions.items()
-                if sid != session_id and lease.reclaimable and lease.handle is not None
+                if sid != session_id and lease.handle is not None
                 and lease.active_uid in behind
             }
             candidates += [(parked[uid], uid) for uid in reversed(behind) if uid in parked]
         cm = self.cache_manager
         own = getattr(self, "_sessions", {}).get(session_id) if session_id else None
-        if not (own is not None and own.reclaimable and own.handle is not None
+        if not (own is not None and own.handle is not None
                 and own.active_uid in (None, pending.uid)):
             own = None
         if not candidates and own is None and not cm.prefix_counters.pinned_prefixes:
@@ -2323,7 +2324,7 @@ class Scheduler(SchedulerIOMixin):
             memo.clear()
 
     def _reclaim_soft_sessions_for_state_slot(self, n: int = 1) -> bool:
-        """Checkpoint LRU idle automatic leases until ``n`` GDN state slots are reachable.
+        """Checkpoint LRU idle leases until ``n`` GDN state slots are reachable.
 
         The KV-shaped reclaim above is driven by a *queued* request. A recurrent-state slot is
         also needed at moments no admission covers -- when a prefill chunk commits its snapshot,
@@ -2341,8 +2342,7 @@ class Scheduler(SchedulerIOMixin):
             (
                 (lease.last_used_at, sid)
                 for sid, lease in getattr(self, "_sessions", {}).items()
-                if lease.reclaimable
-                and lease.active_uid is None
+                if lease.active_uid is None
                 and lease.handle is not None
             ),
             key=lambda item: item[0],
@@ -2420,11 +2420,8 @@ class Scheduler(SchedulerIOMixin):
         protect = resident | queued
         for pending in getattr(self.prefill_manager, "pending_list", ()):
             session_id = getattr(pending, "session_id", None)
-            lease = sessions.get(session_id) if session_id else None
             if not session_id or session_id in resident:
                 continue
-            if lease is not None and not lease.reclaimable:
-                continue  # explicit leases are never spilled: there is nothing to promote
             if store.start_prefetch(
                 session_id, protect=protect, token_ids=getattr(pending, "input_ids", None)
             ):

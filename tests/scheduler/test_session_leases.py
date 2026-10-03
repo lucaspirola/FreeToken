@@ -136,7 +136,7 @@ def test_explicit_session_remains_protected_past_soft_grace():
     assert scheduler.cache_manager.unlocked == []
 
 
-def test_admission_pressure_releases_oldest_idle_soft_session_only():
+def test_admission_pressure_releases_oldest_idle_lease_including_explicit():
     scheduler = _scheduler()
 
     class _PressureCache(_Cache):
@@ -175,10 +175,11 @@ def test_admission_pressure_releases_oldest_idle_soft_session_only():
 
     scheduler._reclaim_soft_sessions_for_admission(msg)
 
-    assert scheduler.cache_manager.unlocked == ["old-handle"]
-    assert scheduler._sessions["old-soft"].handle is None
+    assert scheduler.cache_manager.unlocked == ["hard-handle"]
+    assert scheduler._sessions["hard"].handle is None
+    assert scheduler._sessions["old-soft"].handle == "old-handle"
     assert scheduler._sessions["new-soft"].handle == "new-handle"
-    assert scheduler._sessions["hard"].handle == "hard-handle"
+
 
 
 class _OwnLeaseCache(_Cache):
@@ -751,18 +752,20 @@ def test_look_ahead_protects_every_queued_session_not_only_the_resident():
     assert store.write_behind_protected == {"A", "B", "C"}
 
 
-def test_no_look_ahead_for_an_explicit_lease_or_a_session_without_a_checkpoint():
+def test_look_ahead_promotes_explicit_checkpoint_but_skips_missing_checkpoint():
     scheduler = _demand_scheduler()
     store = scheduler._session_spill_store
     _queued_disk_checkpoint(scheduler, "explicit")
-    # An explicit session_id lease is never spilled, so there is nothing to promote.
+    # Explicit ownership may be checkpointed under admission pressure and remains promotable.
     scheduler._sessions["explicit"] = SessionLease(None, 300.0, reclaimable=False)
     scheduler.prefill_manager.pending_list.append(_queued(3, "unknown-session"))
 
     scheduler._reclaim_for_blocked_prefill()
 
-    assert store.prefetching is None
+    assert store.prefetching == "explicit"
     assert store.get("explicit").tier == "disk"
+    assert store.get("unknown-session") is None
+
 
 
 def test_an_aborted_request_cancels_its_in_flight_look_ahead():
@@ -1203,3 +1206,35 @@ def test_a_sibling_restores_the_conversation_the_summary_replaced():
     assert installed == [6]
     assert scheduler._sessions["A~1"].handle == "restored"
     assert store.get("A") is not None   # the summary's own checkpoint is untouched
+
+
+def test_explicit_admission_release_keeps_lease_when_checkpoint_fails():
+    scheduler, lease = _own_lease_scheduler(matched=20, active_uid=9)
+    scheduler._sessions["omp"].reclaimable = False
+    scheduler.cache_manager.lease_on_path = False
+    spills = []
+    scheduler._spill_soft_session = lambda sid, _lease: spills.append(sid) or False
+    pending = SimpleNamespace(uid=9, input_len=59, output_len=30)
+
+    assert not scheduler._reclaim_soft_sessions_for_pending(pending, "omp")
+
+    assert scheduler.cache_manager.unlocked == []
+    assert scheduler._sessions["omp"].handle is lease
+    assert scheduler._sessions["omp"].active_uid == 9
+    assert scheduler._sessions["omp"].expires_at is None
+    assert spills == ["omp"]
+
+
+
+def test_explicit_checkpoint_release_preserves_busy_owner_without_expiry():
+    scheduler, lease = _own_lease_scheduler(matched=20, active_uid=9)
+    scheduler._sessions["omp"].reclaimable = False
+    scheduler.cache_manager.lease_on_path = False
+    pending = SimpleNamespace(uid=9, input_len=59, output_len=30)
+
+    assert scheduler._reclaim_soft_sessions_for_pending(pending, "omp")
+
+    assert scheduler.cache_manager.unlocked == [lease]
+    assert scheduler._sessions["omp"].handle is None
+    assert scheduler._sessions["omp"].active_uid == 9
+    assert scheduler._sessions["omp"].expires_at is None

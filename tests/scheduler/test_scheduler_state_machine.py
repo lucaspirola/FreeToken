@@ -941,16 +941,14 @@ def test_open_bug_restored_snapshot_is_evictable_under_its_lease(tmp_path):
         store.shutdown()
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=EXPLICIT_LEASE_STARVES_OWN_TURN + (
-    ": the lease is busy (expires_at None, so no TTL) and explicit (the own-lease release in "
-    "_reclaim_soft_sessions_for_pending requires own.reclaimable)"))
-def test_open_bug_explicit_session_turn_that_does_not_fit_beside_its_own_lease():
+def test_explicit_session_turn_that_does_not_fit_beside_its_own_lease():
     _replay([
         _arrive("A", "new", 12, 1, reclaimable=False),
         _loop(2),
         _arrive("A", "new", 9, 4, reclaimable=False),
         _loop(1),
     ])
+
 
 
 def test_open_bug_two_parked_restores_block_each_other():
@@ -1000,13 +998,27 @@ def test_open_bug_own_summary_lease_starves_the_turn_that_continues_the_history(
     ])
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=EXPLICIT_LEASE_STARVES_OWN_TURN + (
-    ": the head (A) is 1 page short; B's explicit lease, which B's queued diverged turn would "
-    "move to B~prev at admission, is never released, and A's lease is parked ahead of B"))
-def test_open_bug_explicit_lease_of_a_queued_diverged_turn_starves_the_head():
+def test_explicit_lease_of_a_queued_diverged_turn_starves_the_head():
     _replay([
         _arrive("B", "new", 14, 4, reclaimable=False),
         _turn("A", "new", 1, 3),
         _arrive("A", "continue", 6, 4),
         ("turn", dict(family="B", kind="new", new_len=1, cut=0, out_len=1, reclaimable=False)),
+    ])
+
+
+
+def test_replay_explicit_lease_and_pin_admission_stall_from_fix_ac():
+    # Minimized default-profile machine replay: B's explicit lease blocks two queued turns
+    # after compaction/restore churn, even after automatic leases and pins are reclaimed.
+    _replay([
+        _turn("A", "new", 4, 4),
+        _compaction("A", 1, 1, run=False),
+        _compaction("B", 1, 1, run=True),
+        _compaction("A", 1, 1, run=True),
+        _compaction("B", 6, 1, run=False),
+        _compaction("A", 3, 1, run=True),
+        _arrive("A", "continue", 1, 2, reclaimable=True),
+        ("turn", dict(family="B", kind="continue", new_len=1, cut=0,
+                       out_len=1, reclaimable=False)),
     ])

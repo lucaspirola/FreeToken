@@ -509,7 +509,7 @@ class CacheManager:
         1. the free-list;
         2. LRU eviction of UNLOCKED radix snapshots (:meth:`ensure_mamba_slots`);
         3. the scheduler's session-lease reclaim -- the only tier that reaches a *locked*
-           snapshot. An idle automatic lease holds its node's ``mamba_ref_count`` above zero
+           snapshot. An idle lease holds its node's ``mamba_ref_count`` above zero
            for as long as the conversation stays resident, so tier 2 cannot see it at all, and
            spilling that lease on demand IS the 3E residency policy: the idle conversation is
            checkpointed, not the live request refused.

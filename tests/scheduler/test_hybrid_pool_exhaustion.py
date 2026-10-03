@@ -250,8 +250,8 @@ def test_real_scheduler_hook_spills_the_lease_and_lands_the_donation():
     assert cm._mamba_donation_skips == 0
 
 
-def test_real_scheduler_hook_keeps_an_explicit_lease_and_degrades_instead():
-    """An explicit (non-reclaimable) lease is never spilled -- the donation gives way."""
+def test_real_scheduler_hook_checkpoints_an_explicit_lease_before_donation():
+    """Admission pressure may spill explicit ownership, preserving it in the cold tier."""
     pool = _pool(5)
     page_table = torch.zeros(4, 64, dtype=torch.int32)
     cm = CacheManager(64, 1, page_table, "hybrid_radix", linear_state_pool=pool)
@@ -263,13 +263,11 @@ def test_real_scheduler_hook_keeps_an_explicit_lease_and_degrades_instead():
     pp_before = b.mamba_ping_pong
     cm.cache_req(b, finished=False)
 
-    assert sched._sessions["a"].handle is lease       # the explicit lease is untouched
-    assert b.mamba_ping_pong == pp_before             # B kept its working set
-    assert b.mamba_last_track_seqlen is None
-    assert cm._mamba_donation_skips == 1
-    assert cm.match_req(_pend([20, 21, 22, 23, 99])).cuda_handle.cached_len == 0
-    # A's prefix is still reusable -- the lease bought exactly what it was holding.
-    assert cm.match_req(_pend([1, 2, 3, 4, 5])).cuda_handle.cached_len == 4
+    assert sched._sessions["a"].handle is None
+    assert sched._sessions["a"].expires_at is not None
+    assert b.mamba_ping_pong != pp_before
+    assert cm._mamba_donation_skips == 0
+    assert cm.match_req(_pend([20, 21, 22, 23, 99])).mamba_value == pp_before[0]
 
 
 def test_admission_reserves_state_slots_through_the_lease_spill():
