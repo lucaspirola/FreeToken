@@ -43,7 +43,7 @@ KVShort(r) == Need(r) > freePages - LockDelta(r)
 MatchSlots(r) == IF ~OnPath(r) /\ matched[r] > 0 THEN 1 ELSE 0
 SeatSlots(r) == 3 + MatchSlots(r)
 Pressure(r) == KVShort(r) \/ freeSlots < SeatSlots(r)
-\* scheduler.py:_reclaim_soft_sessions_for_pending predicts KV lock delta, but not GDN delta.
+\* scheduler.py:_reclaim_soft_sessions_for_pending predicts KV and GDN match-lock deltas in the fixed implementation.
 ReclaimPressure(r) == KVShort(r) \/
  freeSlots < (IF Fixed /\ PredictMatchState THEN SeatSlots(r) ELSE 3)
 Spillable(s) == automatic[s] \/ Fixed
@@ -133,8 +133,8 @@ Reclaim(r, s) ==
  /\ UNCHANGED <<queue, running, arrived, admitted, done, kind, demand, matched,
                 automatic, branch, size, owner, pins, runPages>>
 
-\* cache.py:release_pins_for_admission currently frees pins only for KV pressure.
-\* ReleaseStatePins proposes the same fallback for state-bearing pins under GDN pressure.
+\* cache.py:release_pins_for_admission frees pins for KV and GDN admission pressure in the fixed implementation.
+\* ReleaseStatePins enables the same fallback for state-bearing pins under GDN pressure.
 ReleasePin(r) ==
  /\ r \in Range(queue) /\ pins = 1
  /\ (KVShort(r) \/ (Fixed /\ ReleaseStatePins /\ PinState = 1 /\ freeSlots < SeatSlots(r)))

@@ -1,13 +1,14 @@
 # Single-lane admission and reclaim
 
-`Admission.tla` models scheduler protocol at main `e9ddad4dd4cfa92c1337a4ca60755ab999eee6a3`.
-It changes no Python code. `Fixed = FALSE` preserves explicit-lease exclusion and the
+`Admission.tla` models the pre-fix scheduler protocol at main
+`e9ddad4dd4cfa92c1337a4ca60755ab999eee6a3` and the implemented admission fixes.
+`Fixed = FALSE` preserves the pre-fix explicit-lease exclusion and the
 own-lease length guard. `Fixed = TRUE` permits checkpointing explicit leases and
 uses matched-path identity for own-lease reclaim. `PinState` selects a KV-only pin
-(0) or an independent KV-plus-GDN pin (1). `ReleaseStatePins = TRUE` proposes
+(0) or an independent KV-plus-GDN pin (1). `ReleaseStatePins = TRUE` encodes
 admission-driven release of a state-bearing pin for state pressure, extending the
-current KV-only fallback. This additional pin policy is a proposal, not a stated
-owner decision. `PredictMatchState = TRUE` also
+pre-fix KV-only fallback. The owner approved this pin policy together with explicit
+lease checkpointing and matched-path own-lease reclaim. `PredictMatchState = TRUE` also
 aligns reclaim pressure with the post-match GDN gate; the check below shows why
 changing only the B/D eligibility predicates is insufficient in this abstraction.
 The state-bearing-pin PASS also requires `ReleaseStatePins`; the focused pin
@@ -268,8 +269,8 @@ summary and long historical match can be different branches. Preserve idle-first
 back-to-front parked reclaim, and never reclaim ahead; these are source rules,
 not new owner policy. Predict GDN headroom after locking the matched snapshot as
 well as KV lock delta. The fixed PASS includes this alignment, and must not be
-read as proof that B/D eligibility edits alone suffice. Validate the state-pressure
-and pin findings against Python regressions before treating it as a confirmed runtime bug.
+read as proof that B/D eligibility edits alone suffice. Python regressions now confirm
+both the state-pressure and pin findings.
 
 The finite sweep is not an unbounded proof. It omits radix sharing across leases,
 multi-snapshot paths, byte fidelity, host/disk capacity and eviction, asynchronous

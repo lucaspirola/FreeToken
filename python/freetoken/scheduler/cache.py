@@ -894,9 +894,9 @@ class CacheManager:
             del self._pin_locked[n]
         self._recount_pins()
 
-    def release_pins_for_admission(self, needed: int) -> bool:
+    def release_pins_for_admission(self, needed: int, *, mamba_needed: int = 0) -> bool:
         """Release pins least-recently-matched first, only as many as it takes for
-        ``needed`` tokens to fit ``available_size``.
+        ``needed`` tokens and ``mamba_needed`` state slots to fit allocatable capacity.
 
         The companion to the soft-session admission-pressure release
         (``Scheduler._reclaim_soft_sessions_for_pending``): that release hands a whole idle
@@ -910,16 +910,28 @@ class CacheManager:
         unreachable; ``fresh_admits_deferred`` reached 106,632 in 20 minutes with the GPU
         idle, no error, no refusal).
 
-        Stops the moment ``needed`` fits ``available_size``, or when there is nothing left
+        Stops the moment both currencies fit, or when there is nothing left
         to release: a request that still cannot fit then falls through to the caller's
         existing refusal/deferral path unchanged, exactly as it does today with no pins to
         release. A request whose own footprint already fits is never charged: the caller
         checks pressure first and only calls this when it is genuinely short.
         """
         released = False
-        while self._pins and needed > self.available_size:
+        while self._pins and (needed > self.available_size or (
+            self.is_hybrid and self.mamba_available_size < mamba_needed
+        )):
             before_tokens = self.prefix_counters.pinned_tokens
-            victim = min(self._pins.values(), key=lambda p: p.last_match)
+            candidates = self._pins.values()
+            if needed <= self.available_size:
+                # KV-only pins cannot buy a state slot; leave them for KV pressure.
+                candidates = [p for p in candidates if any(
+                    self._pin_locked.get(n, False)
+                    for n in (p.snapshots if p.snapshots is not None
+                              else self._root_path(p.node))
+                )]
+            if not candidates:
+                break
+            victim = min(candidates, key=lambda p: p.last_match)
             self._release_pin(victim.node)
             self.prefix_counters.pin_admission_releases += 1
             released = True

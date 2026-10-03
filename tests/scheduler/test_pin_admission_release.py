@@ -217,3 +217,41 @@ def test_reclaim_uses_post_match_gdn_budget_to_release_an_idle_lease():
     assert stub._sessions["lease"].handle is None
     assert cm.mamba_available_size == 4
     cm.check_integrity()
+
+
+def test_state_only_pressure_releases_lru_state_pins_until_three_slots_exist():
+    """KV-only pins are skipped; state pins leave once their slots cover the admission."""
+    _setup_context()
+    pool = _pool(8)
+    cm = _cm(pool, num_pages=128, scope="shared", max_pin_slots=8)
+    for start in (1, 20, 40, 60):
+        ids = list(range(start, start + 4))
+        slot = _insert(cm, pool, ids)
+        node = cm.match_req(_pend(0, ids + [999])).cuda_handle.node
+        assert node.mamba_value == slot
+        assert cm.pin_prefix(node)
+    _insert_kv_only(cm, list(range(80, 84)))
+    kv_node, _ = cm.prefix_cache._walk(torch.tensor([80, 81, 82, 83], dtype=torch.int32))
+    assert cm.pin_prefix(kv_node)
+    assert len(cm._pins) == 5
+    cm._pins[kv_node].last_match = -1.0
+    state_pins = [pin for pin in cm._pins.values() if pin.node.mamba_value is not None]
+    for i, pin in enumerate(state_pins):
+        pin.last_match = float(i)
+    # Other live requests own the remaining slots. Only pin release can make state evictable.
+    pool.alloc(pool.num_free_slots)
+    assert cm.mamba_available_size == 1
+
+    stub = _SchedulerStub(cm)
+    request = _pend(7, list(range(100, 104)))
+    assert request.input_len + request.output_len <= cm.available_size
+
+    assert stub._reclaim_soft_sessions_for_pending(request, session_id=None)
+
+    assert len(cm._pins) == 3
+    assert kv_node in cm._pins
+    remaining = {pin.node for pin in cm._pins.values() if pin.node.mamba_value is not None}
+    assert remaining == {pin.node for pin in state_pins[-2:]}
+    assert cm.mamba_available_size == 3
+    assert cm.prefix_counters.pin_admission_releases == 2
+    cm.check_integrity()

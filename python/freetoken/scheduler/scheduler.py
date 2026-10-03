@@ -2303,10 +2303,11 @@ class Scheduler(SchedulerIOMixin):
             ):
                 released = True
                 lock_delta = cm.lock_delta(handle) if handle is not None else 0
-        if needed > cm.available_size - lock_delta:
-            # Every reclaimable idle lease is gone (or there were none) and the request is
-            # still KV-short: try what a pin is holding out of the evictable pool next.
-            released |= cm.release_pins_for_admission(needed + lock_delta)
+        if pressured():
+            released |= cm.release_pins_for_admission(
+                needed + lock_delta,
+                mamba_needed=3 + cm.mamba_lock_delta(handle) if cm.is_hybrid else 0,
+            )
         return released
 
     def _invalidate_match_memo(self) -> None:
