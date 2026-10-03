@@ -84,8 +84,9 @@
 #                                 whatever else holds the card -- which is also why a
 #                                 measurement taken beside another GPU process is not
 #                                 comparable.
-#   FREETOKEN_SESSION_SPILL_RAM_GB default 3: RAM for queued sessions' checkpoints, one
-#                                 full 262K session prefetched (KV 2.68 GiB + one state)
+#   FREETOKEN_SESSION_SPILL_RAM_GB default 1 (owner's choice, 2026-10-03): RAM for queued
+#                                 sessions' checkpoints, ~90K tokens; longer ones restore from
+#                                 disk (~2 s at 262K). 3 GiB starved the page cache on a 33 GiB host
 #   FREETOKEN_CACHE_DIR           default $HOME/.cache/freetoken (spill, traces, logs)
 #   FREETOKEN_LONG_CONTEXT        default 0 (262144, native). 1 = 393216 via YaRN factor 2; see the
 #                                 Context note above and tasks/ornith-exl3/ctx393/README.md before
@@ -142,7 +143,7 @@ exec uv run ft serve \
   --attention-backend triton --moe-backend offload --moe-cache-auto --moe-cache-policy lfu \
   --memory-ratio "${FREETOKEN_MEMORY_RATIO:-1.00}" --max-prefill-length 8192 \
   --host-ram-reserve-gb "${FREETOKEN_HOST_RAM_RESERVE_GB:-2}" \
-  --session-spill-ram-gb "${FREETOKEN_SESSION_SPILL_RAM_GB:-3}" \
+  --session-spill-ram-gb "${FREETOKEN_SESSION_SPILL_RAM_GB:-1}" \
   --session-spill-disk-gb 50 --session-spill-limit-gb 50 \
   --session-spill-dir "$CACHE/spill" \
   --enable-cache-report \

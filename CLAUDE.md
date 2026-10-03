@@ -43,7 +43,7 @@ and a server started there dies with them.
 
 Before starting, `free -g` must show MemAvailable ≥ expert banks + ~4 GiB (≈ 20 GiB for
 this model). `--host-ram-reserve-gb 2` (owner's choice, 2026-10-03) is the MemAvailable the
-session tier never fills: below it, RAM checkpoints (up to `--session-spill-ram-gb 3`) move to
+session tier never fills: below it, RAM checkpoints (up to `--session-spill-ram-gb 1`) move to
 disk. The server still dies first in a host OOM (OOMScoreAdjust=1000).
 Never run torch-backed pytest beside the live model; stop the server first
 (`tests/scheduler` etc. need ~1 GiB, the OOM sweep of 2026-09-06 killed a server this way).
