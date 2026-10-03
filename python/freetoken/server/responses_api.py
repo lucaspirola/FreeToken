@@ -272,10 +272,10 @@ def convert_responses_to_genspec(
         disabled = tc == "none"
     elif isinstance(tc, dict) and tc.get("type") == "function":
         selected = tc.get("name") or (tc.get("function") or {}).get("name")
+    template_tools, parser_tools = split_tool_lists(raw_tools, selected)
     if disabled:
-        template_tools, parser_tools = None, None
-    else:
-        template_tools, parser_tools = split_tool_lists(raw_tools, selected)
+        # Same as chat completions: keep the rendered prefix stable, only stop parsing.
+        parser_tools = None
 
     from .model_meta import effort_toggle_kwargs
 

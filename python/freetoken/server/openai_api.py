@@ -1181,7 +1181,9 @@ def _resolve_sampling(
 
 
 def _tools_for_template(req: ChatCompletionRequest) -> list[dict[str, Any]] | None:
-    if not _should_parse_tools(req):
+    # tool_choice="none" still renders the tools (vLLM's default): clients send them so a
+    # side request (omp handoff) shares the live turn's cached prefix; parsing stays off.
+    if not req.tools:
         return None
 
     tools = req.tools or []

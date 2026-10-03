@@ -116,6 +116,18 @@ def test_convert_list_input_with_tool_roundtrip_and_tools():
     assert spec.parse_tools
 
 
+def test_tool_choice_none_keeps_tools_in_template_but_disables_parsing():
+    tools = [{"type": "function", "name": "get_weather", "description": "d", "parameters": {"type": "object"}}]
+    base = {"model": "gpt-x", "input": "hi", "tools": tools}
+    live = RP.convert_responses_to_genspec(ResponsesRequest.model_validate(base), {})
+    side = RP.convert_responses_to_genspec(
+        ResponsesRequest.model_validate({**base, "tool_choice": "none"}), {}
+    )
+    # Same rendered tools as the live turn, so the side request reuses its cached prefix.
+    assert side.template_tools == live.template_tools
+    assert not side.parse_tools
+
+
 def test_convert_codex_namespace_tool_to_flat_template_and_replay():
     tools = [
         {

@@ -334,7 +334,8 @@ def test_tool_choice_none_keeps_tool_tags_as_content():
     )
 
     assert state.sent is not None
-    assert state.sent.tools is None
+    # The tools stay in the prompt so the prefix matches the live turn; only parsing is off.
+    assert state.sent.tools == tool_schema()
     choice = response["choices"][0]
     assert choice["finish_reason"] == "stop"
     assert choice["message"] == {"role": "assistant", "content": output}
