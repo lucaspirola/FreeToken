@@ -105,6 +105,15 @@ class StaticSpillFactoryTest(unittest.TestCase):
         self.assertIsNone(self.spill.SessionSpillStore.create_if_supported(self.engine, self.config))
 
 
+class _TokenIds(list):
+    def __getitem__(self, key):
+        value = super().__getitem__(key)
+        return type(self)(value) if isinstance(key, slice) else value
+
+    def clone(self):
+        return type(self)(self)
+
+
 class StaticRestorePolicyTest(unittest.TestCase):
     def setUp(self):
         self.restore = _restore_cold_session()
@@ -112,7 +121,7 @@ class StaticRestorePolicyTest(unittest.TestCase):
     def _scheduler(self, *, growable: bool, grow_step: int):
         counters = SimpleNamespace(restores_deferred=0, restores=0, restores_failed=0)
         record = SimpleNamespace(
-            valid=True, token_ids=[1, 2, 3, 4], num_pages=4, tier="disk", byte_size=4,
+            valid=True, token_ids=_TokenIds([1, 2, 3, 4]), num_pages=4, tier="disk", byte_size=4,
             restorable_length=lambda _matched: 4,
         )
         store = SimpleNamespace(

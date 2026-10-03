@@ -2087,6 +2087,7 @@ class Scheduler(SchedulerIOMixin):
             # one per such turn, until no admission could reserve state (2026-10-03).
             held = session.handle
             session.handle = cm.restore_hybrid_session_prefix(record, store, length)
+            session.token_ids = record.token_ids[:length].clone()
             if held is not None:
                 cm.unlock(held)
             elapsed = time.perf_counter() - started

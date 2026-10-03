@@ -4,6 +4,8 @@ import re
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from freetoken.scheduler.counters import PrefixCounters, SpillCounters
 from freetoken.scheduler.scheduler import Scheduler, SessionLease
 
@@ -812,6 +814,24 @@ def test_restore_resumes_at_the_deepest_boundary_the_client_tokens_still_match()
     assert installed == [4]  # 4 restored, the drifting tail re-prefilled
     assert scheduler._sessions["A"].handle == "restored"
     assert store.get("A") is None  # consumed
+
+
+@pytest.mark.parametrize("previous_tokens", [[8, 9], [8, 9, 10, 11]])
+def test_partial_restore_replaces_the_previous_turn_tokens(previous_tokens):
+    import torch
+
+    scheduler, store = _restoring_scheduler([1, 2, 3, 4, 5, 6], extra_states=[(4, 7)])
+    lease = scheduler._sessions["A"]
+    lease.token_ids = torch.tensor(previous_tokens, dtype=torch.int32)
+    record = store.get("A")
+    scheduler.cache_manager.restore_hybrid_session_prefix = lambda _r, _s, n=None: "restored"
+
+    assert scheduler._restore_cold_session("A", torch.tensor([1, 2, 3, 4, 99, 6, 7]))
+
+    assert lease.handle == "restored"
+    assert lease.token_ids.tolist() == [1, 2, 3, 4]
+    record.token_ids[0] = 99
+    assert lease.token_ids.tolist() == [1, 2, 3, 4]
 
 
 def test_a_restore_into_a_lease_that_holds_a_prefix_unlocks_it():

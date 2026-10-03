@@ -87,14 +87,11 @@ MEM_PLENTY = 1 << 40
 # one's exact signature is discarded instead of failed, so the search keeps looking for new
 # ones; FREETOKEN_SM_STRICT=1 fails on them instead. Drop an entry with its fix.
 EXPLICIT_LEASE_STARVES_OWN_TURN = "explicit lease starves its own diverged turn"
-RESTORE_KEEPS_STALE_TOKEN_IDS = (
-    "a restored lease keeps the token_ids of the turn before the restore")
 SHORT_OWN_LEASE_NEVER_RELEASED = (
     "a diverged own lease shorter than the request's match elsewhere is never released")
 KNOWN_BUGS = {
     SHORT_OWN_LEASE_NEVER_RELEASED,
     EXPLICIT_LEASE_STARVES_OWN_TURN,
-    RESTORE_KEEPS_STALE_TOKEN_IDS,
 }
 
 
@@ -580,11 +577,6 @@ class SchedulerSessionMachine(RuleBasedStateMachine):
             return
         queued = [(p.uid, p.session_id, p.input_len, p.output_len) for p in pm.pending_list]
         state = self._describe()
-        stale = [
-            sid for sid, lease in s._sessions.items()
-            if lease.reclaimable and lease.handle is not None and lease.handle.cached_len
-            and (lease.token_ids is None or len(lease.token_ids) != lease.handle.cached_len)
-        ]
         short_own = []
         for p in pm.pending_list:
             own = s._sessions.get(p.session_id) if p.session_id else None
@@ -610,9 +602,6 @@ class SchedulerSessionMachine(RuleBasedStateMachine):
                 s._release_soft_session_handle(sid, "progress oracle", owner_uid=lease.active_uid)
         s.cache_manager.unpin_all()
         admitted = admits(1)
-        if admitted and stale:
-            # The release the reclaim needed is the one it is refused (no checkpoint).
-            self._known_bug(RESTORE_KEEPS_STALE_TOKEN_IDS)
         if admitted and explicit_diverged:
             self._known_bug(EXPLICIT_LEASE_STARVES_OWN_TURN)
         if admitted and short_own:
@@ -815,8 +804,6 @@ class SchedulerSessionMachine(RuleBasedStateMachine):
                 keys.append(node._key)
                 node = node.parent
             path = torch.cat(keys[::-1]) if keys else torch.empty(0, dtype=torch.int32)
-            if not torch.equal(path.to(torch.int32), tokens.to(torch.int32)):
-                self._known_bug(RESTORE_KEEPS_STALE_TOKEN_IDS)
             assert torch.equal(path.to(torch.int32), tokens.to(torch.int32)), (
                 f"session {sid}: token_ids do not match the {handle.cached_len}-token prefix "
                 f"its handle locks"
@@ -966,9 +953,6 @@ def test_open_bug_explicit_session_turn_that_does_not_fit_beside_its_own_lease()
     ])
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=RESTORE_KEEPS_STALE_TOKEN_IDS + (
-    ": _restore_cold_session sets session.handle but not session.token_ids; with a different "
-    "length _spill_soft_session refuses, so no require_checkpoint release frees a parked restore"))
 def test_open_bug_two_parked_restores_block_each_other():
     _replay([
         _loop(1),
@@ -987,9 +971,6 @@ def test_open_bug_two_parked_restores_block_each_other():
     ])
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=RESTORE_KEEPS_STALE_TOKEN_IDS + (
-    ": with the same length _spill_soft_session accepts them and checkpoints the restored KV "
-    "under the previous turn's token ids"))
 def test_open_bug_restored_lease_would_checkpoint_kv_under_another_prompt():
     _replay([
         _arrive("A", "new", 11, 1),
