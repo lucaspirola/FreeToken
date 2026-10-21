@@ -5,16 +5,19 @@ WSL2 box, the Ada box); per-host differences live in `$HOME/.config/freetoken/se
 
 ## The server and its ONE default configuration
 
-* Model served: NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 on `http://127.0.0.1:1919`
-  (`nemotron-3.5-lightning`, aliases `-judge`, `-collect`).
+* Model served: Ornith-1.5-35B-A3B EXL3 5.0 bpw
+  (`~/ai/models/Ornith-1.5-35B-A3B-exl3-5.0bpw-hq`) on `http://127.0.0.1:1919`, served as
+  `ornith`, text only, qwen3 reasoning parser. It is a GDN hybrid: 30 linear-attention +
+  10 full-attention layers. Nemotron 3.5 Lightning is no longer served (owner, 2026-09-26).
 * The configuration is `scripts/serve-default.sh`. **Never hand-type `ft serve` flags** —
   edit that file if the profile must change, and keep its comments truthful. Measured
-  numbers behind it: `benchmarks/results/nemotron35_lightning_5080_single_lane_2026-09-17.md`,
-  design notes in `docs/nemotron.md` ("Default profile").
+  numbers behind it: `tasks/ornith-exl3/final/README.md` (long context:
+  `tasks/ornith-exl3/ctx393/README.md`).
 * What it is: single lane (one session decoding on the GPU, every other session checkpointed
-  to RAM/disk and swapped back), growable KV up to 1M tokens, expert VMM arena + overlap
-  scheduling (no CUDA-graph recaptures), **whole model in RAM** (`FREETOKEN_PIN_BUDGET_GB`
-  ≥ expert banks, all banks mlock'd), q8_0 KV, prefill chunk 8192.
+  to RAM/disk and swapped back), growable KV up to 262144 tokens (393216 with
+  `FREETOKEN_LONG_CONTEXT=1`), expert VMM arena + overlap scheduling (no CUDA-graph
+  recaptures), **RAM saver on** (`--expert-residency mirror`: a ~13.4 GiB pinned pool instead
+  of the 19.28 GiB of expert banks), q8_0 KV, prefill chunk 8192.
 * It runs as the **system** unit `freetoken-serve` (template
   `scripts/systemd/freetoken-serve.service.in`, installed by `sudo scripts/systemd/install.sh`).
   A system unit because only PID 1 grants `LimitMEMLOCK=infinity`; the user manager's cap
@@ -41,8 +44,8 @@ appends across starts; `/v1/stats` answers with nulls while loading). Startup ta
 Do not start the server from an agent shell: the harness can kill shells during the load
 and a server started there dies with them.
 
-Before starting, `free -g` must show MemAvailable ≥ expert banks + ~4 GiB (≈ 20 GiB for
-this model). `--host-ram-reserve-gb 2` (owner's choice, 2026-10-03) is the MemAvailable the
+Before starting, `free -g` must show MemAvailable ≥ the pinned set + ~4 GiB (≈ 18 GiB with
+the RAM saver, ≈ 24 GiB for the whole model in RAM). `--host-ram-reserve-gb 2` (owner's choice, 2026-10-03) is the MemAvailable the
 session tier never fills: below it, RAM checkpoints (up to `--session-spill-ram-gb 1`) move to
 disk. The server still dies first in a host OOM (OOMScoreAdjust=1000).
 Never run torch-backed pytest beside the live model; stop the server first
@@ -61,9 +64,10 @@ Never run torch-backed pytest beside the live model; stop the server first
    banks + ~4 GiB, and that `/etc/wsl.conf` keeps `[boot] systemd=true`.
    Verify: `sudo systemctl show -p LimitMEMLOCK freetoken-serve` → `infinity`, and after a
    start the log must not contain "settled pageable" (`acceptance.sh R6`).
-3. Check `scripts/serve-default.sh` knobs for the host: `FREETOKEN_PIN_BUDGET_GB` must stay
-   ≥ 15.41 GiB (banks) so the whole model is in RAM — lower it only if the host cannot spare
-   the RAM, accepting CPU-decode layers. CUDA arch is auto-detected
+3. Check `scripts/serve-default.sh` knobs for the host. The RAM saver is the default. For
+   the whole model in RAM, set `FREETOKEN_MIRROR_EXPERT_RAM=0 FREETOKEN_MIRROR_HOST_ROWS=0`
+   and keep `FREETOKEN_PIN_BUDGET_GB` ≥ 19.28 GiB (banks) — lower it only if the host cannot
+   spare the RAM, accepting CPU-decode layers. CUDA arch is auto-detected
    (`TVM_FFI_CUDA_ARCH_LIST`, 8.9 on Ada, 12.0 on Blackwell).
 4. Start as above, then verify with `benchmarks/switchyard_soak/checks/acceptance.sh R3`
    (one graph capture, KV growth, no tracebacks) after a couple of long requests, and
