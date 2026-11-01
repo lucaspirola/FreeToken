@@ -47,6 +47,7 @@ from .decode import DecodeManager
 from .io import SchedulerIOMixin
 from .mm import cut_image_spans, plan_mm_batch
 from .prefill import ChunkedReq, PrefillManager
+from .session_spill import SpillCancelled
 from .spec_ngram import SpecNgramDecoder
 from .status import SchedulerStatusReporter
 from .table import TableManager
@@ -71,6 +72,9 @@ _COUNTERS_PUBLISH_INTERVAL_S = 2.0
 _RECLAIM_SCAN_DEPTH = 4
 # Idle-time duplicate seeding for the bounded expert mirror (MirrorResidency.idle_seed).
 _MIRROR_IDLE_SEED = os.getenv("FREETOKEN_MIRROR_IDLE_SEED", "1").strip() != "0"
+# Idle seconds before a finished session is checkpointed ahead of demand (< 0 disables).
+# The wait skips the copy when an agent's next turn follows at once.
+_IDLE_CHECKPOINT_S = float(os.getenv("FREETOKEN_SESSION_IDLE_CHECKPOINT_S", "0.5"))
 
 Indice2D: TypeAlias = Tuple[torch.Tensor, torch.Tensor]
 
@@ -169,6 +173,8 @@ class SessionLease:
     # Host state copies taken while this session's turns prefilled; consumed by the next
     # checkpoint and released with it (or when the lease closes).
     state_captures: list = field(default_factory=list)
+    # The handle an idle checkpoint was last tried for: one try per retained turn.
+    idle_checkpoint_handle: object | None = None
 
 
 class Scheduler(SchedulerIOMixin):
@@ -702,6 +708,7 @@ class Scheduler(SchedulerIOMixin):
             self._expire_sessions()
             self._release_due_soft_sessions()
             self._enforce_session_host_reserve()
+            self._checkpoint_idle_sessions(last_data)
         blocking = not (
             last_data is not None  # don't block if we have a batch to be processed
             or self.prefill_manager.runnable
@@ -819,6 +826,7 @@ class Scheduler(SchedulerIOMixin):
             self._expire_sessions()
             self._release_due_soft_sessions()
             self._enforce_session_host_reserve()
+            self._checkpoint_idle_sessions(None)
         blocking = not (
             self.prefill_manager.runnable
             or self.decode_manager.runnable
@@ -1851,12 +1859,16 @@ class Scheduler(SchedulerIOMixin):
         """Keep the conversation this session held under ``<family>~prev``, out of the way
         of the next checkpoint of ``session_id`` (which would overwrite it)."""
         target = f"{_session_family(session_id)}~prev"
+        store = getattr(self, "_session_spill_store", None)
+        if (session.handle is not None and self._checkpoint_covers(session_id, session)
+                and store.rekey(session.spill, target)):
+            logger.info_rank0("Kept the conversation of session %s as %s", session_id, target)
+            return
         if session.handle is not None and session.token_ids is not None:
             shadow = SessionLease(session.handle, session.ttl_seconds, reclaimable=True)
             shadow.token_ids = session.token_ids
             self._spill_soft_session(target, shadow)
             return
-        store = getattr(self, "_session_spill_store", None)
         record = session.spill if session.spill is not None and session.spill.valid else None
         record = record or (store.get(session_id) if store is not None else None)
         if store is not None and record is not None and store.rekey(record, target):
@@ -1898,7 +1910,118 @@ class Scheduler(SchedulerIOMixin):
                 self.config.host_ram_reserve_gb,
             )
 
+    def _checkpoint_covers(self, session_id: str, session: SessionLease) -> bool:
+        """Whether ``session.spill`` holds exactly the history ``session.handle`` pins.
+
+        Only then may a release skip the copy. A checkpoint of an older turn, of another
+        KV layout, or one the store no longer files under ``session_id`` is stale.
+        """
+        store = getattr(self, "_session_spill_store", None)
+        record = session.spill
+        tokens = session.token_ids
+        if (store is None or record is None or not record.valid or tokens is None
+                or session.handle is None or store.get(session_id) is not record):
+            return False
+        if int(record.num_pages) != len(tokens):
+            return False
+        if record.restorable_length(int(record.num_pages)) != int(record.num_pages):
+            return False
+        pool = getattr(store, "kv_pool", None)
+        if pool is not None and record.fingerprint != pool.session_spill_fingerprint():
+            return False
+        ours = torch.as_tensor(record.token_ids).to(device="cpu", dtype=torch.int32)
+        theirs = torch.as_tensor(tokens).to(device="cpu", dtype=torch.int32)
+        return torch.equal(ours, theirs)
+
+    def _idle_checkpoint_candidates(self, now: float | None) -> list[tuple[str, SessionLease]]:
+        """Idle leases that pin GPU history no idle checkpoint was tried for, LRU first.
+
+        ``now`` None ignores the idle wait.
+        """
+        if _IDLE_CHECKPOINT_S < 0 or getattr(self, "_session_spill_store", None) is None:
+            return []
+        # The waiting-request test is rank 0's view only; other ranks would diverge.
+        tp_info = getattr(getattr(self, "config", None), "tp_info", None)
+        if getattr(tp_info, "size", 1) != 1:
+            return []
+        rows = [
+            (lease.last_used_at, sid, lease)
+            for sid, lease in getattr(self, "_sessions", {}).items()
+            if lease.active_uid is None
+            and lease.handle is not None
+            and lease.token_ids is not None
+            and lease.idle_checkpoint_handle is not lease.handle
+            and (now is None or now - lease.last_used_at >= _IDLE_CHECKPOINT_S)
+        ]
+        rows.sort(key=lambda row: (row[0], row[1]))
+        return [(sid, lease) for _t, sid, lease in rows]
+
+    def _checkpoint_idle_sessions(self, last_data: ForwardData | None) -> None:
+        """Write the checkpoints of idle leases while nothing else runs.
+
+        A later release (admission pressure, a growable handoff) then only unlocks the
+        pages instead of copying them on the new request's critical path. A request that
+        arrives meanwhile stops the copy between chunks.
+        """
+        store = getattr(self, "_session_spill_store", None)
+        if store is None or _IDLE_CHECKPOINT_S < 0:
+            return
+        if (
+            getattr(getattr(self, "prefill_manager", None), "runnable", True)
+            or not self._only_idle_sessions(last_data)
+            or getattr(self, "_pending_durable_checkpoint", None) is not None
+            or getattr(self, "_durable_checkpoint_sealed", False)
+            or getattr(self, "_growable_shrink_in_flight", False)
+        ):
+            return
+        candidates = self._idle_checkpoint_candidates(time.monotonic())
+        if not candidates:
+            return
+        inbox = getattr(self, "_recv_from_tokenizer", None)
+        waiting = (lambda: not inbox.empty()) if inbox is not None else (lambda: False)
+        for sid, lease in candidates:
+            if waiting():
+                return
+            lease.idle_checkpoint_handle = lease.handle
+            if self._checkpoint_covers(sid, lease):
+                continue
+            try:
+                written = self._write_session_checkpoint(
+                    sid, lease, keep_captures=True, should_stop=waiting,
+                    label="Checkpointed idle session")
+            except SpillCancelled:
+                lease.idle_checkpoint_handle = None
+                store.counters.spills_ahead_cancelled += 1
+                logger.info_rank0(
+                    "Stopped the idle checkpoint of session %s for a waiting request", sid)
+                return
+            if written:
+                store.counters.spills_ahead += 1
+
     def _spill_soft_session(self, session_id: str, session: SessionLease) -> bool:
+        if self._checkpoint_covers(session_id, session):
+            # The idle checkpoint owns this exact history, captured states included.
+            session.state_captures = []
+            store = self._session_spill_store
+            store.counters.spills_ahead_reused += 1
+            logger.info_rank0(
+                "Spilled soft session %s: %d tokens, reused its idle checkpoint (%s)",
+                session_id,
+                session.spill.num_pages,
+                session.spill.tier,
+            )
+            return True
+        return self._write_session_checkpoint(session_id, session)
+
+    def _write_session_checkpoint(
+        self, session_id: str, session: SessionLease, *, keep_captures: bool = False,
+        should_stop=None, label: str = "Spilled soft session",
+    ) -> bool:
+        """Copy the history ``session.handle`` pins into the spill store.
+
+        ``keep_captures`` keeps the prefill state captures on the lease for a later
+        checkpoint of the same turn. :class:`SpillCancelled` passes through.
+        """
         store = getattr(self, "_session_spill_store", None)
         handle = session.handle
         if store is None or handle is None or session.token_ids is None:
@@ -1913,6 +2036,7 @@ class Scheduler(SchedulerIOMixin):
         if capture is not None:
             capture.synchronize()  # the staged copies are host-readable now
         started = time.perf_counter()
+        kwargs = {} if should_stop is None else {"should_stop": should_stop}
         record = store.spill(
             session_id,
             session.token_ids,
@@ -1923,9 +2047,11 @@ class Scheduler(SchedulerIOMixin):
             # client's tokens drifted near the end.
             extra_states=self.cache_manager.hybrid_session_state_boundaries(handle),
             captured_states=session.state_captures,
+            **kwargs,
         )
-        # The checkpoint owns its own copies now; free the staging either way.
-        session.state_captures = []
+        if not keep_captures:
+            # The checkpoint owns its own copies now; free the staging either way.
+            session.state_captures = []
         elapsed = time.perf_counter() - started
         if record is None:
             logger.warning(
@@ -1936,7 +2062,8 @@ class Scheduler(SchedulerIOMixin):
             return False
         session.spill = record
         logger.info_rank0(
-            "Spilled soft session %s: %d tokens, %s, %.2f GiB in %.3f s (%.2f GiB/s)",
+            "%s %s: %d tokens, %s, %.2f GiB in %.3f s (%.2f GiB/s)",
+            label,
             session_id,
             record.num_pages,
             record.tier,
@@ -2440,6 +2567,8 @@ class Scheduler(SchedulerIOMixin):
         for lease in getattr(self, "_sessions", {}).values():
             if lease.expires_at is not None or lease.protected_until is not None:
                 return True
+        if self._idle_checkpoint_candidates(None):
+            return True  # an idle checkpoint is still owed once its wait has passed
         store = getattr(self, "_session_spill_store", None)
         return bool(store is not None and store.num_records)
 

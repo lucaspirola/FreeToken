@@ -391,6 +391,7 @@ class _SpillStore:
         *,
         extra_states=(),
         captured_states=(),
+        should_stop=None,
     ):
         self.captured = list(captured_states)
         boundaries = sorted(
@@ -693,10 +694,14 @@ def test_client_disconnect_ends_the_lease_but_keeps_the_checkpoint():
     assert 5 in scheduler._pending_abort_acks
 
 
-def test_resident_session_outlives_its_ttl_and_is_checkpointed_only_on_demand():
+def test_resident_session_outlives_its_ttl_and_is_checkpointed_only_on_demand(monkeypatch):
     """Idle time never costs a session its state; the next admission does, and it restores."""
     import torch
 
+    import freetoken.scheduler.scheduler as scheduler_mod
+
+    # The idle checkpoint is off here: this test is about the on-demand release only.
+    monkeypatch.setattr(scheduler_mod, "_IDLE_CHECKPOINT_S", -1.0)
     scheduler = _demand_scheduler()
     store = scheduler._session_spill_store
     scheduler._sessions["A"] = SessionLease(
@@ -1277,3 +1282,287 @@ def test_a_sibling_restores_the_conversation_the_summary_replaced():
     assert installed == [6]
     assert scheduler._sessions["A~1"].handle == "restored"
     assert store.get("A") is not None   # the summary's own checkpoint is untouched
+
+
+# ------------------------------------------- checkpoints written while the scheduler idles
+
+
+class _Inbox:
+    """The tokenizer queue as the idle checkpoint sees it: a message arrives after
+    ``empty_polls`` polls."""
+
+    def __init__(self, empty_polls: int | None = None) -> None:
+        self.empty_polls = empty_polls
+        self.polls = 0
+
+    def empty(self) -> bool:
+        self.polls += 1
+        return self.empty_polls is None or self.polls <= self.empty_polls
+
+
+def _idle_scheduler(tmp_path, monkeypatch, tier="disk"):
+    """A scheduler on the real hybrid cache and spill store, with nothing running."""
+    import freetoken.scheduler.session_spill as spill_mod
+    from freetoken.scheduler.session_spill import SessionSpillStore
+
+    from .test_session_spill import _pools
+
+    # Several KV chunks per layer, so a waiting request can stop the copy mid-way.
+    monkeypatch.setattr(spill_mod, "SPILL_CHUNK_PAGES", 2)
+    kv, linear, manager = _pools()
+    store = SessionSpillStore(
+        kv, linear, directory=str(tmp_path),
+        ram_budget_bytes=(1 << 30) if tier == "ram" else 0,
+        disk_budget_bytes=1 << 30, host_reserve_bytes=0,
+    )
+    scheduler = _scheduler()
+    scheduler.config.tp_info = SimpleNamespace(size=1)
+    scheduler.cache_manager = manager
+    scheduler._session_spill_store = store
+    scheduler._pending_rebuild = None
+    scheduler._recv_from_tokenizer = _Inbox()
+    return scheduler, kv, linear, manager, store
+
+
+def _resident(scheduler, kv, linear, manager, tokens, *, seed, idle_for=10.0):
+    """Seed KV and state for ``tokens``, retain them under lease "A" (idle ``idle_for`` s)."""
+    import torch
+
+    pages = manager._page_to_token(manager._allocate(len(tokens)))
+    slot = linear.alloc(1)[0]
+    torch.manual_seed(seed)
+    kv._k_buffer[:, pages] = torch.randint(-128, 127, kv._k_buffer[:, pages].shape,
+                                           dtype=torch.int8)
+    linear.recurrent_states[:, slot] = torch.randn_like(linear.recurrent_states[:, slot])
+    manager.prefix_cache.insert(tokens, pages, slot)
+    lease = scheduler._sessions.get("A") or SessionLease(None, 300.0, reclaimable=True)
+    held = lease.handle
+    lease.handle = manager.retain_prefix(tokens, len(tokens))
+    if held is not None:
+        manager.unlock(held)
+    lease.token_ids = tokens.clone()
+    lease.last_used_at = time.monotonic() - idle_for
+    scheduler._sessions["A"] = lease
+    # Read back through the handle: a shared prefix keeps the tree's older pages.
+    held_pages = lease.handle.get_matched_indices().long()
+    return (lease, kv._k_buffer[:, held_pages].clone(),
+            linear.recurrent_states[:, lease.handle.node.mamba_value].clone())
+
+
+def _restore_bytes(scheduler, kv, linear, manager, prompt):
+    """Evict every unlocked prefix, restore lease "A" for ``prompt`` and read back."""
+    held = scheduler._sessions["A"].handle
+    if held is not None:
+        manager.unlock(held)
+    scheduler._sessions["A"] = SessionLease(None, 300.0, reclaimable=True)
+    manager.evict_all_unlocked_prefixes()
+    assert manager.prefix_cache.match_prefix(prompt).cached_len == 0
+    assert scheduler._restore_cold_session("A", prompt) is True
+    handle = scheduler._sessions["A"].handle
+    pages = handle.get_matched_indices().long()
+    k = kv._k_buffer[:, pages].clone()
+    recurrent = linear.recurrent_states[:, handle.node.mamba_value].clone()
+    return handle.cached_len, k, recurrent
+
+
+@pytest.mark.parametrize("tier", ["ram", "disk"])
+def test_an_idle_checkpoint_is_used_when_admission_releases_the_session(
+    tmp_path, monkeypatch, tier
+):
+    import torch
+
+    scheduler, kv, linear, manager, store = _idle_scheduler(tmp_path, monkeypatch, tier)
+    tokens = torch.tensor([11, 12, 13, 14, 15], dtype=torch.int32)
+    lease, k, recurrent = _resident(scheduler, kv, linear, manager, tokens, seed=3)
+
+    scheduler._checkpoint_idle_sessions(None)
+
+    record = store.get("A")
+    assert record is not None and record.tier == tier and lease.spill is record
+    assert lease.handle is not None  # written ahead; the GPU history stays resident
+    assert store.counters.spills_ahead == 1
+    assert scheduler._sessions_need_service() is True  # the store holds a record
+
+    # Admission pressure: the release must not copy the pages again.
+    def no_copy(*_a, **_k):
+        raise AssertionError("release copied a session that was checkpointed at idle")
+
+    monkeypatch.setattr(store, "spill", no_copy)
+    assert scheduler._release_soft_session_handle(
+        "A", "admission pressure", require_checkpoint=True)
+    assert lease.handle is None
+    assert store.counters.spills_ahead_reused == 1
+    monkeypatch.undo()
+
+    restored_len, restored_k, restored_recurrent = _restore_bytes(
+        scheduler, kv, linear, manager, torch.tensor([11, 12, 13, 14, 15, 16]))
+    assert restored_len == 5
+    assert torch.equal(restored_k, k) and torch.equal(restored_recurrent, recurrent)
+    store.shutdown()
+
+
+def test_a_session_is_checkpointed_at_idle_only_after_its_wait_and_once_per_turn(
+    tmp_path, monkeypatch
+):
+    import torch
+
+    scheduler, kv, linear, manager, store = _idle_scheduler(tmp_path, monkeypatch)
+    tokens = torch.tensor([11, 12, 13, 14, 15], dtype=torch.int32)
+    lease, _k, _r = _resident(scheduler, kv, linear, manager, tokens, seed=3, idle_for=0.0)
+
+    scheduler._checkpoint_idle_sessions(None)
+    assert store.get("A") is None  # the next turn may still come at once
+    assert scheduler._sessions_need_service() is True  # keep polling until it is due
+
+    lease.last_used_at -= 10.0
+    scheduler.prefill_manager.runnable = True
+    scheduler._checkpoint_idle_sessions(None)
+    assert store.get("A") is None  # never while a request is queued
+
+    scheduler.prefill_manager.runnable = False
+    scheduler._checkpoint_idle_sessions(None)
+    scheduler._checkpoint_idle_sessions(None)
+    assert store.counters.spills_ahead == 1
+    store.shutdown()
+
+
+@pytest.mark.parametrize("tier", ["ram", "disk"])
+def test_a_stale_idle_checkpoint_is_never_used_for_a_release(tmp_path, monkeypatch, tier):
+    """The session continued after its idle checkpoint: the release must copy the new
+    history, and a restore must return the new turn's bytes, never the old ones."""
+    import torch
+
+    scheduler, kv, linear, manager, store = _idle_scheduler(tmp_path, monkeypatch, tier)
+    old = torch.tensor([11, 12, 13, 14, 15], dtype=torch.int32)
+    lease, _k, _r = _resident(scheduler, kv, linear, manager, old, seed=3)
+    scheduler._checkpoint_idle_sessions(None)
+    stale = lease.spill
+    assert stale is not None and stale.num_pages == 5
+
+    # The next turn diverged at token 3 and is retained, while the lease still points
+    # at the old checkpoint (the turn-end retire is bypassed to test the guard itself).
+    new = torch.tensor([11, 12, 13, 99, 98, 97, 96], dtype=torch.int32)
+    lease, k, recurrent = _resident(scheduler, kv, linear, manager, new, seed=4)
+    assert lease.spill is stale and not scheduler._checkpoint_covers("A", lease)
+
+    assert scheduler._release_soft_session_handle(
+        "A", "admission pressure", require_checkpoint=True)
+    assert store.counters.spills_ahead_reused == 0
+    record = store.get("A")
+    assert record is not stale and torch.equal(record.token_ids, new)
+
+    restored_len, restored_k, restored_recurrent = _restore_bytes(
+        scheduler, kv, linear, manager, torch.cat((new, torch.tensor([5]))))
+    assert restored_len == 7
+    assert torch.equal(restored_k, k) and torch.equal(restored_recurrent, recurrent)
+    store.shutdown()
+
+
+def test_an_idle_checkpoint_of_another_layout_or_a_dropped_one_is_stale(tmp_path, monkeypatch):
+    import torch
+
+    scheduler, kv, linear, manager, store = _idle_scheduler(tmp_path, monkeypatch)
+    tokens = torch.tensor([11, 12, 13, 14, 15], dtype=torch.int32)
+    lease, _k, _r = _resident(scheduler, kv, linear, manager, tokens, seed=3)
+    scheduler._checkpoint_idle_sessions(None)
+    assert scheduler._checkpoint_covers("A", lease)
+
+    record = lease.spill
+    record.fingerprint = ("another", "kv", "layout")
+    assert not scheduler._checkpoint_covers("A", lease)
+
+    store.discard(record)  # capacity eviction while the lease still points at it
+    assert not scheduler._checkpoint_covers("A", lease)
+    store.shutdown()
+
+
+def test_a_finished_turn_retires_the_idle_checkpoint_and_asks_for_a_new_one():
+    import torch
+
+    scheduler = _demand_scheduler()
+    store = scheduler._session_spill_store
+    scheduler.config.tp_info = SimpleNamespace(size=1)
+    scheduler._pending_rebuild = None
+    lease = SessionLease("old-handle", 300.0, active_uid=9, reclaimable=True)
+    lease.token_ids = torch.tensor([1, 2, 3], dtype=torch.int32)
+    lease.spill = store.spill("A", lease.token_ids, [0, 1, 2], 3)
+    lease.idle_checkpoint_handle = "old-handle"
+    scheduler._sessions["A"] = lease
+
+    scheduler._free_req_resources(_req(9, "A"), retain_session=True)  # input [1, 2, 3, 4]
+
+    assert lease.spill is None and store.get("A") is None  # a RAM record is dropped
+    assert scheduler._idle_checkpoint_candidates(None) == [("A", lease)]
+
+
+def test_a_waiting_request_stops_a_fresh_idle_checkpoint_and_leaves_nothing(
+    tmp_path, monkeypatch
+):
+    import torch
+
+    scheduler, kv, linear, manager, store = _idle_scheduler(tmp_path, monkeypatch)
+    tokens = torch.tensor([11, 12, 13, 14, 15], dtype=torch.int32)
+    lease, _k, _r = _resident(scheduler, kv, linear, manager, tokens, seed=3)
+    scheduler._recv_from_tokenizer = _Inbox(empty_polls=4)
+
+    scheduler._checkpoint_idle_sessions(None)
+
+    assert store.get("A") is None and lease.spill is None
+    assert store.counters.spills_ahead_cancelled == 1 and store.disk_bytes == 0
+    assert not any(tmp_path.rglob("*.pt"))
+    assert lease.handle is not None and lease.idle_checkpoint_handle is None  # retried later
+
+    scheduler._recv_from_tokenizer = _Inbox()
+    scheduler._checkpoint_idle_sessions(None)
+    assert store.get("A") is not None and store.counters.spills_ahead == 1
+    store.shutdown()
+
+
+def test_a_waiting_request_stops_an_incremental_idle_checkpoint_and_keeps_its_base(
+    tmp_path, monkeypatch
+):
+    import torch
+
+    scheduler, kv, linear, manager, store = _idle_scheduler(tmp_path, monkeypatch)
+    first = torch.tensor([11, 12, 13, 14, 15], dtype=torch.int32)
+    lease, k, recurrent = _resident(scheduler, kv, linear, manager, first, seed=3)
+    scheduler._checkpoint_idle_sessions(None)
+    base = store.get("A")
+    base_files = sorted(p.name for p in base.directory.iterdir())
+    scheduler._retire_session_spill(lease)  # the turn end: a disk record stays as the base
+
+    # The next turn extends the conversation; a request arrives during its checkpoint.
+    longer = torch.tensor([11, 12, 13, 14, 15, 16, 17, 18, 19], dtype=torch.int32)
+    lease, _k2, _r2 = _resident(scheduler, kv, linear, manager, longer, seed=4)
+    scheduler._recv_from_tokenizer = _Inbox(empty_polls=3)
+    scheduler._checkpoint_idle_sessions(None)
+
+    assert store.counters.spills_ahead_cancelled == 1
+    assert store.get("A") is base and base.valid
+    assert store.disk_bytes == base.byte_size
+    assert sorted(p.name for p in base.directory.iterdir()) == base_files
+    restored_len, restored_k, restored_recurrent = _restore_bytes(
+        scheduler, kv, linear, manager, torch.tensor([11, 12, 13, 14, 15, 40]))
+    assert restored_len == 5
+    assert torch.equal(restored_k, k) and torch.equal(restored_recurrent, recurrent)
+    store.shutdown()
+
+
+def test_a_replaced_conversation_with_an_idle_checkpoint_is_moved_not_copied():
+    import torch
+
+    scheduler = _demand_scheduler()
+    store = scheduler._session_spill_store
+    moved = []
+    store.rekey = lambda record, sid: moved.append((record.session_id, sid)) or True
+    scheduler._spill_soft_session = lambda *a: pytest.fail("copied a checkpointed history")
+    lease = SessionLease("conversation", 300.0, active_uid=9, reclaimable=True)
+    lease.token_ids = torch.tensor([1, 2, 3, 4], dtype=torch.int32)
+    lease.spill = store.spill("A", lease.token_ids, [0, 1, 2, 3], 3)
+    scheduler._sessions["A"] = lease
+    summary = _req(9, "A")
+    summary.input_ids = [7, 8, 9, 10, 11]
+
+    scheduler._free_req_resources(summary, retain_session=True)
+
+    assert moved == [("A", "A~prev")]
