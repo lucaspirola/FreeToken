@@ -6,7 +6,8 @@ slot index (``cache_indices``), so it matches the LinearStatePool layout exactly
 ``conv_states[num_slots, conv_dim, kernel-1]``.
 
 Convention mirrors sglang's ``causal_conv1d.py`` sgl_kernel path. silu is applied
-inside the kernel; the conv state is updated in place (no separate scatter).
+inside the kernel unless ``activation=False`` (the LFM2 short conv has none); the conv
+state is updated in place (no separate scatter).
 """
 from __future__ import annotations
 
@@ -23,9 +24,11 @@ def causal_conv1d_varlen(
     cache_indices: torch.Tensor,    # [batch] int32 slot id per request
     has_initial_state: torch.Tensor,  # [batch] bool (carry conv state across chunks)
     bias: torch.Tensor | None = None,
+    activation: bool = True,
 ) -> torch.Tensor:
-    """Varlen (prefill) depthwise causal conv with silu; writes silu(conv) into ``x``
-    in place and refreshes ``conv_states[cache_indices]`` with each request's tail."""
+    """Varlen (prefill) depthwise causal conv, silu unless ``activation=False``; writes
+    the result into ``x`` in place and refreshes ``conv_states[cache_indices]`` with each
+    request's tail."""
     from freetoken.kernel.backend import is_sgl_kernel_installed
 
     if not is_sgl_kernel_installed():
@@ -34,7 +37,8 @@ def causal_conv1d_varlen(
         )
 
         return triton_causal_conv1d_varlen(
-            x, weight, conv_states, cu_seqlens, cache_indices, has_initial_state, bias=bias
+            x, weight, conv_states, cu_seqlens, cache_indices, has_initial_state, bias=bias,
+            activation="silu" if activation else None,
         )
 
     from sgl_kernel import causal_conv1d_fwd
@@ -44,7 +48,7 @@ def causal_conv1d_varlen(
     causal_conv1d_fwd(
         x, weight, bias, conv_states,
         cu_seqlens.to(torch.int32), cache_indices.to(torch.int32),
-        has_initial_state, True, _PAD_SLOT_ID,
+        has_initial_state, activation, _PAD_SLOT_ID,
     )
     return x
 
@@ -55,9 +59,10 @@ def causal_conv1d_decode(
     weight: torch.Tensor,           # [conv_dim, kernel]
     conv_state_indices: torch.Tensor,  # [batch] int32 slot id per request
     bias: torch.Tensor | None = None,
+    activation: bool = True,
 ) -> torch.Tensor:
-    """Single-token (decode) causal conv update with silu; shifts+appends the new
-    token into ``conv_state[conv_state_indices]`` in place and returns silu(conv)."""
+    """Single-token (decode) causal conv update, silu unless ``activation=False``; shifts
+    and appends the new token into ``conv_state[conv_state_indices]`` in place."""
     from freetoken.kernel.backend import is_sgl_kernel_installed
 
     if not is_sgl_kernel_installed():
@@ -66,14 +71,14 @@ def causal_conv1d_decode(
         )
 
         return triton_causal_conv1d_decode(
-            x, conv_state, weight, conv_state_indices, bias=bias
+            x, conv_state, weight, conv_state_indices, bias=bias, activation=activation
         )
 
     from sgl_kernel import causal_conv1d_update
 
     x = x.unsqueeze(-1)
     causal_conv1d_update(
-        x, conv_state, weight, bias, True, None,
+        x, conv_state, weight, bias, activation, None,
         conv_state_indices.to(torch.int32), _PAD_SLOT_ID,
     )
     return x.squeeze(-1)

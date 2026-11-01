@@ -74,3 +74,52 @@ def test_gated_norm_heads_equals_rows(T, H, D):
                          is_rms_norm=True, norm_before_gate=True, activation="silu")
     got = rms_norm_gated_heads(x=x, weight=w, z=z, eps=1e-6, activation="silu")
     assert torch.equal(got.reshape(-1, D), ref)
+
+
+def _conv_reference(x, w, state, lens, init, activation):
+    """Per-sequence depthwise causal conv in torch: ``x`` [total, dim], ``state`` [n, dim, K-1]."""
+    outs, tails, start = [], [], 0
+    K = w.shape[1]
+    for i, n in enumerate(lens):
+        seg = x[start:start + n].float().T
+        left = state[i].float() if init[i] else torch.zeros_like(state[i], dtype=torch.float32)
+        full = torch.cat([left, seg], dim=-1)
+        y = torch.nn.functional.conv1d(full.unsqueeze(0), w.float().unsqueeze(1), groups=w.shape[0])[0]
+        outs.append(torch.nn.functional.silu(y) if activation else y)
+        tails.append(full[:, -(K - 1):])
+        start += n
+    return torch.cat(outs, dim=-1).T, torch.stack(tails)
+
+
+@cuda
+@pytest.mark.parametrize("backend", ["sgl_kernel", "triton"])
+@pytest.mark.parametrize("activation", [True, False])
+def test_causal_conv1d_activation_switch(backend, activation, monkeypatch):
+    """``activation=False`` (the LFM2 short conv) returns the bare conv; both back ends."""
+    from freetoken.kernel import backend as kb
+    from freetoken.kernel.causal_conv1d import causal_conv1d_decode, causal_conv1d_varlen
+
+    if backend == "sgl_kernel" and not kb.is_sgl_kernel_installed():
+        pytest.skip("sgl_kernel is not installed")
+    if backend == "triton":
+        monkeypatch.setattr(kb, "is_sgl_kernel_installed", lambda: False)
+    torch.manual_seed(1)
+    dim, K, lens = 256, 3, [5, 1, 70]
+    n, total = len(lens), sum(lens)
+    x = torch.randn(total, dim, device="cuda").to(torch.bfloat16)
+    w = (torch.randn(dim, K, device="cuda") * 0.5).to(torch.bfloat16)
+    states = torch.randn(n + 1, dim, K - 1, device="cuda").to(torch.bfloat16)
+    idx = torch.arange(1, n + 1, device="cuda", dtype=torch.int32)
+    init = torch.tensor([False, True, True], device="cuda")
+    cu = torch.tensor([0] + lens, device="cuda").cumsum(0).to(torch.int32)
+    ref_y, ref_tail = _conv_reference(x, w, states[1:], lens, init.tolist(), activation)
+
+    cs = states.clone()
+    y = causal_conv1d_varlen(transpose(x), w, cs, cu, idx, init, activation=activation)
+    torch.testing.assert_close(y.T.float(), ref_y, atol=3e-2, rtol=2e-2)
+    torch.testing.assert_close(cs[1:].float(), ref_tail, atol=0, rtol=0)
+
+    step = torch.randn(n, dim, device="cuda").to(torch.bfloat16)
+    ref_step, _ = _conv_reference(step, w, cs[1:], [1] * n, [True] * n, activation)
+    out = causal_conv1d_decode(step.clone(), cs, w, idx, activation=activation)
+    torch.testing.assert_close(out.float(), ref_step, atol=3e-2, rtol=2e-2)
