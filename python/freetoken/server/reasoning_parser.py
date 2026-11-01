@@ -501,6 +501,26 @@ class NemotronV3ReasoningParser(ThinkReasoningParser):
         return text, ""
 
 
+class Lfm2ReasoningParser(NemotronV3ReasoningParser):
+    """Reasoning parser for LFM2 / LFM2.5 (``<think>`` + pythonic tool calls).
+
+    The chat template always ends the generation prompt with ``<think>`` (there is no
+    thinking-off switch), so the completion is reasoning until ``</think>``. A turn that
+    skips ``</think>`` and runs into ``<|tool_call_start|>`` still yields a tool call,
+    and stray think markers after the block are dropped, as for Nemotron-3.x.
+    """
+
+    def __init__(self, force_reasoning: bool = True, stream_reasoning: bool = True) -> None:
+        BaseReasoningParser.__init__(
+            self,
+            think_start_token=THINK_START_TOKEN,
+            think_end_token=THINK_END_TOKEN,
+            force_reasoning=force_reasoning,
+            stream_reasoning=stream_reasoning,
+            tool_start_token="<|tool_call_start|>",
+        )
+
+
 class MiniMaxM3ReasoningParser(BaseReasoningParser):
     """Reasoning parser for MiniMax-M3's ``<mm:think>...</mm:think>`` protocol.
 
@@ -969,6 +989,7 @@ class ReasoningParser:
         "glm": ThinkReasoningParser,
         "minimax": ThinkReasoningParser,
         "nemotron_v3": NemotronV3ReasoningParser,
+        "lfm2": Lfm2ReasoningParser,
         "minimax_m3": MiniMaxM3ReasoningParser,
         "muse_glimmer": MuseGlimmerReasoningParser,
         "gemma4": GemmaThoughtReasoningParser,
@@ -1014,8 +1035,8 @@ def build_reasoning_parser(config, force_reasoning: bool) -> Optional[ReasoningP
     name = getattr(config, "reasoning_parser", None)
     if not name:
         return None
-    if name == "minimax":
-        # MiniMax-M2's template always starts generation inside an implicit
+    if name in ("minimax", "lfm2"):
+        # MiniMax-M2's and LFM2's templates always starts generation inside an implicit
         # <think> block and the model only emits the closing </think> marker.
         force_reasoning = True
     return ReasoningParser(name, force_reasoning=force_reasoning)

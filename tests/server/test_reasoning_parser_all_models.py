@@ -127,6 +127,30 @@ def test_gemma_thought_split():
     assert content == "visible answer"
 
 
+# ------------------------------------------------------------------------ lfm2
+def test_lfm2_is_reasoning_until_the_closing_tag():
+    # The template ends the prompt with <think> and has no thinking-off switch.
+    parser = build_reasoning_parser(SimpleNamespace(reasoning_parser="lfm2"), False)
+    reasoning, content = parser.parse_non_stream("weigh it</think>\n\nthe answer")
+    assert reasoning == "weigh it"
+    assert content.strip() == "the answer"
+
+
+def test_lfm2_streaming_splits_the_closer_across_chunks():
+    parser = build_reasoning_parser(SimpleNamespace(reasoning_parser="lfm2"), False)
+    reasoning, content = _stream(parser, ["plan", " a</th", "ink>answer", " </think>more"])
+    assert reasoning == "plan a"
+    assert content == "answer more"
+
+
+def test_lfm2_tool_call_without_a_closer_ends_reasoning():
+    parser = ReasoningParser("lfm2", force_reasoning=True)
+    text = "I will call it<|tool_call_start|>[read(filePath='/x')]<|tool_call_end|>"
+    reasoning, content = parser.parse_non_stream(text)
+    assert reasoning == "I will call it"
+    assert content == "<|tool_call_start|>[read(filePath='/x')]<|tool_call_end|>"
+
+
 # ------------------------------------------------------- build_reasoning_parser
 
 
