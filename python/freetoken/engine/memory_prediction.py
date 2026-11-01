@@ -164,6 +164,14 @@ def _mamba2_bytes(T: int, H: int, g: Any, a: int) -> int:
     return in_proj + conv_out + states + cb + out
 
 
+def _short_conv_bytes(T: int, H: int, g: Any, a: int) -> int:
+    """LFM2 short convolution (``state_layout="short_conv"``): the ``in_proj`` output
+    (B|C|x), the gated conv input ``B*x``, the conv output, ``C*y`` and ``out_proj``'s
+    output."""
+    width = g.num_value_heads * g.value_head_dim
+    return T * 3 * width * a + 3 * T * width * a + T * H * a
+
+
 def _moe_bytes(T: int, H: int, mc: Any, a: int) -> int:
     """Fused routed-expert prefill (``fused_experts_nvfp4`` and siblings): gemm1's
     ``[T, k, two_i]`` output (activated in its epilogue), gemm2's ``[T, k, H]``
@@ -226,6 +234,8 @@ def predict_prefill_transient(
             layers["gdn"] = max(layers.get("gdn", 0), _gdn_bytes(T, H, g, a))
         elif g.kind == "linear_gated_delta" and g.state_layout == "mamba2":
             layers["mamba2"] = max(layers.get("mamba2", 0), _mamba2_bytes(T, H, g, a))
+        elif g.kind == "linear_gated_delta" and g.state_layout == "short_conv":
+            layers["short_conv"] = max(layers.get("short_conv", 0), _short_conv_bytes(T, H, g, a))
         else:
             unknown.append(g.kind + ("/mla" if getattr(g, "mla", False) else ""))
     if not mc.attention_groups:

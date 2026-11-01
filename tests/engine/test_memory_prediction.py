@@ -188,3 +188,29 @@ def test_non_expert_weights_from_headers(tmp_path):
     _write_shard(tmp_path / "model-00002.safetensors", {"lm_head.weight": 7})
     assert mp.predict_non_expert_weight_bytes(str(tmp_path)) == 57
     assert mp.predict_non_expert_weight_bytes(str(tmp_path / "missing")) is None
+
+
+def _lfm25_24b():
+    """LFM2.5-24B-A2B geometry as lfm2_moe.parse_config builds it."""
+    return SimpleNamespace(
+        architectures=["Lfm2MoeForCausalLM"],
+        hidden_size=2048, hidden_act="silu", num_experts=64, num_experts_per_tok=4,
+        moe_intermediate_size=1536, intermediate_size=11776,
+        shared_expert_intermediate_size=0, first_k_dense_replace=2,
+        num_qo_heads=32, num_qo_heads_per_layer=None, num_kv_heads=8, head_dim=64,
+        attention_groups=(
+            SimpleNamespace(kind="linear_gated_delta", state_layout="short_conv",
+                            num_key_heads=32, num_value_heads=32, key_head_dim=0,
+                            value_head_dim=64, track_chunk_size=64),
+            SimpleNamespace(kind="full", num_kv_heads=8, head_dim=64, mla=False),
+        ),
+    )
+
+
+def test_short_conv_is_priced_not_coarse():
+    pred = mp.predict_prefill_transient(_lfm25_24b(), 8192)
+    assert not pred.coarse
+    T, H, a = 8192, 2048, 2
+    assert pred.layers["short_conv"] == pred.base + 3 * T * H * a + 3 * T * H * a + T * H * a
+    # the dense SwiGLU of layers 0-1 (intermediate 11776) is the widest layer
+    assert pred.peak_layer == "dense_mlp"

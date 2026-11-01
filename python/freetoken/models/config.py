@@ -179,8 +179,8 @@ class SWAAttentionGroupConfig(BaseAttentionGroupConfig):
 
 @dataclass(frozen=True)
 class LinearGatedDeltaGroupConfig(BaseAttentionGroupConfig):
-    """Recurrent-state group: GatedDeltaNet (``state_layout="kv"``) or Mamba-2 SSD
-    (``state_layout="mamba2"``).
+    """Recurrent-state group: GatedDeltaNet (``state_layout="kv"``), Mamba-2 SSD
+    (``state_layout="mamba2"``) or the LFM2 short convolution (``state_layout="short_conv"``).
 
     The two families keep different state geometries, so the four head/dim fields are
     read through the layout:
@@ -196,6 +196,12 @@ class LinearGatedDeltaGroupConfig(BaseAttentionGroupConfig):
         ``num_key_heads`` = G (B/C groups). The conv stream is
         ``value_heads * key_head_dim + 2 * key_heads * value_head_dim`` (x then B, C),
         i.e. 6144 for Nemotron-3.5 Lightning.
+
+    ``"short_conv"`` (LFM2 / LFM2.5)
+        no recurrent state at all: the slot holds only the depthwise conv's left
+        context of width ``value_heads * value_head_dim`` (the hidden size). Set
+        ``key_head_dim = 0``; the recurrent tensor is then empty (zero elements) and
+        every slot operation (copy, snapshot, spill) moves the conv state alone.
 
     ``track_chunk_size`` is the boundary granularity of the hybrid-radix state
     snapshots: the scan kernel's chunk size, 64 for FLA/GDN and 128 for Mamba-2 SSD.
@@ -214,15 +220,21 @@ class LinearGatedDeltaGroupConfig(BaseAttentionGroupConfig):
     # "gdn" and "kda" share the same state geometry (one LinearStatePool serves
     # both); the variant selects the kernels.
     variant: Literal["gdn", "kda"] = "gdn"
-    state_layout: Literal["kv", "mamba2"] = "kv"
+    state_layout: Literal["kv", "mamba2", "short_conv"] = "kv"
     track_chunk_size: int = 64
 
     def __post_init__(self) -> None:
-        if self.state_layout not in ("kv", "mamba2"):
+        if self.state_layout not in ("kv", "mamba2", "short_conv"):
             raise ValueError(f"unknown linear state_layout {self.state_layout!r}")
+        if self.state_layout == "short_conv" and self.key_head_dim != 0:
+            raise ValueError("state_layout 'short_conv' keeps no recurrent state: key_head_dim must be 0")
         chunk = self.track_chunk_size
         if chunk <= 0 or chunk & (chunk - 1):
             raise ValueError(f"track_chunk_size must be a power of two, got {chunk}")
+
+    @property
+    def has_recurrent_state(self) -> bool:
+        return self.state_layout != "short_conv"
 
 
 @dataclass(frozen=True)

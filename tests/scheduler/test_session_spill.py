@@ -12,7 +12,7 @@ from freetoken.kvcache.mha_pool import MHAKVCache
 from freetoken.kvcache.quant import Q6_0, Q8_0
 from freetoken.models.config import LinearGatedDeltaGroupConfig
 from freetoken.scheduler.cache import CacheManager
-from freetoken.scheduler.session_spill import SessionSpillStore
+from freetoken.scheduler.session_spill import PrefillStateCapture, SessionSpillStore
 
 
 def _linear_pool() -> LinearStatePool:
@@ -29,7 +29,22 @@ def _linear_pool() -> LinearStatePool:
     return LinearStatePool(group, 8, torch.bfloat16, torch.device("cpu"), tp_size=1)
 
 
-def _pools():
+def _short_conv_pool() -> LinearStatePool:
+    group = LinearGatedDeltaGroupConfig(
+        name="conv",
+        layer_ids=(0, 2),
+        num_key_heads=2,
+        num_value_heads=2,
+        key_head_dim=0,
+        value_head_dim=32,
+        conv_kernel_dim=3,
+        output_gate="none",
+        state_layout="short_conv",
+    )
+    return LinearStatePool(group, 8, torch.bfloat16, torch.device("cpu"), tp_size=1)
+
+
+def _pools(linear_pool=_linear_pool):
     with patch(
         "freetoken.kvcache.mha_pool.get_tp_info",
         return_value=DistributedInfo(rank=0, size=1),
@@ -45,7 +60,7 @@ def _pools():
             quant_k=Q8_0,
             quant_v=Q6_0,
         )
-    linear = _linear_pool()
+    linear = linear_pool()
     table = torch.zeros((4, 64), dtype=torch.int32)
     manager = CacheManager(
         32,
@@ -58,9 +73,10 @@ def _pools():
     return kv, linear, manager
 
 
+@pytest.mark.parametrize("linear_pool", [_linear_pool, _short_conv_pool], ids=["gdn", "short_conv"])
 @pytest.mark.parametrize("tier", ["ram", "disk"])
-def test_cold_session_round_trip_is_byte_exact_and_reclaims_gpu_pages(tmp_path, tier):
-    kv, linear, manager = _pools()
+def test_cold_session_round_trip_is_byte_exact_and_reclaims_gpu_pages(tmp_path, tier, linear_pool):
+    kv, linear, manager = _pools(linear_pool)
     store = SessionSpillStore(
         kv,
         linear,
@@ -348,8 +364,8 @@ def test_record_larger_than_the_whole_cap_is_refused(tmp_path):
 # --------------------------------------------------------------- boundary states (3G)
 
 
-def _boundary_pools(tmp_path, **overrides):
-    kv, linear, manager = _pools()
+def _boundary_pools(tmp_path, linear_pool=_linear_pool, **overrides):
+    kv, linear, manager = _pools(linear_pool)
     kwargs = dict(
         directory=str(tmp_path),
         ram_budget_bytes=1 << 30,
@@ -826,6 +842,39 @@ def test_captured_states_ride_into_the_checkpoint_beside_the_final_one(tmp_path)
     assert torch.equal(linear.recurrent_states[:, restored.node.mamba_value], recurrent)
     assert torch.equal(linear.conv_states[:, restored.node.mamba_value], conv)
     manager.unlock(restored)
+    store.shutdown()
+
+
+@pytest.mark.parametrize("ram", [1 << 30, 0], ids=["ram", "disk"])
+def test_short_conv_restore_installs_the_conv_state_at_each_cut(tmp_path, ram):
+    """Conv-only layout (LFM2): a boundary is the conv state alone, and the capture path
+    (side-copied host states) and the slot path both restore it exactly."""
+    kv, linear, manager, store = _boundary_pools(tmp_path, _short_conv_pool, ram_budget_bytes=ram)
+    capture = PrefillStateCapture(linear, stride=1, max_states=4)
+    tokens = torch.tensor([51, 52, 53, 54, 55, 56, 57], dtype=torch.int32)
+    pages = manager._page_to_token(manager._allocate(len(tokens)))
+    final_slot, boundary_slot, captured_slot = linear.alloc(3)
+    torch.manual_seed(17)
+    for slot in (final_slot, boundary_slot, captured_slot):
+        linear.conv_states[:, slot] = torch.randn_like(linear.conv_states[:, slot])
+    expected = {
+        2: linear.conv_states[:, captured_slot].clone(),
+        5: linear.conv_states[:, boundary_slot].clone(),
+        7: linear.conv_states[:, final_slot].clone(),
+    }
+    captured = capture.capture([], 2, captured_slot)
+    assert captured[0][2].numel() == 0
+    record = store.spill(
+        "agent-a", tokens, pages, final_slot,
+        extra_states=[(5, boundary_slot)], captured_states=captured,
+    )
+    assert record is not None and record.state_boundaries == [2, 5, 7]
+    for cut in (2, 5, 7):
+        restored = manager.restore_hybrid_session_prefix(record, store, cut)
+        assert restored.cached_len == cut
+        assert torch.equal(linear.conv_states[:, restored.node.mamba_value], expected[cut])
+        manager.unlock(restored)
+        assert manager.evict_all_unlocked_prefixes() >= 0
     store.shutdown()
 
 

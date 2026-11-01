@@ -34,10 +34,14 @@ def _linear_local_dims(
     ``mamba2`` (SSD) x (``v_heads x key_head_dim`` = the SSM inner width) then B and C
                      (``key_heads x value_head_dim`` = G x N each) -- 4096 + 2*8*128 = 6144
                      for Nemotron-3.5 Lightning.
+    ``short_conv``   ``B*x`` only (``v_heads x value_head_dim`` = the hidden size, 2048 for
+                     LFM2.5-24B-A2B); the recurrent slot is empty (see ``_recurrent_shape``).
     """
     local_k_heads = div_even(group.num_key_heads, tp_size, allow_replicate=True)
     local_v_heads = div_even(group.num_value_heads, tp_size, allow_replicate=True)
-    if group.state_layout == "mamba2":
+    if group.state_layout == "short_conv":
+        local_conv_dim = local_v_heads * group.value_head_dim
+    elif group.state_layout == "mamba2":
         local_conv_dim = (
             local_v_heads * group.key_head_dim + 2 * local_k_heads * group.value_head_dim
         )
@@ -48,8 +52,17 @@ def _linear_local_dims(
     return len(group.layer_ids), local_conv_dim, local_v_heads
 
 
+def _recurrent_shape(group: LinearGatedDeltaGroupConfig, local_v_heads: int) -> tuple[int, int, int]:
+    """Per-slot recurrent state shape; all zeros for a conv-only layout, so the tensor
+    exists (every slot operation stays uniform) but holds no bytes."""
+    if not group.has_recurrent_state:
+        return (0, 0, 0)
+    return (local_v_heads, group.key_head_dim, group.value_head_dim)
+
+
 class LinearStatePool:
-    """Per-request recurrent state (conv + SSM) for GatedDeltaNet layers.
+    """Per-request recurrent state (conv + SSM) for GatedDeltaNet / Mamba-2 layers, or the
+    conv state alone for the LFM2 short convolution (``state_layout="short_conv"``).
 
     Indexed by ``Req.table_idx`` (0..max_running_req), the same per-request slot the
     page table uses, so the scheduler's existing admit/free of ``table_idx`` covers the
@@ -89,7 +102,7 @@ class LinearStatePool:
         # SSM recurrent state. fp32 by default (matches HF mamba_ssm_dtype); the dtype is
         # overridable via FREETOKEN_MAMBA_SSM_DTYPE (see ssm_state_dtype).
         self.recurrent_states = torch.zeros(
-            (n_layers, num_slots, local_v_heads, group.key_head_dim, group.value_head_dim),
+            (n_layers, num_slots, *_recurrent_shape(group, local_v_heads)),
             dtype=ssm_state_dtype(),
             device=device,
         )
@@ -280,7 +293,7 @@ def linear_state_bytes_per_req(
     n_layers, local_conv_dim, local_v_heads = _linear_local_dims(group, tp_size)
 
     conv_elems = local_conv_dim * (group.conv_kernel_dim - 1)
-    rec_elems = local_v_heads * group.key_head_dim * group.value_head_dim
+    rec_elems = math.prod(_recurrent_shape(group, local_v_heads))
     conv_bytes = conv_elems * dtype.itemsize  # conv state in model dtype
     rec_bytes = rec_elems * ssm_state_dtype().itemsize  # recurrent state (default fp32)
     total = n_layers * (conv_bytes + rec_bytes)

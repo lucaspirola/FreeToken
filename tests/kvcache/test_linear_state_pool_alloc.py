@@ -226,3 +226,49 @@ def test_slot_state_bytes_for_the_real_geometry():
     delta = linear_state_bytes_per_req(group, 1, torch.bfloat16, (spec,)) - \
         linear_state_bytes_per_req(group, 1, torch.bfloat16)
     assert delta == 4 * 2560 * 9 * 2 == 180 * 1024
+
+
+# --- state_layout="short_conv" (LFM2): the conv state alone, no recurrent state ---
+
+
+def _lfm25_group(layer_ids=tuple(i for i in range(40) if i % 4 != 2)):
+    """LFM2.5-24B-A2B conv layers as lfm2_moe.parse_config builds them."""
+    return LinearGatedDeltaGroupConfig(
+        name="conv", layer_ids=layer_ids, num_key_heads=32, num_value_heads=32,
+        key_head_dim=0, value_head_dim=64, conv_kernel_dim=3, output_gate="none",
+        state_layout="short_conv",
+    )
+
+
+def test_short_conv_pool_holds_only_the_conv_state():
+    pool = LinearStatePool(group=_lfm25_group(), num_slots=5, dtype=torch.bfloat16,
+                           device=torch.device("cpu"), tp_size=1)
+    assert tuple(pool.conv_states.shape) == (30, 5, 2048, 2)
+    assert pool.recurrent_states.numel() == 0 and pool.recurrent_states.shape[:2] == (30, 5)
+    # 30 layers x 2048 channels x (3 - 1) x 2 B = 240 KiB per slot
+    assert pool.bytes_per_slot() == 245_760
+    assert linear_state_bytes_per_req(_lfm25_group(), 1, torch.bfloat16) == 245_760
+
+
+def test_short_conv_slot_operations_move_the_conv_state():
+    pool = LinearStatePool(group=_lfm25_group((0, 1)), num_slots=6, dtype=torch.bfloat16,
+                           device=torch.device("cpu"), tp_size=1)
+    src, dst = pool.alloc(2)
+    pool.conv_states[:, src] = torch.randn_like(pool.conv_states[:, src])
+    pool.copy_from(src, dst)
+    assert torch.equal(pool.conv_states[:, dst], pool.conv_states[:, src])
+    pool.clear_slots([src])
+    assert pool.conv_states[:, src].abs().sum() == 0
+    pool.reset(dst)
+    assert pool.conv_states[:, dst].abs().sum() == 0
+    pool.rebuild(9)
+    assert tuple(pool.conv_states.shape) == (2, 9, 2048, 2)
+    assert pool.recurrent_states.numel() == 0 and pool.num_free_slots == 8
+
+
+def test_short_conv_layout_refuses_a_recurrent_dim():
+    with pytest.raises(ValueError, match="key_head_dim must be 0"):
+        LinearGatedDeltaGroupConfig(
+            name="conv", layer_ids=(0,), num_key_heads=1, num_value_heads=1, key_head_dim=8,
+            value_head_dim=64, conv_kernel_dim=3, output_gate="none", state_layout="short_conv",
+        )
