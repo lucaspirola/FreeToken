@@ -225,22 +225,38 @@ def _rtx5080_l2(monkeypatch):
     monkeypatch.setattr("torch.cuda.current_device", lambda: 0)
 
 
-def test_lfm25_exl3_moe_is_the_peak(monkeypatch):
-    """LFM2.5-24B-A2B EXL3 5.0bpw on the owner's RTX 5080: the startup measurement was
-    1.10 GiB (reserved rise 1124 MiB, allocated rise 990 MiB; allocator snapshot peak in
-    the first MoE layer's down GEMM, 2026-11-01). The generic fused-MoE term predicted 0.41
-    GiB and left dense_mlp (0.63 GiB, matching the dense layers' measured 648 MiB) as peak."""
+def test_exl3_decode_group_floor(monkeypatch):
+    """An expert too large for the L2 budget decodes PREFILL_DECODE_GROUP_MIN at a time, not 32:
+    LFM2.5 gate|up (12 MiB) fits 2 in 32 MiB and took the 384 MiB group before."""
+    import torch
+
+    from freetoken.moe import fused_exl3 as fx
+
+    _rtx5080_l2(monkeypatch)
+    dev = torch.device("cuda", 0)
+    pick = lambda k, n, e: fx._decode_group(SimpleNamespace(k=k, n=n), e, dev)
+    assert pick(2048, 1024, 256) == 8  # Ornith gate|up
+    assert pick(512, 2048, 256) == 16  # Ornith down
+    assert pick(2048, 3072, 64) == 4  # LFM2.5 gate|up
+    assert pick(1536, 2048, 64) == 5  # LFM2.5 down
+    assert pick(2048, 3072, 3) == 3
+
+
+def test_lfm25_exl3_moe_scratch(monkeypatch):
+    """LFM2.5-24B-A2B EXL3 5.0bpw on the owner's RTX 5080. With the gate|up decode group at the
+    floor (4, was 32) the startup measurement fell 1124 -> 824 MiB reserved (allocator peak 0.97
+    -> 0.64 GiB, 2026-11-02). The MoE layer then sits just under the dense SwiGLU of layers 0-1."""
     _rtx5080_l2(monkeypatch)
     mc = _lfm25_24b()
     mc.expert_quant = "exl3"
     pred = mp.predict_prefill_transient(mc, 8192)
     MiB = 1024**2
-    assert pred.peak_layer == "moe"
-    # base 64 + output 32 + scratch (32 x 12 + 5 x 6) + phase 448 + router 2.25
-    assert pred.layers["moe"] == int(960.25 * MiB)
+    # base 64 + output 32 + scratch (4 x 12 + 5 x 6) + phase 448 + router 2.25
+    assert pred.layers["moe"] == int(624.25 * MiB)
     assert pred.layers["dense_mlp"] == 648 * MiB
-    rel, outside = mp.compare(pred.bytes, 1124 * MiB)
-    assert not outside and abs(rel) <= 0.20, rel
+    assert pred.peak_layer == "dense_mlp"
+    rel, outside = mp.compare(pred.bytes, 824 * MiB)
+    assert not outside and abs(rel) <= 0.25, rel
 
 
 def test_exl3_moe_term_keeps_ornith_peak(monkeypatch):
