@@ -48,7 +48,8 @@ from freetoken.utils import (
 )
 
 from .config import EngineConfig
-from .graph import GraphRunner, get_free_memory
+from .free_vram import FreeVramReader
+from .graph import GraphRunner
 from .growable_kv import (
     GROWABLE_KV_UNSUPPORTED,
     PREFILL_HEADROOM_MARGIN_BYTES,
@@ -1506,7 +1507,10 @@ class Engine:
         torch.cuda.synchronize(self.device)
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(self.device)
-        free_memory = get_free_memory(self.device)
+        reader = getattr(self, "_free_vram", None)
+        if reader is None:
+            reader = self._free_vram = FreeVramReader(self.device)
+        free_memory = reader.read()
         free_mem_tensor = torch.tensor(
             [free_memory, -free_memory], device="cpu", dtype=torch.int64
         )
