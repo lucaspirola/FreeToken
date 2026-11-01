@@ -26,7 +26,14 @@
 #   FREETOKEN_LFM25_MODEL         model directory
 #   FREETOKEN_PORT                default 1921
 #   FREETOKEN_LFM25_CACHE_DIR     default $HOME/.cache/freetoken/lfm25
-#   FREETOKEN_MIRROR_EXPERT_RAM, FREETOKEN_MIRROR_HOST_ROWS, FREETOKEN_PIN_BUDGET_GB,
+#   FREETOKEN_LFM25_MIRROR_EXPERT_RAM, FREETOKEN_LFM25_MIRROR_HOST_ROWS
+#                                 default 0 and 0 = whole model in RAM. The expert banks
+#                                 (~13.4 GiB) cost the same RAM as Ornith's saver pool, and the
+#                                 saver's GPU coverage floor (~1900 slots) does not fit the
+#                                 ~1580 slots left at the 131072 KV ceiling (start refused,
+#                                 2026-11-01). Own names because serve.env sets the mirror on
+#                                 for Ornith.
+#   FREETOKEN_PIN_BUDGET_GB,
 #   FREETOKEN_HOST_RAM_RESERVE_GB, FREETOKEN_MEMORY_RATIO, FREETOKEN_SESSION_SPILL_RAM_GB,
 #   FREETOKEN_MAX_OUTPUT_TOKENS, FREETOKEN_EXTRA_ARGS, TVM_FFI_CUDA_ARCH_LIST
 #                                 as in scripts/serve-default.sh
@@ -48,8 +55,8 @@ if [ -z "${TVM_FFI_CUDA_ARCH_LIST:-}" ]; then
 fi
 
 export FREETOKEN_PIN_BUDGET_GB="${FREETOKEN_PIN_BUDGET_GB:-20}"
-export FREETOKEN_MIRROR_EXPERT_RAM="${FREETOKEN_MIRROR_EXPERT_RAM:-1}"
-export FREETOKEN_MIRROR_HOST_ROWS="${FREETOKEN_MIRROR_HOST_ROWS:--1}"
+export FREETOKEN_MIRROR_EXPERT_RAM="${FREETOKEN_LFM25_MIRROR_EXPERT_RAM:-0}"
+export FREETOKEN_MIRROR_HOST_ROWS="${FREETOKEN_LFM25_MIRROR_HOST_ROWS:-0}"
 export FREETOKEN_SCHEDULER_INVARIANT="${FREETOKEN_SCHEDULER_INVARIANT:-warn}"
 export FREETOKEN_EXPERT_ARENA="${FREETOKEN_EXPERT_ARENA:-1}"
 export FREETOKEN_ARENA_STEP_SLOTS="${FREETOKEN_ARENA_STEP_SLOTS:-8}"
