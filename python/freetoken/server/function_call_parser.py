@@ -79,6 +79,7 @@ TOOLS_TAG_LIST = [
     "<｜DSML｜tool_calls>",
     "<｜DSML｜invoke",
     "<atem:function_calls>",
+    "<|tool_call_start|>",
 ]
 
 
@@ -3512,6 +3513,191 @@ class MuseGlimmerDetector(InvokeParamStreamMixin, BaseFormatDetector):
         return StreamingParseResult(normal_text="".join(normal_parts).strip(), calls=calls)
 
 
+class _JsonLiterals(ast.NodeTransformer):
+    """``true``/``false``/``null`` -> Python constants: LFM2's template renders dict and
+    list arguments with ``tojson``, so the model copies JSON literals into its calls."""
+
+    _NAMES = {"true": True, "false": False, "null": None}
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        if node.id in self._NAMES:
+            return ast.copy_location(ast.Constant(self._NAMES[node.id]), node)
+        return node
+
+
+def _scan_pythonic(text: str, start: int) -> int:
+    """Index just after the bracket that closes the one at ``text[start]`` (quotes and
+    escapes respected), or -1 when it has not arrived yet."""
+    depth, quote, i = 0, "", start
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 1
+            elif text.startswith(quote, i):
+                i += len(quote) - 1
+                quote = ""
+        elif ch in "'\"":
+            quote = ch * 3 if text.startswith(ch * 3, i) else ch
+            i += len(quote) - 1
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return -1
+
+
+class Lfm2PythonicDetector(BaseFormatDetector):
+    """LFM2 / LFM2.5 pythonic tool calls::
+
+        <|tool_call_start|>[get_weather(city='Paris', days=3), f(x={"a": true})]<|tool_call_end|>
+
+    The markers are ordinary (non-special) tokens. Each call is parsed with ``ast``; the
+    name is cut off first so names that are not Python identifiers (``my-tool``) still
+    parse. Streaming is per call: the name when its ``(`` arrives, the whole arguments
+    JSON when its ``)`` closes.
+    """
+
+    toolcall_opener = "<|tool_call_start|>"
+    _NAME_RE = re.compile(r"\s*,?\s*([A-Za-z_][\w.\-:]*)\s*\(")
+    _PARTIAL_NAME_RE = re.compile(r"[A-Za-z_][\w.\-:]*\s*")
+
+    def __init__(self):
+        super().__init__()
+        self.bot_token = "<|tool_call_start|>"
+        self.eot_token = "<|tool_call_end|>"
+        self.tool_call_separator = ", "
+        self._in_block = False
+        self._list_open = False
+
+    def has_tool_call(self, text: str) -> bool:
+        return self.bot_token in text
+
+    def _call_item(self, name: str, source: str, tool_index: int) -> ToolCallItem | None:
+        """``source`` is ``(...)`` after the name; None when it is not a keyword-only call."""
+        try:
+            node = ast.parse("_f" + source, mode="eval").body
+        except SyntaxError:
+            logger.warning(f"Failed to parse LFM2 tool call {name}{source}")
+            return None
+        if not isinstance(node, ast.Call) or node.args:
+            logger.warning(f"LFM2 tool call {name} has positional arguments: {source}")
+            return None
+        args = {}
+        try:
+            for kw in node.keywords:
+                if kw.arg is None:
+                    return None
+                args[kw.arg] = ast.literal_eval(_JsonLiterals().visit(kw.value))
+        except (ValueError, TypeError, SyntaxError):
+            logger.warning(f"LFM2 tool call {name} has a non-literal argument: {source}")
+            return None
+        return ToolCallItem(tool_index=tool_index, name=name, parameters=json.dumps(args, ensure_ascii=False))
+
+    def _iter_calls(self, body: str):
+        """``(name, source, end)`` for each complete call at the top of ``body``."""
+        pos = 0
+        while True:
+            m = self._NAME_RE.match(body, pos)
+            if m is None:
+                return
+            end = _scan_pythonic(body, m.end() - 1)
+            if end == -1:
+                return
+            yield m.group(1), body[m.end() - 1 : end], end
+            pos = end
+
+    def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
+        if self.bot_token not in text:
+            return StreamingParseResult(normal_text=text, calls=[])
+        tool_indices = self._get_tool_indices(tools)
+        normal = text[: text.find(self.bot_token)]
+        calls: List[ToolCallItem] = []
+        for block in text.split(self.bot_token)[1:]:
+            body = block.split(self.eot_token, 1)[0].strip()
+            if body.startswith("["):
+                body = body[1:]
+            for name, source, _end in self._iter_calls(body):
+                if name not in tool_indices and not _should_forward_unknown_tool(name):
+                    logger.warning(f"Model attempted to call undefined function: {name}")
+                    continue
+                item = self._call_item(name, source, tool_indices.get(name, -1))
+                if item is not None:
+                    calls.append(item)
+        return StreamingParseResult(normal_text=normal, calls=calls)
+
+    def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
+        self._buffer += new_text
+        if not self._in_block:
+            pos = self._buffer.find(self.bot_token)
+            if pos == -1:
+                held = self._ends_with_partial_token(self._buffer, self.bot_token)
+                cut = len(self._buffer) - held
+                text, self._buffer = self._buffer[:cut], self._buffer[cut:]
+                return StreamingParseResult(normal_text=text)
+            text, self._buffer = self._buffer[:pos], self._buffer[pos + len(self.bot_token) :]
+            self._in_block, self._list_open = True, False
+            if text:
+                return StreamingParseResult(normal_text=text)
+
+        if not hasattr(self, "_tool_indices"):
+            self._tool_indices = self._get_tool_indices(tools)
+        buf = self._buffer
+        if not self._list_open:
+            stripped = buf.lstrip()
+            if not stripped:
+                return StreamingParseResult()
+            self._list_open = True
+            buf = stripped[1:] if stripped.startswith("[") else stripped
+
+        m = self._NAME_RE.match(buf)
+        if m is None:
+            rest = buf.lstrip(" ,\n]")
+            if rest.startswith(self.eot_token):
+                self._buffer = rest[len(self.eot_token) :]
+                self._in_block = False
+                return StreamingParseResult()
+            if not rest or self.eot_token.startswith(rest) or self._PARTIAL_NAME_RE.fullmatch(rest):
+                self._buffer = buf
+                return StreamingParseResult()
+            # neither a call nor the closer: the block is malformed, hand it back as text
+            self._buffer, self._in_block = "", False
+            return StreamingParseResult(normal_text=self.bot_token + buf)
+
+        name = m.group(1)
+        known = name in self._tool_indices or _should_forward_unknown_tool(name)
+        calls: List[ToolCallItem] = []
+        if not self.current_tool_name_sent:
+            if known:
+                self.current_tool_id += 1
+                self.prev_tool_call_arr.append({"name": name, "arguments": {}})
+                self.streamed_args_for_tool.append("")
+                calls.append(ToolCallItem(tool_index=self.current_tool_id, name=name, parameters=""))
+            self.current_tool_name_sent = True
+        end = _scan_pythonic(buf, m.end() - 1)
+        if end == -1:
+            self._buffer = buf
+            return StreamingParseResult(calls=calls)
+        self._buffer = buf[end:]
+        self.current_tool_name_sent = False
+        if known:
+            item = self._call_item(name, buf[m.end() - 1 : end], self.current_tool_id)
+            params = item.parameters if item is not None else "{}"
+            self.prev_tool_call_arr[self.current_tool_id]["arguments"] = json.loads(params)
+            self.streamed_args_for_tool[self.current_tool_id] = params
+            calls.append(ToolCallItem(tool_index=self.current_tool_id, parameters=params))
+        return StreamingParseResult(calls=calls)
+
+    def finish_streaming(self) -> str:
+        if self._in_block:
+            self._buffer, self._in_block = "", False
+            return ""
+        return super().finish_streaming()
+
+
 class FunctionCallParser:
     """
     Parser for function/tool calls in model outputs.
@@ -3527,6 +3713,7 @@ class FunctionCallParser:
         "gpt-oss": GptOssDetector,
         "gpt_oss": GptOssDetector,
         "glm47": Glm47Detector,
+        "lfm2": Lfm2PythonicDetector,
         "llama3": Llama32Detector,
         "minimax": MiniMaxDetector,
         "minimax_m3": MiniMaxM3Detector,

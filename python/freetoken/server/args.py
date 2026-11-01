@@ -240,6 +240,8 @@ def parse_args(
             return "minimax_m3"
         if "minimax" in marker:
             return "minimax"
+        if "lfm2" in marker:
+            return "lfm2"
         if "muse_glimmer" in marker or "muse-glimmer" in marker or "museglimmer" in marker:
             return "muse_glimmer"
         if "gemma4" in marker:
@@ -312,6 +314,8 @@ def parse_args(
             )
         ):
             return "nemotron_v3"
+        if "lfm2" in marker:
+            return "lfm2"
         if "deepseek" in marker and any(
             tag in marker for tag in ("v4", "deepseek_v4", "v3.2", "v32")
         ):
@@ -935,6 +939,7 @@ def parse_args(
             "minimax",
             "minimax_m3",
             "muse_glimmer",
+            "lfm2",
             "gpt_oss",
             "gpt-oss",
         ],
@@ -948,13 +953,15 @@ def parse_args(
         choices=[
             "auto", "off", "deepseekv32", "gpt_oss", "qwen3", "glm",
             "minimax", "minimax_m3", "muse_glimmer", "gemma4", "nemotron_v3",
+            "lfm2",
         ],
         help=(
             "Reasoning parser that splits chain-of-thought into reasoning_content "
             "for OpenAI responses. 'auto' selects per model family (gpt-oss Harmony, "
             "<think> for qwen3/glm/minimax, <think> + <tool_call> escape for "
-            "nemotron-3.x, <mm:think> for minimax-m3, ATEM to=self channels for "
-            "muse-glimmer, gemma thought, dsv4); 'off' disables it."
+            "nemotron-3.x, <think> + <|tool_call_start|> escape for lfm2, <mm:think> "
+            "for minimax-m3, ATEM to=self channels for muse-glimmer, gemma thought, "
+            "dsv4); 'off' disables it."
         ),
     )
 

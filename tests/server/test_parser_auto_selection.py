@@ -182,3 +182,13 @@ def test_force_nonempty_content_is_off_unless_it_is_turned_on():
 
 def test_nemotron_v3_is_a_pinnable_reasoning_parser():
     assert _args("--reasoning-parser", "nemotron_v3").reasoning_parser == "nemotron_v3"
+
+
+def test_lfm2_resolves_its_own_parsers():
+    """LFM2.5's prompt opens <think> and its tool calls are pythonic lists between
+    <|tool_call_start|> markers: neither generic default reads them."""
+    config = _Config({"architectures": ["Lfm2MoeForCausalLM"], "model_type": "lfm2_moe"})
+    with patch("freetoken.utils.cached_load_hf_config", lambda _path: config):
+        args, _ = parse_args(["--model", ANON_PATH])
+    assert (args.tool_call_parser, args.reasoning_parser) == ("lfm2", "lfm2")
+    assert _args("--reasoning-parser", "lfm2", "--tool-call-parser", "lfm2").tool_call_parser == "lfm2"

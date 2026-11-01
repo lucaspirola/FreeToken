@@ -343,3 +343,83 @@ def test_streaming_support_flags():
     # test_streaming_model_matrix.py::test_non_streaming_detector_falls_back_to_buffered_parse).
     for name in SUPPORTED_TOOL_CALL_PARSERS:
         assert FunctionCallParser(TOOLS, tool_call_parser=name).supports_streaming() is True
+
+
+# --------------------------------------------------------------------------- #
+# LFM2 pythonic tool calls: <|tool_call_start|>[f(a='x')]<|tool_call_end|>
+# --------------------------------------------------------------------------- #
+LFM2_TOOLS = OPENCODE_TOOLS + [
+    {"type": "function", "function": {"name": "set-config", "parameters": {"type": "object", "properties": {}}}},
+]
+
+
+def test_lfm2_non_stream_parses_every_call_and_keeps_the_text_around_them():
+    parser = FunctionCallParser(LFM2_TOOLS, tool_call_parser="lfm2")
+    text = (
+        "Let me look.<|tool_call_start|>[read(filePath='/a b/c.py'), "
+        "glob(pattern=\"*.py\", path='/src')]<|tool_call_end|>Done."
+    )
+    result = parser.parse_non_stream(text)
+    assert [(c.name, c.tool_index, json.loads(c.parameters)) for c in result.calls] == [
+        ("read", 0, {"filePath": "/a b/c.py"}),
+        ("glob", 1, {"pattern": "*.py", "path": "/src"}),
+    ]
+    assert result.normal_text == "Let me look.Done."
+
+
+def test_lfm2_arguments_take_json_literals_nested_values_and_tricky_strings():
+    parser = FunctionCallParser(LFM2_TOOLS, tool_call_parser="lfm2")
+    text = (
+        "<|tool_call_start|>[set-config(opts={\"on\": true, \"off\": false, \"x\": null}, "
+        "items=[1, -2.5, 'a)b'], quote='it\\'s ]', flag=True, n=None)]<|tool_call_end|>"
+    )
+    [call] = parser.parse_non_stream(text).calls
+    assert call.name == "set-config"
+    assert json.loads(call.parameters) == {
+        "opts": {"on": True, "off": False, "x": None},
+        "items": [1, -2.5, "a)b"], "quote": "it's ]", "flag": True, "n": None,
+    }
+
+
+def test_lfm2_drops_calls_that_are_not_keyword_literals():
+    parser = FunctionCallParser(LFM2_TOOLS, tool_call_parser="lfm2")
+    text = "<|tool_call_start|>[read('/x'), read(filePath=os.getcwd()), read(filePath='/ok')]<|tool_call_end|>"
+    calls = parser.parse_non_stream(text).calls
+    assert [json.loads(c.parameters) for c in calls] == [{"filePath": "/ok"}]
+
+
+@pytest.mark.parametrize("step", [1, 3, 7, 1000])
+def test_lfm2_streaming_emits_each_name_then_its_arguments(step):
+    parser = FunctionCallParser(LFM2_TOOLS, tool_call_parser="lfm2")
+    text = (
+        "Checking.<|tool_call_start|>[read(filePath='/x(1).py'), "
+        "glob(pattern='*.md')]<|tool_call_end|> ok"
+    )
+    texts, calls = _feed(parser, [text[i : i + step] for i in range(0, len(text), step)])
+    assert "".join(texts) + parser.finish_stream() == "Checking. ok"
+    named = [(c.tool_index, c.name) for c in calls if c.name]
+    assert named == [(0, "read"), (1, "glob")]
+    args = {}
+    for c in calls:
+        if c.name is None:
+            args[c.tool_index] = args.get(c.tool_index, "") + c.parameters
+    assert {i: json.loads(a) for i, a in args.items()} == {0: {"filePath": "/x(1).py"}, 1: {"pattern": "*.md"}}
+    assert parser.unstreamed_arguments(1) == '{"pattern": "*.md"}'
+
+
+def test_lfm2_streaming_name_arrives_before_the_call_closes():
+    parser = FunctionCallParser(LFM2_TOOLS, tool_call_parser="lfm2")
+    _, calls = _feed(parser, ["<|tool_call_start|>[read(filePath='/very/long"])
+    assert [(c.name, c.parameters) for c in calls] == [("read", "")]
+    _, calls = _feed(parser, ["/path')]<|tool_call_end|>"])
+    assert [(c.name, json.loads(c.parameters)) for c in calls] == [(None, {"filePath": "/very/long/path"})]
+
+
+def test_lfm2_streaming_releases_a_malformed_block_and_hides_an_unfinished_one():
+    parser = FunctionCallParser(LFM2_TOOLS, tool_call_parser="lfm2")
+    texts, calls = _feed(parser, ["a <|tool_call_start|>", "no call here"])
+    assert calls == [] and "".join(texts) == "a <|tool_call_start|>no call here"
+
+    parser = FunctionCallParser(LFM2_TOOLS, tool_call_parser="lfm2")
+    texts, calls = _feed(parser, ["<|tool_call_start|>[read(filePath='/x"])
+    assert parser.finish_stream() == "" and "".join(texts) == ""
