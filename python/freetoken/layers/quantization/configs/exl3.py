@@ -137,13 +137,16 @@ class Exl3Config(QuantConfig):
             "svh": torch.cat([p["svh"].reshape(-1) for p in parts]),
         }
 
-    def expert_facts(self, key_template: str, num_layers: int, num_experts: int, *, first_layer: int = 0) -> tuple[int, str]:
+    def expert_facts(
+        self, key_template: str, num_layers: int, num_experts: int, *, first_layer: int = 0,
+        projs: tuple[str, ...] = ("gate_proj", "up_proj", "down_proj"),
+    ) -> tuple[int, str]:
         """The single ``(bits, codebook)`` every routed expert projection shares; refuses a mix
         (the expert banks hold one row size for every layer)."""
         seen: set[tuple[int, str]] = set()
         for layer in range(first_layer, first_layer + num_layers):
             for expert in range(num_experts):
-                for proj in ("gate_proj", "up_proj", "down_proj"):
+                for proj in projs:
                     name = key_template.format(layer=layer, expert=expert, proj=proj)
                     facts = self.facts(name)
                     if facts is None:

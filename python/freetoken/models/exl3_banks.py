@@ -198,7 +198,10 @@ def expert_facts_for(config) -> tuple[int, str]:
     if quant is None or getattr(quant, "dialect", None) != "exl3":
         raise ValueError("EXL3 experts need the checkpoint's Exl3Config installed")
     spec = expert_spec_for(config)
-    return quant.expert_facts(spec.module_template(), config.num_moe_layers, config.num_experts, first_layer=spec.first_layer)
+    return quant.expert_facts(
+        spec.module_template(), config.num_moe_layers, config.num_experts,
+        first_layer=spec.first_layer, projs=tuple(spec.proj_names.values()),
+    )
 
 
 def expert_index_for(model_path: str, config) -> Exl3ExpertIndex:

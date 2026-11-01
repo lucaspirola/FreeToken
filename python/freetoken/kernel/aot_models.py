@@ -364,6 +364,16 @@ SUPPORTED_MODELS: tuple[AotModel, ...] = (
         expert_formats=("ds_fp4",),
         embed_indexing=False,  # plain nn.Embedding
     ),
+    AotModel(
+        name="LiquidAI/LFM2.5-24B-A2B",
+        architecture="Lfm2MoeForCausalLM",
+        hidden_size=2048,
+        kv_groups=((8, 64),),
+        top_k=4,
+        moe_intermediate_size=1536,
+        # served from EXL3 exports only, whose banks have no _BANK_SCHEMAS copy shapes
+        expert_formats=(),
+    ),
     # ---- dense checkpoints (store/index only, no expert banks) ----
     AotModel(
         name="Qwen/Qwen3.6-27B",

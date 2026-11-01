@@ -110,8 +110,9 @@ def _dequant(scheme: QuantScheme, part: dict[str, torch.Tensor]) -> torch.Tensor
 class _DenseReader:
     """Routes each Linear tensor to the buffer its module's scheme declares; packed projections are concatenated per role once every part is in."""
 
-    def __init__(self, quant: QuantConfig | None, spec: ModelSpec) -> None:
+    def __init__(self, quant: QuantConfig | None, spec: ModelSpec, linear_leaves: frozenset[str] = _LINEAR_LEAVES) -> None:
         self.quant = quant
+        self.linear_leaves = linear_leaves
         self.groups = {fused: parts for fused, parts in spec.packed_modules_mapping if fused != "experts"}
         self.by_part: dict[str, list[tuple[str, int]]] = {}
         for fused, parts in self.groups.items():
@@ -146,7 +147,7 @@ class _DenseReader:
     def add(self, name: str, tensor: torch.Tensor) -> list[tuple[str, torch.Tensor]] | None:
         """Take one tensor; the emitted ``[(name, tensor)]`` once its target module is complete, ``[]`` before, None if ``name`` is not a Linear's tensor."""
         module, _, suffix = name.rpartition(".")
-        if module.rpartition(".")[2] not in _LINEAR_LEAVES:
+        if module.rpartition(".")[2] not in self.linear_leaves:
             return None
         stored = self.stored(module)
         roles = {"weight": "weight"} if stored is None else {e.name: r for r, e in self.quant.storage(stored).items()}

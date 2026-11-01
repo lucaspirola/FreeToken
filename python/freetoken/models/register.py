@@ -88,6 +88,12 @@ _MUSE_GLIMMER_ENCODERS = (EncoderSpec("vision", "vision_config", ("image",)),)
 _MINIMAX_M3_PACKED = _DENSE_PACKED + (
     ("index_qk_proj", ("index_q_proj", "index_k_proj")),
 ) + _EXPERTS_W123_PACKED
+# LFM2 MoE: q/k/v fuse into qkv_proj, the dense w1|w3 into w13; Qwen3Attention's o_proj is the checkpoint's out_proj.
+_LFM2_MOE_PACKED = (
+    ("qkv_proj", ("q_proj", "k_proj", "v_proj")),
+    ("w13", ("w1", "w3")),
+) + _EXPERTS_W123_PACKED
+_LFM2_MOE_SEGMENTS = (("self_attn.o_proj", "self_attn.out_proj"),)
 _MINIMAX_M3_PROCESSOR = "freetoken.mm.processors.minimax_m3:MiniMaxM3MMProcessor"
 _MINIMAX_M3_ENCODERS = (EncoderSpec("vision", "vision_config", ("image",)),)
 
@@ -328,6 +334,14 @@ _MODEL_REGISTRY: dict[str, ModelSpec] = {
     "NemotronHForCausalLM": ModelSpec(
         "freetoken.models.nemotron_h",
         "NemotronHForCausalLM",
+    ),
+    # LFM2.5-24B-A2B (model_type lfm2_moe): 30 gated short-conv + 10 GQA layers (conv-only
+    # linear state, state_layout="short_conv"), 2 dense SwiGLU then sigmoid/bias-routed MoE.
+    "Lfm2MoeForCausalLM": ModelSpec(
+        "freetoken.models.lfm2_moe",
+        "Lfm2MoeForCausalLM",
+        checkpoint_segments=_LFM2_MOE_SEGMENTS,
+        packed_modules_mapping=_LFM2_MOE_PACKED,
     ),
 }
 
