@@ -214,3 +214,42 @@ def test_short_conv_is_priced_not_coarse():
     assert pred.layers["short_conv"] == pred.base + 3 * T * H * a + 3 * T * H * a + T * H * a
     # the dense SwiGLU of layers 0-1 (intermediate 11776) is the widest layer
     assert pred.peak_layer == "dense_mlp"
+
+
+def _rtx5080_l2(monkeypatch):
+    """The decode-group choice as on the RTX 5080 (64 MiB L2), without CUDA."""
+    from freetoken.moe import fused_exl3 as fx
+
+    monkeypatch.setattr(fx, "_l2_bytes", lambda index: 64 * 1024**2)
+    monkeypatch.setattr("torch.cuda.is_available", lambda: True)
+    monkeypatch.setattr("torch.cuda.current_device", lambda: 0)
+
+
+def test_lfm25_exl3_moe_is_the_peak(monkeypatch):
+    """LFM2.5-24B-A2B EXL3 5.0bpw on the owner's RTX 5080: the startup measurement was
+    1.10 GiB (reserved rise 1124 MiB, allocated rise 990 MiB; allocator snapshot peak in
+    the first MoE layer's down GEMM, 2026-11-01). The generic fused-MoE term predicted 0.41
+    GiB and left dense_mlp (0.63 GiB, matching the dense layers' measured 648 MiB) as peak."""
+    _rtx5080_l2(monkeypatch)
+    mc = _lfm25_24b()
+    mc.expert_quant = "exl3"
+    pred = mp.predict_prefill_transient(mc, 8192)
+    MiB = 1024**2
+    assert pred.peak_layer == "moe"
+    # base 64 + output 32 + scratch (32 x 12 + 5 x 6) + phase 448 + router 2.25
+    assert pred.layers["moe"] == int(960.25 * MiB)
+    assert pred.layers["dense_mlp"] == 648 * MiB
+    rel, outside = mp.compare(pred.bytes, 1124 * MiB)
+    assert not outside and abs(rel) <= 0.20, rel
+
+
+def test_exl3_moe_term_keeps_ornith_peak(monkeypatch):
+    """Ornith's EXL3 MoE layer stays below its GDN layer, so its transient is unchanged."""
+    _rtx5080_l2(monkeypatch)
+    plain = mp.predict_prefill_transient(_ornith_15_35b(), 8192)
+    mc = _ornith_15_35b()
+    mc.expert_quant = "exl3"
+    exl3 = mp.predict_prefill_transient(mc, 8192)
+    assert exl3.peak_layer == plain.peak_layer == "gdn"
+    assert exl3.bytes == plain.bytes
+    assert exl3.layers["moe"] < exl3.layers["gdn"]
