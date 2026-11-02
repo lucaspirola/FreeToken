@@ -1802,6 +1802,10 @@ def build_residency(config, mc, engine) -> ExpertResidency:
     )
     if is_sourced:
         source = sourced_row_extents_fn(config.model_path, mc)
+        if mirror_rows <= 0:
+            capacity = mirror_vram_margin_rows(
+                capacity, source.shapes, mc.num_moe_layers * mc.num_experts
+            )
         _check_mirror_host_ram(capacity, source.shapes)
         mirror_pool = MirrorExpertPool(
             config.model_path, mc.num_moe_layers, mc.num_experts, capacity,
@@ -1815,10 +1819,12 @@ def build_residency(config, mc, engine) -> ExpertResidency:
 
         hidden = (getattr(mc, mirror_spec.hidden_size_attr)
                   if mirror_spec.hidden_size_attr else mc.hidden_size)
-        _check_mirror_host_ram(
-            capacity,
-            nvfp4_bank_shapes(hidden, mc.moe_intermediate_size, gated=mirror_spec.gated),
-        )
+        shapes = nvfp4_bank_shapes(hidden, mc.moe_intermediate_size, gated=mirror_spec.gated)
+        if mirror_rows <= 0:
+            capacity = mirror_vram_margin_rows(
+                capacity, shapes, mc.num_moe_layers * mc.num_experts
+            )
+        _check_mirror_host_ram(capacity, shapes)
         mirror_pool = MirrorExpertPool(
             config.model_path, mc.num_moe_layers, mc.num_experts, capacity,
             hidden_size=hidden,
@@ -1847,6 +1853,57 @@ def _mem_available_bytes() -> int:
             if line.startswith("MemAvailable:"):
                 return int(line.split()[1]) * 1024
     raise RuntimeError("mirror expert RAM: /proc/meminfo has no MemAvailable line")
+
+
+# VRAM another process may take after the pool is sized: a GPU container that started
+# mid-load refused an LFM2.5 start 168 rows (0.93 GiB) short on 2026-11-02.
+MIRROR_VRAM_MARGIN_BYTES = 1 << 30
+
+
+def mirror_vram_margin_bytes() -> int:
+    """``FREETOKEN_MIRROR_VRAM_MARGIN_MB`` if set, else ``MIRROR_VRAM_MARGIN_BYTES``."""
+    raw = os.environ.get("FREETOKEN_MIRROR_VRAM_MARGIN_MB", "").strip()
+    if not raw:
+        return MIRROR_VRAM_MARGIN_BYTES
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(
+            f"FREETOKEN_MIRROR_VRAM_MARGIN_MB must be a number of MiB, got {raw!r}"
+        ) from None
+    return max(int(value * (1 << 20)), 0)
+
+
+def mirror_vram_margin_rows(capacity: int, shapes: dict, total: int) -> int:
+    """An auto-sized pool ``capacity`` plus the rows that let the arena give up
+    ``mirror_vram_margin_bytes()`` more VRAM than the plan, as far as host RAM allows.
+
+    Each extra row lowers the coverage floor by one arena slot. The extra rows never
+    make the start fail on host RAM: they stop where ``_check_mirror_host_ram``
+    would refuse, and never go below ``capacity``.
+    """
+    from freetoken.engine.cache_budget import expert_bytes_per_slot
+    from freetoken.moe.mirror_pool import _row_bytes
+
+    margin = mirror_vram_margin_bytes()
+    if margin <= 0 or capacity >= total:
+        return capacity
+    per_slot = expert_bytes_per_slot({
+        name: [torch.empty((1, *tail), dtype=dtype, device="meta")]
+        for name, (tail, dtype) in shapes.items()
+    })
+    want = min(capacity + -(-margin // per_slot), total)
+    row_bytes = sum(_row_bytes(tail, dtype) for tail, dtype in shapes.values())
+    room = _mem_available_bytes() - _MIRROR_HOST_RAM_GUARD_GIB * (1 << 30)
+    fit = room // row_bytes if row_bytes > 0 else want
+    rows = max(min(want, fit), capacity)
+    logger.info_rank0(
+        "Mirror pool: %d auto rows + %d for a %.2f GiB VRAM margin "
+        "(FREETOKEN_MIRROR_VRAM_MARGIN_MB)%s",
+        capacity, rows - capacity, margin / 2**30,
+        f"; {want - rows} more rows do not fit host RAM" if rows < want else "",
+    )
+    return rows
 
 
 def _check_mirror_host_ram(capacity: int, shapes: dict) -> None:
