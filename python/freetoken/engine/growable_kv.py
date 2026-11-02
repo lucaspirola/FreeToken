@@ -713,6 +713,11 @@ class GrowableKvController:
             1 - d["missing"] / d["active"] if d["active"] else float("nan"),
         )
 
+    def _nvml_free_text(self) -> str:
+        reader = getattr(self.engine, "_free_vram", None)
+        free = reader.nvml_free() if reader is not None else None
+        return "n/a" if free is None else mem_GB(free)
+
     @torch.inference_mode()
     def reserve_prefill_headroom(self) -> tuple[int, int]:
         """Shrink the arena until live free VRAM holds one prefill chunk's transient
@@ -755,11 +760,11 @@ class GrowableKvController:
         self._prefill_level = level
         logger.info_rank0(
             "Prefill headroom reserved: MoE slots %d -> %d (%s released, %s free, "
-            "target %s for %s, %.1f ms)",
+            "target %s for %s, NVML free %s, %.1f ms)",
             old_moe, target_moe, mem_GB(released),
             mem_GB(live_free + released), mem_GB(target_free),
             f"<= {level} tokens" if level else "a full chunk",
-            (time.perf_counter() - t0) * 1e3,
+            self._nvml_free_text(), (time.perf_counter() - t0) * 1e3,
         )
         return old_moe, target_moe
 
@@ -798,9 +803,9 @@ class GrowableKvController:
         self._open_decode_memory_window()
         logger.info_rank0(
             "Prefill headroom released to decode: MoE slots %d -> %d (%s committed, "
-            "%s free before, target %s, %.1f ms)",
+            "%s free before, target %s, NVML free %s, %.1f ms)",
             old_moe, target_moe, mem_GB(committed), mem_GB(free), mem_GB(target_free),
-            (time.perf_counter() - t0) * 1e3,
+            self._nvml_free_text(), (time.perf_counter() - t0) * 1e3,
         )
         return old_moe, target_moe
 

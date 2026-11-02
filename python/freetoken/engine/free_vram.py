@@ -14,6 +14,11 @@ KV ceiling against that 0 and was refused.
 nothing on a host without the cliff, and records the NVML-minus-CUDA offset at each such
 reading. When CUDA reads 0 after an offset was recorded, it returns NVML free minus that
 offset: the CUDA scale, continued below the cliff.
+
+The physical limit is lower than the cliff: past about 0.2-0.3 GiB of NVML free,
+cuMemSetAccess returns CUDA_ERROR_NOT_READY, which breaks torch's caching allocator for
+the life of the process. Every reading is therefore also capped at NVML free minus
+``nvml_floor_bytes()`` (0.40 GiB on WSL2), whatever offset the host shows.
 """
 from __future__ import annotations
 
@@ -59,18 +64,42 @@ def _open_nvml_device(uuid: "str | None"):
         return None
 
 
+# NVML free VRAM no plan may go below on WSL2. The cliff map (.work/lfm25/notready,
+# 120 runs) saw the first CUDA_ERROR_NOT_READY at 0.19-0.30 GiB NVML free, probing in
+# 64 MiB steps: 0.30 + 0.0625 rounds up to 0.40 GiB.
+WSL_NVML_FLOOR_BYTES = 400 * 1024 * 1024
+
+
+def _is_wsl() -> bool:
+    return os.path.exists("/dev/dxg")
+
+
+def nvml_floor_bytes() -> int:
+    """``FREETOKEN_NVML_FLOOR_MB`` if set, else ``WSL_NVML_FLOOR_BYTES`` under WSL2, else 0."""
+    raw = os.environ.get("FREETOKEN_NVML_FLOOR_MB", "").strip()
+    if raw:
+        return int(float(raw) * 1024 * 1024)
+    return WSL_NVML_FLOOR_BYTES if _is_wsl() else 0
+
+
 class FreeVramReader:
     """Free VRAM on one device; see the module docstring."""
 
-    def __init__(self, device: torch.device, nvml=None) -> None:
+    def __init__(self, device: torch.device, nvml=None, floor: "int | None" = None) -> None:
         self.device = device
+        self.floor = nvml_floor_bytes() if floor is None else int(floor)
         self._nvml = nvml
         self._nvml_opened = nvml is not None
         self.offset: "int | None" = None
         self._logged = False
+        self._floor_logged = False
 
     def _cuda_free(self) -> int:
         return int(torch.cuda.mem_get_info(self.device)[0])
+
+    def nvml_free(self) -> "int | None":
+        """NVML free bytes, or None when NVML cannot serve this device."""
+        return self._nvml_free()
 
     def _nvml_free(self) -> "int | None":
         if not self._nvml_opened:
@@ -94,12 +123,19 @@ class FreeVramReader:
         nvml_free = self._nvml_free()
         if nvml_free is None:
             return cuda_free
+        ceiling = max(nvml_free - self.floor, 0)
         if cuda_free > 0:
             self.offset = max(nvml_free - cuda_free, 0)
-            return cuda_free
+            if ceiling < cuda_free and not self._floor_logged:
+                self._floor_logged = True
+                logger.info(
+                    "Free VRAM capped by NVML: CUDA %s, NVML %s minus the %s floor = %s",
+                    mem_GB(cuda_free), mem_GB(nvml_free), mem_GB(self.floor), mem_GB(ceiling),
+                )
+            return min(cuda_free, ceiling)
         if self.offset is None:
             return cuda_free
-        free = max(nvml_free - self.offset, 0)
+        free = min(max(nvml_free - self.offset, 0), ceiling)
         if free > 0 and not self._logged:
             self._logged = True
             logger.info(
@@ -108,3 +144,61 @@ class FreeVramReader:
                 mem_GB(nvml_free), mem_GB(free), mem_GB(self.offset),
             )
         return free
+
+
+class PrefillMemoryProbe:
+    """``FREETOKEN_PREFILL_MEM_PROBE=1``: per eager prefill forward, the caching
+    allocator's reserved rise and the minimum NVML free VRAM (a 1 ms sampling thread).
+    Diagnostic only: it synchronizes before and after each prefill forward."""
+
+    enabled = os.environ.get("FREETOKEN_PREFILL_MEM_PROBE", "0").strip() not in (
+        "", "0", "false", "no", "off",
+    )
+
+    def __init__(self, reader: FreeVramReader) -> None:
+        self.reader = reader
+        self._state = None
+
+    def begin(self, tokens: int, cached: int) -> None:
+        import threading
+
+        dev = self.reader.device
+        torch.cuda.synchronize(dev)
+        nvml0 = self.reader.nvml_free()
+        state = {
+            "tokens": tokens, "cached": cached, "nvml0": nvml0, "nvml_min": nvml0,
+            "reserved0": int(torch.cuda.memory_reserved(dev)),
+            "allocated0": int(torch.cuda.memory_allocated(dev)),
+            "stop": threading.Event(),
+        }
+        torch.cuda.reset_peak_memory_stats(dev)
+
+        def sample() -> None:
+            while not state["stop"].wait(0.001):
+                free = self.reader.nvml_free()
+                if free is not None and (state["nvml_min"] is None or free < state["nvml_min"]):
+                    state["nvml_min"] = free
+
+        state["thread"] = threading.Thread(target=sample, daemon=True)
+        state["thread"].start()
+        self._state = state
+
+    def end(self) -> None:
+        state, self._state = self._state, None
+        if state is None:
+            return
+        dev = self.reader.device
+        torch.cuda.synchronize(dev)
+        state["stop"].set()
+        state["thread"].join()
+        nvml1 = self.reader.nvml_free()
+        gib = lambda b: "n/a" if b is None else f"{b / 2**30:.3f}"  # noqa: E731
+        logger.info(
+            "Prefill memory probe: %d new tokens after %d cached; reserved %s -> peak +%s GiB, "
+            "allocated peak +%s GiB; NVML free %s -> min %s -> %s GiB; cuda free %s GiB",
+            state["tokens"], state["cached"], gib(state["reserved0"]),
+            gib(torch.cuda.max_memory_reserved(dev) - state["reserved0"]),
+            gib(torch.cuda.max_memory_allocated(dev) - state["allocated0"]),
+            gib(state["nvml0"]), gib(state["nvml_min"]), gib(nvml1),
+            gib(int(torch.cuda.mem_get_info(dev)[0])),
+        )
