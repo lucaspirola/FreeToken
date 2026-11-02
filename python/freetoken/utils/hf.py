@@ -98,9 +98,9 @@ def load_toolcall_anchor_id(
 
 def load_generation_sampling(model_path: str) -> dict[str, Any]:
     """Recommended sampling defaults from ``generation_config.json`` (sglang's
-    ``sampling_defaults='model'``). Returns ``{temperature, top_k, top_p}`` for the keys
-    present; if the model recommends greedy (``do_sample=false``) returns greedy
-    (``temperature=0``). Empty dict if there is no generation config / no sampling info.
+    ``sampling_defaults='model'``). Returns ``{temperature, top_k, top_p,
+    repetition_penalty}`` for the keys present; if the model recommends greedy
+    (``do_sample=false``) returns greedy (``temperature=0``). Empty dict if there is no generation config / no sampling info.
 
     Many reasoning models (e.g. Qwen3.5: temp 1.0, top_k 20, top_p 0.95) ship these here;
     applying them avoids the greedy/unfiltered repetition loops these models fall into.
@@ -126,9 +126,13 @@ def load_generation_sampling(model_path: str) -> dict[str, Any]:
         gc = GenerationConfig.from_pretrained(model_path)
     except Exception:
         return {}
-    if getattr(gc, "do_sample", None) is False:
-        return {"temperature": 0.0}
     out: dict[str, Any] = {}
+    # transformers applies repetition_penalty under greedy decoding too.
+    rp = getattr(gc, "repetition_penalty", None)
+    if rp is not None and rp != 1.0:
+        out["repetition_penalty"] = float(rp)
+    if getattr(gc, "do_sample", None) is False:
+        return {"temperature": 0.0, **out}
     for key in ("temperature", "top_k", "top_p"):
         val = getattr(gc, key, None)
         if val is not None:

@@ -3268,7 +3268,7 @@ class Scheduler(SchedulerIOMixin):
         self.engine.attn_backend.prepare_metadata(batch)
         return ForwardInput(
             batch=batch,
-            sample_args=self.engine.sampler.prepare(batch),
+            sample_args=self.engine.sampler.prepare(batch, self.token_pool),
             input_tuple=input_mapping,
             write_tuple=write_mapping,
         )

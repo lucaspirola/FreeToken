@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 class AnthropicError(BaseModel):
@@ -101,6 +101,8 @@ class AnthropicMessagesRequest(BaseModel):
     tools: list[AnthropicTool] | None = None
     top_k: int | None = None
     top_p: float | None = None
+    # Not in the Anthropic API; accepted so a client can pass the model card's sampling.
+    repetition_penalty: float | None = Field(default=None, gt=0)
     session_id: str | None = None
     session_ttl_seconds: float | None = None
 

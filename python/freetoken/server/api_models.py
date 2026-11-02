@@ -163,6 +163,7 @@ class ChatCompletionRequest(BaseModel):
     stop: str | list[str] | None = None
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
+    repetition_penalty: float | None = Field(default=None, gt=0)
     chat_template_kwargs: dict[str, Any] = Field(default_factory=dict)
     reasoning_effort: str | None = None
     # DeepSeek-wire thinking toggle ({"type": "enabled"|"disabled"}). Any so a
@@ -225,6 +226,7 @@ class CompletionRequest(BaseModel):
     stop: str | list[str] | None = None
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
+    repetition_penalty: float | None = Field(default=None, gt=0)
     ignore_eos: bool = False
     logprobs: int | None = None
     echo: bool = False

@@ -170,6 +170,7 @@ def chat_request_to_genspec(
         temperature=req.temperature,
         top_k=req.top_k,
         top_p=req.top_p,
+        repetition_penalty=req.repetition_penalty,
         max_tokens=req.max_tokens,
         ignore_eos=req.ignore_eos,
         model_sampling=model_sampling,
@@ -314,6 +315,7 @@ def _trace_sampling(req: Any, sp: SamplingParams | None) -> dict[str, Any]:
     out: dict[str, Any] = {}
     if sp is not None:
         out.update(temperature=sp.temperature, top_p=sp.top_p, top_k=sp.top_k,
+                   repetition_penalty=sp.repetition_penalty,
                    stop=list(sp.stop_strs) if sp.stop_strs else None,
                    ignore_eos=sp.ignore_eos)
     effort = getattr(req, "reasoning_effort", None)
@@ -1172,6 +1174,7 @@ def _resolve_sampling(
         temperature=req.temperature,
         top_k=req.top_k,
         top_p=req.top_p,
+        repetition_penalty=req.repetition_penalty,
         max_tokens=req.max_tokens,
         ignore_eos=req.ignore_eos,
         model_sampling=model_sampling,

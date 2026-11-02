@@ -502,6 +502,7 @@ class SpecNgramDecoder:
             or req in sch.finished_reqs
             or not req.can_decode
             or not params.is_greedy
+            or params.repetition_penalty != 1.0
             or req.mm_items
             or getattr(req, "hidden_states", None) is not None
         ):

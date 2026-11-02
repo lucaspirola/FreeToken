@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, List
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, List, Tuple
 
 import torch
 from freetoken.utils import is_sm90_supported, nvtx_annotate
@@ -60,6 +60,22 @@ class BatchSamplingArgs:
     # device-to-host synchronization. None means top-k filtering is disabled.
     max_top_k: int | None = None
     greedy_mask: torch.Tensor | None = None
+    # (row, token ids seen so far on the GPU, penalty) for each row with a penalty != 1.
+    repetition: List[Tuple[int, torch.Tensor, float]] = field(default_factory=list)
+
+
+def apply_repetition_penalty(
+    logits: torch.Tensor, repetition: List[Tuple[int, torch.Tensor, float]]
+) -> None:
+    """transformers' RepetitionPenaltyLogitsProcessor, in place on float32 ``logits``
+    ``[n, vocab]``: for every id in a row's history a positive logit is divided by the
+    penalty and a negative one multiplied by it. Duplicate ids scatter the same value."""
+    for row, ids, penalty in repetition:
+        ids = ids.to(torch.int64)
+        line = logits[row]
+        score = line.gather(0, ids)
+        score = torch.where(score < 0, score * penalty, score / penalty)
+        line.scatter_(0, ids, score)
 
 
 def make_device_tensor(data: List, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
@@ -117,11 +133,16 @@ class Sampler:
     device: torch.device
     vocab_size: int
 
-    def prepare(self, batch: Batch) -> BatchSamplingArgs:
+    def prepare(
+        self, batch: Batch, token_pool: torch.Tensor | None = None
+    ) -> BatchSamplingArgs:
+        """``token_pool`` is the scheduler's ``[table, position]`` id table. Row ``r``
+        holds prompt + generated ids in ``[:r.device_len]`` once the forward runs."""
         params = [r.sampling_params for r in batch.reqs]
+        repetition = self._repetition_rows(batch, token_pool)
         is_greedy = [p.is_greedy for p in params]
         if all(is_greedy):
-            return BatchSamplingArgs(temperatures=None)
+            return BatchSamplingArgs(temperatures=None, repetition=repetition)
 
         MIN_P = MIN_T = 1e-6
         # Greedy outputs are selected explicitly in sample(); use neutral sampling
@@ -146,8 +167,28 @@ class Sampler:
             make_device_tensor(is_greedy, torch.bool, self.device) if any(is_greedy) else None
         )
         return BatchSamplingArgs(
-            temperatures, top_k=top_k, top_p=top_p, max_top_k=max_top_k, greedy_mask=greedy_mask
+            temperatures,
+            top_k=top_k,
+            top_p=top_p,
+            max_top_k=max_top_k,
+            greedy_mask=greedy_mask,
+            repetition=repetition,
         )
+
+    @staticmethod
+    def _repetition_rows(
+        batch: Batch, token_pool: torch.Tensor | None
+    ) -> List[Tuple[int, torch.Tensor, float]]:
+        from freetoken.scheduler.prefill import ChunkedReq
+
+        if token_pool is None:
+            return []
+        # A ChunkedReq's sampled token is discarded, so it needs no penalty.
+        return [
+            (i, token_pool[r.table_idx, : r.device_len], r.sampling_params.repetition_penalty)
+            for i, r in enumerate(batch.reqs)
+            if r.sampling_params.repetition_penalty != 1.0 and not isinstance(r, ChunkedReq)
+        ]
 
     def first_step_logprobs(
         self, batch: Batch, logits: torch.Tensor, sampled: torch.Tensor
@@ -174,6 +215,10 @@ class Sampler:
     @nvtx_annotate("Sampler")
     def sample(self, logits: torch.Tensor, args: BatchSamplingArgs) -> torch.Tensor:
         with torch.cuda.nvtx.range("Sampler"):
+            if args.repetition:
+                # Before temperature and top-k, as in transformers' processor list.
+                logits = logits.to(torch.float32, copy=True)
+                apply_repetition_penalty(logits, args.repetition)
             if args.temperatures is None:  # greedy sampling
                 return torch.argmax(logits, dim=-1)
             tokens = sample_impl(

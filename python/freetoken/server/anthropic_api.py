@@ -407,6 +407,7 @@ def convert_anthropic_to_genspec(
             temperature=req.temperature,
             top_k=req.top_k,
             top_p=req.top_p,
+            repetition_penalty=req.repetition_penalty,
             max_tokens=req.max_tokens,
             ignore_eos=False,
             model_sampling=model_sampling,

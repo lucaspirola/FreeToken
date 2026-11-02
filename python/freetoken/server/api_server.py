@@ -1154,11 +1154,13 @@ def run_api_server(config: ServerArgs, start_backend: Callable[[], "Any"], run_s
     # Always surface the effective default sampling (model-recommended where available,
     # else framework defaults), since unspecified request fields resolve to these.
     logger.info(
-        "Default sampling config (source=%s): temperature=%s, top_k=%s, top_p=%s",
+        "Default sampling config (source=%s): temperature=%s, top_k=%s, top_p=%s, "
+        "repetition_penalty=%s",
         "model" if _MODEL_SAMPLING else "framework",
         _MODEL_SAMPLING.get("temperature", 0.0),
         _MODEL_SAMPLING.get("top_k", -1),
         _MODEL_SAMPLING.get("top_p", 1.0),
+        _MODEL_SAMPLING.get("repetition_penalty", 1.0),
     )
 
     if run_shell:

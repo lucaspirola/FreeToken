@@ -20,6 +20,8 @@ class SamplingParams:
     temperature: float = 0.0
     top_k: int = -1
     top_p: float = 1.0
+    # transformers' repetition_penalty over prompt + generated ids; 1.0 is off.
+    repetition_penalty: float = 1.0
     ignore_eos: bool = False
     max_tokens: int = 1024
     # Stop strings (OpenAI `stop` / Anthropic `stop_sequences`). Generation finishes when one

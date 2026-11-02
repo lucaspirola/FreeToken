@@ -57,7 +57,7 @@ from openai.types.responses.response_usage import (
     OutputTokensDetails,
     ResponseUsage,
 )
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from .client_sessions import responses_session_id
 from .disconnect import ClientGone, await_or_disconnect, client_gone_response
@@ -101,6 +101,7 @@ class ResponsesRequest(BaseModel):
     temperature: float | None = None
     top_p: float | None = None
     top_k: int | None = None
+    repetition_penalty: float | None = Field(default=None, gt=0)
     stream: bool = False
     tools: list[dict[str, Any]] | None = None
     tool_choice: Any | None = None
@@ -289,6 +290,7 @@ def convert_responses_to_genspec(
             temperature=req.temperature,
             top_k=req.top_k,
             top_p=req.top_p,
+            repetition_penalty=req.repetition_penalty,
             max_tokens=req.max_output_tokens or default_max_tokens,
             ignore_eos=False,
             model_sampling=model_sampling,
