@@ -66,8 +66,9 @@ CTX_TOKENS=131072
 
 mkdir -p "$CACHE"/{hidden-states,pooled-sink,spill,trace,logs}
 
+# float16: with the fp32 residual its KL vs exllamav3 is at the control level (.work/lfm25/router).
 exec uv run ft serve \
-  --model "$MODEL" \
+  --model "$MODEL" --dtype float16 \
   --host 127.0.0.1 --port "${FREETOKEN_PORT:-1921}" \
   --max-running-requests 1 --linear-state-slots 13 --kv-grow-step-tokens 65536 \
   --num-tokens "$CTX_TOKENS" --max-seq-len-override "$CTX_TOKENS" --kv-cache-dtype q8_0 \
