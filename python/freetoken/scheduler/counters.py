@@ -194,6 +194,11 @@ class SpillCounters:
     # and RAM checkpoints moved to disk because the copy itself crossed the host reserve.
     spills_incremental: int = 0
     spills_demoted_after_capture: int = 0
+    # Checkpoints written while the scheduler idled, ahead of any demand; the ones a later
+    # release used instead of a synchronous spill; the ones a waiting request stopped.
+    spills_ahead: int = 0
+    spills_ahead_reused: int = 0
+    spills_ahead_cancelled: int = 0
 
     def as_dict(self) -> Dict[str, int]:
         return {
@@ -210,6 +215,9 @@ class SpillCounters:
             "demote_writes": self.demote_writes,
             "spills_incremental": self.spills_incremental,
             "spills_demoted_after_capture": self.spills_demoted_after_capture,
+            "spills_ahead": self.spills_ahead,
+            "spills_ahead_reused": self.spills_ahead_reused,
+            "spills_ahead_cancelled": self.spills_ahead_cancelled,
         }
 
 

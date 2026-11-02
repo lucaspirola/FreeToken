@@ -37,7 +37,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Iterator, Sequence
+from typing import Callable, Iterable, Iterator, Sequence
 
 import torch
 
@@ -99,6 +99,10 @@ class _BoundedWriter:
     @property
     def closed(self) -> bool:
         return self._stream.closed
+
+
+class SpillCancelled(Exception):
+    """``spill`` stopped at its caller's request. It left no partial checkpoint behind."""
 
 
 @dataclass
@@ -693,6 +697,7 @@ class SessionSpillStore:
         *,
         extra_states: Sequence[tuple[int, int]] = (),
         captured_states: Sequence[tuple[int, torch.Tensor, torch.Tensor]] = (),
+        should_stop: Callable[[], bool] | None = None,
     ) -> SessionSpillRecord | None:
         """Checkpoint one session, with the recurrent state at several prefix boundaries.
 
@@ -701,7 +706,13 @@ class SessionSpillStore:
         ``(prefix length, conv, recurrent)`` host copies taken during prefill, for the
         profiles whose state pool is too small to hold spare snapshots. Both are what let a
         later restore cut before a client-side token drift instead of losing the record.
+
+        ``should_stop`` is polled before each copied chunk. When it returns True, the
+        partial checkpoint is removed, an incremental base is kept, and
+        :class:`SpillCancelled` is raised.
         """
+        if should_stop is not None and should_stop():
+            raise SpillCancelled
         tokens = token_ids.detach().to(device="cpu", dtype=torch.int32).clone()
         num_pages = int(len(page_indices))
         states: dict[int, int | tuple] = {
@@ -736,6 +747,7 @@ class SessionSpillStore:
             self.counters.spills_failed += 1
             return None
         reuse_end, _base_states, reused_kv = base if base is not None else (0, {}, [])
+        kept = previous if base is not None else None
 
         now = time.time()
         chunks: list[SpillChunk] = []
@@ -792,6 +804,8 @@ class SessionSpillStore:
                 page_indices, chunk_pages=SPILL_CHUNK_PAGES, start_page=reuse_end
             )
             for family, layer, start, value in sources:
+                if should_stop is not None and should_stop():
+                    raise SpillCancelled
                 value = value.contiguous()
                 if tier == "ram":
                     chunks.append(SpillChunk(family, layer, start, value=value))
@@ -804,6 +818,8 @@ class SessionSpillStore:
 
             pool = self.linear_state_pool
             for boundary in boundaries:
+                if should_stop is not None and should_stop():
+                    raise SpillCancelled
                 source = states[boundary]
                 if isinstance(source, list):
                     chunks.extend(source)  # reused state files
@@ -828,6 +844,9 @@ class SessionSpillStore:
                             value=value if background else None))
             if tier == "disk" and not background:
                 self._publish(record)
+        except SpillCancelled:
+            self._abandon_spill(record, target, prefix, kept)
+            raise
         except Exception:
             if target is not None:
                 shutil.rmtree(target, ignore_errors=True)
@@ -853,6 +872,23 @@ class SessionSpillStore:
                 self.discard(record)
                 return None
         return record
+
+    def _abandon_spill(
+        self, record: SessionSpillRecord, target: Path | None, prefix: str,
+        kept: SessionSpillRecord | None,
+    ) -> None:
+        """Undo a stopped ``spill``: remove its new files and re-adopt the base it reused."""
+        if kept is None:
+            if target is not None:
+                shutil.rmtree(target, ignore_errors=True)
+            return
+        # Only this generation's files carry ``prefix``; the base's files stay untouched.
+        paths = [record.token_file, *(chunk.file for chunk in record.chunks)]
+        for path in paths:
+            if path is not None and path.name.startswith(prefix):
+                path.unlink(missing_ok=True)
+        kept.valid = True
+        self._track(kept)
 
     def _publish(self, record: SessionSpillRecord) -> None:
         """Manifest last, then drop the files no chunk of the record names any more."""
