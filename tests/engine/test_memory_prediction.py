@@ -214,3 +214,58 @@ def test_short_conv_is_priced_not_coarse():
     assert pred.layers["short_conv"] == pred.base + 3 * T * H * a + 3 * T * H * a + T * H * a
     # the dense SwiGLU of layers 0-1 (intermediate 11776) is the widest layer
     assert pred.peak_layer == "dense_mlp"
+
+
+def _rtx5080_l2(monkeypatch):
+    """The decode-group choice as on the RTX 5080 (64 MiB L2), without CUDA."""
+    from freetoken.moe import fused_exl3 as fx
+
+    monkeypatch.setattr(fx, "_l2_bytes", lambda index: 64 * 1024**2)
+    monkeypatch.setattr("torch.cuda.is_available", lambda: True)
+    monkeypatch.setattr("torch.cuda.current_device", lambda: 0)
+
+
+def test_exl3_decode_group_floor(monkeypatch):
+    """An expert too large for the L2 budget decodes PREFILL_DECODE_GROUP_MIN at a time, not 32:
+    LFM2.5 gate|up (12 MiB) fits 2 in 32 MiB and took the 384 MiB group before."""
+    import torch
+
+    from freetoken.moe import fused_exl3 as fx
+
+    _rtx5080_l2(monkeypatch)
+    dev = torch.device("cuda", 0)
+    pick = lambda k, n, e: fx._decode_group(SimpleNamespace(k=k, n=n), e, dev)
+    assert pick(2048, 1024, 256) == 8  # Ornith gate|up
+    assert pick(512, 2048, 256) == 16  # Ornith down
+    assert pick(2048, 3072, 64) == 4  # LFM2.5 gate|up
+    assert pick(1536, 2048, 64) == 5  # LFM2.5 down
+    assert pick(2048, 3072, 3) == 3
+
+
+def test_lfm25_exl3_moe_scratch(monkeypatch):
+    """LFM2.5-24B-A2B EXL3 5.0bpw on the owner's RTX 5080. With the gate|up decode group at the
+    floor (4, was 32) the startup measurement fell 1124 -> 824 MiB reserved (allocator peak 0.97
+    -> 0.64 GiB, 2026-11-02). The MoE layer then sits just under the dense SwiGLU of layers 0-1."""
+    _rtx5080_l2(monkeypatch)
+    mc = _lfm25_24b()
+    mc.expert_quant = "exl3"
+    pred = mp.predict_prefill_transient(mc, 8192)
+    MiB = 1024**2
+    # base 64 + output 32 + scratch (4 x 12 + 5 x 6) + phase 448 + router 2.25
+    assert pred.layers["moe"] == int(624.25 * MiB)
+    assert pred.layers["dense_mlp"] == 648 * MiB
+    assert pred.peak_layer == "dense_mlp"
+    rel, outside = mp.compare(pred.bytes, 824 * MiB)
+    assert not outside and abs(rel) <= 0.25, rel
+
+
+def test_exl3_moe_term_keeps_ornith_peak(monkeypatch):
+    """Ornith's EXL3 MoE layer stays below its GDN layer, so its transient is unchanged."""
+    _rtx5080_l2(monkeypatch)
+    plain = mp.predict_prefill_transient(_ornith_15_35b(), 8192)
+    mc = _ornith_15_35b()
+    mc.expert_quant = "exl3"
+    exl3 = mp.predict_prefill_transient(mc, 8192)
+    assert exl3.peak_layer == plain.peak_layer == "gdn"
+    assert exl3.bytes == plain.bytes
+    assert exl3.layers["moe"] < exl3.layers["gdn"]

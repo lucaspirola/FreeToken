@@ -10,7 +10,7 @@
 #     layer per slot, about 240 KiB per slot for all 30 layers, and no recurrent state.
 #   - Routed experts are 38 x 64 x 9.44M weights; at 5 bits that is about 13.4 GiB of expert
 #     banks (an estimate from the config, not measured). FREETOKEN_PIN_BUDGET_GB=20 covers them
-#     for the whole-model residency.
+#     when the whole model is in RAM (RAM saver off).
 #   - The exllamav3 export stores an EXL3 lm_head, so the embeddings are untied on load.
 # Context: 131072 tokens, the model's native maximum (rope theta 1e7, no YaRN in the config).
 # KV: q8_0 keys and values, as in the default profile. Only the 10 attention layers hold KV.
@@ -27,12 +27,12 @@
 #   FREETOKEN_PORT                default 1921
 #   FREETOKEN_LFM25_CACHE_DIR     default $HOME/.cache/freetoken/lfm25
 #   FREETOKEN_LFM25_MIRROR_EXPERT_RAM, FREETOKEN_LFM25_MIRROR_HOST_ROWS
-#                                 default 0 and 0 = whole model in RAM. The expert banks
-#                                 (~13.4 GiB) cost the same RAM as Ornith's saver pool, and the
-#                                 saver's GPU coverage floor (~1900 slots) does not fit the
-#                                 ~1580 slots left at the 131072 KV ceiling (start refused,
-#                                 2026-11-01). Own names because serve.env sets the mirror on
-#                                 for Ornith.
+#                                 default 1 and -1 = RAM saver on, auto pool rows (735 rows,
+#                                 4.05 GiB pinned instead of the ~13.4 GiB of expert banks).
+#                                 The pool keeps a GPU coverage floor of 1896 arena slots; at the
+#                                 131072 KV ceiling the arena is 1896-1920 slots (measured
+#                                 2026-11-02). Set 0 and 0 for the whole model in RAM. Own names
+#                                 because serve.env sets the mirror variables for Ornith.
 #   FREETOKEN_PIN_BUDGET_GB,
 #   FREETOKEN_HOST_RAM_RESERVE_GB, FREETOKEN_MEMORY_RATIO, FREETOKEN_SESSION_SPILL_RAM_GB,
 #   FREETOKEN_MAX_OUTPUT_TOKENS, FREETOKEN_EXTRA_ARGS, TVM_FFI_CUDA_ARCH_LIST
@@ -55,8 +55,8 @@ if [ -z "${TVM_FFI_CUDA_ARCH_LIST:-}" ]; then
 fi
 
 export FREETOKEN_PIN_BUDGET_GB="${FREETOKEN_PIN_BUDGET_GB:-20}"
-export FREETOKEN_MIRROR_EXPERT_RAM="${FREETOKEN_LFM25_MIRROR_EXPERT_RAM:-0}"
-export FREETOKEN_MIRROR_HOST_ROWS="${FREETOKEN_LFM25_MIRROR_HOST_ROWS:-0}"
+export FREETOKEN_MIRROR_EXPERT_RAM="${FREETOKEN_LFM25_MIRROR_EXPERT_RAM:-1}"
+export FREETOKEN_MIRROR_HOST_ROWS="${FREETOKEN_LFM25_MIRROR_HOST_ROWS:--1}"
 export FREETOKEN_SCHEDULER_INVARIANT="${FREETOKEN_SCHEDULER_INVARIANT:-warn}"
 export FREETOKEN_EXPERT_ARENA="${FREETOKEN_EXPERT_ARENA:-1}"
 export FREETOKEN_ARENA_STEP_SLOTS="${FREETOKEN_ARENA_STEP_SLOTS:-8}"

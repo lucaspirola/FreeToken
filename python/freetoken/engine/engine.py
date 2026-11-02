@@ -48,7 +48,8 @@ from freetoken.utils import (
 )
 
 from .config import EngineConfig
-from .graph import GraphRunner, get_free_memory
+from .free_vram import FreeVramReader, PrefillMemoryProbe
+from .graph import GraphRunner
 from .growable_kv import (
     GROWABLE_KV_UNSUPPORTED,
     PREFILL_HEADROOM_MARGIN_BYTES,
@@ -1501,12 +1502,18 @@ class Engine:
         cache.set_cpu_executor(executor)
         self.cpu_moe_executor = executor
 
+    def _free_vram_reader(self) -> FreeVramReader:
+        reader = getattr(self, "_free_vram", None)
+        if reader is None:
+            reader = self._free_vram = FreeVramReader(self.device)
+        return reader
+
     def _sync_get_memory(self) -> Tuple[int, int]:
         """Get the min and max free memory across TP ranks."""
         torch.cuda.synchronize(self.device)
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(self.device)
-        free_memory = get_free_memory(self.device)
+        free_memory = Engine._free_vram_reader(self).read()
         free_mem_tensor = torch.tensor(
             [free_memory, -free_memory], device="cpu", dtype=torch.int64
         )
@@ -1819,10 +1826,16 @@ class Engine:
         try:
             use_graph = self.graph_runner.can_use_cuda_graph(batch)
             moe = self.moe_offload_cache
+            probe = None
+            if PrefillMemoryProbe.enabled and batch.is_prefill and not use_graph:
+                probe = PrefillMemoryProbe(self._free_vram_reader())
+                probe.begin(int(batch.input_ids.shape[0]), sum(r.cached_len for r in batch.reqs))
             if moe is not None and batch.is_prefill and not use_graph:
                 moe.prime_prefill(int(batch.input_ids.shape[0]))
             with self.ctx.forward_batch(batch), self.model.forward_host_ctx(batch, use_graph):
                 logits = self.graph_runner.replay(batch) if use_graph else self.model.forward()
+            if probe is not None:
+                probe.end()
         finally:
             self.ctx.hidden_state_sink = None
             if self.moe_offload_cache is not None:

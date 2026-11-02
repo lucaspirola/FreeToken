@@ -174,7 +174,7 @@ def test_ranged_l2_groups_equal_plain_launches(monkeypatch, skew):
         monkeypatch.setattr(fe, "PREFILL_DECODE_GROUP_OVERRIDE", group)
         assert torch.equal(run().view(torch.int16), ref.view(torch.int16)), group
     monkeypatch.setattr(fe, "PREFILL_DECODE_GROUP_OVERRIDE", None)
-    for frac in (0.5, 1e-9, 0.001):  # L2-sized groups; a tiny budget falls back to PREFILL_DECODE_GROUP
+    for frac in (0.5, 1e-9, 0.001):  # L2-sized groups; a tiny budget falls back to PREFILL_DECODE_GROUP_MIN
         monkeypatch.setattr(fe, "PREFILL_DECODE_L2_FRACTION", frac)
         assert torch.equal(run().view(torch.int16), ref.view(torch.int16)), frac
 

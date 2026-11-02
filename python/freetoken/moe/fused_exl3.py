@@ -55,9 +55,9 @@ PREFILL_DECODED_MIN_TOKENS = 256
 # experts per decoded scratch group, per projection: as many as fit in PREFILL_DECODE_L2_FRACTION of
 # the GPU's L2, so the GEMM reads W_hat back from L2 instead of DRAM (RTX 5080, 64 MB L2, Ornith:
 # gate_up 4 MiB per expert -> 8, down 2 MiB -> 16; the fused MoE at 8192 tokens 11.39 -> ~10 ms,
-# tasks/ornith-exl3/popt-exl3/README.md). A GPU whose L2 holds fewer than PREFILL_DECODE_GROUP_MIN
-# experts gains nothing from residency and keeps PREFILL_DECODE_GROUP (fewer launches).
-# PREFILL_DECODE_GROUP_OVERRIDE (int) forces one size for both (sweeps).
+# tasks/ornith-exl3/popt-exl3/README.md). Below PREFILL_DECODE_GROUP_MIN experts the group stays at
+# that floor: LFM2.5 gate_up (12 MiB) at 4 is ~5% faster than 32 and its scratch 384 -> 48 MiB
+# (tasks/lfm25-scratch). PREFILL_DECODE_GROUP_OVERRIDE (int) forces one size for both (sweeps).
 PREFILL_DECODE_GROUP = 32
 PREFILL_DECODE_L2_FRACTION = 0.5
 PREFILL_DECODE_GROUP_MIN = 4
@@ -78,7 +78,7 @@ def _decode_group(parts: Exl3Parts, num_experts: int, device: torch.device) -> i
         return min(PREFILL_DECODE_GROUP_OVERRIDE, num_experts)
     per_expert = parts.k * parts.n * 2
     fit = int(_l2_bytes(device.index or 0) * PREFILL_DECODE_L2_FRACTION) // per_expert
-    return min(fit if fit >= PREFILL_DECODE_GROUP_MIN else PREFILL_DECODE_GROUP, PREFILL_DECODE_GROUP, num_experts)
+    return min(max(fit, PREFILL_DECODE_GROUP_MIN), PREFILL_DECODE_GROUP, num_experts)
 
 
 # the gate/up output and the activation between the two GEMMs: fp16, as in exllamav3 (whose

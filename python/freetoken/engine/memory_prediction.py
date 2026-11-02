@@ -17,6 +17,8 @@ onboarding interface:
 * ``ModelConfig.attention_groups``, which each family's ``parse_config`` fills
   (full / SWA attention, GatedDeltaNet ``"kv"`` and Mamba-2 ``"mamba2"`` linear
   groups), plus the MoE / dense-MLP fields every family sets;
+* ``ModelConfig.expert_quant``: ``"exl3"`` experts run ``moe/fused_exl3._prefill``, whose
+  decoded W_hat scratch and fp32 down output the fused-MoE term does not have;
 * ``ModelSpec.prefill_transient`` (``"module:function"``), an optional family hook
   returning ``{layer_kind: bytes}`` for mixers the generic terms do not model. Its
   kinds replace or add to the generic ones.
@@ -189,6 +191,49 @@ def _moe_bytes(T: int, H: int, mc: Any, a: int) -> int:
     return routed + router + shared
 
 
+def _exl3_decode_group(per_expert_bytes: int, num_experts: int) -> int:
+    """Experts per decoded W_hat scratch group, as ``fused_exl3._decode_group`` picks it on
+    the current GPU. Without CUDA (CPU tests) the L2 is unknown: the largest group is taken."""
+    from types import SimpleNamespace
+
+    import torch
+
+    from freetoken.moe import fused_exl3 as fx
+
+    if not torch.cuda.is_available():
+        return min(fx.PREFILL_DECODE_GROUP_OVERRIDE or fx.PREFILL_DECODE_GROUP, num_experts)
+    # _decode_group prices an expert as k * n fp16 values
+    parts = SimpleNamespace(k=per_expert_bytes // 2, n=1)
+    return fx._decode_group(parts, num_experts, torch.device("cuda", torch.cuda.current_device()))
+
+
+def _exl3_moe_bytes(T: int, H: int, mc: Any, a: int) -> int:
+    """EXL3 routed-expert prefill (``moe/fused_exl3._prefill``) at the larger of its two
+    GEMM phases. Both decoded fp16 W_hat scratches (gate|up and down, one decode group each)
+    live for the whole layer. Gate|up phase: the fp16 rotated input ``[2, R, H]`` and the fp16
+    output ``[R, 2I]``. Down phase: the fp16 activation and its rotation ``[R, I]`` each, and
+    the down output ``[R, H]`` (fp32 unless ``FREETOKEN_EXL3_F16ACC``). ``R`` = sub-chunk
+    tokens x top-k. The layer output ``[T, H]``, router and shared expert as in ``_moe_bytes``."""
+    from freetoken.kernel.triton.exl3 import f16acc_enabled
+    from freetoken.moe import fused_exl3 as fx
+
+    k, inter, E = mc.num_experts_per_tok, mc.moe_intermediate_size, mc.num_experts
+    two_i = inter if mc.hidden_act == "relu2" else 2 * inter
+    R = min(T, fx.PREFILL_CHUNK_TOKENS) * k
+    scratch = 0
+    if T >= fx.PREFILL_DECODED_MIN_TOKENS:
+        gu, dn = H * two_i * 2, inter * H * 2
+        scratch = _exl3_decode_group(gu, E) * gu + _exl3_decode_group(dn, E) * dn
+    gate_up = 2 * R * H * 2 + R * two_i * 2
+    down = 2 * R * inter * 2 + R * H * (2 if f16acc_enabled() else 4)
+    router = T * E * 4 + T * k * 8
+    shared = 0
+    if mc.shared_expert_intermediate_size:
+        si = mc.shared_expert_intermediate_size
+        shared = T * (si if mc.hidden_act == "relu2" else 2 * si) * a + T * H * a
+    return T * H * a + scratch + max(gate_up, down) + router + shared
+
+
 def _dense_mlp_bytes(T: int, H: int, mc: Any, a: int) -> int:
     inter = mc.intermediate_size
     return T * 2 * inter * a + T * inter * a + T * H * a
@@ -241,7 +286,8 @@ def predict_prefill_transient(
     if not mc.attention_groups:
         layers["attention"] = _attention_bytes(T, H, nq, mc.num_kv_heads, mc.head_dim, a)
     if mc.num_experts and mc.moe_intermediate_size:
-        layers["moe"] = _moe_bytes(T, H, mc, a)
+        exl3 = getattr(mc, "expert_quant", "none") == "exl3"
+        layers["moe"] = (_exl3_moe_bytes if exl3 else _moe_bytes)(T, H, mc, a)
     if mc.intermediate_size and (not mc.num_experts or mc.first_k_dense_replace):
         layers["dense_mlp"] = _dense_mlp_bytes(T, H, mc, a)
     hook = _family_hook(mc)
