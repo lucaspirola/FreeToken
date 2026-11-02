@@ -76,3 +76,72 @@ def test_engine_without_an_estimate_prices_the_bare_cushion(monkeypatch):
     engine, config, _per_slot, total = _setup(monkeypatch, transient=0)
     del engine.prefill_transient_bytes
     assert MirrorResidency._mirror_final_gpu_slots(engine, config) == total - 4
+
+
+# LFM2.5-24B-A2B EXL3 5.0 bpw: 38 MoE layers x 64 experts, ~5.63 MiB per expert slot.
+LFM_LAYERS, LFM_EXPERTS, LFM_SLOT = 38, 64, 5_906_000
+
+
+def _build_lfm25_auto_pool(monkeypatch, *, host_rows=-1, mem_available=64 << 30):
+    """Run ``build_residency``'s auto path with the 2026-11-02 07:30 sizing (final arena
+    estimate 1904 slots, so 720 auto rows) and return the capacity it built."""
+    import freetoken.models.nvfp4_banks as nb
+    import freetoken.moe.mirror_pool as mp
+    import freetoken.moe.residency as res
+
+    built = {}
+
+    class _Pool:
+        def __init__(self, path, layers, experts, capacity, **kwargs):
+            built["capacity"] = capacity
+
+    bank = {"rows": ((LFM_SLOT,), torch.uint8)}
+    monkeypatch.setattr(mp, "MirrorExpertPool", _Pool)
+    monkeypatch.setattr(mp, "nvfp4_bank_shapes", lambda *a, **k: bank)
+    monkeypatch.setattr(nb, "expert_source_spec",
+                        lambda mc: SimpleNamespace(gated=False, hidden_size_attr=None))
+    monkeypatch.setattr(MirrorResidency, "_mirror_final_gpu_slots",
+                        staticmethod(lambda engine, config: 1904))
+    monkeypatch.setattr(res, "_mem_available_bytes", lambda: mem_available)
+    monkeypatch.delenv("FREETOKEN_MIRROR_RESERVE_ROWS", raising=False)
+    mc = SimpleNamespace(
+        expert_quant="nvfp4", expert_gated=False, hidden_size=H, moe_intermediate_size=I,
+        num_experts=LFM_EXPERTS, num_moe_layers=LFM_LAYERS, model_type="lfm2_moe",
+    )
+    config = SimpleNamespace(
+        expert_residency="mirror", moe_mirror_host_rows=host_rows, moe_strategy="offload",
+        moe_pageable_gpu=False, moe_cpu_layers=None, use_dummy_weight=False,
+        tp_info=SimpleNamespace(size=1), nvfp4_backend="triton", model_path="/none",
+        max_running_req=1,
+    )
+    engine = SimpleNamespace(model=SimpleNamespace(), device=torch.device("cpu"))
+    res.build_residency(config, mc, engine)
+    return built["capacity"]
+
+
+def test_auto_pool_survives_the_0730_vram_swing(monkeypatch):
+    """The refused start asked for at least 888 rows where the auto size gave 720: a
+    GPU container took about 1.1 GiB between the pool sizing and the ceiling check."""
+    monkeypatch.delenv("FREETOKEN_MIRROR_VRAM_MARGIN_MB", raising=False)
+    capacity = _build_lfm25_auto_pool(monkeypatch)
+    assert capacity >= 888
+    # 1 GiB of 5.63 MiB slots, rounded up.
+    assert capacity == 720 + -(-(1 << 30) // LFM_SLOT)
+
+
+def test_vram_margin_is_tunable_and_explicit_rows_are_kept(monkeypatch):
+    monkeypatch.setenv("FREETOKEN_MIRROR_VRAM_MARGIN_MB", "0")
+    assert _build_lfm25_auto_pool(monkeypatch) == 720
+    monkeypatch.delenv("FREETOKEN_MIRROR_VRAM_MARGIN_MB")
+    assert _build_lfm25_auto_pool(monkeypatch, host_rows=720) == 720
+
+
+def test_vram_margin_never_fails_the_start_on_host_ram(monkeypatch):
+    """The margin rows stop at the host-RAM guard; the auto rows themselves still fit."""
+    monkeypatch.delenv("FREETOKEN_MIRROR_VRAM_MARGIN_MB", raising=False)
+    guard = 4 << 30
+    room_rows = 750
+    capacity = _build_lfm25_auto_pool(
+        monkeypatch, mem_available=guard + room_rows * LFM_SLOT + LFM_SLOT // 2
+    )
+    assert capacity == room_rows
