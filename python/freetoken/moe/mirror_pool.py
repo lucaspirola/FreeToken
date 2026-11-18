@@ -45,6 +45,31 @@ import ctypes
 import torch
 
 _BLK = 4096
+_HUGE = 2 << 20
+
+
+def _huge_bank(shape: tuple, dtype: torch.dtype):
+    """Bank storage on 2 MiB-aligned anonymous memory that asks for transparent huge pages.
+
+    The NVIDIA driver maps a registered host range with 2 MiB entries only if the range starts on a
+    2 MiB boundary and huge pages back it. With 4 KiB entries a GPU-to-host copy runs at about 25 GB/s
+    on native Linux, against about 42 GB/s (measured, RTX 5080, PCIe gen 5).
+    FREETOKEN_MIRROR_HUGE_PAGES=0 keeps the torch.empty allocation."""
+    if os.environ.get("FREETOKEN_MIRROR_HUGE_PAGES", "1") == "0":
+        return torch.empty(shape, dtype=dtype), None
+    elsize = torch.empty((), dtype=dtype).element_size()
+    count = 1
+    for dim in shape:
+        count *= int(dim)
+    nbytes = count * elsize
+    size = max(_HUGE, ((nbytes + _HUGE - 1) // _HUGE) * _HUGE)
+    buf = mmap.mmap(-1, size + _HUGE, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+    off = (-ctypes.addressof(ctypes.c_char.from_buffer(buf))) % _HUGE
+    try:
+        buf.madvise(mmap.MADV_HUGEPAGE, off, size)
+    except (AttributeError, OSError, ValueError):
+        pass  # no huge pages on this kernel: the range stays on 4 KiB pages
+    return torch.frombuffer(buf, dtype=dtype, count=count, offset=off).view(*shape), buf
 
 # Which bank each expert projection feeds, and the safetensors dtype string each
 # tensor kind must carry. Roles come from the model's Nvfp4ExpertSourceSpec
@@ -421,8 +446,11 @@ class MirrorExpertPool:
             from freetoken.kernel.pinned import host_register
 
             self._registered = []
+            self._bank_buffers = []
             for name, (tail, dtype) in self.shapes.items():
-                bank = torch.empty((capacity, *tail), dtype=dtype)
+                bank, backing = _huge_bank((capacity, *tail), dtype)
+                if backing is not None:
+                    self._bank_buffers.append(backing)
                 if source is not None:
                     # A GGUF row's raw bytes cover only its unaligned tensor
                     # width; the bank's per-row stride is padded to 64B (the

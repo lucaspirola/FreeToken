@@ -84,9 +84,12 @@
 #                                 whatever else holds the card -- which is also why a
 #                                 measurement taken beside another GPU process is not
 #                                 comparable.
-#   FREETOKEN_SESSION_SPILL_RAM_GB default 1 (owner's choice, 2026-10-03): RAM for queued
-#                                 sessions' checkpoints, ~90K tokens; longer ones restore from
-#                                 disk (~2 s at 262K). 3 GiB starved the page cache on a 33 GiB host
+#   FREETOKEN_SESSION_SPILL_RAM_GB default 5 (owner's choice, 2026-11-18: 1.5 sessions of 262K):
+#                                 RAM for queued sessions' checkpoints, ~90K tokens per GiB; longer
+#                                 ones restore from disk (~2 s at 262K). 3 GiB starved the page cache
+#                                 on a 33 GiB host; TESSERACT has 45 GiB
+#   FREETOKEN_BIND_HOST           default 127.0.0.1. Set the LAN address in serve.env to serve the
+#                                 relay; the API has no key, so only bind where the network is trusted
 #   FREETOKEN_CACHE_DIR           default $HOME/.cache/freetoken (spill, traces, logs)
 #   FREETOKEN_LONG_CONTEXT        default 0 (262144, native). 1 = 393216 via YaRN factor 2; see the
 #                                 Context note above and tasks/ornith-exl3/ctx393/README.md before
@@ -136,14 +139,14 @@ mkdir -p "$CACHE"/{hidden-states,pooled-sink,spill,trace,logs}
 # context; FREETOKEN_MAX_OUTPUT_TOKENS overrides it per host.
 exec uv run ft serve \
   --model "$MODEL" \
-  --host 127.0.0.1 --port "${FREETOKEN_PORT:-1919}" \
+  --host "${FREETOKEN_BIND_HOST:-127.0.0.1}" --port "${FREETOKEN_PORT:-1919}" \
   --max-running-requests 1 --linear-state-slots 13 --kv-grow-step-tokens 65536 \
   --text-model-only \
   --num-tokens "$CTX_TOKENS" --max-seq-len-override "$CTX_TOKENS" --kv-cache-dtype q8_0 \
   --attention-backend triton --moe-backend offload --moe-cache-auto --moe-cache-policy lfu \
   --memory-ratio "${FREETOKEN_MEMORY_RATIO:-1.00}" --max-prefill-length 8192 \
   --host-ram-reserve-gb "${FREETOKEN_HOST_RAM_RESERVE_GB:-2}" \
-  --session-spill-ram-gb "${FREETOKEN_SESSION_SPILL_RAM_GB:-1}" \
+  --session-spill-ram-gb "${FREETOKEN_SESSION_SPILL_RAM_GB:-5}" \
   --session-spill-disk-gb 15 --session-spill-limit-gb 15 \
   --session-spill-dir "$CACHE/spill" \
   --enable-cache-report \
