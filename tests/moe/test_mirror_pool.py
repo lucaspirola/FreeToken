@@ -411,3 +411,40 @@ def test_marlin_layout_pool_cannot_attach(tmp_path):
             pool.adopt_cache_schema(bank_schema, layout)
     finally:
         pool.close()
+
+
+def _anon_huge_kib(addr: int) -> int:
+    hit, kib = False, 0
+    with open("/proc/self/smaps") as smaps:
+        for line in smaps:
+            head = line.split()
+            if head and "-" in head[0] and ":" not in head[0]:
+                lo, hi = (int(x, 16) for x in head[0].split("-"))
+                hit = lo <= addr < hi
+            elif hit and line.startswith("AnonHugePages:"):
+                kib += int(head[1])
+    return kib
+
+
+def test_bank_storage_is_2mib_aligned_and_huge(monkeypatch):
+    from freetoken.moe.mirror_pool import _huge_bank
+
+    monkeypatch.delenv("FREETOKEN_MIRROR_HUGE_PAGES", raising=False)
+    bank, backing = _huge_bank((8, 3, 1 << 20), torch.uint8)
+    assert backing is not None
+    assert bank.shape == (8, 3, 1 << 20)
+    assert bank.data_ptr() % (2 << 20) == 0
+    bank.fill_(7)
+    assert int(bank[5, 2, 123]) == 7
+    enabled = open("/sys/kernel/mm/transparent_hugepage/enabled").read()
+    if "[never]" not in enabled:
+        assert _anon_huge_kib(bank.data_ptr()) >= 2048
+
+
+def test_bank_storage_env_off_keeps_torch_empty(monkeypatch):
+    from freetoken.moe.mirror_pool import _huge_bank
+
+    monkeypatch.setenv("FREETOKEN_MIRROR_HUGE_PAGES", "0")
+    bank, backing = _huge_bank((4, 5), torch.float16)
+    assert backing is None
+    assert bank.shape == (4, 5) and bank.dtype == torch.float16
