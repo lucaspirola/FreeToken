@@ -3223,6 +3223,13 @@ class Scheduler(SchedulerIOMixin):
             last_data = getattr(self, "_last_data", None)
             if last_data is not None:
                 self._last_data = self._drain_inflight(last_data)
+        # The batch was selected before the drains above: a request they finished and
+        # freed (table_idx -1) must not allocate pages or rejoin running_reqs.
+        reqs = getattr(batch, "reqs", None) or ()
+        if any(getattr(req, "table_idx", None) == -1 for req in reqs):
+            batch.reqs = [req for req in reqs if req.table_idx != -1]
+            if not batch.reqs:
+                return None
         forward_input = self._prepare_batch(batch)
         if getattr(getattr(self, "config", None), "adaptive_scheduler", False):
             batch.scheduler_started_at = time.perf_counter()
