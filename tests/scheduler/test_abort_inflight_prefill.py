@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from freetoken.core import Batch, Req, SamplingParams
@@ -223,3 +224,76 @@ def test_post_terminal_overlap_step_is_dropped():
     assert [m for m in sent if isinstance(m, DetokenizeMsg)] == terminal  # no 2nd msg
     assert req.output_len == output_len_before                           # no append
     cm.check_integrity()
+
+
+@pytest.mark.parametrize("drain", ["prefill_headroom", "kv_growth"])
+def test_first_token_eos_freed_by_early_drain_is_not_a_ghost(drain):
+    """A 1-token EOS answer finishes when its prefill drains. Overlap selects the next
+    decode batch [req] before that drain, and an early drain inside _schedule_next_batch
+    (headroom release or KV growth) then frees req. The stale batch must not allocate
+    pages for it, re-add it to running_reqs, or let it reply again. Before the fix req
+    decoded as a ghost: one leaked page per step until the idle integrity check failed."""
+    from freetoken.message import DetokenizeMsg
+
+    pool, cm, tm, dm, _pm, sent, stub = _setup()
+    stub.eos_token_ids = {42}  # the prefill's sampled token (42) is EOS
+    req = _launch_req(pool, cm, tm, torch.arange(1, 13, dtype=torch.int32),
+                      track_seqlen=8)
+    prefill = Batch(reqs=[req], phase="prefill")
+    dm.filter_reqs(prefill.reqs)               # _forward of the prefill
+    stub._last_data = _as_last_data(prefill)   # still in flight
+
+    moves = []
+    release = lambda *, prefill, prefill_pending, new_tokens: (  # noqa: E731
+        "reserve" if prefill else "release"
+    )
+    stub.engine = SimpleNamespace(
+        stream=None,
+        prefill_headroom_transition=release if drain == "prefill_headroom" else None,
+        apply_prefill_headroom=moves.append,
+    )
+    stub.stream = SimpleNamespace(wait_stream=lambda _stream: None)
+    stub.prefill_budget = 16
+    stub._flush_abort_acks = lambda: None
+    stub._retry_queued_cold_restores = lambda: None  # freeing req arms the cold-restore retry
+    stub._process_last_data = lambda ld: Scheduler._process_last_data(stub, ld)
+    stub._drain_inflight = lambda ld: Scheduler._drain_inflight(stub, ld)
+    stub._move_prefill_headroom = lambda b: Scheduler._move_prefill_headroom(stub, b)
+    if drain == "kv_growth":
+        stub._batch_needs_kv_growth = lambda _batch: True
+    else:
+        stub._batch_needs_kv_growth = lambda b: Scheduler._batch_needs_kv_growth(stub, b)
+    stub._note_prefix_admissions = lambda b: Scheduler._note_prefix_admissions(stub, b)
+    stub._report_prompt_admissions = lambda b: Scheduler._report_prompt_admissions(stub, b)
+
+    def prepare(batch):  # the pool effect of the real _prepare_batch
+        cm.allocate_paged(batch.reqs)
+        return SimpleNamespace(batch=batch)
+
+    stub._prepare_batch = prepare
+
+    forward_input = Scheduler._schedule_next_batch(stub)
+    assert stub._last_data is None             # the early drain ran
+    assert req.table_idx == -1 and req in stub.finished_reqs
+    if drain == "prefill_headroom":
+        assert moves == ["release"]
+    if forward_input is not None:
+        dm.filter_reqs(forward_input.batch.reqs)  # _forward of the stale decode batch
+        assert req not in forward_input.batch.reqs
+
+    assert forward_input is None
+    assert req not in dm.running_reqs
+    cm.check_integrity()                       # pre-fix: one page leaked to row -1
+    assert Scheduler._schedule_next_batch(stub) is None  # nothing left to decode
+    replies = [m for m in sent if isinstance(m, DetokenizeMsg)]
+    assert [(m.uid, m.finished) for m in replies] == [(UID, True)]
+
+
+def test_filter_reqs_skips_a_freed_req():
+    """Defense-in-depth for the ghost above: a freed req never rejoins running_reqs."""
+    pool, cm, tm, dm, _pm, _sent, stub = _setup()
+    req = _launch_req(pool, cm, tm, torch.arange(1, 13, dtype=torch.int32))
+    Scheduler._free_req_resources(stub, req)
+    assert req.table_idx == -1 and req.can_decode
+    dm.filter_reqs([req])
+    assert req not in dm.running_reqs

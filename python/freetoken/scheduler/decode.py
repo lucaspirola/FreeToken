@@ -12,7 +12,12 @@ class DecodeManager:
     running_reqs: Set[Req] = field(default_factory=set)
 
     def filter_reqs(self, reqs: Iterable[Req]) -> None:
-        self.running_reqs = {req for req in self.running_reqs.union(reqs) if req.can_decode}
+        # table_idx -1: already freed; re-adding it would decode a ghost that leaks pages.
+        self.running_reqs = {
+            req
+            for req in self.running_reqs.union(reqs)
+            if req.can_decode and req.table_idx != -1
+        }
 
     def remove_req(self, req: Req) -> None:
         self.running_reqs.discard(req)
