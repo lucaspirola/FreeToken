@@ -5,8 +5,11 @@
 # this file IS the reference configuration.
 #
 # Model (2026-09-27, exp/final-numbers): Ornith-1.5-35B-A3B EXL3 5.0 bpw
-# (~/ai/models/Ornith-1.5-35B-A3B-exl3-5.0bpw-hq), text only, served as `ornith` with the
+# (~/ai/models/Ornith-1.5-35B-A3B-exl3-5.0bpw-hq), served as `ornith` with the
 # qwen3 reasoning parser. Nemotron 3.5 Lightning is no longer served (owner, 2026-09-26).
+# Vision on (owner, 2026-11-21): the EXL3 tower streams from pinned host RAM two blocks at a
+# time (--mm-encoder-weights host, ~133 MiB VRAM measured); --image-max-tokens 4096 (~4 MP)
+# caps the encoder transient (~290 MiB measured at 4056 tokens). Larger images are scaled down.
 # Numbers behind every choice below: tasks/ornith-exl3/final/README.md.
 #
 # Single-lane profile: ONE session resident on the GPU at a time (max experts),
@@ -143,7 +146,7 @@ exec uv run ft serve \
   --model "$MODEL" \
   --host "${FREETOKEN_BIND_HOST:-127.0.0.1}" --port "${FREETOKEN_PORT:-1919}" \
   --max-running-requests 1 --linear-state-slots 13 --kv-grow-step-tokens 65536 \
-  --text-model-only \
+  --image-max-tokens 4096 \
   --num-tokens "$CTX_TOKENS" --max-seq-len-override "$CTX_TOKENS" --kv-cache-dtype q8_0 \
   --attention-backend triton --moe-backend offload --moe-cache-auto --moe-cache-policy lfu \
   --memory-ratio "${FREETOKEN_MEMORY_RATIO:-1.00}" --max-prefill-length 8192 \
