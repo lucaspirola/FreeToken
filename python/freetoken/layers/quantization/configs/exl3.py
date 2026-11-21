@@ -5,13 +5,20 @@ per-module facts -- which modules are quantized, each one's bit width and codebo
 ``tensor_storage`` table of the ``quantization_config.json`` exllamav3 writes next to it. Each
 quantized module stores ``trellis`` / ``suh`` / ``svh`` plus a codebook flag tensor (``mul1`` or
 ``mcg``; neither means 3INST), whose value must be the multiplier the kernels hardcode.
+
+exllamav3 builds that table from the text model alone (``conversion/quant_config.py`` walks
+``Model.from_config(config)``, component "text"), so the vision tower and the MTP head it quantized
+are absent from it. A module the table does not list is read from the safetensors headers instead:
+``trellis`` there means EXL3, with the bit width from the trellis tile width as for listed modules.
 """
 
 from __future__ import annotations
 
 import functools
+import glob
 import json
 import os
+import struct
 from typing import Any, ClassVar
 
 import torch
@@ -22,6 +29,36 @@ from .base import QuantConfig, Stored, cfg_get
 
 _FLAGS = ("mul1", "mcg")
 _MULTIPLIER = {"mul1": 0x83DCD12D, "mcg": 0xCBAC1FED}
+# fused leaves an export stores split: exllamav3 quantizes a vision tower's fused qkv as q/k/v_proj
+# (modules/attn.py key_fused_qkv) and also copies the source's bf16 qkv through unchanged
+_SPLIT_LEAVES = {"qkv": ("q_proj", "k_proj", "v_proj")}
+_VISION_ROOTS = ("model.visual.", "visual.")
+
+
+def _shard_files(root: str) -> list[str]:
+    index = os.path.join(root, "model.safetensors.index.json")
+    if os.path.isfile(index):
+        with open(index, encoding="utf-8") as f:
+            return [os.path.join(root, name) for name in sorted(set(json.load(f)["weight_map"].values()))]
+    return sorted(glob.glob(os.path.join(root, "*.safetensors")))
+
+
+def _header_modules(root: str, listed: frozenset[str] | set[str]) -> dict[str, dict]:
+    """``module -> tensor_storage-style entry`` for every module whose shards store a ``trellis`` but the table does not list."""
+    headers: dict[str, dict] = {}
+    for path in _shard_files(root):
+        with open(path, "rb") as f:
+            (n,) = struct.unpack("<Q", f.read(8))
+            header = json.loads(f.read(n))
+        header.pop("__metadata__", None)
+        headers.update(header)
+    modules = {key[: -len(".trellis")] for key in headers if key.endswith(".trellis")} - set(listed)
+    out: dict[str, dict] = {m: {"quant_format": "exl3", "stored_tensors": {}} for m in modules}
+    for key, meta in headers.items():
+        module = key.rpartition(".")[0]
+        if module in out:
+            out[module]["stored_tensors"][key] = {"shape": meta["shape"]}
+    return out
 
 
 @functools.lru_cache(maxsize=4)
@@ -78,21 +115,51 @@ class Exl3Config(QuantConfig):
                 f"config.json was not found (looked for {path!r})"
             )
         self.path = path
+        self.root = os.path.dirname(path)
         self.storage_table = _tensor_storage(path)
+        self.vision_bits = q.get("vision_bits")
         self._facts: dict[str, tuple[int, str] | None] = {}
+        self._header: dict[str, dict] | None = None
 
     def facts(self, name: str) -> tuple[int, str] | None:
         """``(bits, codebook)`` of the module ``name`` (checkpoint naming), or None if unquantized / absent.
 
         A routed-expert container (``...mlp.experts``, which the table does not list: it stores
-        ``experts.<e>.<proj>``) gets the one value all its projections share (``_container_facts``)."""
+        ``experts.<e>.<proj>``) gets the one value all its projections share (``_container_facts``).
+        A module neither the table nor a listed child covers is read from the shard headers."""
         if name not in self._facts:
             entry = self.storage_table.get(name)
             if entry is not None:
                 self._facts[name] = _module_facts(name, entry)
             else:
-                self._facts[name] = self._container_facts(name)
+                facts = self._container_facts(name)
+                self._facts[name] = facts if facts is not None else self._header_facts(name)
         return self._facts[name]
+
+    def _header_facts(self, name: str) -> tuple[int, str] | None:
+        if self._header is None:
+            self._header = _header_modules(self.root, self.storage_table.keys())
+        entry = self._header.get(name)
+        if entry is None:
+            return None
+        facts = _module_facts(name, entry)
+        if facts is not None and self.vision_bits is not None and name.startswith(_VISION_ROOTS) and facts[0] != int(self.vision_bits):
+            raise ValueError(f"{name}: trellis stores {facts[0]} bits but the quantization_config declares vision_bits {self.vision_bits}")
+        return facts
+
+    def split_parts(self, name: str) -> tuple[str, ...] | None:
+        """The EXL3 parts an export stores in place of the fused module ``name``, or None if ``name`` is read as itself."""
+        head, _, leaf = name.rpartition(".")
+        parts = tuple(f"{head}.{p}" for p in _SPLIT_LEAVES.get(leaf, ()))
+        if not parts or self.facts(name) is not None or any(self.facts(p) is None for p in parts):
+            return None
+        return parts
+
+    def checkpoint_names(self, prefix: str) -> tuple[str, ...]:
+        names = super().checkpoint_names(prefix)
+        if len(names) == 1:
+            return self.split_parts(names[0]) or names
+        return names
 
     def _container_facts(self, name: str) -> tuple[int, str] | None:
         prefix = name + "."

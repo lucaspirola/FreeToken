@@ -108,13 +108,25 @@ class VisionAttention(BaseOP):
         return o[0].transpose(0, 1).reshape(S, -1)
 
 
+def _mlp_width(vc: VisionConfig, quant_config: QuantConfig | None, prefix: str) -> int:
+    from freetoken.layers.quantization import QuantKind
+
+    width = vc.intermediate_size
+    scheme = quant_config.scheme_for(f"{prefix}.linear_fc1") if quant_config is not None else None
+    if scheme is not None and scheme.kind is QuantKind.EXL3:
+        # exllamav3 stores fc1/fc2 padded to 128 features (zero rows before quantization) and runs the padded width
+        width = -(-width // 128) * 128
+    return width
+
+
 class VisionMLP(BaseOP):
     def __init__(self, vc: VisionConfig, *, quant_config: QuantConfig | None = None, prefix: str = ""):
+        width = _mlp_width(vc, quant_config, prefix)
         self.linear_fc1 = LinearColParallelMerged(
-            vc.hidden_size, [vc.intermediate_size], has_bias=True, quant_config=quant_config, prefix=f"{prefix}.linear_fc1"
+            vc.hidden_size, [width], has_bias=True, quant_config=quant_config, prefix=f"{prefix}.linear_fc1"
         )
         self.linear_fc2 = LinearRowParallel(
-            vc.intermediate_size, vc.hidden_size, has_bias=True, quant_config=quant_config, prefix=f"{prefix}.linear_fc2"
+            width, vc.hidden_size, has_bias=True, quant_config=quant_config, prefix=f"{prefix}.linear_fc2"
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

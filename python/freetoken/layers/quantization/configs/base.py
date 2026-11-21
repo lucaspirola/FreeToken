@@ -68,13 +68,17 @@ class QuantConfig(ABC):
     def scheme_for(self, prefix: str) -> QuantScheme | None:
         if prefix in self._schemes:
             return self._schemes[prefix]
-        names = self.name_map.to_checkpoint(prefix)
+        names = self.checkpoint_names(prefix)
         schemes = {None if self.unquantized(n) else self.scheme_for_name(n) for n in names}
         if len(schemes) != 1:
             raise ValueError(f"fused module {prefix!r} mixes quantization schemes across {names}: {schemes}")
         scheme = schemes.pop()
         self._schemes[prefix] = scheme
         return scheme
+
+    def checkpoint_names(self, prefix: str) -> tuple[str, ...]:
+        """The checkpoint modules behind one layer prefix; a dialect overrides this when its exports split a fused module differently."""
+        return self.name_map.to_checkpoint(prefix)
 
     def stored_tensors(self, kind: QuantKind) -> dict[str, Stored]:
         """role -> checkpoint tensor for every role the dialect stores for ``kind``."""
