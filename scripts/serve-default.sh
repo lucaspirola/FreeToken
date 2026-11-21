@@ -84,10 +84,10 @@
 #                                 whatever else holds the card -- which is also why a
 #                                 measurement taken beside another GPU process is not
 #                                 comparable.
-#   FREETOKEN_SESSION_SPILL_RAM_GB default 5 (owner's choice, 2026-11-18: 1.5 sessions of 262K):
-#                                 RAM for queued sessions' checkpoints, ~90K tokens per GiB; longer
-#                                 ones restore from disk (~2 s at 262K). 3 GiB starved the page cache
-#                                 on a 33 GiB host; TESSERACT has 45 GiB
+#   FREETOKEN_SESSION_SPILL_RAM_GB default 2.5 (owner's choice, 2026-11-19): RAM for queued
+#                                 sessions' checkpoints, ~90K tokens per GiB; longer ones restore
+#                                 from disk (~2 s at 262K). Disk holds 70 GB (owner, 2026-11-19);
+#                                 the total cap is RAM + disk so the disk can fill while RAM is full
 #   FREETOKEN_BIND_HOST           default 127.0.0.1. Set the LAN address in serve.env to serve the
 #                                 relay; the API has no key, so only bind where the network is trusted
 #   FREETOKEN_CACHE_DIR           default $HOME/.cache/freetoken (spill, traces, logs)
@@ -128,6 +128,8 @@ if [ "${FREETOKEN_LONG_CONTEXT:-0}" = "1" ]; then
 fi
 
 mkdir -p "$CACHE"/{hidden-states,pooled-sink,spill,trace,logs}
+SPILL_RAM_GB="${FREETOKEN_SESSION_SPILL_RAM_GB:-2.5}"
+SPILL_DISK_GB=70
 
 # Output cap: 65536, raised from 16384 on 2026-09-22. Measured on Nemotron's needle
 # battery: a multi-hop question over a 20K haystack emitted 125119 characters of
@@ -146,8 +148,9 @@ exec uv run ft serve \
   --attention-backend triton --moe-backend offload --moe-cache-auto --moe-cache-policy lfu \
   --memory-ratio "${FREETOKEN_MEMORY_RATIO:-1.00}" --max-prefill-length 8192 \
   --host-ram-reserve-gb "${FREETOKEN_HOST_RAM_RESERVE_GB:-2}" \
-  --session-spill-ram-gb "${FREETOKEN_SESSION_SPILL_RAM_GB:-5}" \
-  --session-spill-disk-gb 15 --session-spill-limit-gb 15 \
+  --session-spill-ram-gb "$SPILL_RAM_GB" \
+  --session-spill-disk-gb "$SPILL_DISK_GB" \
+  --session-spill-limit-gb "$(awk -v r="$SPILL_RAM_GB" -v d="$SPILL_DISK_GB" 'BEGIN { print r + d }')" \
   --session-spill-dir "$CACHE/spill" \
   --enable-cache-report \
   --served-model-name ornith \
