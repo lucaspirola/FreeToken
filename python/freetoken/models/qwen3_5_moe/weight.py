@@ -47,6 +47,9 @@ _LINEAR_LEAVES = frozenset({
     "q_proj", "k_proj", "v_proj", "o_proj", "in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "out_proj",
     "gate_proj", "up_proj", "down_proj", "gate", "shared_expert_gate", "lm_head",
 })
+# vision tower linears; only EXL3 ones go through the reader, the rest pass through as stored
+_VISION_SPLIT = {"q_proj": 0, "k_proj": 1, "v_proj": 2}
+_VISION_LINEARS = frozenset({"qkv", "proj", "linear_fc1", "linear_fc2", *_VISION_SPLIT})
 # activation scales of modules whose scheme carries no input_scale role
 _DROPPED_SUFFIXES = frozenset({"input_scale", "input_global_scale"})
 _ELEM_DTYPES = {"e4m3": torch.float8_e4m3fn, "e2m1": torch.uint8}
@@ -120,6 +123,8 @@ class _DenseReader:
                 self.by_part.setdefault(part, []).append((fused, idx))
         # target module -> (part count, {part: {role: tensor}}, {part: the roles its module stores})
         self.pending: dict[str, tuple[int, dict[int, dict[str, torch.Tensor]], dict[int, set[str]], QuantScheme | None]] = {}
+        # vision target -> (part count, {part: bias})
+        self.biases: dict[str, tuple[int, dict[int, torch.Tensor]]] = {}
 
     def scheme(self, module: str) -> QuantScheme | None:
         return None if self.quant is None else self.quant.scheme_for(module)
@@ -162,7 +167,36 @@ class _DenseReader:
             raise ValueError(f"{name} is {tensor.dtype} but the checkpoint's quant config declares {module} unquantized")
         if stored is not None and role == "weight" and tensor.dtype is not _ELEM_DTYPES[stored.weight.elem]:
             raise ValueError(f"{name} is {tensor.dtype} but the checkpoint's quant config declares {module} {stored}")
-        target, idx, count = self.target(module)
+        return self._collect(*self.target(module), roles, role, tensor, stored)
+
+    def add_vision(self, name: str, tensor: torch.Tensor) -> list[tuple[str, torch.Tensor]] | None:
+        """A vision tower tensor: like ``add`` for an EXL3 linear (q/k/v_proj fused into ``qkv``, biases concatenated), None for everything else."""
+        module, _, suffix = name.rpartition(".")
+        parent, _, leaf = module.rpartition(".")
+        if self.quant is None or leaf not in _VISION_LINEARS:
+            return None
+        if leaf == "qkv":
+            layer = self.scheme(module)
+            # the bf16 qkv exllamav3 copies through beside the q/k/v_proj it quantized: the layer reads those
+            return [] if layer is not None and layer.kind is QuantKind.EXL3 and self.stored(module) is None else None
+        stored = self.stored(module)
+        if stored is None or stored.kind is not QuantKind.EXL3:
+            return None
+        target, idx, count = (f"{parent}.qkv", _VISION_SPLIT[leaf], 3) if leaf in _VISION_SPLIT else (module, 0, 1)
+        if suffix == "bias":
+            _, biases = self.biases.setdefault(target, (count, {}))
+            biases[idx] = tensor
+            if len(biases) < count:
+                return []
+            del self.biases[target]
+            return [(f"{target}.bias", torch.cat([biases[i] for i in range(count)]))]
+        roles = {e.name: r for r, e in self.quant.storage(stored).items()}
+        role = roles.get(suffix)
+        if role is None:
+            raise ValueError(f"{name}: the checkpoint's quant config declares {module} {stored}, stored as {sorted(roles)} and bias")
+        return self._collect(target, idx, count, roles, role, tensor, stored)
+
+    def _collect(self, target: str, idx: int, count: int, roles: dict[str, str], role: str, tensor: torch.Tensor, stored: QuantScheme | None):
         _, parts, expected, _ = self.pending.setdefault(target, (count, {}, {}, stored))
         parts.setdefault(idx, {})[role] = tensor
         expected[idx] = set(roles.values())
@@ -183,6 +217,8 @@ class _DenseReader:
             if len(parts) < count:
                 lacking.append(f"{count - len(parts)} of {count} fused parts")
             lines.append(f"{target}: missing {lacking}{note}")
+        for target, (count, biases) in sorted(self.biases.items()):
+            lines.append(f"{target}: missing the bias of {count - len(biases)} of {count} fused parts")
         return lines
 
     def _emit(self, target: str, parts: list[dict[str, torch.Tensor]], stored: QuantScheme | None):
@@ -277,14 +313,20 @@ def _iter_shards(model_path: str, device: torch.device, reader: _DenseReader | N
                 if reader is None:
                     continue
                 tensor = f.get_tensor(raw_name)
-                emitted = reader.add(name, tensor)
+                vision = name.startswith(VISION_KEY_PREFIXES)
+                emitted = reader.add_vision(name, tensor) if vision else reader.add(name, tensor)
                 if emitted is not None:
                     yield from emitted
                 elif _is_gemma_norm(name):
                     yield name, tensor + 1.0  # (1 + weight) baked into the stored norm weight
                 else:
                     yield name, tensor
-    if reader is not None and reader.pending:
+    if reader is not None:
+        _check_complete(reader)
+
+
+def _check_complete(reader: _DenseReader) -> None:
+    if reader.pending or reader.biases:
         lines = reader.missing()
         shown = "\n  ".join(lines[:8]) + (f"\n  ... {len(lines) - 8} more" if len(lines) > 8 else "")
         raise ValueError(f"checkpoint is missing tensors the quant config declares for {len(lines)} modules:\n  {shown}")
@@ -292,12 +334,22 @@ def _iter_shards(model_path: str, device: torch.device, reader: _DenseReader | N
 
 def iter_vision_weights(model_path: str, device: torch.device) -> Iterator[tuple[str, torch.Tensor]]:
     """The vision tower alone, named as iter_weights names it."""
+    quant = get_quant_config()
+    reader = _DenseReader(quant, get_model_spec(cached_load_hf_config(model_path).architectures[0])) if quant is not None else None
     for file in iter_weight_files(model_path):
         with safetensors.safe_open(file, framework="pt", device=str(device)) as f:
             for raw_name in f.keys():
                 name = _rename(raw_name)
-                if name is not None and name.startswith(VISION_KEY_PREFIXES):
-                    yield name, f.get_tensor(raw_name)
+                if name is None or not name.startswith(VISION_KEY_PREFIXES):
+                    continue
+                tensor = f.get_tensor(raw_name)
+                emitted = reader.add_vision(name, tensor) if reader is not None else None
+                if emitted is not None:
+                    yield from emitted
+                else:
+                    yield name, tensor
+    if reader is not None:
+        _check_complete(reader)
 
 
 def iter_weights_parallel(

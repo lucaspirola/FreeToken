@@ -594,3 +594,132 @@ def test_a_checkpoint_disagreeing_with_its_quant_config_is_rejected(tmp_path, qu
     (tmp_path / "config.json").write_text(json.dumps(_config_json(True, quantization_config)))
     with pytest.raises(ValueError, match=match):
         _load(str(tmp_path))
+
+
+# --------------------------------------------------------------------------- EXL3 vision tower (exllamav3 export)
+
+# depth 1 ViT, head_dim 64; fc1 width 200 is stored padded to 256 as exllamav3 pads every linear to 128
+VIS_H, VIS_HEADS, VIS_I, VIS_OUT, VIS_BITS = 128, 2, 200, 128, 6
+VIS = "model.visual"
+VIS_MUL1 = 0x83DCD12D - (1 << 32)
+VISION_CONFIG = {
+    "model_type": "qwen3_5_moe_vision", "depth": 1, "hidden_size": VIS_H, "num_heads": VIS_HEADS,
+    "intermediate_size": VIS_I, "out_hidden_size": VIS_OUT, "patch_size": 16, "temporal_patch_size": 2,
+    "spatial_merge_size": 2, "in_channels": 3, "num_position_embeddings": 16, "deepstack_visual_indexes": [],
+}
+
+
+def _pad128(n: int) -> int:
+    return -(-n // 128) * 128
+
+
+def _exl3_module(k: int, n: int, bits: int = VIS_BITS) -> dict[str, torch.Tensor]:
+    return {
+        "trellis": torch.randint(-(1 << 15), 1 << 15, (k // 16, n // 16, 16 * bits), dtype=torch.int32).to(torch.int16),
+        "suh": torch.randn(k).half(), "svh": torch.randn(n).half(), "mul1": torch.tensor(VIS_MUL1, dtype=torch.int32),
+        "bias": torch.randn(n).half(),
+    }
+
+
+def _exl3_vision_checkpoint(folder, *, vision_bits=VIS_BITS, list_visual: bool = False) -> dict[str, torch.Tensor]:
+    """An exllamav3 export's vision tower: split EXL3 q/k/v_proj next to the source's bf16 qkv, EXL3 proj / MLP / merger, f16 norms."""
+    folder.mkdir(parents=True, exist_ok=True)
+    mi, merged = _pad128(VIS_I), VIS_H * 4
+    raw: dict[str, torch.Tensor] = {f"{LM}.norm.weight": torch.randn(H).half()}
+    modules = {
+        **{f"{VIS}.blocks.0.attn.{p}": (VIS_H, VIS_H) for p in ("q_proj", "k_proj", "v_proj", "proj")},
+        f"{VIS}.blocks.0.mlp.linear_fc1": (VIS_H, mi), f"{VIS}.blocks.0.mlp.linear_fc2": (mi, VIS_H),
+        f"{VIS}.merger.linear_fc1": (merged, merged), f"{VIS}.merger.linear_fc2": (merged, VIS_OUT),
+    }
+    for module, (k, n) in modules.items():
+        raw.update({f"{module}.{s}": t for s, t in _exl3_module(k, n).items()})
+    raw.update({
+        f"{VIS}.blocks.0.attn.qkv.weight": _bf16(3 * VIS_H, VIS_H), f"{VIS}.blocks.0.attn.qkv.bias": _bf16(3 * VIS_H),
+        **{f"{VIS}.blocks.0.{n}.{p}": torch.randn(VIS_H).half() for n in ("norm1", "norm2") for p in ("weight", "bias")},
+        **{f"{VIS}.merger.norm.{p}": torch.randn(VIS_H).half() for p in ("weight", "bias")},
+        f"{VIS}.patch_embed.proj.weight": torch.randn(VIS_H, 3, 2, 16, 16).half(), f"{VIS}.patch_embed.proj.bias": torch.randn(VIS_H).half(),
+        f"{VIS}.pos_embed.weight": _bf16(16, VIS_H),
+    })
+    # exllamav3 builds tensor_storage from the text model only: no visual entry
+    storage = {f"{LM}.norm": {"stored_tensors": {f"{LM}.norm.weight": {"shape": [H]}}}}
+    if list_visual:
+        storage.update({m: {"quant_format": "exl3", "bits_per_weight": VIS_BITS, "stored_tensors": {
+            f"{m}.{s}": {"shape": list(raw[f"{m}.{s}"].shape)} for s in ("trellis", "suh", "svh", "mul1", "bias")}} for m in modules})
+    quant = {"quant_method": "exl3", "bits": 5.0, "codebook": "mul1", "vision_bits": vision_bits}
+    _write(folder, True, quant, raw)
+    config = json.loads((folder / "config.json").read_text())
+    (folder / "config.json").write_text(json.dumps({**config, "vision_config": VISION_CONFIG}))
+    (folder / "quantization_config.json").write_text(json.dumps({**quant, "tensor_storage": storage}))
+    return raw
+
+
+def _vision_state_dict() -> dict[str, torch.Tensor]:
+    """State dict of the tower built under the installed QuantConfig, on the meta device."""
+    from types import SimpleNamespace
+
+    from freetoken.layers.quantization import get_quant_config
+    from freetoken.models.qwen3_vl.config import parse_vision_config
+    from freetoken.models.qwen3_vl.vision import Qwen3VLVisionModel
+    from freetoken.utils.torch_utils import torch_dtype
+
+    vc = parse_vision_config(SimpleNamespace(vision_config=SimpleNamespace(**VISION_CONFIG)))
+    with torch.device("meta"), torch_dtype(torch.bfloat16):
+        return Qwen3VLVisionModel(vc, quant_config=get_quant_config(), prefix="visual").state_dict(prefix="visual")
+
+
+def test_exl3_vision_tower_absent_from_tensor_storage_fills_the_tower(tmp_path):
+    """The 2026-11-21 Ornith failure: the tower is not in tensor_storage, so its q/k/v_proj read as bf16 and their bias was refused."""
+    torch.manual_seed(21)
+    raw = _exl3_vision_checkpoint(tmp_path)
+    loaded = {k: v for k, v in _load(str(tmp_path)).items() if k.startswith("visual.")}
+    state = _vision_state_dict()
+    assert set(loaded) == set(state)
+    for key, tensor in loaded.items():
+        assert tensor.shape == state[key].shape, key
+        if state[key].dtype in (torch.int16, torch.float16):
+            assert tensor.dtype is state[key].dtype, key
+    attn = f"{VIS}.blocks.0.attn"
+    parts = [f"{attn}.{p}_proj" for p in "qkv"]
+    assert torch.equal(loaded["visual.blocks.0.attn.qkv.trellis"], torch.cat([raw[f"{p}.trellis"].reshape(-1) for p in parts]))
+    assert torch.equal(loaded["visual.blocks.0.attn.qkv.suh"], torch.stack([raw[f"{p}.suh"] for p in parts]))
+    assert torch.equal(loaded["visual.blocks.0.attn.qkv.bias"], torch.cat([raw[f"{p}.bias"] for p in parts]))
+    assert torch.equal(loaded["visual.blocks.0.mlp.linear_fc1.bias"], raw[f"{VIS}.blocks.0.mlp.linear_fc1.bias"])
+    assert loaded["visual.blocks.0.mlp.linear_fc2.suh"].shape == (1, _pad128(VIS_I))
+    # the bf16 qkv copy is dropped: the layer reads the EXL3 parts exllamav3 itself loads
+    assert "visual.blocks.0.attn.qkv.weight" not in loaded
+
+
+def test_exl3_vision_scheme_comes_from_the_trellis_and_a_listed_tower_keeps_the_table(tmp_path):
+    from freetoken.layers.quantization import QuantKind as Kind, get_quant_config
+
+    _exl3_vision_checkpoint(tmp_path / "absent")
+    _install(str(tmp_path / "absent"))
+    quant = get_quant_config()
+    scheme = quant.scheme_for("visual.blocks.0.attn.qkv")
+    assert scheme.kind is Kind.EXL3 and scheme.weight.elem == f"exl3_mul1_{VIS_BITS}" and "mul1" in scheme.roles
+    assert quant.scheme_for("visual.merger.linear_fc2").weight.elem == f"exl3_mul1_{VIS_BITS}"
+    assert quant.scheme_for_name(f"{VIS}.blocks.0.attn.qkv") is None
+    _exl3_vision_checkpoint(tmp_path / "listed", list_visual=True)
+    _install(str(tmp_path / "listed"))
+    quant = get_quant_config()
+    assert quant.scheme_for("visual.blocks.0.attn.proj").weight.elem == f"exl3_mul1_{VIS_BITS}"
+    assert quant._header is None
+
+
+def test_exl3_vision_bits_disagreeing_with_the_trellis_is_rejected(tmp_path):
+    _exl3_vision_checkpoint(tmp_path, vision_bits=4)
+    _install(str(tmp_path))
+    from freetoken.layers.quantization import get_quant_config
+
+    with pytest.raises(ValueError, match="vision_bits 4"):
+        get_quant_config().scheme_for("visual.blocks.0.attn.proj")
+
+
+def test_exl3_encoder_only_reader_matches_the_full_reader(tmp_path):
+    from freetoken.models.qwen3_5_moe.weight import iter_vision_weights
+
+    torch.manual_seed(22)
+    _exl3_vision_checkpoint(tmp_path)
+    full = {k: v for k, v in _load(str(tmp_path)).items() if k.startswith("visual.")}
+    alone = dict(iter_vision_weights(str(tmp_path), torch.device("cpu")))
+    assert set(alone) == set(full) and all(torch.equal(alone[k], full[k]) for k in full)
